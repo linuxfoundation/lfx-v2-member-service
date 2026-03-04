@@ -1,0 +1,9 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+builds:
+  - id: member-api
+    dir: ./cmd/member-api
+    ldflags:
+      - -X=main.Version={{.Env.VERSION}}
+      - -X=main.BuildTime={{.Env.BUILD_TIME}}
+      - -X=main.GitCommit={{.Env.GIT_COMMIT}}
