@@ -79,6 +79,13 @@ func natsStorageImpl(ctx context.Context) port.MembershipReader {
 	return natsStorage
 }
 
+// CloseNATSClient closes the NATS client connection if initialized
+func CloseNATSClient() {
+	if natsClient != nil {
+		natsClient.Close()
+	}
+}
+
 // MembershipReaderImpl initializes the membership reader implementation based on the repository source
 func MembershipReaderImpl(ctx context.Context) port.MembershipReader {
 	var membershipReader port.MembershipReader

@@ -48,13 +48,13 @@ func AppendCtx(parent context.Context, attr slog.Attr) context.Context {
 	}
 
 	if v, ok := parent.Value(slogFields).([]slog.Attr); ok {
-		v = append(v, attr)
-		return context.WithValue(parent, slogFields, v)
+		newAttrs := make([]slog.Attr, len(v)+1)
+		copy(newAttrs, v)
+		newAttrs[len(v)] = attr
+		return context.WithValue(parent, slogFields, newAttrs)
 	}
 
-	v := []slog.Attr{}
-	v = append(v, attr)
-	return context.WithValue(parent, slogFields, v)
+	return context.WithValue(parent, slogFields, []slog.Attr{attr})
 }
 
 // InitStructureLogConfig sets the structured log behavior

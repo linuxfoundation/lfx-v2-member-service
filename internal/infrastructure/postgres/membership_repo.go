@@ -66,7 +66,7 @@ LEFT JOIN salesforce.alternate_email__c aec
 LEFT JOIN salesforce.product2 p ON p.sfid = a.product2id
 LEFT JOIN salesforce.account acc ON acc.sfid = a.accountid
 LEFT JOIN salesforce.project__c proj ON proj.sfid = a.projects__c
-WHERE p.family IN ('Membership', 'Training', 'Alternate Funding')
+WHERE p.family = 'Membership'
     AND a.isdeleted = false
 `
 

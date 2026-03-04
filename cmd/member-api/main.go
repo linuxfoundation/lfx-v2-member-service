@@ -81,6 +81,7 @@ func main() {
 
 	// Initialize the repositories based on configuration
 	membershipReader := service.MembershipReaderImpl(ctx)
+	defer service.CloseNATSClient()
 
 	// Initialize the service with use cases
 	readMembershipUseCase := usecaseSvc.NewMembershipReaderOrchestrator(
@@ -91,7 +92,9 @@ func main() {
 
 	// Wrap the services in endpoints
 	membershipServiceEndpoints := membershipservice.NewEndpoints(membershipServiceSvc)
-	membershipServiceEndpoints.Use(debug.LogPayloads())
+	if *dbgF {
+		membershipServiceEndpoints.Use(debug.LogPayloads())
+	}
 
 	// Create channel for error handling
 	errc := make(chan error, 1)

@@ -73,10 +73,10 @@ test: ## Run tests
 build: ## Build the application for local OS
 	@echo "Building application for local development..."
 	go build \
-		-ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)" \
+		-ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)" \
 		-o bin/member-api ./cmd/member-api
 	go build \
-		-ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)" \
+		-ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)" \
 		-o bin/sync ./cmd/sync
 
 .PHONY: run

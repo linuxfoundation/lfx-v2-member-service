@@ -33,7 +33,7 @@ func (s *storage) get(ctx context.Context, bucket, uid string, model any) (uint6
 		return 0, errGet
 	}
 
-	errUnmarshal := json.Unmarshal(data.Value(), &model)
+	errUnmarshal := json.Unmarshal(data.Value(), model)
 	if errUnmarshal != nil {
 		return 0, errUnmarshal
 	}
@@ -69,7 +69,14 @@ func (s *storage) ListMemberships(ctx context.Context, params model.ListParams) 
 
 	// If filtering by project_id, use the lookup index for fast retrieval
 	if projectID, ok := params.Filters["project_id"]; ok {
-		return s.listMembershipsByLookup(ctx, kv, fmt.Sprintf("lookup/project/%s/", projectID), params)
+		// Build remaining filters (excluding project_id which is handled by lookup)
+		remainingFilters := make(map[string]string)
+		for k, v := range params.Filters {
+			if k != "project_id" {
+				remainingFilters[k] = v
+			}
+		}
+		return s.listMembershipsByLookup(ctx, kv, fmt.Sprintf("lookup/project/%s/", projectID), params, remainingFilters)
 	}
 
 	hasFilters := len(params.Filters) > 0
@@ -173,8 +180,9 @@ func (s *storage) ListMemberships(ctx context.Context, params model.ListParams) 
 	return filtered[start:end], totalSize, nil
 }
 
-// listMembershipsByLookup uses a lookup prefix to efficiently find memberships
-func (s *storage) listMembershipsByLookup(ctx context.Context, kv jetstream.KeyValue, lookupPrefix string, params model.ListParams) ([]*model.Membership, int, error) {
+// listMembershipsByLookup uses a lookup prefix to efficiently find memberships.
+// remainingFilters are applied after fetching records from the lookup index.
+func (s *storage) listMembershipsByLookup(ctx context.Context, kv jetstream.KeyValue, lookupPrefix string, params model.ListParams, remainingFilters map[string]string) ([]*model.Membership, int, error) {
 	keys, errKeys := kv.ListKeys(ctx, jetstream.MetaOnly())
 	if errKeys != nil {
 		if errors.Is(errKeys, jetstream.ErrNoKeysFound) {
@@ -193,6 +201,37 @@ func (s *storage) listMembershipsByLookup(ctx context.Context, kv jetstream.KeyV
 				membershipUIDs = append(membershipUIDs, parts[len(parts)-1])
 			}
 		}
+	}
+
+	// If there are remaining filters, we must fetch and filter all records before paginating
+	if len(remainingFilters) > 0 {
+		var filtered []*model.Membership
+		for _, uid := range membershipUIDs {
+			membership := &model.Membership{}
+			_, errGet := s.get(ctx, constants.KVBucketNameMemberships, uid, membership)
+			if errGet != nil {
+				slog.WarnContext(ctx, "failed to get membership from lookup",
+					"uid", uid,
+					"error", errGet,
+				)
+				continue
+			}
+			if matchesFilters(membership, remainingFilters) {
+				filtered = append(filtered, membership)
+			}
+		}
+
+		totalSize := len(filtered)
+		start := params.Offset
+		if start > totalSize {
+			start = totalSize
+		}
+		end := start + params.PageSize
+		if end > totalSize {
+			end = totalSize
+		}
+
+		return filtered[start:end], totalSize, nil
 	}
 
 	totalSize := len(membershipUIDs)
