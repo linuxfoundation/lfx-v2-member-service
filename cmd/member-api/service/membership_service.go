@@ -10,9 +10,11 @@ import (
 	"strings"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 
 	"goa.design/goa/v3/security"
 )
@@ -21,16 +23,16 @@ import (
 type membershipServicesrvc struct {
 	membershipReaderOrchestrator usecaseSvc.MembershipReader
 	storage                      port.MembershipReader
+	auth                         domain.Authenticator
 }
 
 // JWTAuth implements the authorization logic for service "membership-service"
-func (s *membershipServicesrvc) JWTAuth(ctx context.Context, token string, scheme *security.JWTScheme) (context.Context, error) {
-	// For this read-only service, we accept the token without full validation.
-	// In production, this would validate via Heimdall.
-	if token == "" {
-		slog.WarnContext(ctx, "membershipService.jwt-auth: empty token")
+func (s *membershipServicesrvc) JWTAuth(ctx context.Context, token string, _ *security.JWTScheme) (context.Context, error) {
+	principal, err := s.auth.ParsePrincipal(ctx, token, slog.Default())
+	if err != nil {
+		return ctx, err
 	}
-	return ctx, nil
+	return context.WithValue(ctx, constants.PrincipalContextID, principal), nil
 }
 
 // ListMemberships lists memberships with pagination and filtering
@@ -133,10 +135,11 @@ func (s *membershipServicesrvc) Livez(ctx context.Context) (res []byte, err erro
 }
 
 // NewMembershipService returns the membership-service service implementation with dependencies
-func NewMembershipService(readMembershipUseCase usecaseSvc.MembershipReader, storage port.MembershipReader) membershipservice.Service {
+func NewMembershipService(readMembershipUseCase usecaseSvc.MembershipReader, storage port.MembershipReader, authenticator domain.Authenticator) membershipservice.Service {
 	return &membershipServicesrvc{
 		membershipReaderOrchestrator: readMembershipUseCase,
 		storage:                      storage,
+		auth:                         authenticator,
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/service"
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
 
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 
@@ -79,6 +80,19 @@ func main() {
 		"graceful-shutdown-seconds", gracefulShutdownSeconds,
 	)
 
+	// Set up JWT validator needed by the JWTAuth security handler.
+	// NewJWTAuth only stores config; actual JWKS fetching happens at request time.
+	jwtAuthConfig := auth.JWTAuthConfig{
+		JWKSURL:            os.Getenv("JWKS_URL"),
+		Audience:           os.Getenv("AUDIENCE"),
+		MockLocalPrincipal: os.Getenv("JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL"),
+	}
+	jwtAuth, err := auth.NewJWTAuth(jwtAuthConfig)
+	if err != nil {
+		slog.ErrorContext(ctx, "error setting up JWT authentication", "error", err)
+		os.Exit(1)
+	}
+
 	// Initialize the repositories based on configuration
 	membershipReader := service.MembershipReaderImpl(ctx)
 	defer service.CloseNATSClient()
@@ -88,7 +102,7 @@ func main() {
 		usecaseSvc.WithMembershipReader(membershipReader),
 	)
 
-	membershipServiceSvc := service.NewMembershipService(readMembershipUseCase, membershipReader)
+	membershipServiceSvc := service.NewMembershipService(readMembershipUseCase, membershipReader, jwtAuth)
 
 	// Wrap the services in endpoints
 	membershipServiceEndpoints := membershipservice.NewEndpoints(membershipServiceSvc)
