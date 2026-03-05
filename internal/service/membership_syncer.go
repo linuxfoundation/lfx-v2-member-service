@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 )
 
 // MembershipSyncer orchestrates the sync from PostgreSQL to NATS KV
@@ -30,6 +31,15 @@ func NewMembershipSyncer(sourceReader port.MembershipSourceReader, kvWriter port
 func (s *MembershipSyncer) Sync(ctx context.Context) error {
 	start := time.Now()
 	slog.InfoContext(ctx, "starting membership sync")
+
+	// Purge existing data to remove stale entries and lookup keys
+	for _, bucket := range []string{constants.KVBucketNameMemberships, constants.KVBucketNameMembershipContacts} {
+		slog.InfoContext(ctx, "purging bucket before sync", "bucket", bucket)
+		if err := s.kvWriter.PurgeBucket(ctx, bucket); err != nil {
+			slog.ErrorContext(ctx, "failed to purge bucket", "bucket", bucket, "error", err)
+			return err
+		}
+	}
 
 	// Sync memberships
 	membershipErrors := 0

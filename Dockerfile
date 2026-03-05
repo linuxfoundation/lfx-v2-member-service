@@ -33,6 +33,10 @@ USER nonroot
 # Expose port 8080 for the member service API.
 EXPOSE 8080
 
+# Location for runtime data such as OpenAPI specs.
+ENV KO_DATA_PATH=/var/run
+
 COPY --from=builder /go/bin/member-api /cmd/member-api
+COPY --from=builder /build/gen/http ${KO_DATA_PATH}/gen/http
 
 ENTRYPOINT ["/cmd/member-api"]

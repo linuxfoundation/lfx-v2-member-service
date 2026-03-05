@@ -97,5 +97,8 @@ func NewMembershipReaderOrchestrator(opts ...membershipReaderOrchestratorOption)
 	for _, opt := range opts {
 		opt(rc)
 	}
+	if rc.membershipReader == nil {
+		panic("membership reader is required: use WithMembershipReader option")
+	}
 	return rc
 }

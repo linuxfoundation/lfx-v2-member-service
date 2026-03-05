@@ -19,4 +19,5 @@ type MembershipSourceReader interface {
 type MembershipKVWriter interface {
 	WriteMembership(ctx context.Context, membership *model.Membership) error
 	WriteKeyContact(ctx context.Context, contact *model.KeyContact) error
+	PurgeBucket(ctx context.Context, bucket string) error
 }

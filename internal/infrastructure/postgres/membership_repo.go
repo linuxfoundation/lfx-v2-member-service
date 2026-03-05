@@ -5,7 +5,6 @@ package postgres
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"time"
@@ -157,6 +156,5 @@ func convertSQLToMembership(s SQLMembership) *model.Membership {
 // generateDeterministicUID generates a deterministic UUID v5 from a Salesforce ID
 func generateDeterministicUID(sfid string) string {
 	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // DNS namespace
-	hash := sha256.Sum256([]byte("lfx-membership:" + sfid))
-	return uuid.NewSHA1(namespace, hash[:]).String()
+	return uuid.NewSHA1(namespace, []byte("lfx-membership:"+sfid)).String()
 }

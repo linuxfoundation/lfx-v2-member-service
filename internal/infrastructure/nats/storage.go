@@ -384,6 +384,41 @@ func (s *storage) WriteKeyContact(ctx context.Context, contact *model.KeyContact
 	return nil
 }
 
+// PurgeBucket deletes all keys in a bucket and recreates it to ensure a clean state
+func (s *storage) PurgeBucket(ctx context.Context, bucket string) error {
+	kv, ok := s.client.kvStore[bucket]
+	if !ok {
+		return errs.NewValidation(fmt.Sprintf("bucket %s not found", bucket))
+	}
+
+	keys, err := kv.ListKeys(ctx, jetstream.MetaOnly())
+	if err != nil {
+		if errors.Is(err, jetstream.ErrNoKeysFound) {
+			return nil
+		}
+		return errs.NewUnexpected("failed to list keys for purge", err)
+	}
+
+	deleted := 0
+	for key := range keys.Keys() {
+		if err := kv.Delete(ctx, key); err != nil {
+			slog.WarnContext(ctx, "failed to delete key during purge",
+				"bucket", bucket,
+				"key", key,
+				"error", err,
+			)
+			continue
+		}
+		deleted++
+	}
+
+	slog.InfoContext(ctx, "purged bucket",
+		"bucket", bucket,
+		"deleted_keys", deleted,
+	)
+	return nil
+}
+
 // IsReady checks if NATS is ready
 func (s *storage) IsReady(ctx context.Context) error {
 	return s.client.IsReady(ctx)

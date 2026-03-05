@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	"go.opentelemetry.io/contrib/propagators/jaeger"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
@@ -54,7 +55,7 @@ type OTelConfig struct {
 func OTelConfigFromEnv() OTelConfig {
 	serviceName := os.Getenv("OTEL_SERVICE_NAME")
 	if serviceName == "" {
-		serviceName = "lfx-v2-member-service"
+		serviceName = constants.ServiceName
 	}
 
 	serviceVersion := os.Getenv("OTEL_SERVICE_VERSION")

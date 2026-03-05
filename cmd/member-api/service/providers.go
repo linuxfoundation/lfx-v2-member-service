@@ -102,11 +102,11 @@ func MembershipReaderImpl(ctx context.Context) port.MembershipReader {
 
 	case "nats":
 		slog.InfoContext(ctx, "initializing NATS membership reader")
-		natsClient := natsStorageImpl(ctx)
-		if natsClient == nil {
-			log.Fatalf("failed to initialize NATS client")
+		natsReader := natsStorageImpl(ctx)
+		if natsReader == nil {
+			log.Fatalf("failed to initialize NATS membership reader")
 		}
-		membershipReader = natsClient
+		membershipReader = natsReader
 
 	default:
 		log.Fatalf("unsupported membership reader implementation: %s", repoSource)
