@@ -161,3 +161,38 @@ heimdall:
   # jwksUrl is the JWKS URL for JWT verification (note: uses port 4457)
   jwksUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks
   add_middleware: false
+
+# global is the configuration for the global settings
+global:
+  # awsRegion is the AWS region for the External Secrets Operator
+  awsRegion: us-west-2
+
+# serviceAccount is the configuration for the Kubernetes service account
+serviceAccount:
+  # create specifies whether a service account should be created
+  create: true
+  # name is the name of the service account to use.
+  # If not set and create is true, a name is generated using the chart name
+  name: "lfx-v2-member-service"
+  # annotations to add to the service account (e.g. for IRSA)
+  annotations: {}
+  # automountServiceAccountToken determines if the service account token should be automatically mounted
+  automountServiceAccountToken: true
+
+# externalSecretsOperator is the configuration for the External Secrets Operator
+externalSecretsOperator:
+  # enabled controls whether ESO SecretStore and ExternalSecret resources are created
+  enabled: true
+
+  # externalSecret is the configuration for the ExternalSecret resource
+  externalSecret:
+    # refreshInterval is how often secrets are refreshed from AWS Secrets Manager
+    refreshInterval: "10m"
+
+    # data is the list of secret mappings from AWS Secrets Manager to Kubernetes secret keys.
+    # REQUIRED: Secrets must exist in AWS Secrets Manager (global.awsRegion)
+    data:
+      - secretKey: RDSDB
+        remoteRef:
+          key: /cloudops/managed-secrets/database/platform/shared
+          property: uri
