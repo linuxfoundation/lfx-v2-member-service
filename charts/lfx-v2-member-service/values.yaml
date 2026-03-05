@@ -1,0 +1,163 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+# image is the configuration for the container images
+image:
+  # repository is the container image repository
+  repository: ghcr.io/linuxfoundation/lfx-v2-member-service/member-api
+  # tag is the container image tag (overrides appVersion from Chart.yaml)
+  tag: ""
+  # pullPolicy is the image pull policy
+  pullPolicy: IfNotPresent
+
+# replicaCount is the number of replicas for the deployment
+replicaCount: 3
+
+# resources is the configuration for container resource limits and requests
+resources:
+  # limits is the maximum amount of resources the container can use
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  # requests is the amount of resources the container requests
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# app is the configuration for the application
+app:
+  # logLevel is the log level (debug, info, warn, error)
+  logLevel: info
+  # logAddSource is a boolean to determine if the log source should be added
+  logAddSource: true
+  # audience is the JWT audience required for authentication with this app
+  audience: lfx-v2-member-service
+  # jwtAuthDisabledMockLocalPrincipal mocks auth for local development to use a set principal
+  # (only use for local development)
+  jwtAuthDisabledMockLocalPrincipal: ""
+  # use_oidc_contextualizer is a boolean to determine if the OIDC contextualizer should be used
+  use_oidc_contextualizer: true
+  # extraEnv is a list of additional environment variables to set in the container.
+  # Supports both simple key-value pairs and Kubernetes field references.
+  extraEnv: []
+  # otel is the configuration for OpenTelemetry tracing
+  otel:
+    # serviceName is the service name for OpenTelemetry resource identification
+    # (default: "lfx-v2-member-service")
+    serviceName: ""
+    # serviceVersion is the service version for OpenTelemetry resource identification
+    # (default: "1.0.0")
+    serviceVersion: ""
+    # protocol specifies the OTLP protocol: "grpc" or "http"
+    # (default: "grpc")
+    protocol: "grpc"
+    # endpoint is the OTLP collector endpoint
+    # For gRPC: typically "host:4317", for HTTP: typically "host:4318"
+    endpoint: ""
+    # insecure disables TLS for the OTLP connection
+    # Set to "true" for in-cluster communication without TLS
+    insecure: "false"
+    # tracesExporter specifies the traces exporter: "otlp" or "none"
+    # (default: "none")
+    tracesExporter: "none"
+    # tracesSampleRatio specifies the sampling ratio for traces (0.0 to 1.0)
+    # A value of 1.0 means all traces are sampled, 0.5 means 50% are sampled
+    # (default: "1.0")
+    tracesSampleRatio: "1.0"
+    # metricsExporter specifies the metrics exporter: "otlp" or "none"
+    # (default: "none")
+    metricsExporter: "none"
+    # logsExporter specifies the logs exporter: "otlp" or "none"
+    # (default: "none")
+    logsExporter: "none"
+    # propagators specifies the propagators to use, comma-separated
+    # Supported values: "tracecontext", "baggage", "jaeger"
+    # (default: "tracecontext,baggage")
+    propagators: "tracecontext,baggage,jaeger"
+
+# traefik is the configuration for Traefik Gateway API routing
+traefik:
+  # gateway specifies the platform Gateway to attach to
+  gateway:
+    name: lfx-platform-gateway
+    namespace: lfx
+
+# lfx is the configuration for LFX platform
+lfx:
+  # domain is the base domain for routing
+  domain: k8s.orb.local
+  # namespace is the target namespace for deployment
+  namespace: lfx
+
+# service is the configuration for the Kubernetes service
+service:
+  # port is the service port
+  port: 8080
+
+# nats is the configuration for the NATS server
+nats:
+  # url is the URL of the NATS server
+  url: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+
+  # kv_bucket_memberships is the configuration for the KV bucket storing membership records
+  kv_bucket_memberships:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing membership records
+    name: memberships
+    # history is the number of history entries to keep for the KV bucket
+    history: 20
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 10485760  # 10MB
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 1073741824  # 1GB
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+
+  # kv_bucket_membership_contacts is the configuration for the KV bucket storing membership contacts
+  kv_bucket_membership_contacts:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing membership contacts
+    name: membership-contacts
+    # history is the number of history entries to keep for the KV bucket
+    history: 20
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 10485760  # 10MB
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 1073741824  # 1GB
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+
+# openfga is the configuration for the OpenFGA server
+openfga:
+  # enabled is a boolean to determine if the OpenFGA server should be enabled for authorization
+  # Note: If it is disabled, then the member service will allow all requests
+  # (Disabling OpenFGA should only be used for local development).
+  enabled: true
+
+# sync is the configuration for the membership sync job
+sync:
+  # fgaAuditorTeamID is the OpenFGA team ID whose members are granted auditor access
+  # on every membership object (maps to team:<id>#member in OpenFGA).
+  fgaAuditorTeamID: "membership-auditors"
+
+# heimdall is the configuration for the heimdall middleware
+heimdall:
+  enabled: true
+  url: http://lfx-platform-heimdall.lfx.svc.cluster.local:4456
+  # jwksUrl is the JWKS URL for JWT verification (note: uses port 4457)
+  jwksUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks
+  add_middleware: false

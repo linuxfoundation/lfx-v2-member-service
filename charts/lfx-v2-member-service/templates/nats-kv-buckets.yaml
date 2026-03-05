@@ -1,0 +1,40 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+{{- if .Values.nats.kv_bucket_memberships.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.kv_bucket_memberships.name }}
+  namespace: lfx
+  {{- if .Values.nats.kv_bucket_memberships.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.kv_bucket_memberships.name }}
+  history: {{ .Values.nats.kv_bucket_memberships.history }}
+  storage: {{ .Values.nats.kv_bucket_memberships.storage }}
+  maxValueSize: {{ .Values.nats.kv_bucket_memberships.maxValueSize }}
+  maxBytes: {{ .Values.nats.kv_bucket_memberships.maxBytes }}
+  compression: {{ .Values.nats.kv_bucket_memberships.compression }}
+{{- end }}
+---
+{{- if .Values.nats.kv_bucket_membership_contacts.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.kv_bucket_membership_contacts.name }}
+  namespace: lfx
+  {{- if .Values.nats.kv_bucket_membership_contacts.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.kv_bucket_membership_contacts.name }}
+  history: {{ .Values.nats.kv_bucket_membership_contacts.history }}
+  storage: {{ .Values.nats.kv_bucket_membership_contacts.storage }}
+  maxValueSize: {{ .Values.nats.kv_bucket_membership_contacts.maxValueSize }}
+  maxBytes: {{ .Values.nats.kv_bucket_membership_contacts.maxBytes }}
+  compression: {{ .Values.nats.kv_bucket_membership_contacts.compression }}
+{{- end }}
