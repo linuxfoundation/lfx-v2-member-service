@@ -15,10 +15,10 @@ import (
 
 // MembershipSyncer orchestrates the sync from PostgreSQL to NATS KV
 type MembershipSyncer struct {
-	sourceReader   port.MembershipSourceReader
-	kvWriter       port.MembershipKVWriter
-	fgaPublisher   port.FGAPublisher
-	auditorTeamID  string
+	sourceReader  port.MembershipSourceReader
+	kvWriter      port.MembershipKVWriter
+	fgaPublisher  port.FGAPublisher
+	auditorTeamID string
 }
 
 // NewMembershipSyncer creates a new MembershipSyncer

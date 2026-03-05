@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	membershipservicesvr "github.com/linuxfoundation/lfx-v2-member-service/gen/http/membership_service/server"
+	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/middleware"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"

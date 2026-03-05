@@ -34,7 +34,7 @@ var (
 )
 
 const (
-	defaultPort            = "8080"
+	defaultPort             = "8080"
 	gracefulShutdownSeconds = 25
 )
 
@@ -55,6 +55,21 @@ func main() {
 	flag.Parse()
 
 	ctx := context.Background()
+
+	// Set up JWT validator needed by the JWTAuth security handler.
+	// Initialized before OpenTelemetry so that os.Exit(1) does not skip
+	// the deferred OTel shutdown. NewJWTAuth only stores config; actual
+	// JWKS fetching happens at request time when OTel is active.
+	jwtAuthConfig := auth.JWTAuthConfig{
+		JWKSURL:            os.Getenv("JWKS_URL"),
+		Audience:           os.Getenv("AUDIENCE"),
+		MockLocalPrincipal: os.Getenv("JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL"),
+	}
+	jwtAuth, err := auth.NewJWTAuth(jwtAuthConfig)
+	if err != nil {
+		slog.ErrorContext(ctx, "error setting up JWT authentication", "error", err)
+		os.Exit(1)
+	}
 
 	// Set up OpenTelemetry SDK
 	otelConfig := utils.OTelConfigFromEnv()
@@ -79,19 +94,6 @@ func main() {
 		"http-port", *port,
 		"graceful-shutdown-seconds", gracefulShutdownSeconds,
 	)
-
-	// Set up JWT validator needed by the JWTAuth security handler.
-	// NewJWTAuth only stores config; actual JWKS fetching happens at request time.
-	jwtAuthConfig := auth.JWTAuthConfig{
-		JWKSURL:            os.Getenv("JWKS_URL"),
-		Audience:           os.Getenv("AUDIENCE"),
-		MockLocalPrincipal: os.Getenv("JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL"),
-	}
-	jwtAuth, err := auth.NewJWTAuth(jwtAuthConfig)
-	if err != nil {
-		slog.ErrorContext(ctx, "error setting up JWT authentication", "error", err)
-		os.Exit(1)
-	}
 
 	// Initialize the repositories based on configuration
 	membershipReader := service.MembershipReaderImpl(ctx)

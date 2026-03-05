@@ -15,13 +15,13 @@ func convertMembershipToResponse(m *model.Membership) *membershipservice.Members
 	}
 
 	result := &membershipservice.MembershipResponse{
-		UID:              &m.UID,
-		Name:             &m.Name,
-		Status:           &m.Status,
-		MembershipType:   &m.MembershipType,
-		AutoRenew:        &m.AutoRenew,
-		Price:            &m.Price,
-		AnnualFullPrice:  &m.AnnualFullPrice,
+		UID:             &m.UID,
+		Name:            &m.Name,
+		Status:          &m.Status,
+		MembershipType:  &m.MembershipType,
+		AutoRenew:       &m.AutoRenew,
+		Price:           &m.Price,
+		AnnualFullPrice: &m.AnnualFullPrice,
 	}
 
 	if m.Year != "" {
