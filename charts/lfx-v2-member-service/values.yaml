@@ -148,6 +148,12 @@ openfga:
   # (Disabling OpenFGA should only be used for local development).
   enabled: true
 
+# sync is the configuration for the membership sync job
+sync:
+  # fgaAuditorTeamID is the OpenFGA team ID whose members are granted auditor access
+  # on every membership object (maps to team:<id>#member in OpenFGA).
+  fgaAuditorTeamID: "membership-auditors"
+
 # heimdall is the configuration for the heimdall middleware
 heimdall:
   enabled: true

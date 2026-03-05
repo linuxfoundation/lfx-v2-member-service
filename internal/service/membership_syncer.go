@@ -15,15 +15,19 @@ import (
 
 // MembershipSyncer orchestrates the sync from PostgreSQL to NATS KV
 type MembershipSyncer struct {
-	sourceReader port.MembershipSourceReader
-	kvWriter     port.MembershipKVWriter
+	sourceReader   port.MembershipSourceReader
+	kvWriter       port.MembershipKVWriter
+	fgaPublisher   port.FGAPublisher
+	auditorTeamID  string
 }
 
 // NewMembershipSyncer creates a new MembershipSyncer
-func NewMembershipSyncer(sourceReader port.MembershipSourceReader, kvWriter port.MembershipKVWriter) *MembershipSyncer {
+func NewMembershipSyncer(sourceReader port.MembershipSourceReader, kvWriter port.MembershipKVWriter, fgaPublisher port.FGAPublisher, auditorTeamID string) *MembershipSyncer {
 	return &MembershipSyncer{
-		sourceReader: sourceReader,
-		kvWriter:     kvWriter,
+		sourceReader:  sourceReader,
+		kvWriter:      kvWriter,
+		fgaPublisher:  fgaPublisher,
+		auditorTeamID: auditorTeamID,
 	}
 }
 
@@ -66,6 +70,15 @@ func (s *MembershipSyncer) Sync(ctx context.Context) error {
 
 		if err := s.kvWriter.WriteMembership(ctx, membership); err != nil {
 			slog.ErrorContext(ctx, "failed to write membership to KV",
+				"error", err,
+				"membership_uid", membership.UID,
+			)
+			membershipErrors++
+			continue
+		}
+
+		if err := s.fgaPublisher.UpdateMemberAccess(ctx, membership.UID, s.auditorTeamID); err != nil {
+			slog.ErrorContext(ctx, "failed to publish fga-sync access for membership",
 				"error", err,
 				"membership_uid", membership.UID,
 			)

@@ -88,10 +88,16 @@ func main() {
 	defer natsClient.Close()
 	slog.InfoContext(ctx, "connected to NATS")
 
+	auditorTeamID := os.Getenv("FGA_AUDITOR_TEAM_ID")
+	if auditorTeamID == "" {
+		log.Fatal("FGA_AUDITOR_TEAM_ID environment variable is required")
+	}
+
 	// Create source reader (PostgreSQL) and KV writer (NATS)
 	membershipRepo := postgres.NewMembershipRepo(db)
 	keyContactRepo := postgres.NewKeyContactRepo(db)
 	natsStorage := nats.NewStorage(natsClient)
+	fgaPublisher := nats.NewFGAPublisher(natsClient)
 
 	// Create a combined source reader
 	sourceReader := &combinedSourceReader{
@@ -100,7 +106,7 @@ func main() {
 	}
 
 	// Create and run the syncer
-	syncer := usecaseSvc.NewMembershipSyncer(sourceReader, natsStorage)
+	syncer := usecaseSvc.NewMembershipSyncer(sourceReader, natsStorage, fgaPublisher, auditorTeamID)
 	if err := syncer.Sync(ctx); err != nil {
 		log.Fatalf("sync failed: %v", err)
 	}
