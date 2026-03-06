@@ -104,6 +104,8 @@ func run() error {
 	// Create source reader (PostgreSQL) and KV writer (NATS)
 	membershipRepo := postgres.NewMembershipRepo(db)
 	keyContactRepo := postgres.NewKeyContactRepo(db)
+	memberRepo := postgres.NewMemberRepo(db)
+	projectRepo := postgres.NewProjectRepo(db)
 	natsStorage := nats.NewStorage(natsClient)
 	fgaPublisher := nats.NewFGAPublisher(natsClient)
 
@@ -111,10 +113,11 @@ func run() error {
 	sourceReader := &combinedSourceReader{
 		membershipRepo: membershipRepo,
 		keyContactRepo: keyContactRepo,
+		memberRepo:     memberRepo,
 	}
 
 	// Create and run the syncer
-	syncer := usecaseSvc.NewMembershipSyncer(sourceReader, natsStorage, fgaPublisher, auditorTeamID)
+	syncer := usecaseSvc.NewMembershipSyncer(sourceReader, natsStorage, fgaPublisher, projectRepo, auditorTeamID)
 	if err := syncer.Sync(ctx); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
@@ -123,10 +126,11 @@ func run() error {
 	return nil
 }
 
-// combinedSourceReader combines MembershipRepo and KeyContactRepo into a single MembershipSourceReader
+// combinedSourceReader combines MembershipRepo, KeyContactRepo, and MemberRepo into a single MembershipSourceReader
 type combinedSourceReader struct {
 	membershipRepo *postgres.MembershipRepo
 	keyContactRepo *postgres.KeyContactRepo
+	memberRepo     *postgres.MemberRepo
 }
 
 func (r *combinedSourceReader) FetchAllMemberships(ctx context.Context) ([]*model.Membership, error) {
@@ -135,4 +139,8 @@ func (r *combinedSourceReader) FetchAllMemberships(ctx context.Context) ([]*mode
 
 func (r *combinedSourceReader) FetchAllKeyContacts(ctx context.Context) ([]*model.KeyContact, error) {
 	return r.keyContactRepo.FetchAllKeyContacts(ctx)
+}
+
+func (r *combinedSourceReader) FetchAllMembers(ctx context.Context) ([]*model.Member, error) {
+	return r.memberRepo.FetchAllMembers(ctx)
 }

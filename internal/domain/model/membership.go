@@ -8,6 +8,7 @@ import "time"
 // Membership represents a membership entity
 type Membership struct {
 	UID              string    `json:"uid"`
+	MemberUID        string    `json:"member_uid"`
 	Name             string    `json:"name"`
 	Status           string    `json:"status"`
 	Year             string    `json:"year,omitempty"`

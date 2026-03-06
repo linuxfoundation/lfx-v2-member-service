@@ -41,6 +41,298 @@ func (s *storage) get(ctx context.Context, bucket, uid string, model any) (uint6
 	return data.Revision(), nil
 }
 
+// getValue retrieves the raw value from a NATS KV store key.
+func (s *storage) getValue(ctx context.Context, bucket, key string) ([]byte, error) {
+	data, err := s.client.kvStore[bucket].Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return data.Value(), nil
+}
+
+// ================== MemberReader implementation ==================
+
+// GetMember retrieves a member by UID
+func (s *storage) GetMember(ctx context.Context, uid string) (*model.Member, uint64, error) {
+	member := &model.Member{}
+
+	rev, errGet := s.get(ctx, constants.KVBucketNameMembers, uid, member)
+	if errGet != nil {
+		if errors.Is(errGet, jetstream.ErrKeyNotFound) {
+			return nil, 0, errs.NewNotFound("member not found", fmt.Errorf("member UID: %s", uid))
+		}
+		return nil, 0, errs.NewUnexpected("failed to get member", errGet)
+	}
+
+	return member, rev, nil
+}
+
+// ListMembers retrieves members with pagination, filtering, and search
+func (s *storage) ListMembers(ctx context.Context, params model.ListParams) ([]*model.Member, int, error) {
+	slog.DebugContext(ctx, "listing members from NATS storage",
+		"page_size", params.PageSize,
+		"offset", params.Offset,
+		"search", params.Search,
+	)
+
+	kv := s.client.kvStore[constants.KVBucketNameMembers]
+
+	// If filtering by project_id, use the lookup index for fast retrieval
+	if projectID, ok := params.Filters["project_id"]; ok {
+		return s.listMembersByProjectLookup(ctx, kv, projectID, params)
+	}
+
+	// If filtering by member_id (SFID or UUID), resolve to member UID
+	if memberID, ok := params.Filters["member_id"]; ok {
+		return s.listMembersByMemberID(ctx, memberID, params)
+	}
+
+	hasFilters := len(params.Filters) > 0 || params.Search != ""
+
+	keys, errKeys := kv.ListKeys(ctx)
+	if errKeys != nil {
+		if errors.Is(errKeys, jetstream.ErrNoKeysFound) {
+			return []*model.Member{}, 0, nil
+		}
+		return nil, 0, errs.NewUnexpected("failed to list keys from members bucket", errKeys)
+	}
+
+	// When no filters/search, paginate at the key level
+	if !hasFilters {
+		var allKeys []string
+		for key := range keys.Keys() {
+			if strings.HasPrefix(key, "lookup/") {
+				continue
+			}
+			allKeys = append(allKeys, key)
+		}
+
+		totalSize := len(allKeys)
+
+		start := params.Offset
+		if start > totalSize {
+			start = totalSize
+		}
+		end := start + params.PageSize
+		if end > totalSize {
+			end = totalSize
+		}
+
+		pageKeys := allKeys[start:end]
+		members := make([]*model.Member, 0, len(pageKeys))
+		for _, key := range pageKeys {
+			member := &model.Member{}
+			_, errGet := s.get(ctx, constants.KVBucketNameMembers, key, member)
+			if errGet != nil {
+				slog.WarnContext(ctx, "failed to get member while listing",
+					"key", key,
+					"error", errGet,
+				)
+				continue
+			}
+			members = append(members, member)
+		}
+
+		slog.DebugContext(ctx, "retrieved members from NATS storage",
+			"total_size", totalSize,
+			"page_size", params.PageSize,
+			"offset", params.Offset,
+			"returned", len(members),
+		)
+
+		return members, totalSize, nil
+	}
+
+	// With filters/search, load and check each record
+	var filtered []*model.Member
+	for key := range keys.Keys() {
+		if strings.HasPrefix(key, "lookup/") {
+			continue
+		}
+
+		member := &model.Member{}
+		_, errGet := s.get(ctx, constants.KVBucketNameMembers, key, member)
+		if errGet != nil {
+			slog.WarnContext(ctx, "failed to get member while listing",
+				"key", key,
+				"error", errGet,
+			)
+			continue
+		}
+
+		if !matchesMemberFilters(member, params.Filters, params.Search) {
+			continue
+		}
+
+		filtered = append(filtered, member)
+	}
+
+	totalSize := len(filtered)
+
+	start := params.Offset
+	if start > totalSize {
+		start = totalSize
+	}
+	end := start + params.PageSize
+	if end > totalSize {
+		end = totalSize
+	}
+
+	slog.DebugContext(ctx, "retrieved members from NATS storage",
+		"total_size", totalSize,
+		"page_size", params.PageSize,
+		"offset", params.Offset,
+		"returned", end-start,
+	)
+
+	return filtered[start:end], totalSize, nil
+}
+
+// listMembersByProjectLookup uses the project lookup index to find members
+func (s *storage) listMembersByProjectLookup(ctx context.Context, kv jetstream.KeyValue, projectID string, params model.ListParams) ([]*model.Member, int, error) {
+	keys, errKeys := kv.ListKeys(ctx, jetstream.MetaOnly())
+	if errKeys != nil {
+		if errors.Is(errKeys, jetstream.ErrNoKeysFound) {
+			return []*model.Member{}, 0, nil
+		}
+		return nil, 0, errs.NewUnexpected("failed to list keys from members bucket", errKeys)
+	}
+
+	lookupPrefix := fmt.Sprintf("lookup/member-project/%s/", projectID)
+
+	// Collect member UIDs from lookup keys matching the prefix
+	var memberUIDs []string
+	for key := range keys.Keys() {
+		if strings.HasPrefix(key, lookupPrefix) {
+			parts := strings.Split(key, "/")
+			if len(parts) > 0 {
+				memberUIDs = append(memberUIDs, parts[len(parts)-1])
+			}
+		}
+	}
+
+	// Build remaining filters (excluding project_id)
+	remainingFilters := make(map[string]string)
+	for k, v := range params.Filters {
+		if k != "project_id" {
+			remainingFilters[k] = v
+		}
+	}
+
+	hasRemainingFilters := len(remainingFilters) > 0 || params.Search != ""
+
+	if hasRemainingFilters {
+		var filtered []*model.Member
+		for _, uid := range memberUIDs {
+			member := &model.Member{}
+			_, errGet := s.get(ctx, constants.KVBucketNameMembers, uid, member)
+			if errGet != nil {
+				slog.WarnContext(ctx, "failed to get member from lookup", "uid", uid, "error", errGet)
+				continue
+			}
+			if matchesMemberFilters(member, remainingFilters, params.Search) {
+				filtered = append(filtered, member)
+			}
+		}
+
+		totalSize := len(filtered)
+		start := params.Offset
+		if start > totalSize {
+			start = totalSize
+		}
+		end := start + params.PageSize
+		if end > totalSize {
+			end = totalSize
+		}
+		return filtered[start:end], totalSize, nil
+	}
+
+	totalSize := len(memberUIDs)
+	start := params.Offset
+	if start > totalSize {
+		start = totalSize
+	}
+	end := start + params.PageSize
+	if end > totalSize {
+		end = totalSize
+	}
+
+	pageUIDs := memberUIDs[start:end]
+	members := make([]*model.Member, 0, len(pageUIDs))
+	for _, uid := range pageUIDs {
+		member := &model.Member{}
+		_, errGet := s.get(ctx, constants.KVBucketNameMembers, uid, member)
+		if errGet != nil {
+			slog.WarnContext(ctx, "failed to get member from lookup", "uid", uid, "error", errGet)
+			continue
+		}
+		members = append(members, member)
+	}
+
+	return members, totalSize, nil
+}
+
+// listMembersByMemberID resolves a member_id (SFID or UUID) and returns matching members
+func (s *storage) listMembersByMemberID(ctx context.Context, memberID string, params model.ListParams) ([]*model.Member, int, error) {
+	// Try direct UUID lookup first
+	member := &model.Member{}
+	_, errGet := s.get(ctx, constants.KVBucketNameMembers, memberID, member)
+	if errGet == nil {
+		return []*model.Member{member}, 1, nil
+	}
+
+	// Try SFID lookup
+	sfidKey := fmt.Sprintf(constants.KVLookupMemberBySFIDPrefix, memberID)
+	val, errVal := s.getValue(ctx, constants.KVBucketNameMembers, sfidKey)
+	if errVal != nil {
+		if errors.Is(errVal, jetstream.ErrKeyNotFound) {
+			return []*model.Member{}, 0, nil
+		}
+		return nil, 0, errs.NewUnexpected("failed to resolve member_id", errVal)
+	}
+
+	memberUID := string(val)
+	member = &model.Member{}
+	_, errGet = s.get(ctx, constants.KVBucketNameMembers, memberUID, member)
+	if errGet != nil {
+		return []*model.Member{}, 0, nil
+	}
+
+	return []*model.Member{member}, 1, nil
+}
+
+// GetMembershipForMember retrieves a membership and verifies it belongs to the specified member
+func (s *storage) GetMembershipForMember(ctx context.Context, memberUID, membershipUID string) (*model.Membership, uint64, error) {
+	membership := &model.Membership{}
+
+	rev, errGet := s.get(ctx, constants.KVBucketNameMemberships, membershipUID, membership)
+	if errGet != nil {
+		if errors.Is(errGet, jetstream.ErrKeyNotFound) {
+			return nil, 0, errs.NewNotFound("membership not found", fmt.Errorf("membership UID: %s", membershipUID))
+		}
+		return nil, 0, errs.NewUnexpected("failed to get membership", errGet)
+	}
+
+	if membership.MemberUID != memberUID {
+		return nil, 0, errs.NewNotFound("membership not found for this member",
+			fmt.Errorf("membership %s does not belong to member %s", membershipUID, memberUID))
+	}
+
+	return membership, rev, nil
+}
+
+// ListKeyContactsForMembership retrieves key contacts for a membership after verifying member ownership
+func (s *storage) ListKeyContactsForMembership(ctx context.Context, memberUID, membershipUID string) ([]*model.KeyContact, error) {
+	// Verify membership belongs to member
+	_, _, err := s.GetMembershipForMember(ctx, memberUID, membershipUID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reuse existing contact lookup logic
+	return s.ListKeyContacts(ctx, membershipUID)
+}
+
 // ================== MembershipReader implementation ==================
 
 // GetMembership retrieves a membership by UID
@@ -320,6 +612,41 @@ func (s *storage) ListKeyContacts(ctx context.Context, membershipUID string) ([]
 
 // ================== MembershipKVWriter implementation ==================
 
+// WriteMember writes a member to the KV store and creates lookup keys
+func (s *storage) WriteMember(ctx context.Context, member *model.Member) error {
+	if member == nil {
+		return errs.NewValidation("member cannot be nil")
+	}
+
+	memberBytes, errMarshal := json.Marshal(member)
+	if errMarshal != nil {
+		return errs.NewUnexpected("failed to marshal member", errMarshal)
+	}
+
+	kv := s.client.kvStore[constants.KVBucketNameMembers]
+
+	_, errPut := kv.Put(ctx, member.UID, memberBytes)
+	if errPut != nil {
+		return errs.NewUnexpected("failed to write member", errPut)
+	}
+
+	// Write SFID lookup keys for dual-ID resolution
+	for _, sfid := range member.SFIDs {
+		if sfid == "" {
+			continue
+		}
+		lookupKey := fmt.Sprintf(constants.KVLookupMemberBySFIDPrefix, sfid)
+		if _, err := kv.Put(ctx, lookupKey, []byte(member.UID)); err != nil {
+			slog.WarnContext(ctx, "failed to write member SFID lookup key",
+				"key", lookupKey,
+				"error", err,
+			)
+		}
+	}
+
+	return nil
+}
+
 // WriteMembership writes a membership to the KV store and creates lookup keys
 func (s *storage) WriteMembership(ctx context.Context, membership *model.Membership) error {
 	if membership == nil {
@@ -346,6 +673,29 @@ func (s *storage) WriteMembership(ctx context.Context, membership *model.Members
 				"key", lookupKey,
 				"error", err,
 			)
+		}
+	}
+
+	// Write member-membership lookup key
+	if membership.MemberUID != "" {
+		lookupKey := fmt.Sprintf(constants.KVLookupMembershipByMemberPrefix, membership.MemberUID, membership.UID)
+		if _, err := kv.Put(ctx, lookupKey, []byte(membership.UID)); err != nil {
+			slog.WarnContext(ctx, "failed to write member-membership lookup key",
+				"key", lookupKey,
+				"error", err,
+			)
+		}
+
+		// Write member-project lookup key in the members bucket
+		if membership.Project.ID != "" {
+			memberKV := s.client.kvStore[constants.KVBucketNameMembers]
+			memberProjectKey := fmt.Sprintf(constants.KVLookupMemberByProjectPrefix, membership.Project.ID, membership.MemberUID)
+			if _, err := memberKV.Put(ctx, memberProjectKey, []byte(membership.MemberUID)); err != nil {
+				slog.WarnContext(ctx, "failed to write member-project lookup key",
+					"key", memberProjectKey,
+					"error", err,
+				)
+			}
 		}
 	}
 
@@ -378,6 +728,27 @@ func (s *storage) WriteKeyContact(ctx context.Context, contact *model.KeyContact
 				"key", lookupKey,
 				"error", err,
 			)
+		}
+	}
+
+	return nil
+}
+
+// WriteProjectAliasLookups writes additional lookup keys under a PCC project ID alias
+func (s *storage) WriteProjectAliasLookups(ctx context.Context, aliasProjectID, membershipUID, memberUID string) error {
+	// Write project lookup in memberships bucket: lookup/project/{pccProjectID}/{membershipUID}
+	membershipKV := s.client.kvStore[constants.KVBucketNameMemberships]
+	projectKey := fmt.Sprintf(constants.KVLookupProjectPrefix, aliasProjectID, membershipUID)
+	if _, err := membershipKV.Put(ctx, projectKey, []byte(membershipUID)); err != nil {
+		return fmt.Errorf("failed to write project alias lookup: %w", err)
+	}
+
+	// Write member-project lookup in members bucket: lookup/member-project/{pccProjectID}/{memberUID}
+	if memberUID != "" {
+		memberKV := s.client.kvStore[constants.KVBucketNameMembers]
+		memberProjectKey := fmt.Sprintf(constants.KVLookupMemberByProjectPrefix, aliasProjectID, memberUID)
+		if _, err := memberKV.Put(ctx, memberProjectKey, []byte(memberUID)); err != nil {
+			return fmt.Errorf("failed to write member-project alias lookup: %w", err)
 		}
 	}
 
@@ -477,4 +848,100 @@ func matchesFilters(m *model.Membership, filters map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// matchesMemberFilters checks if a member matches the given filters and search term.
+// Filters operate on the MembershipSummary to enable filtering by membership-level fields.
+func matchesMemberFilters(m *model.Member, filters map[string]string, search string) bool {
+	// Check search term first (case-insensitive substring across name, project names, tiers)
+	if search != "" {
+		searchLower := strings.ToLower(search)
+		found := false
+
+		if strings.Contains(strings.ToLower(m.Name), searchLower) {
+			found = true
+		}
+
+		if !found && m.MembershipSummary != nil {
+			for _, ms := range m.MembershipSummary.Memberships {
+				if strings.Contains(strings.ToLower(ms.Project.Name), searchLower) ||
+					strings.Contains(strings.ToLower(ms.Project.Slug), searchLower) ||
+					strings.Contains(strings.ToLower(ms.Tier), searchLower) ||
+					strings.Contains(strings.ToLower(ms.Name), searchLower) {
+					found = true
+					break
+				}
+			}
+		}
+
+		if !found {
+			return false
+		}
+	}
+
+	// Check filters
+	for key, value := range filters {
+		switch strings.ToLower(key) {
+		case "name":
+			if !strings.Contains(strings.ToLower(m.Name), strings.ToLower(value)) {
+				return false
+			}
+		case "tier":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return strings.EqualFold(ms.Tier, value)
+			}) {
+				return false
+			}
+		case "status":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return strings.EqualFold(ms.Status, value)
+			}) {
+				return false
+			}
+		case "year":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return ms.Year == value
+			}) {
+				return false
+			}
+		case "product_name":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return strings.Contains(strings.ToLower(ms.Product.Name), strings.ToLower(value))
+			}) {
+				return false
+			}
+		case "project_name":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return strings.Contains(strings.ToLower(ms.Project.Name), strings.ToLower(value))
+			}) {
+				return false
+			}
+		case "project_slug":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return strings.EqualFold(ms.Project.Slug, value)
+			}) {
+				return false
+			}
+		case "membership_type":
+			if !memberHasMembershipMatch(m, func(ms model.MembershipSummaryItem) bool {
+				return strings.EqualFold(ms.MembershipType, value)
+			}) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// memberHasMembershipMatch checks if any membership in the summary matches the predicate
+func memberHasMembershipMatch(m *model.Member, predicate func(model.MembershipSummaryItem) bool) bool {
+	if m.MembershipSummary == nil {
+		return false
+	}
+	for _, ms := range m.MembershipSummary.Memberships {
+		if predicate(ms) {
+			return true
+		}
+	}
+	return false
 }

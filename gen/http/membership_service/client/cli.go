@@ -16,14 +16,14 @@ import (
 	goa "goa.design/goa/v3/pkg"
 )
 
-// BuildListMembershipsPayload builds the payload for the membership-service
-// list-memberships endpoint from CLI flags.
-func BuildListMembershipsPayload(membershipServiceListMembershipsVersion string, membershipServiceListMembershipsPageSize string, membershipServiceListMembershipsOffset string, membershipServiceListMembershipsFilter string, membershipServiceListMembershipsBearerToken string) (*membershipservice.ListMembershipsPayload, error) {
+// BuildListMembersPayload builds the payload for the membership-service
+// list-members endpoint from CLI flags.
+func BuildListMembersPayload(membershipServiceListMembersVersion string, membershipServiceListMembersPageSize string, membershipServiceListMembersOffset string, membershipServiceListMembersFilter string, membershipServiceListMembersSearch string, membershipServiceListMembersBearerToken string) (*membershipservice.ListMembersPayload, error) {
 	var err error
 	var version *string
 	{
-		if membershipServiceListMembershipsVersion != "" {
-			version = &membershipServiceListMembershipsVersion
+		if membershipServiceListMembersVersion != "" {
+			version = &membershipServiceListMembersVersion
 			if !(*version == "1") {
 				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
 			}
@@ -34,9 +34,9 @@ func BuildListMembershipsPayload(membershipServiceListMembershipsVersion string,
 	}
 	var pageSize int
 	{
-		if membershipServiceListMembershipsPageSize != "" {
+		if membershipServiceListMembersPageSize != "" {
 			var v int64
-			v, err = strconv.ParseInt(membershipServiceListMembershipsPageSize, 10, strconv.IntSize)
+			v, err = strconv.ParseInt(membershipServiceListMembersPageSize, 10, strconv.IntSize)
 			pageSize = int(v)
 			if err != nil {
 				return nil, fmt.Errorf("invalid value for pageSize, must be INT")
@@ -54,9 +54,9 @@ func BuildListMembershipsPayload(membershipServiceListMembershipsVersion string,
 	}
 	var offset int
 	{
-		if membershipServiceListMembershipsOffset != "" {
+		if membershipServiceListMembersOffset != "" {
 			var v int64
-			v, err = strconv.ParseInt(membershipServiceListMembershipsOffset, 10, strconv.IntSize)
+			v, err = strconv.ParseInt(membershipServiceListMembersOffset, 10, strconv.IntSize)
 			offset = int(v)
 			if err != nil {
 				return nil, fmt.Errorf("invalid value for offset, must be INT")
@@ -71,42 +71,57 @@ func BuildListMembershipsPayload(membershipServiceListMembershipsVersion string,
 	}
 	var filter *string
 	{
-		if membershipServiceListMembershipsFilter != "" {
-			filter = &membershipServiceListMembershipsFilter
+		if membershipServiceListMembersFilter != "" {
+			filter = &membershipServiceListMembersFilter
+		}
+	}
+	var search *string
+	{
+		if membershipServiceListMembersSearch != "" {
+			search = &membershipServiceListMembersSearch
 		}
 	}
 	var bearerToken *string
 	{
-		if membershipServiceListMembershipsBearerToken != "" {
-			bearerToken = &membershipServiceListMembershipsBearerToken
+		if membershipServiceListMembersBearerToken != "" {
+			bearerToken = &membershipServiceListMembersBearerToken
 		}
 	}
-	v := &membershipservice.ListMembershipsPayload{}
+	v := &membershipservice.ListMembersPayload{}
 	v.Version = version
 	v.PageSize = pageSize
 	v.Offset = offset
 	v.Filter = filter
+	v.Search = search
 	v.BearerToken = bearerToken
 
 	return v, nil
 }
 
-// BuildGetMembershipPayload builds the payload for the membership-service
-// get-membership endpoint from CLI flags.
-func BuildGetMembershipPayload(membershipServiceGetMembershipUID string, membershipServiceGetMembershipVersion string, membershipServiceGetMembershipBearerToken string) (*membershipservice.GetMembershipPayload, error) {
+// BuildGetMemberMembershipPayload builds the payload for the
+// membership-service get-member-membership endpoint from CLI flags.
+func BuildGetMemberMembershipPayload(membershipServiceGetMemberMembershipMemberID string, membershipServiceGetMemberMembershipID string, membershipServiceGetMemberMembershipVersion string, membershipServiceGetMemberMembershipBearerToken string) (*membershipservice.GetMemberMembershipPayload, error) {
 	var err error
-	var uid string
+	var memberID string
 	{
-		uid = membershipServiceGetMembershipUID
-		err = goa.MergeErrors(err, goa.ValidateFormat("uid", uid, goa.FormatUUID))
+		memberID = membershipServiceGetMemberMembershipMemberID
+		err = goa.MergeErrors(err, goa.ValidateFormat("member_id", memberID, goa.FormatUUID))
+		if err != nil {
+			return nil, err
+		}
+	}
+	var id string
+	{
+		id = membershipServiceGetMemberMembershipID
+		err = goa.MergeErrors(err, goa.ValidateFormat("id", id, goa.FormatUUID))
 		if err != nil {
 			return nil, err
 		}
 	}
 	var version *string
 	{
-		if membershipServiceGetMembershipVersion != "" {
-			version = &membershipServiceGetMembershipVersion
+		if membershipServiceGetMemberMembershipVersion != "" {
+			version = &membershipServiceGetMemberMembershipVersion
 			if !(*version == "1") {
 				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
 			}
@@ -117,34 +132,44 @@ func BuildGetMembershipPayload(membershipServiceGetMembershipUID string, members
 	}
 	var bearerToken *string
 	{
-		if membershipServiceGetMembershipBearerToken != "" {
-			bearerToken = &membershipServiceGetMembershipBearerToken
+		if membershipServiceGetMemberMembershipBearerToken != "" {
+			bearerToken = &membershipServiceGetMemberMembershipBearerToken
 		}
 	}
-	v := &membershipservice.GetMembershipPayload{}
-	v.UID = &uid
+	v := &membershipservice.GetMemberMembershipPayload{}
+	v.MemberID = &memberID
+	v.ID = &id
 	v.Version = version
 	v.BearerToken = bearerToken
 
 	return v, nil
 }
 
-// BuildListMembershipContactsPayload builds the payload for the
-// membership-service list-membership-contacts endpoint from CLI flags.
-func BuildListMembershipContactsPayload(membershipServiceListMembershipContactsUID string, membershipServiceListMembershipContactsVersion string, membershipServiceListMembershipContactsBearerToken string) (*membershipservice.ListMembershipContactsPayload, error) {
+// BuildListMemberMembershipKeyContactsPayload builds the payload for the
+// membership-service list-member-membership-key-contacts endpoint from CLI
+// flags.
+func BuildListMemberMembershipKeyContactsPayload(membershipServiceListMemberMembershipKeyContactsMemberID string, membershipServiceListMemberMembershipKeyContactsID string, membershipServiceListMemberMembershipKeyContactsVersion string, membershipServiceListMemberMembershipKeyContactsBearerToken string) (*membershipservice.ListMemberMembershipKeyContactsPayload, error) {
 	var err error
-	var uid string
+	var memberID string
 	{
-		uid = membershipServiceListMembershipContactsUID
-		err = goa.MergeErrors(err, goa.ValidateFormat("uid", uid, goa.FormatUUID))
+		memberID = membershipServiceListMemberMembershipKeyContactsMemberID
+		err = goa.MergeErrors(err, goa.ValidateFormat("member_id", memberID, goa.FormatUUID))
+		if err != nil {
+			return nil, err
+		}
+	}
+	var id string
+	{
+		id = membershipServiceListMemberMembershipKeyContactsID
+		err = goa.MergeErrors(err, goa.ValidateFormat("id", id, goa.FormatUUID))
 		if err != nil {
 			return nil, err
 		}
 	}
 	var version *string
 	{
-		if membershipServiceListMembershipContactsVersion != "" {
-			version = &membershipServiceListMembershipContactsVersion
+		if membershipServiceListMemberMembershipKeyContactsVersion != "" {
+			version = &membershipServiceListMemberMembershipKeyContactsVersion
 			if !(*version == "1") {
 				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
 			}
@@ -155,12 +180,13 @@ func BuildListMembershipContactsPayload(membershipServiceListMembershipContactsU
 	}
 	var bearerToken *string
 	{
-		if membershipServiceListMembershipContactsBearerToken != "" {
-			bearerToken = &membershipServiceListMembershipContactsBearerToken
+		if membershipServiceListMemberMembershipKeyContactsBearerToken != "" {
+			bearerToken = &membershipServiceListMemberMembershipKeyContactsBearerToken
 		}
 	}
-	v := &membershipservice.ListMembershipContactsPayload{}
-	v.UID = &uid
+	v := &membershipservice.ListMemberMembershipKeyContactsPayload{}
+	v.MemberID = &memberID
+	v.ID = &id
 	v.Version = version
 	v.BearerToken = bearerToken
 

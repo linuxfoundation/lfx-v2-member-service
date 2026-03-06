@@ -93,6 +93,79 @@ var OrganizationType = dsl.Type("organization-type", func() {
 	})
 })
 
+// MembershipSummaryItemType is the DSL type for a membership summary item.
+var MembershipSummaryItemType = dsl.Type("membership-summary-item-type", func() {
+	dsl.Attribute("uid", dsl.String, "Membership UID", func() {
+		dsl.Example("7cad5a8d-19d0-41a4-81a6-043453daf9ee")
+		dsl.Format(dsl.FormatUUID)
+	})
+	dsl.Attribute("name", dsl.String, "Membership name", func() {
+		dsl.Example("Gold Membership - Example Corp")
+	})
+	dsl.Attribute("status", dsl.String, "Membership status", func() {
+		dsl.Example("Active")
+	})
+	dsl.Attribute("year", dsl.String, "Membership year", func() {
+		dsl.Example("2025")
+	})
+	dsl.Attribute("tier", dsl.String, "Membership tier", func() {
+		dsl.Example("Gold")
+	})
+	dsl.Attribute("membership_type", dsl.String, "Membership type", func() {
+		dsl.Example("Corporate")
+	})
+	dsl.Attribute("auto_renew", dsl.Boolean, "Whether auto-renew is enabled", func() {
+		dsl.Example(true)
+	})
+	dsl.Attribute("start_date", dsl.String, "Start date", func() {
+		dsl.Example("2025-01-01T00:00:00Z")
+	})
+	dsl.Attribute("end_date", dsl.String, "End date", func() {
+		dsl.Example("2025-12-31T23:59:59Z")
+	})
+	dsl.Attribute("product", ProductType, "Product information")
+	dsl.Attribute("project", ProjectType, "Project information")
+})
+
+// MembershipSummaryType is the DSL type for a membership summary.
+var MembershipSummaryType = dsl.Type("membership-summary-type", func() {
+	dsl.Description("Summary of memberships for a member")
+	dsl.Attribute("active_count", dsl.Int, "Number of active memberships", func() {
+		dsl.Example(1)
+	})
+	dsl.Attribute("total_count", dsl.Int, "Total number of memberships", func() {
+		dsl.Example(2)
+	})
+	dsl.Attribute("memberships", dsl.ArrayOf(MembershipSummaryItemType), "List of membership details")
+})
+
+// MemberResponse is the DSL type for a member response.
+var MemberResponse = dsl.Type("member-response", func() {
+	dsl.Description("A member (account/organization) resource")
+	dsl.Attribute("uid", dsl.String, "Member UID", func() {
+		dsl.Example("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+		dsl.Format(dsl.FormatUUID)
+	})
+	dsl.Attribute("name", dsl.String, "Member name", func() {
+		dsl.Example("Example Corp")
+	})
+	dsl.Attribute("logo_url", dsl.String, "Member logo URL", func() {
+		dsl.Example("https://example.com/logo.png")
+	})
+	dsl.Attribute("website", dsl.String, "Member website", func() {
+		dsl.Example("https://example.com")
+	})
+	dsl.Attribute("membership_summary", MembershipSummaryType, "Membership summary")
+	dsl.Attribute("created_at", dsl.String, "Creation timestamp", func() {
+		dsl.Format(dsl.FormatDateTime)
+		dsl.Example("2025-01-01T00:00:00Z")
+	})
+	dsl.Attribute("updated_at", dsl.String, "Last update timestamp", func() {
+		dsl.Format(dsl.FormatDateTime)
+		dsl.Example("2025-06-01T12:00:00Z")
+	})
+})
+
 // MembershipAttributes defines the attributes for a membership.
 func MembershipAttributes() {
 	dsl.Attribute("uid", dsl.String, "Membership UID", func() {
@@ -243,9 +316,17 @@ func ETagAttribute() {
 	})
 }
 
-// MembershipUIDAttribute is the DSL attribute for membership UID.
-func MembershipUIDAttribute() {
-	dsl.Attribute("uid", dsl.String, "Membership UID", func() {
+// MemberIDAttribute is the DSL attribute for member ID.
+func MemberIDAttribute() {
+	dsl.Attribute("member_id", dsl.String, "Member UID", func() {
+		dsl.Example("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+		dsl.Format(dsl.FormatUUID)
+	})
+}
+
+// MembershipIDAttribute is the DSL attribute for membership ID.
+func MembershipIDAttribute() {
+	dsl.Attribute("id", dsl.String, "Membership UID", func() {
 		dsl.Example("7cad5a8d-19d0-41a4-81a6-043453daf9ee")
 		dsl.Format(dsl.FormatUUID)
 	})
@@ -273,7 +354,14 @@ func OffsetAttribute() {
 // FilterAttribute is the DSL attribute for filter.
 func FilterAttribute() {
 	dsl.Attribute("filter", dsl.String, "Filter expression (key=value pairs separated by semicolons)", func() {
-		dsl.Example("status=Active;membership_type=Corporate")
+		dsl.Example("status=Active;tier=Gold")
+	})
+}
+
+// SearchAttribute is the DSL attribute for free-text search.
+func SearchAttribute() {
+	dsl.Attribute("search", dsl.String, "Free-text search across member name, project names, and tiers", func() {
+		dsl.Example("Linux")
 	})
 }
 

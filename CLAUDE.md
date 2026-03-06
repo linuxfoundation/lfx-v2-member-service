@@ -24,8 +24,8 @@ The service follows **Clean Architecture** principles with clear separation of c
 ```text
 cmd/member-api/               # Presentation Layer (HTTP entry point)
 ├── design/                  # Goa API design specifications
-│   ├── membership.go        # API endpoints definition
-│   └── type.go              # Goa type definitions
+│   ├── membership.go        # API endpoints definition (member-centric routes)
+│   └── type.go              # Goa type definitions (Member, Membership, KeyContact)
 ├── service/                 # Service handlers (implements Goa interfaces)
 │   ├── membership_service.go  # Main service handler with endpoint logic
 │   ├── membership_service_response.go  # Response conversion helpers
@@ -45,16 +45,24 @@ internal/
 ├── domain/                  # Domain layer
 │   ├── auth.go              # Authenticator interface
 │   ├── model/               # Domain entities
+│   │   ├── member.go        # Member, MembershipSummary models
+│   │   ├── membership.go    # Membership, KeyContact, Account, Contact, Product, Project
+│   │   └── list_params.go   # ListParams with Search support
 │   └── port/                # Repository interfaces
+│       ├── member_reader.go  # MemberReader interface (main read port)
+│       └── membership_syncer.go  # Sync interfaces (source reader, KV writer)
 ├── infrastructure/          # Infrastructure layer
 │   ├── auth/                # JWT authentication (Heimdall)
 │   ├── mock/                # Mock repository for testing
 │   ├── nats/                # NATS KV repository implementation
 │   └── postgres/            # PostgreSQL repository (used by sync job)
+│       ├── member_repo.go   # Fetches distinct accounts with memberships
+│       └── membership_repo.go  # Fetches membership assets
 ├── middleware/              # HTTP middleware
 │   ├── authorization.go     # Extracts Authorization header to context
 │   └── request_id.go        # Request ID propagation
 └── service/                 # Business logic / use case orchestration
+    └── member_reader.go     # MemberReaderOrchestrator
 
 pkg/
 └── constants/               # Shared constants (HTTP headers, NATS buckets, etc.)
@@ -72,14 +80,36 @@ charts/                      # Helm chart for Kubernetes deployment
 
 ## API Endpoints
 
+The API is structured around **Members** (accounts/organizations) as the top-level resource. Each member owns one or more memberships.
+
 | Method | Path | Description | OpenFGA Check |
 |--------|------|-------------|---------------|
-| GET | `/memberships` | List memberships with pagination/filtering | `auditor` on `member` (allow_all) |
-| GET | `/memberships/{uid}` | Get a specific membership by UID | `auditor` on `member:{uid}` |
-| GET | `/memberships/{uid}/contacts` | List key contacts for a membership | `auditor` on `member:{uid}` |
+| GET | `/members` | Search/list members with pagination, filtering, and search | `auditor` on `member` (allow_all) |
+| GET | `/members/{member_id}/memberships/{id}` | Get a specific membership under a member | `auditor` on `member:{member_id}` |
+| GET | `/members/{member_id}/memberships/{id}/key_contacts` | List key contacts for a membership | `auditor` on `member:{member_id}` |
 | GET | `/readyz` | Readiness probe | None |
 | GET | `/livez` | Liveness probe | None |
 | GET | `/_memberships/openapi*.{json,yaml}` | OpenAPI spec files | None |
+
+### Member Search & Filtering
+
+The `/members` endpoint supports:
+
+- **`search`** query parameter: Free-text case-insensitive substring match across member name, project names, and tier names
+- **`filter`** query parameter: Key-value pairs separated by `;` (e.g., `filter=status=Active;tier=Gold`)
+
+| Filter Key | Match Type | Example |
+|------------|------------|---------|
+| `name` | Case-insensitive contains | `name=Linux` |
+| `member_id` | Exact (UID or account SFID) | `member_id=abc-123` |
+| `project_id` | Exact (supports dual IDs) | `project_id=proj-123` |
+| `project_name` | Case-insensitive contains | `project_name=Kubernetes` |
+| `project_slug` | Case-insensitive exact | `project_slug=linux-foundation` |
+| `tier` | Case-insensitive exact | `tier=Gold` |
+| `status` | Case-insensitive exact | `status=Active` |
+| `year` | Exact | `year=2026` |
+| `product_name` | Case-insensitive contains | `product_name=Gold` |
+| `membership_type` | Case-insensitive exact | `membership_type=Corporate` |
 
 ## Development Workflow
 
@@ -163,16 +193,28 @@ The service uses Goa v3 for API code generation. This is **critical** to underst
 
 ## NATS Storage
 
-The service reads from two NATS Key-Value stores (populated by the sync job):
+The service reads from three NATS Key-Value stores (populated by the sync job):
 
-- `memberships`: Membership records
+- `members`: Member (account) records with precomputed MembershipSummary
+- `memberships`: Membership records (with MemberUID linking back to member)
 - `membership-contacts`: Key contacts for memberships
 
 ### Lookup Key Patterns
 
-- Individual: `{uid}` → direct KV key
-- Project-based lookup: `lookup/project/{project_id}/{membership_uid}`
-- Membership-contact lookup: `lookup/membership/{membership_uid}/{contact_uid}`
+- Member by UID: `{uid}` → direct KV key in `members` bucket
+- Member by SFID: `lookup/member-sfid/{sfid}` → member UID (supports both sfid and sfid_b2b)
+- Member by project: `lookup/member-project/{project_id}/{member_uid}` → member UID
+- Membership by member: `lookup/member-membership/{member_uid}/{membership_uid}` → membership UID
+- Membership by project: `lookup/project/{project_id}/{membership_uid}` → membership UID
+- Contact by membership: `lookup/membership/{membership_uid}/{contact_uid}` → contact UID
+
+### Sync-time Denormalization
+
+During sync, for each member:
+1. All memberships are grouped by `MemberUID`
+2. A `MembershipSummary` is precomputed (active count, total count, membership details)
+3. Lookup keys are stored for both `sfid` and `sfid_b2b` (dual Salesforce ID support)
+4. Member UIDs are deterministic: `uuid.NewSHA1(namespace, "lfx-member:{account_sfid}")`
 
 ## Authentication (JWT / Heimdall)
 
@@ -209,9 +251,9 @@ type member
 ```
 
 Authorization checks in Heimdall ruleset:
-- **GET /memberships** — authenticated, allow_all (no object-level check)
-- **GET /memberships/{uid}** — requires `auditor` on `member:{uid}`
-- **GET /memberships/{uid}/contacts** — requires `auditor` on `member:{uid}`
+- **GET /members** — authenticated, allow_all (no object-level check)
+- **GET /members/{member_id}/memberships/{id}** — requires `auditor` on `member:{member_id}`
+- **GET /members/{member_id}/memberships/{id}/key_contacts** — requires `auditor` on `member:{member_id}`
 
 ## Testing Patterns
 
@@ -279,6 +321,7 @@ For rapid development:
 docker run -d -p 4222:4222 nats:latest -js
 
 # Create KV stores
+nats kv add members --history=20 --storage=file
 nats kv add memberships --history=20 --storage=file
 nats kv add membership-contacts --history=20 --storage=file
 
@@ -357,8 +400,8 @@ GitHub Actions workflows:
 ### Service Architecture
 
 The `membershipServicesrvc` struct in `membership_service.go` is the central service handler. It holds:
-- `membershipReaderOrchestrator`: Use case layer for business logic
-- `storage`: Direct storage access (for readyz check)
+- `memberReaderOrchestrator`: Use case layer for member/membership business logic (`MemberReaderOrchestrator`)
+- `storage`: Direct storage access (for readyz check, implements `port.MemberReader`)
 - `auth`: `domain.Authenticator` for JWT validation
 
 ### JWTAuth Security Handler

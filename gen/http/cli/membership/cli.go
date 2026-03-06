@@ -24,13 +24,13 @@ import (
 //	command (subcommand1|subcommand2|...)
 func UsageCommands() []string {
 	return []string{
-		"membership-service (list-memberships|get-membership|list-membership-contacts|readyz|livez)",
+		"membership-service (list-members|get-member-membership|list-member-membership-key-contacts|readyz|livez)",
 	}
 }
 
 // UsageExamples produces an example of a valid invocation of the CLI tool.
 func UsageExamples() string {
-	return os.Args[0] + " " + "membership-service list-memberships --version \"1\" --page-size 25 --offset 0 --filter \"status=Active;membership_type=Corporate\" --bearer-token \"eyJhbGci...\"" + "\n" +
+	return os.Args[0] + " " + "membership-service list-members --version \"1\" --page-size 25 --offset 0 --filter \"status=Active;tier=Gold\" --search \"Linux\" --bearer-token \"eyJhbGci...\"" + "\n" +
 		""
 }
 
@@ -46,31 +46,34 @@ func ParseEndpoint(
 	var (
 		membershipServiceFlags = flag.NewFlagSet("membership-service", flag.ContinueOnError)
 
-		membershipServiceListMembershipsFlags           = flag.NewFlagSet("list-memberships", flag.ExitOnError)
-		membershipServiceListMembershipsVersionFlag     = membershipServiceListMembershipsFlags.String("version", "", "")
-		membershipServiceListMembershipsPageSizeFlag    = membershipServiceListMembershipsFlags.String("page-size", "25", "")
-		membershipServiceListMembershipsOffsetFlag      = membershipServiceListMembershipsFlags.String("offset", "", "")
-		membershipServiceListMembershipsFilterFlag      = membershipServiceListMembershipsFlags.String("filter", "", "")
-		membershipServiceListMembershipsBearerTokenFlag = membershipServiceListMembershipsFlags.String("bearer-token", "", "")
+		membershipServiceListMembersFlags           = flag.NewFlagSet("list-members", flag.ExitOnError)
+		membershipServiceListMembersVersionFlag     = membershipServiceListMembersFlags.String("version", "", "")
+		membershipServiceListMembersPageSizeFlag    = membershipServiceListMembersFlags.String("page-size", "25", "")
+		membershipServiceListMembersOffsetFlag      = membershipServiceListMembersFlags.String("offset", "", "")
+		membershipServiceListMembersFilterFlag      = membershipServiceListMembersFlags.String("filter", "", "")
+		membershipServiceListMembersSearchFlag      = membershipServiceListMembersFlags.String("search", "", "")
+		membershipServiceListMembersBearerTokenFlag = membershipServiceListMembersFlags.String("bearer-token", "", "")
 
-		membershipServiceGetMembershipFlags           = flag.NewFlagSet("get-membership", flag.ExitOnError)
-		membershipServiceGetMembershipUIDFlag         = membershipServiceGetMembershipFlags.String("uid", "REQUIRED", "Membership UID")
-		membershipServiceGetMembershipVersionFlag     = membershipServiceGetMembershipFlags.String("version", "", "")
-		membershipServiceGetMembershipBearerTokenFlag = membershipServiceGetMembershipFlags.String("bearer-token", "", "")
+		membershipServiceGetMemberMembershipFlags           = flag.NewFlagSet("get-member-membership", flag.ExitOnError)
+		membershipServiceGetMemberMembershipMemberIDFlag    = membershipServiceGetMemberMembershipFlags.String("member-id", "REQUIRED", "Member UID")
+		membershipServiceGetMemberMembershipIDFlag          = membershipServiceGetMemberMembershipFlags.String("id", "REQUIRED", "Membership UID")
+		membershipServiceGetMemberMembershipVersionFlag     = membershipServiceGetMemberMembershipFlags.String("version", "", "")
+		membershipServiceGetMemberMembershipBearerTokenFlag = membershipServiceGetMemberMembershipFlags.String("bearer-token", "", "")
 
-		membershipServiceListMembershipContactsFlags           = flag.NewFlagSet("list-membership-contacts", flag.ExitOnError)
-		membershipServiceListMembershipContactsUIDFlag         = membershipServiceListMembershipContactsFlags.String("uid", "REQUIRED", "Membership UID")
-		membershipServiceListMembershipContactsVersionFlag     = membershipServiceListMembershipContactsFlags.String("version", "", "")
-		membershipServiceListMembershipContactsBearerTokenFlag = membershipServiceListMembershipContactsFlags.String("bearer-token", "", "")
+		membershipServiceListMemberMembershipKeyContactsFlags           = flag.NewFlagSet("list-member-membership-key-contacts", flag.ExitOnError)
+		membershipServiceListMemberMembershipKeyContactsMemberIDFlag    = membershipServiceListMemberMembershipKeyContactsFlags.String("member-id", "REQUIRED", "Member UID")
+		membershipServiceListMemberMembershipKeyContactsIDFlag          = membershipServiceListMemberMembershipKeyContactsFlags.String("id", "REQUIRED", "Membership UID")
+		membershipServiceListMemberMembershipKeyContactsVersionFlag     = membershipServiceListMemberMembershipKeyContactsFlags.String("version", "", "")
+		membershipServiceListMemberMembershipKeyContactsBearerTokenFlag = membershipServiceListMemberMembershipKeyContactsFlags.String("bearer-token", "", "")
 
 		membershipServiceReadyzFlags = flag.NewFlagSet("readyz", flag.ExitOnError)
 
 		membershipServiceLivezFlags = flag.NewFlagSet("livez", flag.ExitOnError)
 	)
 	membershipServiceFlags.Usage = membershipServiceUsage
-	membershipServiceListMembershipsFlags.Usage = membershipServiceListMembershipsUsage
-	membershipServiceGetMembershipFlags.Usage = membershipServiceGetMembershipUsage
-	membershipServiceListMembershipContactsFlags.Usage = membershipServiceListMembershipContactsUsage
+	membershipServiceListMembersFlags.Usage = membershipServiceListMembersUsage
+	membershipServiceGetMemberMembershipFlags.Usage = membershipServiceGetMemberMembershipUsage
+	membershipServiceListMemberMembershipKeyContactsFlags.Usage = membershipServiceListMemberMembershipKeyContactsUsage
 	membershipServiceReadyzFlags.Usage = membershipServiceReadyzUsage
 	membershipServiceLivezFlags.Usage = membershipServiceLivezUsage
 
@@ -108,14 +111,14 @@ func ParseEndpoint(
 		switch svcn {
 		case "membership-service":
 			switch epn {
-			case "list-memberships":
-				epf = membershipServiceListMembershipsFlags
+			case "list-members":
+				epf = membershipServiceListMembersFlags
 
-			case "get-membership":
-				epf = membershipServiceGetMembershipFlags
+			case "get-member-membership":
+				epf = membershipServiceGetMemberMembershipFlags
 
-			case "list-membership-contacts":
-				epf = membershipServiceListMembershipContactsFlags
+			case "list-member-membership-key-contacts":
+				epf = membershipServiceListMemberMembershipKeyContactsFlags
 
 			case "readyz":
 				epf = membershipServiceReadyzFlags
@@ -148,15 +151,15 @@ func ParseEndpoint(
 		case "membership-service":
 			c := membershipservicec.NewClient(scheme, host, doer, enc, dec, restore)
 			switch epn {
-			case "list-memberships":
-				endpoint = c.ListMemberships()
-				data, err = membershipservicec.BuildListMembershipsPayload(*membershipServiceListMembershipsVersionFlag, *membershipServiceListMembershipsPageSizeFlag, *membershipServiceListMembershipsOffsetFlag, *membershipServiceListMembershipsFilterFlag, *membershipServiceListMembershipsBearerTokenFlag)
-			case "get-membership":
-				endpoint = c.GetMembership()
-				data, err = membershipservicec.BuildGetMembershipPayload(*membershipServiceGetMembershipUIDFlag, *membershipServiceGetMembershipVersionFlag, *membershipServiceGetMembershipBearerTokenFlag)
-			case "list-membership-contacts":
-				endpoint = c.ListMembershipContacts()
-				data, err = membershipservicec.BuildListMembershipContactsPayload(*membershipServiceListMembershipContactsUIDFlag, *membershipServiceListMembershipContactsVersionFlag, *membershipServiceListMembershipContactsBearerTokenFlag)
+			case "list-members":
+				endpoint = c.ListMembers()
+				data, err = membershipservicec.BuildListMembersPayload(*membershipServiceListMembersVersionFlag, *membershipServiceListMembersPageSizeFlag, *membershipServiceListMembersOffsetFlag, *membershipServiceListMembersFilterFlag, *membershipServiceListMembersSearchFlag, *membershipServiceListMembersBearerTokenFlag)
+			case "get-member-membership":
+				endpoint = c.GetMemberMembership()
+				data, err = membershipservicec.BuildGetMemberMembershipPayload(*membershipServiceGetMemberMembershipMemberIDFlag, *membershipServiceGetMemberMembershipIDFlag, *membershipServiceGetMemberMembershipVersionFlag, *membershipServiceGetMemberMembershipBearerTokenFlag)
+			case "list-member-membership-key-contacts":
+				endpoint = c.ListMemberMembershipKeyContacts()
+				data, err = membershipservicec.BuildListMemberMembershipKeyContactsPayload(*membershipServiceListMemberMembershipKeyContactsMemberIDFlag, *membershipServiceListMemberMembershipKeyContactsIDFlag, *membershipServiceListMemberMembershipKeyContactsVersionFlag, *membershipServiceListMemberMembershipKeyContactsBearerTokenFlag)
 			case "readyz":
 				endpoint = c.Readyz()
 			case "livez":
@@ -174,86 +177,92 @@ func ParseEndpoint(
 // membershipServiceUsage displays the usage of the membership-service command
 // and its subcommands.
 func membershipServiceUsage() {
-	fmt.Fprintln(os.Stderr, `Membership management service - read-only endpoints for membership data`)
+	fmt.Fprintln(os.Stderr, `Membership management service - read-only endpoints for member and membership data`)
 	fmt.Fprintf(os.Stderr, "Usage:\n    %s [globalflags] membership-service COMMAND [flags]\n\n", os.Args[0])
 	fmt.Fprintln(os.Stderr, "COMMAND:")
-	fmt.Fprintln(os.Stderr, `    list-memberships: List memberships with pagination and filtering`)
-	fmt.Fprintln(os.Stderr, `    get-membership: Get a specific membership by UID`)
-	fmt.Fprintln(os.Stderr, `    list-membership-contacts: Get key contacts for a specific membership`)
+	fmt.Fprintln(os.Stderr, `    list-members: List members with pagination, filtering, and search`)
+	fmt.Fprintln(os.Stderr, `    get-member-membership: Get a specific membership for a member`)
+	fmt.Fprintln(os.Stderr, `    list-member-membership-key-contacts: Get key contacts for a specific membership under a member`)
 	fmt.Fprintln(os.Stderr, `    readyz: Check if the service is able to take inbound requests.`)
 	fmt.Fprintln(os.Stderr, `    livez: Check if the service is alive.`)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Additional help:")
 	fmt.Fprintf(os.Stderr, "    %s membership-service COMMAND --help\n", os.Args[0])
 }
-func membershipServiceListMembershipsUsage() {
+func membershipServiceListMembersUsage() {
 	// Header with flags
-	fmt.Fprintf(os.Stderr, "%s [flags] membership-service list-memberships", os.Args[0])
+	fmt.Fprintf(os.Stderr, "%s [flags] membership-service list-members", os.Args[0])
 	fmt.Fprint(os.Stderr, " -version STRING")
 	fmt.Fprint(os.Stderr, " -page-size INT")
 	fmt.Fprint(os.Stderr, " -offset INT")
 	fmt.Fprint(os.Stderr, " -filter STRING")
+	fmt.Fprint(os.Stderr, " -search STRING")
 	fmt.Fprint(os.Stderr, " -bearer-token STRING")
 	fmt.Fprintln(os.Stderr)
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `List memberships with pagination and filtering`)
+	fmt.Fprintln(os.Stderr, `List members with pagination, filtering, and search`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -version STRING: `)
 	fmt.Fprintln(os.Stderr, `    -page-size INT: `)
 	fmt.Fprintln(os.Stderr, `    -offset INT: `)
 	fmt.Fprintln(os.Stderr, `    -filter STRING: `)
+	fmt.Fprintln(os.Stderr, `    -search STRING: `)
 	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service list-memberships --version \"1\" --page-size 25 --offset 0 --filter \"status=Active;membership_type=Corporate\" --bearer-token \"eyJhbGci...\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service list-members --version \"1\" --page-size 25 --offset 0 --filter \"status=Active;tier=Gold\" --search \"Linux\" --bearer-token \"eyJhbGci...\"")
 }
 
-func membershipServiceGetMembershipUsage() {
+func membershipServiceGetMemberMembershipUsage() {
 	// Header with flags
-	fmt.Fprintf(os.Stderr, "%s [flags] membership-service get-membership", os.Args[0])
-	fmt.Fprint(os.Stderr, " -uid STRING")
+	fmt.Fprintf(os.Stderr, "%s [flags] membership-service get-member-membership", os.Args[0])
+	fmt.Fprint(os.Stderr, " -member-id STRING")
+	fmt.Fprint(os.Stderr, " -id STRING")
 	fmt.Fprint(os.Stderr, " -version STRING")
 	fmt.Fprint(os.Stderr, " -bearer-token STRING")
 	fmt.Fprintln(os.Stderr)
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Get a specific membership by UID`)
+	fmt.Fprintln(os.Stderr, `Get a specific membership for a member`)
 
 	// Flags list
-	fmt.Fprintln(os.Stderr, `    -uid STRING: Membership UID`)
+	fmt.Fprintln(os.Stderr, `    -member-id STRING: Member UID`)
+	fmt.Fprintln(os.Stderr, `    -id STRING: Membership UID`)
 	fmt.Fprintln(os.Stderr, `    -version STRING: `)
 	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service get-membership --uid \"7cad5a8d-19d0-41a4-81a6-043453daf9ee\" --version \"1\" --bearer-token \"eyJhbGci...\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service get-member-membership --member-id \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\" --id \"7cad5a8d-19d0-41a4-81a6-043453daf9ee\" --version \"1\" --bearer-token \"eyJhbGci...\"")
 }
 
-func membershipServiceListMembershipContactsUsage() {
+func membershipServiceListMemberMembershipKeyContactsUsage() {
 	// Header with flags
-	fmt.Fprintf(os.Stderr, "%s [flags] membership-service list-membership-contacts", os.Args[0])
-	fmt.Fprint(os.Stderr, " -uid STRING")
+	fmt.Fprintf(os.Stderr, "%s [flags] membership-service list-member-membership-key-contacts", os.Args[0])
+	fmt.Fprint(os.Stderr, " -member-id STRING")
+	fmt.Fprint(os.Stderr, " -id STRING")
 	fmt.Fprint(os.Stderr, " -version STRING")
 	fmt.Fprint(os.Stderr, " -bearer-token STRING")
 	fmt.Fprintln(os.Stderr)
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Get key contacts for a specific membership`)
+	fmt.Fprintln(os.Stderr, `Get key contacts for a specific membership under a member`)
 
 	// Flags list
-	fmt.Fprintln(os.Stderr, `    -uid STRING: Membership UID`)
+	fmt.Fprintln(os.Stderr, `    -member-id STRING: Member UID`)
+	fmt.Fprintln(os.Stderr, `    -id STRING: Membership UID`)
 	fmt.Fprintln(os.Stderr, `    -version STRING: `)
 	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service list-membership-contacts --uid \"7cad5a8d-19d0-41a4-81a6-043453daf9ee\" --version \"1\" --bearer-token \"eyJhbGci...\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service list-member-membership-key-contacts --member-id \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\" --id \"7cad5a8d-19d0-41a4-81a6-043453daf9ee\" --version \"1\" --bearer-token \"eyJhbGci...\"")
 }
 
 func membershipServiceReadyzUsage() {

@@ -25,30 +25,30 @@ func NewKeyContactRepo(db *sqlx.DB) *KeyContactRepo {
 
 const keyContactQuery = `
 SELECT
-    pr.sfid as id, pr.asset__c as membershipid,
-    pr.role__c as role, pr.status__c as rolestatus,
-    pr.boardmember__c as boardmember, pr.primarycontact__c as primarycontact,
-    pr.contact__c as contactid,
-    COALESCE(mu.firstname, '') as firstname,
-    COALESCE(mu.lastname, '') as lastname,
-    COALESCE(aec.alternate_email_address__c, '') as email,
-    COALESCE(mu.title, '') as title,
-    COALESCE(ac.sfid, '') as orgid,
-    COALESCE(ac.name, '') as orgname,
-    COALESCE(ac.logo_url__c, '') as orglogourl,
-    COALESCE(ac.website, '') as orgwebsite,
-    COALESCE(p.sfid, '') as projectid,
-    COALESCE(p.name, '') as projectname,
-    COALESCE(p.project_logo__c, '') as projectlogourl,
-    pr.createddate as createddate, pr.systemmodstamp as updatedat
-FROM salesforce.project_role__c pr
-INNER JOIN salesforce.merged_user mu ON mu.sfid = pr.contact__c
-INNER JOIN salesforce.alternate_email__c aec
-    ON aec.leadorcontactid = mu.sfid AND aec.primary_email__c = true
-INNER JOIN salesforce.asset a ON a.sfid = pr.asset__c
-INNER JOIN salesforce.project__c p ON p.sfid = a.projects__c
-INNER JOIN salesforce.account ac ON ac.sfid = a.accountid
-WHERE pr.isdeleted = false
+    pr."Id" as id, pr."Asset__c" as membershipid,
+    pr."Role__c" as role, pr."Status__c" as rolestatus,
+    pr."BoardMember__c" as boardmember, pr."PrimaryContact__c" as primarycontact,
+    pr."Contact__c" as contactid,
+    COALESCE(c."FirstName", '') as firstname,
+    COALESCE(c."LastName", '') as lastname,
+    COALESCE(aec."Alternate_Email_Address__c", '') as email,
+    COALESCE(c."Title", '') as title,
+    COALESCE(ac."Id", '') as orgid,
+    COALESCE(ac."Name", '') as orgname,
+    COALESCE(ac."Logo_URL__c", '') as orglogourl,
+    COALESCE(ac."Website", '') as orgwebsite,
+    COALESCE(p."Id", '') as projectid,
+    COALESCE(p."Name", '') as projectname,
+    COALESCE(p."Project_Logo__c", '') as projectlogourl,
+    pr."CreatedDate" as createddate, pr."SystemModstamp" as updatedat
+FROM salesforce_b2b."Project_Role__c" pr
+INNER JOIN salesforce_b2b."Contact" c ON c."Id" = pr."Contact__c"
+INNER JOIN salesforce_b2b."Alternate_Email__c" aec
+    ON aec."Contact_ID__c" = c."Id" AND aec."Primary_Email__c" = true
+INNER JOIN salesforce_b2b."Asset" a ON a."Id" = pr."Asset__c"
+INNER JOIN salesforce_b2b."Project__c" p ON p."Id" = a."Projects__c"
+INNER JOIN salesforce_b2b."Account" ac ON ac."Id" = a."AccountId"
+WHERE pr."IsDeleted" = false
 `
 
 // FetchAllKeyContacts fetches all key contacts from PostgreSQL

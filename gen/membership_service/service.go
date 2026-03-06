@@ -14,14 +14,15 @@ import (
 	"goa.design/goa/v3/security"
 )
 
-// Membership management service - read-only endpoints for membership data
+// Membership management service - read-only endpoints for member and
+// membership data
 type Service interface {
-	// List memberships with pagination and filtering
-	ListMemberships(context.Context, *ListMembershipsPayload) (res *ListMembershipsResult, err error)
-	// Get a specific membership by UID
-	GetMembership(context.Context, *GetMembershipPayload) (res *GetMembershipResult, err error)
-	// Get key contacts for a specific membership
-	ListMembershipContacts(context.Context, *ListMembershipContactsPayload) (res *ListMembershipContactsResult, err error)
+	// List members with pagination, filtering, and search
+	ListMembers(context.Context, *ListMembersPayload) (res *ListMembersResult, err error)
+	// Get a specific membership for a member
+	GetMemberMembership(context.Context, *GetMemberMembershipPayload) (res *GetMemberMembershipResult, err error)
+	// Get key contacts for a specific membership under a member
+	ListMemberMembershipKeyContacts(context.Context, *ListMemberMembershipKeyContactsPayload) (res *ListMemberMembershipKeyContactsResult, err error)
 	// Check if the service is able to take inbound requests.
 	Readyz(context.Context) (res []byte, err error)
 	// Check if the service is alive.
@@ -48,7 +49,7 @@ const ServiceName = "membership-service"
 // MethodNames lists the service method names as defined in the design. These
 // are the same values that are set in the endpoint request contexts under the
 // MethodKey key.
-var MethodNames = [5]string{"list-memberships", "get-membership", "list-membership-contacts", "readyz", "livez"}
+var MethodNames = [5]string{"list-members", "get-member-membership", "list-member-membership-key-contacts", "readyz", "livez"}
 
 type AccountType struct {
 	// Account ID
@@ -74,20 +75,22 @@ type ContactType struct {
 	Title *string
 }
 
-// GetMembershipPayload is the payload type of the membership-service service
-// get-membership method.
-type GetMembershipPayload struct {
+// GetMemberMembershipPayload is the payload type of the membership-service
+// service get-member-membership method.
+type GetMemberMembershipPayload struct {
 	// JWT token issued by Heimdall
 	BearerToken *string
 	// Version of the API
 	Version *string
+	// Member UID
+	MemberID *string
 	// Membership UID
-	UID *string
+	ID *string
 }
 
-// GetMembershipResult is the result type of the membership-service service
-// get-membership method.
-type GetMembershipResult struct {
+// GetMemberMembershipResult is the result type of the membership-service
+// service get-member-membership method.
+type GetMemberMembershipResult struct {
 	// Membership details
 	Membership *MembershipResponse
 	// ETag header value
@@ -120,27 +123,29 @@ type KeyContactResponse struct {
 	UpdatedAt *string
 }
 
-// ListMembershipContactsPayload is the payload type of the membership-service
-// service list-membership-contacts method.
-type ListMembershipContactsPayload struct {
+// ListMemberMembershipKeyContactsPayload is the payload type of the
+// membership-service service list-member-membership-key-contacts method.
+type ListMemberMembershipKeyContactsPayload struct {
 	// JWT token issued by Heimdall
 	BearerToken *string
 	// Version of the API
 	Version *string
+	// Member UID
+	MemberID *string
 	// Membership UID
-	UID *string
+	ID *string
 }
 
-// ListMembershipContactsResult is the result type of the membership-service
-// service list-membership-contacts method.
-type ListMembershipContactsResult struct {
+// ListMemberMembershipKeyContactsResult is the result type of the
+// membership-service service list-member-membership-key-contacts method.
+type ListMemberMembershipKeyContactsResult struct {
 	// List of key contacts
 	Contacts []*KeyContactResponse
 }
 
-// ListMembershipsPayload is the payload type of the membership-service service
-// list-memberships method.
-type ListMembershipsPayload struct {
+// ListMembersPayload is the payload type of the membership-service service
+// list-members method.
+type ListMembersPayload struct {
 	// JWT token issued by Heimdall
 	BearerToken *string
 	// Version of the API
@@ -151,13 +156,15 @@ type ListMembershipsPayload struct {
 	Offset int
 	// Filter expression (key=value pairs separated by semicolons)
 	Filter *string
+	// Free-text search across member name, project names, and tiers
+	Search *string
 }
 
-// ListMembershipsResult is the result type of the membership-service service
-// list-memberships method.
-type ListMembershipsResult struct {
-	// List of memberships
-	Memberships []*MembershipResponse
+// ListMembersResult is the result type of the membership-service service
+// list-members method.
+type ListMembersResult struct {
+	// List of members
+	Members []*MemberResponse
 	// Pagination metadata
 	Metadata *ListMetadata
 }
@@ -170,6 +177,24 @@ type ListMetadata struct {
 	PageSize int
 	// Offset into the total list
 	Offset int
+}
+
+// A member (account/organization) resource
+type MemberResponse struct {
+	// Member UID
+	UID *string
+	// Member name
+	Name *string
+	// Member logo URL
+	LogoURL *string
+	// Member website
+	Website *string
+	// Membership summary
+	MembershipSummary *MembershipSummaryType
+	// Creation timestamp
+	CreatedAt *string
+	// Last update timestamp
+	UpdatedAt *string
 }
 
 // A membership resource
@@ -218,6 +243,41 @@ type MembershipResponse struct {
 	CreatedAt *string
 	// Last update timestamp
 	UpdatedAt *string
+}
+
+type MembershipSummaryItemType struct {
+	// Membership UID
+	UID *string
+	// Membership name
+	Name *string
+	// Membership status
+	Status *string
+	// Membership year
+	Year *string
+	// Membership tier
+	Tier *string
+	// Membership type
+	MembershipType *string
+	// Whether auto-renew is enabled
+	AutoRenew *bool
+	// Start date
+	StartDate *string
+	// End date
+	EndDate *string
+	// Product information
+	Product *ProductType
+	// Project information
+	Project *ProjectType
+}
+
+// Summary of memberships for a member
+type MembershipSummaryType struct {
+	// Number of active memberships
+	ActiveCount *int
+	// Total number of memberships
+	TotalCount *int
+	// List of membership details
+	Memberships []*MembershipSummaryItemType
 }
 
 type OrganizationType struct {
