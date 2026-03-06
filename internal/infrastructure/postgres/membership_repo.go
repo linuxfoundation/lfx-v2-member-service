@@ -26,47 +26,47 @@ func NewMembershipRepo(db *sqlx.DB) *MembershipRepo {
 
 const membershipQuery = `
 SELECT
-    a.sfid as id, a.name as name, a.contactid as contactid,
-    a.status as status, COALESCE(a.year__c, '') as year,
-    COALESCE(a.tier__c, '') as tier, a.recordtypeid as membershiptype,
-    COALESCE(a.auto_renew__c, false) as autorenew,
-    COALESCE(a.renewal_type__c, '') as renewaltype,
-    COALESCE(a.price, 0) as price,
-    COALESCE(a.annual_full_price__c, 0) as annualfullprice,
-    COALESCE(a.paymentfrequency__c, '') as paymentfrequency,
-    COALESCE(a.paymentterms__c, '') as paymentterms,
-    a.agreement_date__c as agreementdate,
-    COALESCE(a.purchasedate, a.installdate, a.createddate) as purchasedate,
-    a.installdate as startdate,
-    a.usageenddate as enddate,
-    COALESCE(a.accountid, '') as accountid,
-    COALESCE(mu.firstname, '') as firstname,
-    COALESCE(mu.lastname, '') as lastname,
-    COALESCE(aec.alternate_email_address__c, '') as email,
-    COALESCE(mu.title, '') as contacttitle,
-    COALESCE(p.name, '') as productname,
-    COALESCE(p.family, '') as productfamily,
-    COALESCE(p.type__c, '') as producttype,
-    COALESCE(a.product2id, '') as productid,
-    COALESCE(a.projects__c, '') as projectid,
-    a.createddate as createddate,
-    a.lastmodifieddate as lastmodifiedat,
-    COALESCE(acc.name, '') as accountname,
-    COALESCE(acc.logo_url__c, '') as accountlogourl,
-    COALESCE(acc.website, '') as accountwebsite,
-    COALESCE(proj.name, '') as projectname,
-    COALESCE(proj.project_logo__c, '') as projectlogourl,
-    COALESCE(proj.slug__c, '') as projectslug,
-    COALESCE(proj.status__c, '') as projectstatus
-FROM salesforce.asset a
-LEFT JOIN salesforce.merged_user mu ON mu.sfid = a.contactid
-LEFT JOIN salesforce.alternate_email__c aec
-    ON aec.leadorcontactid = mu.sfid AND aec.primary_email__c = true
-LEFT JOIN salesforce.product2 p ON p.sfid = a.product2id
-LEFT JOIN salesforce.account acc ON acc.sfid = a.accountid
-LEFT JOIN salesforce.project__c proj ON proj.sfid = a.projects__c
-WHERE p.family = 'Membership'
-    AND a.isdeleted = false
+    a."Id" as id, a."Name" as name, a."ContactId" as contactid,
+    a."Status" as status, COALESCE(a."Year__c", '') as year,
+    COALESCE(a."Tier__c", '') as tier, a."RecordTypeId" as membershiptype,
+    COALESCE(a."Auto_Renew__c", false) as autorenew,
+    COALESCE(a."Renewal_Type__c", '') as renewaltype,
+    COALESCE(a."Price", 0) as price,
+    COALESCE(a."Annual_Full_Price__c", 0) as annualfullprice,
+    COALESCE(a."PaymentFrequency__c", '') as paymentfrequency,
+    COALESCE(a."PaymentTerms__c", '') as paymentterms,
+    a."Agreement_Date__c" as agreementdate,
+    COALESCE(a."PurchaseDate", a."InstallDate", a."CreatedDate") as purchasedate,
+    a."InstallDate" as startdate,
+    a."UsageEndDate" as enddate,
+    COALESCE(a."AccountId", '') as accountid,
+    COALESCE(c."FirstName", '') as firstname,
+    COALESCE(c."LastName", '') as lastname,
+    COALESCE(aec."Alternate_Email_Address__c", '') as email,
+    COALESCE(c."Title", '') as contacttitle,
+    COALESCE(p."Name", '') as productname,
+    COALESCE(p."Family", '') as productfamily,
+    COALESCE(p."Type__c", '') as producttype,
+    COALESCE(a."Product2Id", '') as productid,
+    COALESCE(a."Projects__c", '') as projectid,
+    a."CreatedDate" as createddate,
+    a."LastModifiedDate" as lastmodifiedat,
+    COALESCE(acc."Name", '') as accountname,
+    COALESCE(acc."Logo_URL__c", '') as accountlogourl,
+    COALESCE(acc."Website", '') as accountwebsite,
+    COALESCE(proj."Name", '') as projectname,
+    COALESCE(proj."Project_Logo__c", '') as projectlogourl,
+    COALESCE(proj."Slug__c", '') as projectslug,
+    COALESCE(proj."Status__c", '') as projectstatus
+FROM salesforce_b2b."Asset" a
+LEFT JOIN salesforce_b2b."Contact" c ON c."Id" = a."ContactId"
+LEFT JOIN salesforce_b2b."Alternate_Email__c" aec
+    ON aec."Contact_ID__c" = c."Id" AND aec."Primary_Email__c" = true
+LEFT JOIN salesforce_b2b."Product2" p ON p."Id" = a."Product2Id"
+LEFT JOIN salesforce_b2b."Account" acc ON acc."Id" = a."AccountId"
+LEFT JOIN salesforce_b2b."Project__c" proj ON proj."Id" = a."Projects__c"
+WHERE p."Family" = 'Membership'
+    AND a."IsDeleted" = false
 `
 
 // FetchAllMemberships fetches all memberships from PostgreSQL
@@ -95,6 +95,7 @@ func (r *MembershipRepo) FetchAllMemberships(ctx context.Context) ([]*model.Memb
 func convertSQLToMembership(s SQLMembership) *model.Membership {
 	m := &model.Membership{
 		UID:              generateDeterministicUID(s.ID),
+		MemberUID:        generateMemberUID(s.AccountID),
 		Name:             s.Name,
 		Status:           nullStringValue(s.Status),
 		Year:             s.Year,

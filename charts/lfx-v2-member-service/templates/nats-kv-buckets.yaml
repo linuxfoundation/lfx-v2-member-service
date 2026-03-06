@@ -38,3 +38,22 @@ spec:
   maxBytes: {{ .Values.nats.kv_bucket_membership_contacts.maxBytes }}
   compression: {{ .Values.nats.kv_bucket_membership_contacts.compression }}
 {{- end }}
+---
+{{- if .Values.nats.kv_bucket_members.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.kv_bucket_members.name }}
+  namespace: lfx
+  {{- if .Values.nats.kv_bucket_members.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.kv_bucket_members.name }}
+  history: {{ .Values.nats.kv_bucket_members.history }}
+  storage: {{ .Values.nats.kv_bucket_members.storage }}
+  maxValueSize: {{ .Values.nats.kv_bucket_members.maxValueSize }}
+  maxBytes: {{ .Values.nats.kv_bucket_members.maxBytes }}
+  compression: {{ .Values.nats.kv_bucket_members.compression }}
+{{- end }}

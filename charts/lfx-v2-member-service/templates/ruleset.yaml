@@ -30,13 +30,13 @@ spec:
             values:
               aud: {{ .Values.app.audience }}
 
-    - id: "rule:lfx:lfx-v2-member-service:memberships:list"
+    - id: "rule:lfx:lfx-v2-member-service:members:list"
       allow_encoded_slashes: "off"
       match:
         methods:
           - GET
         routes:
-          - path: /memberships
+          - path: /members
       execute:
         - authenticator: oidc
         - authenticator: anonymous_authenticator
@@ -61,13 +61,13 @@ spec:
             values:
               aud: {{ .Values.app.audience }}
 
-    - id: "rule:lfx:lfx-v2-member-service:memberships:get"
+    - id: "rule:lfx:lfx-v2-member-service:members:memberships:get"
       allow_encoded_slashes: "off"
       match:
         methods:
           - GET
         routes:
-          - path: /memberships/:uid
+          - path: /members/:member_id/memberships/:id
       execute:
         - authenticator: oidc
         - authenticator: anonymous_authenticator
@@ -79,7 +79,7 @@ spec:
           config:
             values:
               relation: auditor
-              object: "member:{{ "{{- .Request.URL.Captures.uid -}}" }}"
+              object: "member:{{ "{{- .Request.URL.Captures.member_id -}}" }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests
@@ -92,13 +92,13 @@ spec:
             values:
               aud: {{ .Values.app.audience }}
 
-    - id: "rule:lfx:lfx-v2-member-service:memberships:contacts:list"
+    - id: "rule:lfx:lfx-v2-member-service:members:memberships:key-contacts:list"
       allow_encoded_slashes: "off"
       match:
         methods:
           - GET
         routes:
-          - path: /memberships/:uid/contacts
+          - path: /members/:member_id/memberships/:id/key_contacts
       execute:
         - authenticator: oidc
         - authenticator: anonymous_authenticator
@@ -110,7 +110,7 @@ spec:
           config:
             values:
               relation: auditor
-              object: "member:{{ "{{- .Request.URL.Captures.uid -}}" }}"
+              object: "member:{{ "{{- .Request.URL.Captures.member_id -}}" }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests

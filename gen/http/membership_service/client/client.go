@@ -18,17 +18,17 @@ import (
 
 // Client lists the membership-service service endpoint HTTP clients.
 type Client struct {
-	// ListMemberships Doer is the HTTP client used to make requests to the
-	// list-memberships endpoint.
-	ListMembershipsDoer goahttp.Doer
+	// ListMembers Doer is the HTTP client used to make requests to the
+	// list-members endpoint.
+	ListMembersDoer goahttp.Doer
 
-	// GetMembership Doer is the HTTP client used to make requests to the
-	// get-membership endpoint.
-	GetMembershipDoer goahttp.Doer
+	// GetMemberMembership Doer is the HTTP client used to make requests to the
+	// get-member-membership endpoint.
+	GetMemberMembershipDoer goahttp.Doer
 
-	// ListMembershipContacts Doer is the HTTP client used to make requests to the
-	// list-membership-contacts endpoint.
-	ListMembershipContactsDoer goahttp.Doer
+	// ListMemberMembershipKeyContacts Doer is the HTTP client used to make
+	// requests to the list-member-membership-key-contacts endpoint.
+	ListMemberMembershipKeyContactsDoer goahttp.Doer
 
 	// Readyz Doer is the HTTP client used to make requests to the readyz endpoint.
 	ReadyzDoer goahttp.Doer
@@ -57,28 +57,28 @@ func NewClient(
 	restoreBody bool,
 ) *Client {
 	return &Client{
-		ListMembershipsDoer:        doer,
-		GetMembershipDoer:          doer,
-		ListMembershipContactsDoer: doer,
-		ReadyzDoer:                 doer,
-		LivezDoer:                  doer,
-		RestoreResponseBody:        restoreBody,
-		scheme:                     scheme,
-		host:                       host,
-		decoder:                    dec,
-		encoder:                    enc,
+		ListMembersDoer:                     doer,
+		GetMemberMembershipDoer:             doer,
+		ListMemberMembershipKeyContactsDoer: doer,
+		ReadyzDoer:                          doer,
+		LivezDoer:                           doer,
+		RestoreResponseBody:                 restoreBody,
+		scheme:                              scheme,
+		host:                                host,
+		decoder:                             dec,
+		encoder:                             enc,
 	}
 }
 
-// ListMemberships returns an endpoint that makes HTTP requests to the
-// membership-service service list-memberships server.
-func (c *Client) ListMemberships() goa.Endpoint {
+// ListMembers returns an endpoint that makes HTTP requests to the
+// membership-service service list-members server.
+func (c *Client) ListMembers() goa.Endpoint {
 	var (
-		encodeRequest  = EncodeListMembershipsRequest(c.encoder)
-		decodeResponse = DecodeListMembershipsResponse(c.decoder, c.RestoreResponseBody)
+		encodeRequest  = EncodeListMembersRequest(c.encoder)
+		decodeResponse = DecodeListMembersResponse(c.decoder, c.RestoreResponseBody)
 	)
 	return func(ctx context.Context, v any) (any, error) {
-		req, err := c.BuildListMembershipsRequest(ctx, v)
+		req, err := c.BuildListMembersRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
@@ -86,23 +86,23 @@ func (c *Client) ListMemberships() goa.Endpoint {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.ListMembershipsDoer.Do(req)
+		resp, err := c.ListMembersDoer.Do(req)
 		if err != nil {
-			return nil, goahttp.ErrRequestError("membership-service", "list-memberships", err)
+			return nil, goahttp.ErrRequestError("membership-service", "list-members", err)
 		}
 		return decodeResponse(resp)
 	}
 }
 
-// GetMembership returns an endpoint that makes HTTP requests to the
-// membership-service service get-membership server.
-func (c *Client) GetMembership() goa.Endpoint {
+// GetMemberMembership returns an endpoint that makes HTTP requests to the
+// membership-service service get-member-membership server.
+func (c *Client) GetMemberMembership() goa.Endpoint {
 	var (
-		encodeRequest  = EncodeGetMembershipRequest(c.encoder)
-		decodeResponse = DecodeGetMembershipResponse(c.decoder, c.RestoreResponseBody)
+		encodeRequest  = EncodeGetMemberMembershipRequest(c.encoder)
+		decodeResponse = DecodeGetMemberMembershipResponse(c.decoder, c.RestoreResponseBody)
 	)
 	return func(ctx context.Context, v any) (any, error) {
-		req, err := c.BuildGetMembershipRequest(ctx, v)
+		req, err := c.BuildGetMemberMembershipRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
@@ -110,23 +110,23 @@ func (c *Client) GetMembership() goa.Endpoint {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.GetMembershipDoer.Do(req)
+		resp, err := c.GetMemberMembershipDoer.Do(req)
 		if err != nil {
-			return nil, goahttp.ErrRequestError("membership-service", "get-membership", err)
+			return nil, goahttp.ErrRequestError("membership-service", "get-member-membership", err)
 		}
 		return decodeResponse(resp)
 	}
 }
 
-// ListMembershipContacts returns an endpoint that makes HTTP requests to the
-// membership-service service list-membership-contacts server.
-func (c *Client) ListMembershipContacts() goa.Endpoint {
+// ListMemberMembershipKeyContacts returns an endpoint that makes HTTP requests
+// to the membership-service service list-member-membership-key-contacts server.
+func (c *Client) ListMemberMembershipKeyContacts() goa.Endpoint {
 	var (
-		encodeRequest  = EncodeListMembershipContactsRequest(c.encoder)
-		decodeResponse = DecodeListMembershipContactsResponse(c.decoder, c.RestoreResponseBody)
+		encodeRequest  = EncodeListMemberMembershipKeyContactsRequest(c.encoder)
+		decodeResponse = DecodeListMemberMembershipKeyContactsResponse(c.decoder, c.RestoreResponseBody)
 	)
 	return func(ctx context.Context, v any) (any, error) {
-		req, err := c.BuildListMembershipContactsRequest(ctx, v)
+		req, err := c.BuildListMemberMembershipKeyContactsRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
@@ -134,9 +134,9 @@ func (c *Client) ListMembershipContacts() goa.Endpoint {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.ListMembershipContactsDoer.Do(req)
+		resp, err := c.ListMemberMembershipKeyContactsDoer.Do(req)
 		if err != nil {
-			return nil, goahttp.ErrRequestError("membership-service", "list-membership-contacts", err)
+			return nil, goahttp.ErrRequestError("membership-service", "list-member-membership-key-contacts", err)
 		}
 		return decodeResponse(resp)
 	}

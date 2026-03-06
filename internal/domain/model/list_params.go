@@ -8,4 +8,5 @@ type ListParams struct {
 	PageSize int
 	Offset   int
 	Filters  map[string]string
+	Search   string
 }

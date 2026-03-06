@@ -57,9 +57,6 @@ func main() {
 	ctx := context.Background()
 
 	// Set up JWT validator needed by the JWTAuth security handler.
-	// Initialized before OpenTelemetry so that os.Exit(1) does not skip
-	// the deferred OTel shutdown. NewJWTAuth only stores config; actual
-	// JWKS fetching happens at request time when OTel is active.
 	jwtAuthConfig := auth.JWTAuthConfig{
 		JWKSURL:            os.Getenv("JWKS_URL"),
 		Audience:           os.Getenv("AUDIENCE"),
@@ -96,15 +93,15 @@ func main() {
 	)
 
 	// Initialize the repositories based on configuration
-	membershipReader := service.MembershipReaderImpl(ctx)
+	memberReader := service.MemberReaderImpl(ctx)
 	defer service.CloseNATSClient()
 
 	// Initialize the service with use cases
-	readMembershipUseCase := usecaseSvc.NewMembershipReaderOrchestrator(
-		usecaseSvc.WithMembershipReader(membershipReader),
+	readMemberUseCase := usecaseSvc.NewMemberReaderOrchestrator(
+		usecaseSvc.WithMemberReader(memberReader),
 	)
 
-	membershipServiceSvc := service.NewMembershipService(readMembershipUseCase, membershipReader, jwtAuth)
+	membershipServiceSvc := service.NewMembershipService(readMemberUseCase, memberReader, jwtAuth)
 
 	// Wrap the services in endpoints
 	membershipServiceEndpoints := membershipservice.NewEndpoints(membershipServiceSvc)

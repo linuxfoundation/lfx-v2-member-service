@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	natsStorage port.MembershipReader
+	natsStorage port.MemberReader
 	natsClient  *nats.NATSClient
 	natsDoOnce  sync.Once
 )
@@ -74,7 +74,7 @@ func natsInit(ctx context.Context) {
 	})
 }
 
-func natsStorageImpl(ctx context.Context) port.MembershipReader {
+func natsStorageImpl(ctx context.Context) port.MemberReader {
 	natsInit(ctx)
 	return natsStorage
 }
@@ -86,9 +86,9 @@ func CloseNATSClient() {
 	}
 }
 
-// MembershipReaderImpl initializes the membership reader implementation based on the repository source
-func MembershipReaderImpl(ctx context.Context) port.MembershipReader {
-	var membershipReader port.MembershipReader
+// MemberReaderImpl initializes the member reader implementation based on the repository source
+func MemberReaderImpl(ctx context.Context) port.MemberReader {
+	var memberReader port.MemberReader
 
 	repoSource := os.Getenv("REPOSITORY_SOURCE")
 	if repoSource == "" {
@@ -97,20 +97,20 @@ func MembershipReaderImpl(ctx context.Context) port.MembershipReader {
 
 	switch repoSource {
 	case "mock":
-		slog.InfoContext(ctx, "initializing mock membership reader")
-		membershipReader = mock.NewMockMembershipRepository()
+		slog.InfoContext(ctx, "initializing mock member reader")
+		memberReader = mock.NewMockMembershipRepository()
 
 	case "nats":
-		slog.InfoContext(ctx, "initializing NATS membership reader")
+		slog.InfoContext(ctx, "initializing NATS member reader")
 		natsReader := natsStorageImpl(ctx)
 		if natsReader == nil {
-			log.Fatalf("failed to initialize NATS membership reader")
+			log.Fatalf("failed to initialize NATS member reader")
 		}
-		membershipReader = natsReader
+		memberReader = natsReader
 
 	default:
-		log.Fatalf("unsupported membership reader implementation: %s", repoSource)
+		log.Fatalf("unsupported member reader implementation: %s", repoSource)
 	}
 
-	return membershipReader
+	return memberReader
 }

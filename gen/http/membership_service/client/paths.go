@@ -12,19 +12,19 @@ import (
 	"fmt"
 )
 
-// ListMembershipsMembershipServicePath returns the URL path to the membership-service service list-memberships HTTP endpoint.
-func ListMembershipsMembershipServicePath() string {
-	return "/memberships"
+// ListMembersMembershipServicePath returns the URL path to the membership-service service list-members HTTP endpoint.
+func ListMembersMembershipServicePath() string {
+	return "/members"
 }
 
-// GetMembershipMembershipServicePath returns the URL path to the membership-service service get-membership HTTP endpoint.
-func GetMembershipMembershipServicePath(uid string) string {
-	return fmt.Sprintf("/memberships/%v", uid)
+// GetMemberMembershipMembershipServicePath returns the URL path to the membership-service service get-member-membership HTTP endpoint.
+func GetMemberMembershipMembershipServicePath(memberID string, id string) string {
+	return fmt.Sprintf("/members/%v/memberships/%v", memberID, id)
 }
 
-// ListMembershipContactsMembershipServicePath returns the URL path to the membership-service service list-membership-contacts HTTP endpoint.
-func ListMembershipContactsMembershipServicePath(uid string) string {
-	return fmt.Sprintf("/memberships/%v/contacts", uid)
+// ListMemberMembershipKeyContactsMembershipServicePath returns the URL path to the membership-service service list-member-membership-key-contacts HTTP endpoint.
+func ListMemberMembershipKeyContactsMembershipServicePath(memberID string, id string) string {
+	return fmt.Sprintf("/members/%v/memberships/%v/key_contacts", memberID, id)
 }
 
 // ReadyzMembershipServicePath returns the URL path to the membership-service service readyz HTTP endpoint.

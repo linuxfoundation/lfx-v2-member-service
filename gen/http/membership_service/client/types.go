@@ -13,94 +13,95 @@ import (
 	goa "goa.design/goa/v3/pkg"
 )
 
-// ListMembershipsResponseBody is the type of the "membership-service" service
-// "list-memberships" endpoint HTTP response body.
-type ListMembershipsResponseBody struct {
-	// List of memberships
-	Memberships []*MembershipResponseResponseBody `form:"memberships,omitempty" json:"memberships,omitempty" xml:"memberships,omitempty"`
+// ListMembersResponseBody is the type of the "membership-service" service
+// "list-members" endpoint HTTP response body.
+type ListMembersResponseBody struct {
+	// List of members
+	Members []*MemberResponseResponseBody `form:"members,omitempty" json:"members,omitempty" xml:"members,omitempty"`
 	// Pagination metadata
 	Metadata *ListMetadataResponseBody `form:"metadata,omitempty" json:"metadata,omitempty" xml:"metadata,omitempty"`
 }
 
-// GetMembershipResponseBody is the type of the "membership-service" service
-// "get-membership" endpoint HTTP response body.
-type GetMembershipResponseBody MembershipResponseResponseBody
+// GetMemberMembershipResponseBody is the type of the "membership-service"
+// service "get-member-membership" endpoint HTTP response body.
+type GetMemberMembershipResponseBody MembershipResponseResponseBody
 
-// ListMembershipContactsResponseBody is the type of the "membership-service"
-// service "list-membership-contacts" endpoint HTTP response body.
-type ListMembershipContactsResponseBody struct {
+// ListMemberMembershipKeyContactsResponseBody is the type of the
+// "membership-service" service "list-member-membership-key-contacts" endpoint
+// HTTP response body.
+type ListMemberMembershipKeyContactsResponseBody struct {
 	// List of key contacts
 	Contacts []*KeyContactResponseResponseBody `form:"contacts,omitempty" json:"contacts,omitempty" xml:"contacts,omitempty"`
 }
 
-// ListMembershipsBadRequestResponseBody is the type of the
-// "membership-service" service "list-memberships" endpoint HTTP response body
-// for the "BadRequest" error.
-type ListMembershipsBadRequestResponseBody struct {
-	// Error message
-	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
-}
-
-// ListMembershipsInternalServerErrorResponseBody is the type of the
-// "membership-service" service "list-memberships" endpoint HTTP response body
-// for the "InternalServerError" error.
-type ListMembershipsInternalServerErrorResponseBody struct {
-	// Error message
-	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
-}
-
-// ListMembershipsServiceUnavailableResponseBody is the type of the
-// "membership-service" service "list-memberships" endpoint HTTP response body
-// for the "ServiceUnavailable" error.
-type ListMembershipsServiceUnavailableResponseBody struct {
-	// Error message
-	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
-}
-
-// GetMembershipInternalServerErrorResponseBody is the type of the
-// "membership-service" service "get-membership" endpoint HTTP response body
-// for the "InternalServerError" error.
-type GetMembershipInternalServerErrorResponseBody struct {
-	// Error message
-	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
-}
-
-// GetMembershipNotFoundResponseBody is the type of the "membership-service"
-// service "get-membership" endpoint HTTP response body for the "NotFound"
+// ListMembersBadRequestResponseBody is the type of the "membership-service"
+// service "list-members" endpoint HTTP response body for the "BadRequest"
 // error.
-type GetMembershipNotFoundResponseBody struct {
+type ListMembersBadRequestResponseBody struct {
 	// Error message
 	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
 }
 
-// GetMembershipServiceUnavailableResponseBody is the type of the
-// "membership-service" service "get-membership" endpoint HTTP response body
-// for the "ServiceUnavailable" error.
-type GetMembershipServiceUnavailableResponseBody struct {
+// ListMembersInternalServerErrorResponseBody is the type of the
+// "membership-service" service "list-members" endpoint HTTP response body for
+// the "InternalServerError" error.
+type ListMembersInternalServerErrorResponseBody struct {
 	// Error message
 	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
 }
 
-// ListMembershipContactsInternalServerErrorResponseBody is the type of the
-// "membership-service" service "list-membership-contacts" endpoint HTTP
-// response body for the "InternalServerError" error.
-type ListMembershipContactsInternalServerErrorResponseBody struct {
+// ListMembersServiceUnavailableResponseBody is the type of the
+// "membership-service" service "list-members" endpoint HTTP response body for
+// the "ServiceUnavailable" error.
+type ListMembersServiceUnavailableResponseBody struct {
 	// Error message
 	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
 }
 
-// ListMembershipContactsNotFoundResponseBody is the type of the
-// "membership-service" service "list-membership-contacts" endpoint HTTP
-// response body for the "NotFound" error.
-type ListMembershipContactsNotFoundResponseBody struct {
+// GetMemberMembershipInternalServerErrorResponseBody is the type of the
+// "membership-service" service "get-member-membership" endpoint HTTP response
+// body for the "InternalServerError" error.
+type GetMemberMembershipInternalServerErrorResponseBody struct {
 	// Error message
 	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
 }
 
-// ListMembershipContactsServiceUnavailableResponseBody is the type of the
-// "membership-service" service "list-membership-contacts" endpoint HTTP
-// response body for the "ServiceUnavailable" error.
-type ListMembershipContactsServiceUnavailableResponseBody struct {
+// GetMemberMembershipNotFoundResponseBody is the type of the
+// "membership-service" service "get-member-membership" endpoint HTTP response
+// body for the "NotFound" error.
+type GetMemberMembershipNotFoundResponseBody struct {
+	// Error message
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+}
+
+// GetMemberMembershipServiceUnavailableResponseBody is the type of the
+// "membership-service" service "get-member-membership" endpoint HTTP response
+// body for the "ServiceUnavailable" error.
+type GetMemberMembershipServiceUnavailableResponseBody struct {
+	// Error message
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+}
+
+// ListMemberMembershipKeyContactsInternalServerErrorResponseBody is the type
+// of the "membership-service" service "list-member-membership-key-contacts"
+// endpoint HTTP response body for the "InternalServerError" error.
+type ListMemberMembershipKeyContactsInternalServerErrorResponseBody struct {
+	// Error message
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+}
+
+// ListMemberMembershipKeyContactsNotFoundResponseBody is the type of the
+// "membership-service" service "list-member-membership-key-contacts" endpoint
+// HTTP response body for the "NotFound" error.
+type ListMemberMembershipKeyContactsNotFoundResponseBody struct {
+	// Error message
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+}
+
+// ListMemberMembershipKeyContactsServiceUnavailableResponseBody is the type of
+// the "membership-service" service "list-member-membership-key-contacts"
+// endpoint HTTP response body for the "ServiceUnavailable" error.
+type ListMemberMembershipKeyContactsServiceUnavailableResponseBody struct {
 	// Error message
 	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
 }
@@ -111,6 +112,98 @@ type ListMembershipContactsServiceUnavailableResponseBody struct {
 type ReadyzServiceUnavailableResponseBody struct {
 	// Error message
 	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+}
+
+// MemberResponseResponseBody is used to define fields on response body types.
+type MemberResponseResponseBody struct {
+	// Member UID
+	UID *string `form:"uid,omitempty" json:"uid,omitempty" xml:"uid,omitempty"`
+	// Member name
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// Member logo URL
+	LogoURL *string `form:"logo_url,omitempty" json:"logo_url,omitempty" xml:"logo_url,omitempty"`
+	// Member website
+	Website *string `form:"website,omitempty" json:"website,omitempty" xml:"website,omitempty"`
+	// Membership summary
+	MembershipSummary *MembershipSummaryTypeResponseBody `form:"membership_summary,omitempty" json:"membership_summary,omitempty" xml:"membership_summary,omitempty"`
+	// Creation timestamp
+	CreatedAt *string `form:"created_at,omitempty" json:"created_at,omitempty" xml:"created_at,omitempty"`
+	// Last update timestamp
+	UpdatedAt *string `form:"updated_at,omitempty" json:"updated_at,omitempty" xml:"updated_at,omitempty"`
+}
+
+// MembershipSummaryTypeResponseBody is used to define fields on response body
+// types.
+type MembershipSummaryTypeResponseBody struct {
+	// Number of active memberships
+	ActiveCount *int `form:"active_count,omitempty" json:"active_count,omitempty" xml:"active_count,omitempty"`
+	// Total number of memberships
+	TotalCount *int `form:"total_count,omitempty" json:"total_count,omitempty" xml:"total_count,omitempty"`
+	// List of membership details
+	Memberships []*MembershipSummaryItemTypeResponseBody `form:"memberships,omitempty" json:"memberships,omitempty" xml:"memberships,omitempty"`
+}
+
+// MembershipSummaryItemTypeResponseBody is used to define fields on response
+// body types.
+type MembershipSummaryItemTypeResponseBody struct {
+	// Membership UID
+	UID *string `form:"uid,omitempty" json:"uid,omitempty" xml:"uid,omitempty"`
+	// Membership name
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// Membership status
+	Status *string `form:"status,omitempty" json:"status,omitempty" xml:"status,omitempty"`
+	// Membership year
+	Year *string `form:"year,omitempty" json:"year,omitempty" xml:"year,omitempty"`
+	// Membership tier
+	Tier *string `form:"tier,omitempty" json:"tier,omitempty" xml:"tier,omitempty"`
+	// Membership type
+	MembershipType *string `form:"membership_type,omitempty" json:"membership_type,omitempty" xml:"membership_type,omitempty"`
+	// Whether auto-renew is enabled
+	AutoRenew *bool `form:"auto_renew,omitempty" json:"auto_renew,omitempty" xml:"auto_renew,omitempty"`
+	// Start date
+	StartDate *string `form:"start_date,omitempty" json:"start_date,omitempty" xml:"start_date,omitempty"`
+	// End date
+	EndDate *string `form:"end_date,omitempty" json:"end_date,omitempty" xml:"end_date,omitempty"`
+	// Product information
+	Product *ProductTypeResponseBody `form:"product,omitempty" json:"product,omitempty" xml:"product,omitempty"`
+	// Project information
+	Project *ProjectTypeResponseBody `form:"project,omitempty" json:"project,omitempty" xml:"project,omitempty"`
+}
+
+// ProductTypeResponseBody is used to define fields on response body types.
+type ProductTypeResponseBody struct {
+	// Product ID
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Product name
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// Product family
+	Family *string `form:"family,omitempty" json:"family,omitempty" xml:"family,omitempty"`
+	// Product type
+	Type *string `form:"type,omitempty" json:"type,omitempty" xml:"type,omitempty"`
+}
+
+// ProjectTypeResponseBody is used to define fields on response body types.
+type ProjectTypeResponseBody struct {
+	// Project ID
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Project name
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// Project logo URL
+	LogoURL *string `form:"logo_url,omitempty" json:"logo_url,omitempty" xml:"logo_url,omitempty"`
+	// Project slug
+	Slug *string `form:"slug,omitempty" json:"slug,omitempty" xml:"slug,omitempty"`
+	// Project status
+	Status *string `form:"status,omitempty" json:"status,omitempty" xml:"status,omitempty"`
+}
+
+// ListMetadataResponseBody is used to define fields on response body types.
+type ListMetadataResponseBody struct {
+	// Total number of items
+	TotalSize *int `form:"total_size,omitempty" json:"total_size,omitempty" xml:"total_size,omitempty"`
+	// Number of items per page
+	PageSize *int `form:"page_size,omitempty" json:"page_size,omitempty" xml:"page_size,omitempty"`
+	// Offset into the total list
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty" xml:"offset,omitempty"`
 }
 
 // MembershipResponseResponseBody is used to define fields on response body
@@ -188,42 +281,6 @@ type ContactTypeResponseBody struct {
 	Title *string `form:"title,omitempty" json:"title,omitempty" xml:"title,omitempty"`
 }
 
-// ProductTypeResponseBody is used to define fields on response body types.
-type ProductTypeResponseBody struct {
-	// Product ID
-	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
-	// Product name
-	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
-	// Product family
-	Family *string `form:"family,omitempty" json:"family,omitempty" xml:"family,omitempty"`
-	// Product type
-	Type *string `form:"type,omitempty" json:"type,omitempty" xml:"type,omitempty"`
-}
-
-// ProjectTypeResponseBody is used to define fields on response body types.
-type ProjectTypeResponseBody struct {
-	// Project ID
-	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
-	// Project name
-	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
-	// Project logo URL
-	LogoURL *string `form:"logo_url,omitempty" json:"logo_url,omitempty" xml:"logo_url,omitempty"`
-	// Project slug
-	Slug *string `form:"slug,omitempty" json:"slug,omitempty" xml:"slug,omitempty"`
-	// Project status
-	Status *string `form:"status,omitempty" json:"status,omitempty" xml:"status,omitempty"`
-}
-
-// ListMetadataResponseBody is used to define fields on response body types.
-type ListMetadataResponseBody struct {
-	// Total number of items
-	TotalSize *int `form:"total_size,omitempty" json:"total_size,omitempty" xml:"total_size,omitempty"`
-	// Number of items per page
-	PageSize *int `form:"page_size,omitempty" json:"page_size,omitempty" xml:"page_size,omitempty"`
-	// Offset into the total list
-	Offset *int `form:"offset,omitempty" json:"offset,omitempty" xml:"offset,omitempty"`
-}
-
 // KeyContactResponseResponseBody is used to define fields on response body
 // types.
 type KeyContactResponseResponseBody struct {
@@ -263,22 +320,22 @@ type OrganizationTypeResponseBody struct {
 	Website *string `form:"website,omitempty" json:"website,omitempty" xml:"website,omitempty"`
 }
 
-// NewListMembershipsResultOK builds a "membership-service" service
-// "list-memberships" endpoint result from a HTTP "OK" response.
-func NewListMembershipsResultOK(body *ListMembershipsResponseBody) *membershipservice.ListMembershipsResult {
-	v := &membershipservice.ListMembershipsResult{}
-	v.Memberships = make([]*membershipservice.MembershipResponse, len(body.Memberships))
-	for i, val := range body.Memberships {
-		v.Memberships[i] = unmarshalMembershipResponseResponseBodyToMembershipserviceMembershipResponse(val)
+// NewListMembersResultOK builds a "membership-service" service "list-members"
+// endpoint result from a HTTP "OK" response.
+func NewListMembersResultOK(body *ListMembersResponseBody) *membershipservice.ListMembersResult {
+	v := &membershipservice.ListMembersResult{}
+	v.Members = make([]*membershipservice.MemberResponse, len(body.Members))
+	for i, val := range body.Members {
+		v.Members[i] = unmarshalMemberResponseResponseBodyToMembershipserviceMemberResponse(val)
 	}
 	v.Metadata = unmarshalListMetadataResponseBodyToMembershipserviceListMetadata(body.Metadata)
 
 	return v
 }
 
-// NewListMembershipsBadRequest builds a membership-service service
-// list-memberships endpoint BadRequest error.
-func NewListMembershipsBadRequest(body *ListMembershipsBadRequestResponseBody) *membershipservice.BadRequestError {
+// NewListMembersBadRequest builds a membership-service service list-members
+// endpoint BadRequest error.
+func NewListMembersBadRequest(body *ListMembersBadRequestResponseBody) *membershipservice.BadRequestError {
 	v := &membershipservice.BadRequestError{
 		Message: *body.Message,
 	}
@@ -286,9 +343,9 @@ func NewListMembershipsBadRequest(body *ListMembershipsBadRequestResponseBody) *
 	return v
 }
 
-// NewListMembershipsInternalServerError builds a membership-service service
-// list-memberships endpoint InternalServerError error.
-func NewListMembershipsInternalServerError(body *ListMembershipsInternalServerErrorResponseBody) *membershipservice.InternalServerError {
+// NewListMembersInternalServerError builds a membership-service service
+// list-members endpoint InternalServerError error.
+func NewListMembersInternalServerError(body *ListMembersInternalServerErrorResponseBody) *membershipservice.InternalServerError {
 	v := &membershipservice.InternalServerError{
 		Message: *body.Message,
 	}
@@ -296,9 +353,9 @@ func NewListMembershipsInternalServerError(body *ListMembershipsInternalServerEr
 	return v
 }
 
-// NewListMembershipsServiceUnavailable builds a membership-service service
-// list-memberships endpoint ServiceUnavailable error.
-func NewListMembershipsServiceUnavailable(body *ListMembershipsServiceUnavailableResponseBody) *membershipservice.ServiceUnavailableError {
+// NewListMembersServiceUnavailable builds a membership-service service
+// list-members endpoint ServiceUnavailable error.
+func NewListMembersServiceUnavailable(body *ListMembersServiceUnavailableResponseBody) *membershipservice.ServiceUnavailableError {
 	v := &membershipservice.ServiceUnavailableError{
 		Message: *body.Message,
 	}
@@ -306,9 +363,9 @@ func NewListMembershipsServiceUnavailable(body *ListMembershipsServiceUnavailabl
 	return v
 }
 
-// NewGetMembershipResultOK builds a "membership-service" service
-// "get-membership" endpoint result from a HTTP "OK" response.
-func NewGetMembershipResultOK(body *GetMembershipResponseBody, etag *string) *membershipservice.GetMembershipResult {
+// NewGetMemberMembershipResultOK builds a "membership-service" service
+// "get-member-membership" endpoint result from a HTTP "OK" response.
+func NewGetMemberMembershipResultOK(body *GetMemberMembershipResponseBody, etag *string) *membershipservice.GetMemberMembershipResult {
 	v := &membershipservice.MembershipResponse{
 		UID:              body.UID,
 		Name:             body.Name,
@@ -341,7 +398,7 @@ func NewGetMembershipResultOK(body *GetMembershipResponseBody, etag *string) *me
 	if body.Project != nil {
 		v.Project = unmarshalProjectTypeResponseBodyToMembershipserviceProjectType(body.Project)
 	}
-	res := &membershipservice.GetMembershipResult{
+	res := &membershipservice.GetMemberMembershipResult{
 		Membership: v,
 	}
 	res.Etag = etag
@@ -349,9 +406,9 @@ func NewGetMembershipResultOK(body *GetMembershipResponseBody, etag *string) *me
 	return res
 }
 
-// NewGetMembershipInternalServerError builds a membership-service service
-// get-membership endpoint InternalServerError error.
-func NewGetMembershipInternalServerError(body *GetMembershipInternalServerErrorResponseBody) *membershipservice.InternalServerError {
+// NewGetMemberMembershipInternalServerError builds a membership-service
+// service get-member-membership endpoint InternalServerError error.
+func NewGetMemberMembershipInternalServerError(body *GetMemberMembershipInternalServerErrorResponseBody) *membershipservice.InternalServerError {
 	v := &membershipservice.InternalServerError{
 		Message: *body.Message,
 	}
@@ -359,9 +416,9 @@ func NewGetMembershipInternalServerError(body *GetMembershipInternalServerErrorR
 	return v
 }
 
-// NewGetMembershipNotFound builds a membership-service service get-membership
-// endpoint NotFound error.
-func NewGetMembershipNotFound(body *GetMembershipNotFoundResponseBody) *membershipservice.NotFoundError {
+// NewGetMemberMembershipNotFound builds a membership-service service
+// get-member-membership endpoint NotFound error.
+func NewGetMemberMembershipNotFound(body *GetMemberMembershipNotFoundResponseBody) *membershipservice.NotFoundError {
 	v := &membershipservice.NotFoundError{
 		Message: *body.Message,
 	}
@@ -369,9 +426,9 @@ func NewGetMembershipNotFound(body *GetMembershipNotFoundResponseBody) *membersh
 	return v
 }
 
-// NewGetMembershipServiceUnavailable builds a membership-service service
-// get-membership endpoint ServiceUnavailable error.
-func NewGetMembershipServiceUnavailable(body *GetMembershipServiceUnavailableResponseBody) *membershipservice.ServiceUnavailableError {
+// NewGetMemberMembershipServiceUnavailable builds a membership-service service
+// get-member-membership endpoint ServiceUnavailable error.
+func NewGetMemberMembershipServiceUnavailable(body *GetMemberMembershipServiceUnavailableResponseBody) *membershipservice.ServiceUnavailableError {
 	v := &membershipservice.ServiceUnavailableError{
 		Message: *body.Message,
 	}
@@ -379,10 +436,11 @@ func NewGetMembershipServiceUnavailable(body *GetMembershipServiceUnavailableRes
 	return v
 }
 
-// NewListMembershipContactsResultOK builds a "membership-service" service
-// "list-membership-contacts" endpoint result from a HTTP "OK" response.
-func NewListMembershipContactsResultOK(body *ListMembershipContactsResponseBody) *membershipservice.ListMembershipContactsResult {
-	v := &membershipservice.ListMembershipContactsResult{}
+// NewListMemberMembershipKeyContactsResultOK builds a "membership-service"
+// service "list-member-membership-key-contacts" endpoint result from a HTTP
+// "OK" response.
+func NewListMemberMembershipKeyContactsResultOK(body *ListMemberMembershipKeyContactsResponseBody) *membershipservice.ListMemberMembershipKeyContactsResult {
+	v := &membershipservice.ListMemberMembershipKeyContactsResult{}
 	v.Contacts = make([]*membershipservice.KeyContactResponse, len(body.Contacts))
 	for i, val := range body.Contacts {
 		v.Contacts[i] = unmarshalKeyContactResponseResponseBodyToMembershipserviceKeyContactResponse(val)
@@ -391,9 +449,10 @@ func NewListMembershipContactsResultOK(body *ListMembershipContactsResponseBody)
 	return v
 }
 
-// NewListMembershipContactsInternalServerError builds a membership-service
-// service list-membership-contacts endpoint InternalServerError error.
-func NewListMembershipContactsInternalServerError(body *ListMembershipContactsInternalServerErrorResponseBody) *membershipservice.InternalServerError {
+// NewListMemberMembershipKeyContactsInternalServerError builds a
+// membership-service service list-member-membership-key-contacts endpoint
+// InternalServerError error.
+func NewListMemberMembershipKeyContactsInternalServerError(body *ListMemberMembershipKeyContactsInternalServerErrorResponseBody) *membershipservice.InternalServerError {
 	v := &membershipservice.InternalServerError{
 		Message: *body.Message,
 	}
@@ -401,9 +460,9 @@ func NewListMembershipContactsInternalServerError(body *ListMembershipContactsIn
 	return v
 }
 
-// NewListMembershipContactsNotFound builds a membership-service service
-// list-membership-contacts endpoint NotFound error.
-func NewListMembershipContactsNotFound(body *ListMembershipContactsNotFoundResponseBody) *membershipservice.NotFoundError {
+// NewListMemberMembershipKeyContactsNotFound builds a membership-service
+// service list-member-membership-key-contacts endpoint NotFound error.
+func NewListMemberMembershipKeyContactsNotFound(body *ListMemberMembershipKeyContactsNotFoundResponseBody) *membershipservice.NotFoundError {
 	v := &membershipservice.NotFoundError{
 		Message: *body.Message,
 	}
@@ -411,9 +470,10 @@ func NewListMembershipContactsNotFound(body *ListMembershipContactsNotFoundRespo
 	return v
 }
 
-// NewListMembershipContactsServiceUnavailable builds a membership-service
-// service list-membership-contacts endpoint ServiceUnavailable error.
-func NewListMembershipContactsServiceUnavailable(body *ListMembershipContactsServiceUnavailableResponseBody) *membershipservice.ServiceUnavailableError {
+// NewListMemberMembershipKeyContactsServiceUnavailable builds a
+// membership-service service list-member-membership-key-contacts endpoint
+// ServiceUnavailable error.
+func NewListMemberMembershipKeyContactsServiceUnavailable(body *ListMemberMembershipKeyContactsServiceUnavailableResponseBody) *membershipservice.ServiceUnavailableError {
 	v := &membershipservice.ServiceUnavailableError{
 		Message: *body.Message,
 	}
@@ -431,18 +491,18 @@ func NewReadyzServiceUnavailable(body *ReadyzServiceUnavailableResponseBody) *me
 	return v
 }
 
-// ValidateListMembershipsResponseBody runs the validations defined on
-// List-MembershipsResponseBody
-func ValidateListMembershipsResponseBody(body *ListMembershipsResponseBody) (err error) {
-	if body.Memberships == nil {
-		err = goa.MergeErrors(err, goa.MissingFieldError("memberships", "body"))
+// ValidateListMembersResponseBody runs the validations defined on
+// List-MembersResponseBody
+func ValidateListMembersResponseBody(body *ListMembersResponseBody) (err error) {
+	if body.Members == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("members", "body"))
 	}
 	if body.Metadata == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("metadata", "body"))
 	}
-	for _, e := range body.Memberships {
+	for _, e := range body.Members {
 		if e != nil {
-			if err2 := ValidateMembershipResponseResponseBody(e); err2 != nil {
+			if err2 := ValidateMemberResponseResponseBody(e); err2 != nil {
 				err = goa.MergeErrors(err, err2)
 			}
 		}
@@ -455,9 +515,9 @@ func ValidateListMembershipsResponseBody(body *ListMembershipsResponseBody) (err
 	return
 }
 
-// ValidateGetMembershipResponseBody runs the validations defined on
-// Get-MembershipResponseBody
-func ValidateGetMembershipResponseBody(body *GetMembershipResponseBody) (err error) {
+// ValidateGetMemberMembershipResponseBody runs the validations defined on
+// Get-Member-MembershipResponseBody
+func ValidateGetMemberMembershipResponseBody(body *GetMemberMembershipResponseBody) (err error) {
 	if body.UID != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.uid", *body.UID, goa.FormatUUID))
 	}
@@ -470,9 +530,9 @@ func ValidateGetMembershipResponseBody(body *GetMembershipResponseBody) (err err
 	return
 }
 
-// ValidateListMembershipContactsResponseBody runs the validations defined on
-// List-Membership-ContactsResponseBody
-func ValidateListMembershipContactsResponseBody(body *ListMembershipContactsResponseBody) (err error) {
+// ValidateListMemberMembershipKeyContactsResponseBody runs the validations
+// defined on List-Member-Membership-Key-ContactsResponseBody
+func ValidateListMemberMembershipKeyContactsResponseBody(body *ListMemberMembershipKeyContactsResponseBody) (err error) {
 	if body.Contacts == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("contacts", "body"))
 	}
@@ -486,83 +546,85 @@ func ValidateListMembershipContactsResponseBody(body *ListMembershipContactsResp
 	return
 }
 
-// ValidateListMembershipsBadRequestResponseBody runs the validations defined
-// on list-memberships_BadRequest_response_body
-func ValidateListMembershipsBadRequestResponseBody(body *ListMembershipsBadRequestResponseBody) (err error) {
+// ValidateListMembersBadRequestResponseBody runs the validations defined on
+// list-members_BadRequest_response_body
+func ValidateListMembersBadRequestResponseBody(body *ListMembersBadRequestResponseBody) (err error) {
 	if body.Message == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
 	}
 	return
 }
 
-// ValidateListMembershipsInternalServerErrorResponseBody runs the validations
-// defined on list-memberships_InternalServerError_response_body
-func ValidateListMembershipsInternalServerErrorResponseBody(body *ListMembershipsInternalServerErrorResponseBody) (err error) {
+// ValidateListMembersInternalServerErrorResponseBody runs the validations
+// defined on list-members_InternalServerError_response_body
+func ValidateListMembersInternalServerErrorResponseBody(body *ListMembersInternalServerErrorResponseBody) (err error) {
 	if body.Message == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
 	}
 	return
 }
 
-// ValidateListMembershipsServiceUnavailableResponseBody runs the validations
-// defined on list-memberships_ServiceUnavailable_response_body
-func ValidateListMembershipsServiceUnavailableResponseBody(body *ListMembershipsServiceUnavailableResponseBody) (err error) {
+// ValidateListMembersServiceUnavailableResponseBody runs the validations
+// defined on list-members_ServiceUnavailable_response_body
+func ValidateListMembersServiceUnavailableResponseBody(body *ListMembersServiceUnavailableResponseBody) (err error) {
 	if body.Message == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
 	}
 	return
 }
 
-// ValidateGetMembershipInternalServerErrorResponseBody runs the validations
-// defined on get-membership_InternalServerError_response_body
-func ValidateGetMembershipInternalServerErrorResponseBody(body *GetMembershipInternalServerErrorResponseBody) (err error) {
-	if body.Message == nil {
-		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
-	}
-	return
-}
-
-// ValidateGetMembershipNotFoundResponseBody runs the validations defined on
-// get-membership_NotFound_response_body
-func ValidateGetMembershipNotFoundResponseBody(body *GetMembershipNotFoundResponseBody) (err error) {
-	if body.Message == nil {
-		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
-	}
-	return
-}
-
-// ValidateGetMembershipServiceUnavailableResponseBody runs the validations
-// defined on get-membership_ServiceUnavailable_response_body
-func ValidateGetMembershipServiceUnavailableResponseBody(body *GetMembershipServiceUnavailableResponseBody) (err error) {
-	if body.Message == nil {
-		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
-	}
-	return
-}
-
-// ValidateListMembershipContactsInternalServerErrorResponseBody runs the
+// ValidateGetMemberMembershipInternalServerErrorResponseBody runs the
 // validations defined on
-// list-membership-contacts_InternalServerError_response_body
-func ValidateListMembershipContactsInternalServerErrorResponseBody(body *ListMembershipContactsInternalServerErrorResponseBody) (err error) {
+// get-member-membership_InternalServerError_response_body
+func ValidateGetMemberMembershipInternalServerErrorResponseBody(body *GetMemberMembershipInternalServerErrorResponseBody) (err error) {
 	if body.Message == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
 	}
 	return
 }
 
-// ValidateListMembershipContactsNotFoundResponseBody runs the validations
-// defined on list-membership-contacts_NotFound_response_body
-func ValidateListMembershipContactsNotFoundResponseBody(body *ListMembershipContactsNotFoundResponseBody) (err error) {
+// ValidateGetMemberMembershipNotFoundResponseBody runs the validations defined
+// on get-member-membership_NotFound_response_body
+func ValidateGetMemberMembershipNotFoundResponseBody(body *GetMemberMembershipNotFoundResponseBody) (err error) {
 	if body.Message == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
 	}
 	return
 }
 
-// ValidateListMembershipContactsServiceUnavailableResponseBody runs the
+// ValidateGetMemberMembershipServiceUnavailableResponseBody runs the
+// validations defined on get-member-membership_ServiceUnavailable_response_body
+func ValidateGetMemberMembershipServiceUnavailableResponseBody(body *GetMemberMembershipServiceUnavailableResponseBody) (err error) {
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	return
+}
+
+// ValidateListMemberMembershipKeyContactsInternalServerErrorResponseBody runs
+// the validations defined on
+// list-member-membership-key-contacts_InternalServerError_response_body
+func ValidateListMemberMembershipKeyContactsInternalServerErrorResponseBody(body *ListMemberMembershipKeyContactsInternalServerErrorResponseBody) (err error) {
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	return
+}
+
+// ValidateListMemberMembershipKeyContactsNotFoundResponseBody runs the
 // validations defined on
-// list-membership-contacts_ServiceUnavailable_response_body
-func ValidateListMembershipContactsServiceUnavailableResponseBody(body *ListMembershipContactsServiceUnavailableResponseBody) (err error) {
+// list-member-membership-key-contacts_NotFound_response_body
+func ValidateListMemberMembershipKeyContactsNotFoundResponseBody(body *ListMemberMembershipKeyContactsNotFoundResponseBody) (err error) {
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	return
+}
+
+// ValidateListMemberMembershipKeyContactsServiceUnavailableResponseBody runs
+// the validations defined on
+// list-member-membership-key-contacts_ServiceUnavailable_response_body
+func ValidateListMemberMembershipKeyContactsServiceUnavailableResponseBody(body *ListMemberMembershipKeyContactsServiceUnavailableResponseBody) (err error) {
 	if body.Message == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
 	}
@@ -578,17 +640,44 @@ func ValidateReadyzServiceUnavailableResponseBody(body *ReadyzServiceUnavailable
 	return
 }
 
-// ValidateMembershipResponseResponseBody runs the validations defined on
-// membership-responseResponseBody
-func ValidateMembershipResponseResponseBody(body *MembershipResponseResponseBody) (err error) {
+// ValidateMemberResponseResponseBody runs the validations defined on
+// member-responseResponseBody
+func ValidateMemberResponseResponseBody(body *MemberResponseResponseBody) (err error) {
 	if body.UID != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.uid", *body.UID, goa.FormatUUID))
+	}
+	if body.MembershipSummary != nil {
+		if err2 := ValidateMembershipSummaryTypeResponseBody(body.MembershipSummary); err2 != nil {
+			err = goa.MergeErrors(err, err2)
+		}
 	}
 	if body.CreatedAt != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.created_at", *body.CreatedAt, goa.FormatDateTime))
 	}
 	if body.UpdatedAt != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.updated_at", *body.UpdatedAt, goa.FormatDateTime))
+	}
+	return
+}
+
+// ValidateMembershipSummaryTypeResponseBody runs the validations defined on
+// membership-summary-typeResponseBody
+func ValidateMembershipSummaryTypeResponseBody(body *MembershipSummaryTypeResponseBody) (err error) {
+	for _, e := range body.Memberships {
+		if e != nil {
+			if err2 := ValidateMembershipSummaryItemTypeResponseBody(e); err2 != nil {
+				err = goa.MergeErrors(err, err2)
+			}
+		}
+	}
+	return
+}
+
+// ValidateMembershipSummaryItemTypeResponseBody runs the validations defined
+// on membership-summary-item-typeResponseBody
+func ValidateMembershipSummaryItemTypeResponseBody(body *MembershipSummaryItemTypeResponseBody) (err error) {
+	if body.UID != nil {
+		err = goa.MergeErrors(err, goa.ValidateFormat("body.uid", *body.UID, goa.FormatUUID))
 	}
 	return
 }
@@ -604,6 +693,21 @@ func ValidateListMetadataResponseBody(body *ListMetadataResponseBody) (err error
 	}
 	if body.Offset == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("offset", "body"))
+	}
+	return
+}
+
+// ValidateMembershipResponseResponseBody runs the validations defined on
+// membership-responseResponseBody
+func ValidateMembershipResponseResponseBody(body *MembershipResponseResponseBody) (err error) {
+	if body.UID != nil {
+		err = goa.MergeErrors(err, goa.ValidateFormat("body.uid", *body.UID, goa.FormatUUID))
+	}
+	if body.CreatedAt != nil {
+		err = goa.MergeErrors(err, goa.ValidateFormat("body.created_at", *body.CreatedAt, goa.FormatDateTime))
+	}
+	if body.UpdatedAt != nil {
+		err = goa.MergeErrors(err, goa.ValidateFormat("body.updated_at", *body.UpdatedAt, goa.FormatDateTime))
 	}
 	return
 }

@@ -19,10 +19,10 @@ spec:
   - matches:
     - path:
         type: Exact
-        value: /memberships
+        value: /members
     - path:
         type: PathPrefix
-        value: /memberships/
+        value: /members/
     - path:
         type: PathPrefix
         value: /_memberships/

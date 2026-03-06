@@ -17,11 +17,11 @@ import (
 
 // Endpoints wraps the "membership-service" service endpoints.
 type Endpoints struct {
-	ListMemberships        goa.Endpoint
-	GetMembership          goa.Endpoint
-	ListMembershipContacts goa.Endpoint
-	Readyz                 goa.Endpoint
-	Livez                  goa.Endpoint
+	ListMembers                     goa.Endpoint
+	GetMemberMembership             goa.Endpoint
+	ListMemberMembershipKeyContacts goa.Endpoint
+	Readyz                          goa.Endpoint
+	Livez                           goa.Endpoint
 }
 
 // NewEndpoints wraps the methods of the "membership-service" service with
@@ -30,29 +30,29 @@ func NewEndpoints(s Service) *Endpoints {
 	// Casting service to Auther interface
 	a := s.(Auther)
 	return &Endpoints{
-		ListMemberships:        NewListMembershipsEndpoint(s, a.JWTAuth),
-		GetMembership:          NewGetMembershipEndpoint(s, a.JWTAuth),
-		ListMembershipContacts: NewListMembershipContactsEndpoint(s, a.JWTAuth),
-		Readyz:                 NewReadyzEndpoint(s),
-		Livez:                  NewLivezEndpoint(s),
+		ListMembers:                     NewListMembersEndpoint(s, a.JWTAuth),
+		GetMemberMembership:             NewGetMemberMembershipEndpoint(s, a.JWTAuth),
+		ListMemberMembershipKeyContacts: NewListMemberMembershipKeyContactsEndpoint(s, a.JWTAuth),
+		Readyz:                          NewReadyzEndpoint(s),
+		Livez:                           NewLivezEndpoint(s),
 	}
 }
 
 // Use applies the given middleware to all the "membership-service" service
 // endpoints.
 func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
-	e.ListMemberships = m(e.ListMemberships)
-	e.GetMembership = m(e.GetMembership)
-	e.ListMembershipContacts = m(e.ListMembershipContacts)
+	e.ListMembers = m(e.ListMembers)
+	e.GetMemberMembership = m(e.GetMemberMembership)
+	e.ListMemberMembershipKeyContacts = m(e.ListMemberMembershipKeyContacts)
 	e.Readyz = m(e.Readyz)
 	e.Livez = m(e.Livez)
 }
 
-// NewListMembershipsEndpoint returns an endpoint function that calls the
-// method "list-memberships" of service "membership-service".
-func NewListMembershipsEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+// NewListMembersEndpoint returns an endpoint function that calls the method
+// "list-members" of service "membership-service".
+func NewListMembersEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
 	return func(ctx context.Context, req any) (any, error) {
-		p := req.(*ListMembershipsPayload)
+		p := req.(*ListMembersPayload)
 		var err error
 		sc := security.JWTScheme{
 			Name:           "jwt",
@@ -67,15 +67,15 @@ func NewListMembershipsEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.E
 		if err != nil {
 			return nil, err
 		}
-		return s.ListMemberships(ctx, p)
+		return s.ListMembers(ctx, p)
 	}
 }
 
-// NewGetMembershipEndpoint returns an endpoint function that calls the method
-// "get-membership" of service "membership-service".
-func NewGetMembershipEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+// NewGetMemberMembershipEndpoint returns an endpoint function that calls the
+// method "get-member-membership" of service "membership-service".
+func NewGetMemberMembershipEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
 	return func(ctx context.Context, req any) (any, error) {
-		p := req.(*GetMembershipPayload)
+		p := req.(*GetMemberMembershipPayload)
 		var err error
 		sc := security.JWTScheme{
 			Name:           "jwt",
@@ -90,15 +90,16 @@ func NewGetMembershipEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.End
 		if err != nil {
 			return nil, err
 		}
-		return s.GetMembership(ctx, p)
+		return s.GetMemberMembership(ctx, p)
 	}
 }
 
-// NewListMembershipContactsEndpoint returns an endpoint function that calls
-// the method "list-membership-contacts" of service "membership-service".
-func NewListMembershipContactsEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+// NewListMemberMembershipKeyContactsEndpoint returns an endpoint function that
+// calls the method "list-member-membership-key-contacts" of service
+// "membership-service".
+func NewListMemberMembershipKeyContactsEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
 	return func(ctx context.Context, req any) (any, error) {
-		p := req.(*ListMembershipContactsPayload)
+		p := req.(*ListMemberMembershipKeyContactsPayload)
 		var err error
 		sc := security.JWTScheme{
 			Name:           "jwt",
@@ -113,7 +114,7 @@ func NewListMembershipContactsEndpoint(s Service, authJWTFn security.AuthJWTFunc
 		if err != nil {
 			return nil, err
 		}
-		return s.ListMembershipContacts(ctx, p)
+		return s.ListMemberMembershipKeyContacts(ctx, p)
 	}
 }
 

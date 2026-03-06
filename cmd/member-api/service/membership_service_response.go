@@ -8,6 +8,80 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 )
 
+// convertMemberToResponse converts a domain Member to a Goa response
+func convertMemberToResponse(m *model.Member) *membershipservice.MemberResponse {
+	if m == nil {
+		return nil
+	}
+
+	result := &membershipservice.MemberResponse{
+		UID:  &m.UID,
+		Name: &m.Name,
+	}
+
+	if m.LogoURL != "" {
+		result.LogoURL = &m.LogoURL
+	}
+	if m.Website != "" {
+		result.Website = &m.Website
+	}
+
+	// Membership summary
+	if m.MembershipSummary != nil {
+		summary := &membershipservice.MembershipSummaryType{
+			ActiveCount: &m.MembershipSummary.ActiveCount,
+			TotalCount:  &m.MembershipSummary.TotalCount,
+		}
+
+		items := make([]*membershipservice.MembershipSummaryItemType, 0, len(m.MembershipSummary.Memberships))
+		for i := range m.MembershipSummary.Memberships {
+			ms := &m.MembershipSummary.Memberships[i]
+			item := &membershipservice.MembershipSummaryItemType{
+				UID:            &ms.UID,
+				Name:           &ms.Name,
+				Status:         &ms.Status,
+				MembershipType: &ms.MembershipType,
+				AutoRenew:      &ms.AutoRenew,
+			}
+			if ms.Year != "" {
+				item.Year = &ms.Year
+			}
+			if ms.Tier != "" {
+				item.Tier = &ms.Tier
+			}
+			if ms.StartDate != "" {
+				item.StartDate = &ms.StartDate
+			}
+			if ms.EndDate != "" {
+				item.EndDate = &ms.EndDate
+			}
+			item.Product = &membershipservice.ProductType{
+				ID:   &ms.Product.ID,
+				Name: &ms.Product.Name,
+			}
+			item.Project = &membershipservice.ProjectType{
+				ID:   &ms.Project.ID,
+				Name: &ms.Project.Name,
+			}
+			items = append(items, item)
+		}
+		summary.Memberships = items
+		result.MembershipSummary = summary
+	}
+
+	// Timestamps
+	if !m.CreatedAt.IsZero() {
+		createdAt := m.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+		result.CreatedAt = &createdAt
+	}
+	if !m.UpdatedAt.IsZero() {
+		updatedAt := m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00")
+		result.UpdatedAt = &updatedAt
+	}
+
+	return result
+}
+
 // convertMembershipToResponse converts a domain Membership to a Goa response
 func convertMembershipToResponse(m *model.Membership) *membershipservice.MembershipResponse {
 	if m == nil {

@@ -21,9 +21,9 @@ import (
 
 // membershipServicesrvc service implementation
 type membershipServicesrvc struct {
-	membershipReaderOrchestrator usecaseSvc.MembershipReader
-	storage                      port.MembershipReader
-	auth                         domain.Authenticator
+	memberReaderOrchestrator usecaseSvc.MemberReader
+	storage                  port.MemberReader
+	auth                     domain.Authenticator
 }
 
 // JWTAuth implements the authorization logic for service "membership-service"
@@ -35,36 +35,43 @@ func (s *membershipServicesrvc) JWTAuth(ctx context.Context, token string, _ *se
 	return context.WithValue(ctx, constants.PrincipalContextID, principal), nil
 }
 
-// ListMemberships lists memberships with pagination and filtering
-func (s *membershipServicesrvc) ListMemberships(ctx context.Context, p *membershipservice.ListMembershipsPayload) (res *membershipservice.ListMembershipsResult, err error) {
-	slog.DebugContext(ctx, "membershipService.list-memberships",
+// ListMembers lists members with pagination, filtering, and search
+func (s *membershipServicesrvc) ListMembers(ctx context.Context, p *membershipservice.ListMembersPayload) (res *membershipservice.ListMembersResult, err error) {
+	slog.DebugContext(ctx, "membershipService.list-members",
 		"page_size", p.PageSize,
 		"offset", p.Offset,
 		"filter", p.Filter,
+		"search", p.Search,
 	)
 
 	// Parse filters
 	filters := parseFilters(p.Filter)
 
+	var search string
+	if p.Search != nil {
+		search = *p.Search
+	}
+
 	params := model.ListParams{
 		PageSize: p.PageSize,
 		Offset:   p.Offset,
 		Filters:  filters,
+		Search:   search,
 	}
 
-	memberships, totalSize, err := s.membershipReaderOrchestrator.ListMemberships(ctx, params)
+	members, totalSize, err := s.memberReaderOrchestrator.ListMembers(ctx, params)
 	if err != nil {
 		return nil, wrapError(ctx, err)
 	}
 
 	// Convert to response
-	membershipResponses := make([]*membershipservice.MembershipResponse, 0, len(memberships))
-	for _, m := range memberships {
-		membershipResponses = append(membershipResponses, convertMembershipToResponse(m))
+	memberResponses := make([]*membershipservice.MemberResponse, 0, len(members))
+	for _, m := range members {
+		memberResponses = append(memberResponses, convertMemberToResponse(m))
 	}
 
-	res = &membershipservice.ListMembershipsResult{
-		Memberships: membershipResponses,
+	res = &membershipservice.ListMembersResult{
+		Members: memberResponses,
 		Metadata: &membershipservice.ListMetadata{
 			TotalSize: totalSize,
 			PageSize:  p.PageSize,
@@ -75,13 +82,14 @@ func (s *membershipServicesrvc) ListMemberships(ctx context.Context, p *membersh
 	return res, nil
 }
 
-// GetMembership retrieves a specific membership by UID
-func (s *membershipServicesrvc) GetMembership(ctx context.Context, p *membershipservice.GetMembershipPayload) (res *membershipservice.GetMembershipResult, err error) {
-	slog.DebugContext(ctx, "membershipService.get-membership",
-		"uid", p.UID,
+// GetMemberMembership retrieves a specific membership for a member
+func (s *membershipServicesrvc) GetMemberMembership(ctx context.Context, p *membershipservice.GetMemberMembershipPayload) (res *membershipservice.GetMemberMembershipResult, err error) {
+	slog.DebugContext(ctx, "membershipService.get-member-membership",
+		"member_id", p.MemberID,
+		"id", p.ID,
 	)
 
-	membership, revision, err := s.membershipReaderOrchestrator.GetMembership(ctx, *p.UID)
+	membership, revision, err := s.memberReaderOrchestrator.GetMembershipForMember(ctx, *p.MemberID, *p.ID)
 	if err != nil {
 		return nil, wrapError(ctx, err)
 	}
@@ -89,7 +97,7 @@ func (s *membershipServicesrvc) GetMembership(ctx context.Context, p *membership
 	result := convertMembershipToResponse(membership)
 	revisionStr := fmt.Sprintf("%d", revision)
 
-	res = &membershipservice.GetMembershipResult{
+	res = &membershipservice.GetMemberMembershipResult{
 		Membership: result,
 		Etag:       &revisionStr,
 	}
@@ -97,13 +105,14 @@ func (s *membershipServicesrvc) GetMembership(ctx context.Context, p *membership
 	return res, nil
 }
 
-// ListMembershipContacts retrieves key contacts for a specific membership
-func (s *membershipServicesrvc) ListMembershipContacts(ctx context.Context, p *membershipservice.ListMembershipContactsPayload) (res *membershipservice.ListMembershipContactsResult, err error) {
-	slog.DebugContext(ctx, "membershipService.list-membership-contacts",
-		"uid", p.UID,
+// ListMemberMembershipKeyContacts retrieves key contacts for a membership under a member
+func (s *membershipServicesrvc) ListMemberMembershipKeyContacts(ctx context.Context, p *membershipservice.ListMemberMembershipKeyContactsPayload) (res *membershipservice.ListMemberMembershipKeyContactsResult, err error) {
+	slog.DebugContext(ctx, "membershipService.list-member-membership-key-contacts",
+		"member_id", p.MemberID,
+		"id", p.ID,
 	)
 
-	contacts, err := s.membershipReaderOrchestrator.ListKeyContacts(ctx, *p.UID)
+	contacts, err := s.memberReaderOrchestrator.ListKeyContactsForMembership(ctx, *p.MemberID, *p.ID)
 	if err != nil {
 		return nil, wrapError(ctx, err)
 	}
@@ -113,7 +122,7 @@ func (s *membershipServicesrvc) ListMembershipContacts(ctx context.Context, p *m
 		contactResponses = append(contactResponses, convertKeyContactToResponse(c))
 	}
 
-	res = &membershipservice.ListMembershipContactsResult{
+	res = &membershipservice.ListMemberMembershipKeyContactsResult{
 		Contacts: contactResponses,
 	}
 
@@ -135,11 +144,11 @@ func (s *membershipServicesrvc) Livez(ctx context.Context) (res []byte, err erro
 }
 
 // NewMembershipService returns the membership-service service implementation with dependencies
-func NewMembershipService(readMembershipUseCase usecaseSvc.MembershipReader, storage port.MembershipReader, authenticator domain.Authenticator) membershipservice.Service {
+func NewMembershipService(readMemberUseCase usecaseSvc.MemberReader, storage port.MemberReader, authenticator domain.Authenticator) membershipservice.Service {
 	return &membershipServicesrvc{
-		membershipReaderOrchestrator: readMembershipUseCase,
-		storage:                      storage,
-		auth:                         authenticator,
+		memberReaderOrchestrator: readMemberUseCase,
+		storage:                  storage,
+		auth:                     authenticator,
 	}
 }
 

@@ -16,71 +16,72 @@ import (
 
 // Client is the "membership-service" service client.
 type Client struct {
-	ListMembershipsEndpoint        goa.Endpoint
-	GetMembershipEndpoint          goa.Endpoint
-	ListMembershipContactsEndpoint goa.Endpoint
-	ReadyzEndpoint                 goa.Endpoint
-	LivezEndpoint                  goa.Endpoint
+	ListMembersEndpoint                     goa.Endpoint
+	GetMemberMembershipEndpoint             goa.Endpoint
+	ListMemberMembershipKeyContactsEndpoint goa.Endpoint
+	ReadyzEndpoint                          goa.Endpoint
+	LivezEndpoint                           goa.Endpoint
 }
 
 // NewClient initializes a "membership-service" service client given the
 // endpoints.
-func NewClient(listMemberships, getMembership, listMembershipContacts, readyz, livez goa.Endpoint) *Client {
+func NewClient(listMembers, getMemberMembership, listMemberMembershipKeyContacts, readyz, livez goa.Endpoint) *Client {
 	return &Client{
-		ListMembershipsEndpoint:        listMemberships,
-		GetMembershipEndpoint:          getMembership,
-		ListMembershipContactsEndpoint: listMembershipContacts,
-		ReadyzEndpoint:                 readyz,
-		LivezEndpoint:                  livez,
+		ListMembersEndpoint:                     listMembers,
+		GetMemberMembershipEndpoint:             getMemberMembership,
+		ListMemberMembershipKeyContactsEndpoint: listMemberMembershipKeyContacts,
+		ReadyzEndpoint:                          readyz,
+		LivezEndpoint:                           livez,
 	}
 }
 
-// ListMemberships calls the "list-memberships" endpoint of the
-// "membership-service" service.
-// ListMemberships may return the following errors:
+// ListMembers calls the "list-members" endpoint of the "membership-service"
+// service.
+// ListMembers may return the following errors:
 //   - "BadRequest" (type *BadRequestError): Bad request
 //   - "InternalServerError" (type *InternalServerError): Internal server error
 //   - "ServiceUnavailable" (type *ServiceUnavailableError): Service unavailable
 //   - error: internal error
-func (c *Client) ListMemberships(ctx context.Context, p *ListMembershipsPayload) (res *ListMembershipsResult, err error) {
+func (c *Client) ListMembers(ctx context.Context, p *ListMembersPayload) (res *ListMembersResult, err error) {
 	var ires any
-	ires, err = c.ListMembershipsEndpoint(ctx, p)
+	ires, err = c.ListMembersEndpoint(ctx, p)
 	if err != nil {
 		return
 	}
-	return ires.(*ListMembershipsResult), nil
+	return ires.(*ListMembersResult), nil
 }
 
-// GetMembership calls the "get-membership" endpoint of the
+// GetMemberMembership calls the "get-member-membership" endpoint of the
 // "membership-service" service.
-// GetMembership may return the following errors:
+// GetMemberMembership may return the following errors:
 //   - "NotFound" (type *NotFoundError): Resource not found
 //   - "InternalServerError" (type *InternalServerError): Internal server error
 //   - "ServiceUnavailable" (type *ServiceUnavailableError): Service unavailable
 //   - error: internal error
-func (c *Client) GetMembership(ctx context.Context, p *GetMembershipPayload) (res *GetMembershipResult, err error) {
+func (c *Client) GetMemberMembership(ctx context.Context, p *GetMemberMembershipPayload) (res *GetMemberMembershipResult, err error) {
 	var ires any
-	ires, err = c.GetMembershipEndpoint(ctx, p)
+	ires, err = c.GetMemberMembershipEndpoint(ctx, p)
 	if err != nil {
 		return
 	}
-	return ires.(*GetMembershipResult), nil
+	return ires.(*GetMemberMembershipResult), nil
 }
 
-// ListMembershipContacts calls the "list-membership-contacts" endpoint of the
-// "membership-service" service.
-// ListMembershipContacts may return the following errors:
+// ListMemberMembershipKeyContacts calls the
+// "list-member-membership-key-contacts" endpoint of the "membership-service"
+// service.
+// ListMemberMembershipKeyContacts may return the following errors:
 //   - "NotFound" (type *NotFoundError): Membership not found
 //   - "InternalServerError" (type *InternalServerError): Internal server error
 //   - "ServiceUnavailable" (type *ServiceUnavailableError): Service unavailable
 //   - error: internal error
-func (c *Client) ListMembershipContacts(ctx context.Context, p *ListMembershipContactsPayload) (res *ListMembershipContactsResult, err error) {
+func (c *Client) ListMemberMembershipKeyContacts(ctx context.Context, p *ListMemberMembershipKeyContactsPayload) (res *ListMemberMembershipKeyContactsResult, err error) {
 	var ires any
-	ires, err = c.ListMembershipContactsEndpoint(ctx, p)
+	ires, err = c.ListMemberMembershipKeyContactsEndpoint(ctx, p)
 	if err != nil {
 		return
 	}
-	return ires.(*ListMembershipContactsResult), nil
+	return ires.(*ListMemberMembershipKeyContactsResult), nil
 }
 
 // Readyz calls the "readyz" endpoint of the "membership-service" service.

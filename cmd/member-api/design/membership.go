@@ -18,11 +18,11 @@ var JWTAuth = dsl.JWTSecurity("jwt", func() {
 
 // Service describes the membership service
 var _ = dsl.Service("membership-service", func() {
-	dsl.Description("Membership management service - read-only endpoints for membership data")
+	dsl.Description("Membership management service - read-only endpoints for member and membership data")
 
-	// List memberships
-	dsl.Method("list-memberships", func() {
-		dsl.Description("List memberships with pagination and filtering")
+	// List members with search/filtering
+	dsl.Method("list-members", func() {
+		dsl.Description("List members with pagination, filtering, and search")
 
 		dsl.Security(JWTAuth)
 
@@ -32,12 +32,13 @@ var _ = dsl.Service("membership-service", func() {
 			PageSizeAttribute()
 			OffsetAttribute()
 			FilterAttribute()
+			SearchAttribute()
 		})
 
 		dsl.Result(func() {
-			dsl.Attribute("memberships", dsl.ArrayOf(MembershipResponse), "List of memberships")
+			dsl.Attribute("members", dsl.ArrayOf(MemberResponse), "List of members")
 			dsl.Attribute("metadata", ListMetadata, "Pagination metadata")
-			dsl.Required("memberships", "metadata")
+			dsl.Required("members", "metadata")
 		})
 
 		dsl.Error("BadRequest", BadRequestError, "Bad request")
@@ -45,11 +46,12 @@ var _ = dsl.Service("membership-service", func() {
 		dsl.Error("ServiceUnavailable", ServiceUnavailableError, "Service unavailable")
 
 		dsl.HTTP(func() {
-			dsl.GET("/memberships")
+			dsl.GET("/members")
 			dsl.Param("version:v")
 			dsl.Param("pageSize")
 			dsl.Param("offset")
 			dsl.Param("filter")
+			dsl.Param("search")
 			dsl.Header("bearer_token:Authorization")
 			dsl.Response(dsl.StatusOK)
 			dsl.Response("BadRequest", dsl.StatusBadRequest)
@@ -58,16 +60,17 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
-	// Get membership by UID
-	dsl.Method("get-membership", func() {
-		dsl.Description("Get a specific membership by UID")
+	// Get a specific membership under a member
+	dsl.Method("get-member-membership", func() {
+		dsl.Description("Get a specific membership for a member")
 
 		dsl.Security(JWTAuth)
 
 		dsl.Payload(func() {
 			BearerTokenAttribute()
 			VersionAttribute()
-			MembershipUIDAttribute()
+			MemberIDAttribute()
+			MembershipIDAttribute()
 		})
 
 		dsl.Result(func() {
@@ -81,9 +84,10 @@ var _ = dsl.Service("membership-service", func() {
 		dsl.Error("ServiceUnavailable", ServiceUnavailableError, "Service unavailable")
 
 		dsl.HTTP(func() {
-			dsl.GET("/memberships/{uid}")
+			dsl.GET("/members/{member_id}/memberships/{id}")
 			dsl.Param("version:v")
-			dsl.Param("uid")
+			dsl.Param("member_id")
+			dsl.Param("id")
 			dsl.Header("bearer_token:Authorization")
 			dsl.Response(dsl.StatusOK, func() {
 				dsl.Body("membership")
@@ -95,16 +99,17 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
-	// List key contacts for a membership
-	dsl.Method("list-membership-contacts", func() {
-		dsl.Description("Get key contacts for a specific membership")
+	// List key contacts for a membership under a member
+	dsl.Method("list-member-membership-key-contacts", func() {
+		dsl.Description("Get key contacts for a specific membership under a member")
 
 		dsl.Security(JWTAuth)
 
 		dsl.Payload(func() {
 			BearerTokenAttribute()
 			VersionAttribute()
-			MembershipUIDAttribute()
+			MemberIDAttribute()
+			MembershipIDAttribute()
 		})
 
 		dsl.Result(func() {
@@ -117,9 +122,10 @@ var _ = dsl.Service("membership-service", func() {
 		dsl.Error("ServiceUnavailable", ServiceUnavailableError, "Service unavailable")
 
 		dsl.HTTP(func() {
-			dsl.GET("/memberships/{uid}/contacts")
+			dsl.GET("/members/{member_id}/memberships/{id}/key_contacts")
 			dsl.Param("version:v")
-			dsl.Param("uid")
+			dsl.Param("member_id")
+			dsl.Param("id")
 			dsl.Header("bearer_token:Authorization")
 			dsl.Response(dsl.StatusOK)
 			dsl.Response("NotFound", dsl.StatusNotFound)

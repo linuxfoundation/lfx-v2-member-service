@@ -41,10 +41,10 @@ type SQLMembership struct {
 	AccountName      sql.NullString `db:"accountname"`
 	AccountLogoURL   sql.NullString `db:"accountlogourl"`
 	AccountWebsite   sql.NullString `db:"accountwebsite"`
-	ProjectName      sql.NullString `db:"projectname"`
-	ProjectLogoURL   sql.NullString `db:"projectlogourl"`
-	ProjectSlug      sql.NullString `db:"projectslug"`
-	ProjectStatus    sql.NullString `db:"projectstatus"`
+	ProjectName    sql.NullString `db:"projectname"`
+	ProjectLogoURL sql.NullString `db:"projectlogourl"`
+	ProjectSlug    sql.NullString `db:"projectslug"`
+	ProjectStatus  sql.NullString `db:"projectstatus"`
 	ContactTitle     sql.NullString `db:"contacttitle"`
 }
 
@@ -70,6 +70,16 @@ type SQLKeyContact struct {
 	ProjectLogoURL string         `db:"projectlogourl"`
 	CreatedDate    sql.NullTime   `db:"createddate"`
 	UpdatedAt      sql.NullTime   `db:"updatedat"`
+}
+
+// SQLMember represents the SQL scan struct for member (account) queries
+type SQLMember struct {
+	SFID             string       `db:"sfid"`
+	Name             string       `db:"name"`
+	LogoURL          string       `db:"logourl"`
+	Website          string       `db:"website"`
+	CreatedDate      sql.NullTime `db:"createddate"`
+	LastModifiedDate sql.NullTime `db:"lastmodifieddate"`
 }
 
 // timeToString converts a sql.NullTime to a string in RFC3339 format
