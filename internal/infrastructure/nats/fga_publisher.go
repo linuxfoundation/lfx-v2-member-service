@@ -34,7 +34,7 @@ func (p *FGAPublisher) UpdateMemberAccess(ctx context.Context, membershipUID str
 			UID:    membershipUID,
 			Public: false,
 			References: map[string][]string{
-				"auditor": {fmt.Sprintf("team:%s", auditorTeamID)},
+				"auditor": {fmt.Sprintf("team:%s#member", auditorTeamID)},
 			},
 		},
 	}
