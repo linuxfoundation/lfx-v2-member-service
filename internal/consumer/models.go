@@ -44,6 +44,7 @@ type SFAsset struct {
 	Name             string  `json:"Name" msgpack:"Name"`
 	AccountID        string  `json:"AccountId" msgpack:"AccountId"`
 	Product2ID       string  `json:"Product2Id" msgpack:"Product2Id"`
+	ProductFamily    string  `json:"Product_Family__c" msgpack:"Product_Family__c"`
 	ProjectsSFID     string  `json:"Projects__c" msgpack:"Projects__c"`
 	Status           string  `json:"Status" msgpack:"Status"`
 	Year             string  `json:"Year__c" msgpack:"Year__c"`
@@ -108,6 +109,7 @@ type SFAlternateEmail struct {
 	ContactIDC            string  `json:"Contact_ID__c" msgpack:"Contact_ID__c"`
 	AlternateEmailAddress string  `json:"Alternate_Email_Address__c" msgpack:"Alternate_Email_Address__c"`
 	PrimaryEmail          bool    `json:"Primary_Email__c" msgpack:"Primary_Email__c"`
+	Active                bool    `json:"Active__c" msgpack:"Active__c"`
 	IsDeleted             bool    `json:"IsDeleted" msgpack:"IsDeleted"`
 	SDCDeletedAt          *string `json:"_sdc_deleted_at" msgpack:"_sdc_deleted_at"`
 }
@@ -146,36 +148,31 @@ type IndexedProjectProductB2B struct {
 
 // IndexedProjectMemberB2B is the indexer payload for a project_members_b2b document.
 type IndexedProjectMemberB2B struct {
-	UID              string    `json:"uid"`
-	Name             string    `json:"name"`
-	Aliases          []string  `json:"aliases,omitempty"`
-	Status           string    `json:"status,omitempty"`
-	Year             string    `json:"year,omitempty"`
-	Tier             string    `json:"tier,omitempty"`
-	MembershipType   string    `json:"membership_type,omitempty"`
-	AutoRenew        bool      `json:"auto_renew"`
-	RenewalType      string    `json:"renewal_type,omitempty"`
-	Price            float64   `json:"price,omitempty"`
-	AnnualFullPrice  float64   `json:"annual_full_price,omitempty"`
-	PaymentFrequency string    `json:"payment_frequency,omitempty"`
-	PaymentTerms     string    `json:"payment_terms,omitempty"`
-	AgreementDate    string    `json:"agreement_date,omitempty"`
-	PurchaseDate     string    `json:"purchase_date,omitempty"`
-	StartDate        string    `json:"start_date,omitempty"`
-	EndDate          string    `json:"end_date,omitempty"`
-	CompanyName      string    `json:"company_name,omitempty"`
-	CompanyLogoURL   string    `json:"company_logo_url,omitempty"`
-	CompanyWebsite   string    `json:"company_website,omitempty"`
-	ProductName      string    `json:"product_name,omitempty"`
-	ProductFamily    string    `json:"product_family,omitempty"`
-	ProductType      string    `json:"product_type,omitempty"`
-	ProductUID       string    `json:"product_uid,omitempty"`
-	ProjectUID       string    `json:"project_uid"`
-	ProjectName      string    `json:"project_name,omitempty"`
-	ProjectSlug      string    `json:"project_slug,omitempty"`
-	Parents          []Parent  `json:"parents,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	UID             string    `json:"uid"`
+	Name            string    `json:"name"`
+	Aliases         []string  `json:"aliases,omitempty"`
+	Status          string    `json:"status,omitempty"`
+	Year            string    `json:"year,omitempty"`
+	Tier            string    `json:"tier,omitempty"`
+	MembershipType  string    `json:"membership_type,omitempty"`
+	AnnualFullPrice float64   `json:"annual_full_price,omitempty"`
+	AgreementDate   string    `json:"agreement_date,omitempty"`
+	PurchaseDate    string    `json:"purchase_date,omitempty"`
+	StartDate       string    `json:"start_date,omitempty"`
+	EndDate         string    `json:"end_date,omitempty"`
+	CompanyName     string    `json:"company_name,omitempty"`
+	CompanyLogoURL  string    `json:"company_logo_url,omitempty"`
+	CompanyWebsite  string    `json:"company_website,omitempty"`
+	ProductName     string    `json:"product_name,omitempty"`
+	ProductFamily   string    `json:"product_family,omitempty"`
+	ProductType     string    `json:"product_type,omitempty"`
+	ProductUID      string    `json:"product_uid,omitempty"`
+	ProjectUID      string    `json:"project_uid"`
+	ProjectName     string    `json:"project_name,omitempty"`
+	ProjectSlug     string    `json:"project_slug,omitempty"`
+	Parents         []Parent  `json:"parents,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // IndexedKeyContact is the indexer payload for a key_contact document.
@@ -215,7 +212,10 @@ type DeleteRequest struct {
 	UID string `json:"uid"`
 }
 
-// projectInfo caches resolved project name/slug/uid for a given Salesforce project SFID.
+// projectInfo caches resolved project information for a given Salesforce project SFID.
+// uid is the v2 project UID (resolved via NATS RPC to v1-sync-helper). name and slug
+// are the v1 B2B values from salesforce_b2b-project__c, which are expected to align
+// with v2 project data and are safe to denormalize in v2 context.
 type projectInfo struct {
 	uid  string
 	name string

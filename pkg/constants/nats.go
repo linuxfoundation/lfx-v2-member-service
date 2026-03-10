@@ -30,7 +30,7 @@ const (
 	B2BConsumerStreamName = "KV_v1-objects"
 
 	// B2BConsumerFilterSubject is the subject filter for salesforce_b2b keys in the v1-objects bucket.
-	B2BConsumerFilterSubject = "$KV.v1-objects.salesforce_b2b-*"
+	B2BConsumerFilterSubject = "$KV.v1-objects.salesforce_b2b->"
 
 	// V1ObjectsKVBucket is the name of the v1-objects NATS KV bucket consumed by the b2b consumer.
 	V1ObjectsKVBucket = "v1-objects"

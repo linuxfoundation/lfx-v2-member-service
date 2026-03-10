@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
-// resolveProject returns the projectInfo for the given Salesforce project SFID,
-// consulting the in-memory cache first and falling back to:
+// resolveProject returns the v2 UID and v1 B2B project name and slug structured in projectInfo
+// for the given Salesforce project SFID, consulting the in-memory cache first and falling back to:
 //  1. The salesforce_b2b-project__c record in the v1-objects KV bucket (for name/slug).
 //  2. A NATS RPC call to v1-sync-helper (lfx.lookup_v1_mapping) to translate the
 //     project SFID to a v2 project UID.
@@ -71,6 +72,8 @@ func (c *Consumer) resolveProject(ctx context.Context, projectSFID string) (*pro
 		return nil, false
 	}
 
+	// Name and slug are v1 B2B values, but are expected to be safe to denormalize
+	// in v2 context (expected to be equal!).
 	info := projectInfo{
 		uid:  projectUID,
 		name: proj.Name,
@@ -227,82 +230,100 @@ func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFC
 }
 
 // resolvePrimaryEmail finds the primary email address for the given contact SFID by
-// consulting the contact → project-roles forward-lookup index and then scanning the
+// consulting the contact → emails forward-lookup index and then scanning the
 // alternate_email__c entries stored in the v1-objects KV bucket.
 //
-// The lookup strategy:
-//  1. Retrieve the list of alternate_email SFID candidates from the
-//     contact.project-roles index (populated when alternate email upserts are processed).
-//     NOTE: At this time we use a KV prefix scan as a fallback since the alternate_email
-//     index is not separately maintained; this is acceptable given the expected data volume.
+// The lookup strategy mirrors the v1-sync-helper logic:
+//  1. Retrieve the list of alternate_email SFIDs from the contact.emails index
+//     (populated when alternate_email__c upserts are processed).
 //  2. For each candidate, fetch the salesforce_b2b-alternate_email__c record and check
-//     whether Primary_Email__c is true and Contact_ID__c matches.
+//     whether the record is active (Active__c == true), not soft-deleted (both SDC and
+//     SFDC deleted flags), and whether Primary_Email__c is true.
+//  3. If no primary email is found, fall back to the first active non-deleted email.
 //
-// Returns an empty string when no primary email is found or on any error (non-fatal).
+// Returns an empty string when no email is found or on any error (non-fatal).
 func (c *Consumer) resolvePrimaryEmail(ctx context.Context, contactSFID string) string {
-	// Retrieve candidate alternate_email SFIDs from the forward-lookup index.
-	emailSFIDs, err := c.mapping.getProjectRolesForContact(ctx, contactSFID)
+	// Retrieve candidate alternate_email SFIDs from the contact.emails forward-lookup index.
+	emailSFIDs, err := c.mapping.getEmailsForContact(ctx, contactSFID)
 	if err != nil {
-		slog.WarnContext(ctx, "b2b resolvers: failed to retrieve contact→project_role index for email resolution",
+		slog.DebugContext(ctx, "b2b resolvers: no emails index found for contact",
 			"contact_sfid", contactSFID,
 			"error", err,
 		)
-		// Fall through to KV scan.
-	}
-
-	// Attempt to find the primary email by scanning alternate_email entries in the
-	// contact's email index (stored under a separate index key in the mapping bucket).
-	email := c.findPrimaryEmailFromIndex(ctx, contactSFID)
-	if email != "" {
-		return email
-	}
-
-	// As a secondary check, attempt to resolve via any known alternate_email SFIDs
-	// that happen to be co-listed in the emailSFIDs list (defensive).
-	for _, sfid := range emailSFIDs {
-		kvKey := fmt.Sprintf("salesforce_b2b-alternate_email__c.%s", sfid)
-		data, fetchErr := c.fetchKVRecord(ctx, kvKey)
-		if fetchErr != nil {
-			continue
-		}
-		var ae SFAlternateEmail
-		if decodeErr := decodeTyped(data, &ae); decodeErr != nil {
-			continue
-		}
-		if ae.ContactIDC == contactSFID && ae.PrimaryEmail && !isSoftDeletedRecord(ae.SDCDeletedAt) {
-			return ae.AlternateEmailAddress
-		}
-	}
-
-	return ""
-}
-
-// findPrimaryEmailFromIndex looks up the primary email for a contact from the dedicated
-// alternate-email forward-lookup index stored in the mapping KV bucket under the key
-// "contact.emails.{contactSfid}". Returns empty string when not found.
-func (c *Consumer) findPrimaryEmailFromIndex(ctx context.Context, contactSFID string) string {
-	indexKey := fmt.Sprintf("contact.emails.%s", contactSFID)
-	emailSFIDs, err := c.mapping.listValues(ctx, indexKey)
-	if err != nil || len(emailSFIDs) == 0 {
 		return ""
 	}
 
+	if len(emailSFIDs) == 0 {
+		return ""
+	}
+
+	// Single pass: look for primary email while tracking first valid fallback.
+	var fallbackEmail string
 	for _, emailSFID := range emailSFIDs {
 		kvKey := fmt.Sprintf("salesforce_b2b-alternate_email__c.%s", emailSFID)
 		data, fetchErr := c.fetchKVRecord(ctx, kvKey)
 		if fetchErr != nil {
+			slog.DebugContext(ctx, "b2b resolvers: failed to fetch alternate email record",
+				"email_sfid", emailSFID,
+				"error", fetchErr,
+			)
 			continue
 		}
+
 		var ae SFAlternateEmail
 		if decodeErr := decodeTyped(data, &ae); decodeErr != nil {
+			slog.DebugContext(ctx, "b2b resolvers: failed to decode alternate email record",
+				"email_sfid", emailSFID,
+				"error", decodeErr,
+			)
 			continue
 		}
-		if ae.PrimaryEmail && !isSoftDeletedRecord(ae.SDCDeletedAt) {
+
+		// Skip inactive emails.
+		if !ae.Active {
+			slog.DebugContext(ctx, "b2b resolvers: skipping inactive email",
+				"email_sfid", emailSFID,
+			)
+			continue
+		}
+
+		// Skip soft-deleted records (both SDC and SFDC deleted flags).
+		if ae.IsDeleted || (ae.SDCDeletedAt != nil && *ae.SDCDeletedAt != "") {
+			slog.DebugContext(ctx, "b2b resolvers: skipping deleted email record",
+				"email_sfid", emailSFID,
+			)
+			continue
+		}
+
+		// Verify the contact association matches.
+		if ae.ContactIDC != contactSFID {
+			continue
+		}
+
+		if ae.AlternateEmailAddress == "" {
+			continue
+		}
+
+		// Return immediately if this is the primary email.
+		if ae.PrimaryEmail {
 			return ae.AlternateEmailAddress
+		}
+
+		// Track the first valid email as a fallback.
+		if fallbackEmail == "" {
+			fallbackEmail = ae.AlternateEmailAddress
 		}
 	}
 
-	return ""
+	// If no primary email found, return the first active email as fallback.
+	if fallbackEmail != "" {
+		slog.DebugContext(ctx, "b2b resolvers: using first active email as fallback (no primary found)",
+			"contact_sfid", contactSFID,
+			"email", fallbackEmail,
+		)
+	}
+
+	return fallbackEmail
 }
 
 // fetchKVRecord retrieves and auto-decodes (JSON or msgpack) a record from the v1-objects
@@ -329,26 +350,14 @@ func (c *Consumer) fetchKVRecord(ctx context.Context, key string) (map[string]an
 	return result, nil
 }
 
-// decodePayloadMsgpack is a small wrapper to unmarshal msgpack bytes into dst using the
-// vmihailenco/msgpack library. Kept here so handler.go's decodePayload stays standalone.
+// decodePayloadMsgpack unmarshals msgpack bytes directly into dst using the
+// vmihailenco/msgpack library.
 func decodePayloadMsgpack(data []byte, dst any) error {
-	// Import is handled via the msgpack import in handler.go; here we re-use json as an
-	// intermediate step via a direct call to avoid a circular helper dependency.
-	// In practice the vmihailenco/msgpack library is already in scope via handler.go in
-	// the same package — we call it through the package-level decodePayload helper.
-	decoded, err := decodePayload(data)
-	if err != nil {
-		return err
-	}
-	b, err := json.Marshal(decoded)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, dst)
+	return msgpack.Unmarshal(data, dst)
 }
 
 // lookupV2ProjectUID calls the v1-sync-helper NATS RPC endpoint to translate a Salesforce
-// project SFID to a v2 project UID. The mapping key format follows the v1-sync-helper
+// B2B project SFID to a v2 project UID. The mapping key format follows the v1-sync-helper
 // convention: "salesforce-project__c.{sfid}" → v2 UID.
 //
 // Returns ("", false) when the mapping does not exist (non-retryable skip).
@@ -388,10 +397,4 @@ func (c *Consumer) lookupV2ProjectUID(ctx context.Context, projectSFID string) (
 	}
 
 	return response, false
-}
-
-// isSoftDeletedRecord returns true when the _sdc_deleted_at pointer is non-nil and
-// points to a non-empty string. Used when working with already-decoded typed structs.
-func isSoftDeletedRecord(deletedAt *string) bool {
-	return deletedAt != nil && *deletedAt != ""
 }

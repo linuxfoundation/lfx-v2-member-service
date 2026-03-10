@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -29,6 +30,9 @@ const (
 
 	// mappingKeyAssetProjectRoles maps assetSfid → [projectRoleSfid, ...].
 	mappingKeyAssetProjectRoles = "asset.project-roles.%s"
+
+	// mappingKeyContactEmails maps contactSfid → [alternateEmailSfid, ...].
+	mappingKeyContactEmails = "contact.emails.%s"
 )
 
 // OCC retry configuration for read-modify-write operations on the mapping KV bucket.
@@ -86,8 +90,19 @@ func (m *mappingStore) addToList(ctx context.Context, key, value string) error {
 			return nil
 		}
 
-		// CAS conflict — another writer raced us; retry after a short sleep.
-		slog.DebugContext(ctx, "mapping OCC conflict on addToList, retrying",
+		// Check if this is a concurrency error that warrants a retry.
+		if isRevisionMismatchError(casErr) {
+			slog.DebugContext(ctx, "mapping OCC conflict on addToList, retrying",
+				"key", key,
+				"attempt", attempt,
+				"error", casErr,
+			)
+			time.Sleep(mappingOCCRetryInterval)
+			continue
+		}
+
+		// Non-concurrency error — log a warning and retry anyway in case it's transient.
+		slog.WarnContext(ctx, "mapping non-OCC error on addToList, retrying",
 			"key", key,
 			"attempt", attempt,
 			"error", casErr,
@@ -100,7 +115,7 @@ func (m *mappingStore) addToList(ctx context.Context, key, value string) error {
 
 // removeFromList removes value from the JSON-encoded string list stored at key, using OCC
 // retries to handle concurrent updates. Removing a value that is not present is a no-op.
-func (m *mappingStore) removeFromList(ctx context.Context, key, value string) error { //nolint:unused // Reserved for future delete cleanup paths.
+func (m *mappingStore) removeFromList(ctx context.Context, key, value string) error {
 	for attempt := 1; attempt <= mappingOCCMaxRetries; attempt++ {
 		list, revision, err := m.getList(ctx, key)
 		if err != nil {
@@ -138,8 +153,19 @@ func (m *mappingStore) removeFromList(ctx context.Context, key, value string) er
 			return nil
 		}
 
-		// CAS conflict — retry.
-		slog.DebugContext(ctx, "mapping OCC conflict on removeFromList, retrying",
+		// Check if this is a concurrency error that warrants a retry.
+		if isRevisionMismatchError(casErr) {
+			slog.DebugContext(ctx, "mapping OCC conflict on removeFromList, retrying",
+				"key", key,
+				"attempt", attempt,
+				"error", casErr,
+			)
+			time.Sleep(mappingOCCRetryInterval)
+			continue
+		}
+
+		// Non-concurrency error — log a warning and retry anyway in case it's transient.
+		slog.WarnContext(ctx, "mapping non-OCC error on removeFromList, retrying",
 			"key", key,
 			"attempt", attempt,
 			"error", casErr,
@@ -177,6 +203,27 @@ func (m *mappingStore) listValues(ctx context.Context, key string) ([]string, er
 	return list, err
 }
 
+// isRevisionMismatchError checks if an error is a KV revision mismatch (concurrency
+// conflict) that should be retried. Mirrors the helper in v1-sync-helper.
+func isRevisionMismatchError(err error) bool {
+	// Attempt direct JetStreamError comparison.
+	if jsErr, ok := err.(jetstream.JetStreamError); ok {
+		if apiErr := jsErr.APIError(); apiErr != nil {
+			return apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
+		}
+	}
+
+	// Check for NATS error strings containing the expected error codes.
+	errStr := err.Error()
+	if strings.Contains(errStr, "err_code=10071") ||
+		strings.Contains(errStr, "wrong last sequence") ||
+		strings.Contains(errStr, "key exists") {
+		return true
+	}
+
+	return false
+}
+
 // ---- Typed helpers for each forward-lookup index ----
 
 // addAssetToAccount records that assetSfid is associated with accountSfid so that
@@ -186,7 +233,7 @@ func (m *mappingStore) addAssetToAccount(ctx context.Context, accountSfid, asset
 }
 
 // removeAssetFromAccount removes assetSfid from the account → assets index.
-func (m *mappingStore) removeAssetFromAccount(ctx context.Context, accountSfid, assetSfid string) error { //nolint:unused // Reserved for future delete cleanup paths.
+func (m *mappingStore) removeAssetFromAccount(ctx context.Context, accountSfid, assetSfid string) error {
 	return m.removeFromList(ctx, fmt.Sprintf(mappingKeyAccountAssets, accountSfid), assetSfid)
 }
 
@@ -202,12 +249,12 @@ func (m *mappingStore) addAssetToProduct2(ctx context.Context, product2Sfid, ass
 }
 
 // removeAssetFromProduct2 removes assetSfid from the product2 → assets index.
-func (m *mappingStore) removeAssetFromProduct2(ctx context.Context, product2Sfid, assetSfid string) error { //nolint:unused // Reserved for future delete cleanup paths.
+func (m *mappingStore) removeAssetFromProduct2(ctx context.Context, product2Sfid, assetSfid string) error {
 	return m.removeFromList(ctx, fmt.Sprintf(mappingKeyProduct2Assets, product2Sfid), assetSfid)
 }
 
 // getAssetsForProduct2 returns all asset SFIDs associated with the given Product2 SFID.
-func (m *mappingStore) getAssetsForProduct2(ctx context.Context, product2Sfid string) ([]string, error) { //nolint:unused // Reserved for future product2 fan-out delete paths.
+func (m *mappingStore) getAssetsForProduct2(ctx context.Context, product2Sfid string) ([]string, error) {
 	return m.listValues(ctx, fmt.Sprintf(mappingKeyProduct2Assets, product2Sfid))
 }
 
@@ -218,7 +265,7 @@ func (m *mappingStore) addProjectRoleToContact(ctx context.Context, contactSfid,
 }
 
 // removeProjectRoleFromContact removes roleSfid from the contact → project-roles index.
-func (m *mappingStore) removeProjectRoleFromContact(ctx context.Context, contactSfid, roleSfid string) error { //nolint:unused // Reserved for future delete cleanup paths.
+func (m *mappingStore) removeProjectRoleFromContact(ctx context.Context, contactSfid, roleSfid string) error {
 	return m.removeFromList(ctx, fmt.Sprintf(mappingKeyContactProjectRoles, contactSfid), roleSfid)
 }
 
@@ -234,11 +281,27 @@ func (m *mappingStore) addProjectRoleToAsset(ctx context.Context, assetSfid, rol
 }
 
 // removeProjectRoleFromAsset removes roleSfid from the asset → project-roles index.
-func (m *mappingStore) removeProjectRoleFromAsset(ctx context.Context, assetSfid, roleSfid string) error { //nolint:unused // Reserved for future delete cleanup paths.
+func (m *mappingStore) removeProjectRoleFromAsset(ctx context.Context, assetSfid, roleSfid string) error {
 	return m.removeFromList(ctx, fmt.Sprintf(mappingKeyAssetProjectRoles, assetSfid), roleSfid)
 }
 
 // getProjectRolesForAsset returns all project_role SFIDs associated with the given asset SFID.
 func (m *mappingStore) getProjectRolesForAsset(ctx context.Context, assetSfid string) ([]string, error) {
 	return m.listValues(ctx, fmt.Sprintf(mappingKeyAssetProjectRoles, assetSfid))
+}
+
+// addEmailToContact records that emailSfid is associated with contactSfid so that
+// resolvePrimaryEmail can find alternate emails for a contact.
+func (m *mappingStore) addEmailToContact(ctx context.Context, contactSfid, emailSfid string) error {
+	return m.addToList(ctx, fmt.Sprintf(mappingKeyContactEmails, contactSfid), emailSfid)
+}
+
+// removeEmailFromContact removes emailSfid from the contact → emails index.
+func (m *mappingStore) removeEmailFromContact(ctx context.Context, contactSfid, emailSfid string) error {
+	return m.removeFromList(ctx, fmt.Sprintf(mappingKeyContactEmails, contactSfid), emailSfid)
+}
+
+// getEmailsForContact returns all alternate_email SFIDs associated with the given contact SFID.
+func (m *mappingStore) getEmailsForContact(ctx context.Context, contactSfid string) ([]string, error) {
+	return m.listValues(ctx, fmt.Sprintf(mappingKeyContactEmails, contactSfid))
 }

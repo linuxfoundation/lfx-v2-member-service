@@ -4,67 +4,48 @@
 package consumer
 
 import (
-	"sync"
 	"time"
+
+	gocache "github.com/patrickmn/go-cache"
 )
 
 const projectCacheTTL = 10 * time.Minute
 
-// projectCacheEntry holds a resolved project info value with an expiration time.
-type projectCacheEntry struct {
-	info      projectInfo
-	expiresAt time.Time
-}
-
-// projectCache is a thread-safe in-memory cache mapping Salesforce project SFIDs
-// to resolved project info (UID, name, slug) with a fixed TTL.
+// projectCache is an in-memory cache mapping Salesforce project SFIDs to resolved
+// project info (UID, name, slug) with a fixed TTL. It wraps patrickmn/go-cache for
+// thread-safe access with automatic expiration.
 type projectCache struct {
-	mu      sync.RWMutex
-	entries map[string]projectCacheEntry
+	c *gocache.Cache
 }
 
-// newProjectCache creates a new empty projectCache.
+// newProjectCache creates a new projectCache with the standard TTL and a cleanup
+// interval of twice the TTL.
 func newProjectCache() *projectCache {
 	return &projectCache{
-		entries: make(map[string]projectCacheEntry),
+		c: gocache.New(projectCacheTTL, 2*projectCacheTTL),
 	}
 }
 
 // get returns the cached projectInfo for the given SFID, and whether it was found
 // and not yet expired.
-func (c *projectCache) get(sfid string) (projectInfo, bool) {
-	c.mu.RLock()
-	entry, ok := c.entries[sfid]
-	c.mu.RUnlock()
-
+func (pc *projectCache) get(sfid string) (projectInfo, bool) {
+	v, ok := pc.c.Get(sfid)
 	if !ok {
 		return projectInfo{}, false
 	}
-
-	if time.Now().After(entry.expiresAt) {
-		// Entry has expired; evict it lazily.
-		c.mu.Lock()
-		delete(c.entries, sfid)
-		c.mu.Unlock()
+	info, valid := v.(projectInfo)
+	if !valid {
 		return projectInfo{}, false
 	}
-
-	return entry.info, true
+	return info, true
 }
 
 // set stores the given projectInfo for the SFID with the standard TTL.
-func (c *projectCache) set(sfid string, info projectInfo) {
-	c.mu.Lock()
-	c.entries[sfid] = projectCacheEntry{
-		info:      info,
-		expiresAt: time.Now().Add(projectCacheTTL),
-	}
-	c.mu.Unlock()
+func (pc *projectCache) set(sfid string, info projectInfo) {
+	pc.c.Set(sfid, info, gocache.DefaultExpiration)
 }
 
 // delete removes the cache entry for the given SFID, if present.
-func (c *projectCache) delete(sfid string) {
-	c.mu.Lock()
-	delete(c.entries, sfid)
-	c.mu.Unlock()
+func (pc *projectCache) delete(sfid string) {
+	pc.c.Delete(sfid)
 }

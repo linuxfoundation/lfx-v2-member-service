@@ -81,10 +81,12 @@ func New(ctx context.Context, cfg Config) (*Consumer, error) {
 		return nil, err
 	}
 
-	// Open or create the project-membership-mapping KV bucket for forward-lookup indexes.
-	mappingKV, err := openOrCreateKV(ctx, js, constants.KVBucketNameB2BMapping)
+	// Open the project-membership-mapping KV bucket for forward-lookup indexes.
+	// The bucket must already exist (created by the Helm chart); the app does not
+	// attempt to create it, so that operators can control bucket settings via Helm values.
+	mappingKV, err := js.KeyValue(ctx, constants.KVBucketNameB2BMapping)
 	if err != nil {
-		slog.ErrorContext(ctx, "b2b consumer: failed to open project-membership-mapping KV bucket",
+		slog.ErrorContext(ctx, "b2b consumer: failed to open project-membership-mapping KV bucket (must be pre-created via Helm chart)",
 			"bucket", constants.KVBucketNameB2BMapping,
 			"error", err,
 		)
@@ -108,6 +110,9 @@ func New(ctx context.Context, cfg Config) (*Consumer, error) {
 // consuming messages. It blocks until ctx is cancelled or a fatal consumer error occurs.
 // Run is intended to be called in a dedicated goroutine.
 func (c *Consumer) Run(ctx context.Context) error {
+	// DeliverLastPerSubject ensures we only consume the most recent revision of any
+	// item in the KV bucket, even if the consumer is destroyed and recreated. This
+	// avoids replaying stale intermediate versions on cold start.
 	consumer, err := c.js.CreateOrUpdateConsumer(ctx, constants.B2BConsumerStreamName, jetstream.ConsumerConfig{
 		Name:          constants.B2BConsumerName,
 		Durable:       constants.B2BConsumerName,
@@ -165,34 +170,4 @@ func (c *Consumer) Stop() {
 		c.consumerCtx.Drain()
 		c.consumerCtx = nil
 	}
-}
-
-// openOrCreateKV returns the KeyValue handle for the named bucket, creating it with
-// sensible defaults if it does not yet exist. The bucket is owned by this service;
-// its schema is an implementation detail of the consumer package.
-func openOrCreateKV(ctx context.Context, js jetstream.JetStream, bucket string) (jetstream.KeyValue, error) {
-	kv, err := js.KeyValue(ctx, bucket)
-	if err == nil {
-		return kv, nil
-	}
-
-	slog.InfoContext(ctx, "b2b consumer: KV bucket not found, creating it",
-		"bucket", bucket,
-	)
-
-	kv, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket:      bucket,
-		History:     20,
-		Storage:     jetstream.FileStorage,
-		Compression: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	slog.InfoContext(ctx, "b2b consumer: KV bucket created",
-		"bucket", bucket,
-	)
-
-	return kv, nil
 }

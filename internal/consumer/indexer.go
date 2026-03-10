@@ -60,10 +60,10 @@ func (idx *indexer) publish(ctx context.Context, subject string, action MessageA
 	return nil
 }
 
-// systemHeaders returns the minimal set of headers required by the indexer when
-// the message originates from a system-generated (non-user) event path.
+// systemHeaders returns the minimal set of headers included with indexer messages
+// originating from a system-generated (non-user) event path. Currently empty because
+// the indexer expects a Heimdall-signed authorization header, which this service does
+// not have when triggered by incoming v1-objects data.
 func systemHeaders() map[string]string {
-	return map[string]string{
-		"authorization": "Bearer member-service-b2b-consumer",
-	}
+	return map[string]string{}
 }

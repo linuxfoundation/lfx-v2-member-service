@@ -5,7 +5,6 @@ package consumer
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
@@ -28,6 +27,15 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 
 	if role.AssetSFID == "" {
 		slog.WarnContext(ctx, "b2b handler_project_role: Project_Role__c has no Asset__c, skipping indexing",
+			"sfid", sfid,
+		)
+		return false
+	}
+
+	// A key contact without a linked Contact record is not useful — personal info is
+	// the whole point of a key_contact document.
+	if role.ContactSFID == "" {
+		slog.WarnContext(ctx, "b2b handler_project_role: Project_Role__c has no Contact__c, skipping indexing",
 			"sfid", sfid,
 		)
 		return false
@@ -73,24 +81,26 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		return true
 	}
 
-	// Resolve the linked Contact for personal fields.
-	var contact *SFContact
-	if role.ContactSFID != "" {
-		contact, retry = c.resolveContact(ctx, role.ContactSFID)
-		if retry {
-			return true
-		}
+	// Resolve the linked Contact for personal fields. A key contact without resolved
+	// personal info is not useful, so we skip indexing if the contact cannot be found.
+	contact, retry := c.resolveContact(ctx, role.ContactSFID)
+	if retry {
+		return true
+	}
+	if contact == nil {
+		slog.WarnContext(ctx, "b2b handler_project_role: could not resolve contact for Project_Role__c, skipping",
+			"sfid", sfid,
+			"contact_sfid", role.ContactSFID,
+		)
+		return false
 	}
 
 	// Resolve the primary email address for the contact from Alternate_Email__c.
-	email := ""
-	if role.ContactSFID != "" {
-		email = c.resolvePrimaryEmail(ctx, role.ContactSFID)
-	}
+	email := c.resolvePrimaryEmail(ctx, role.ContactSFID)
 
-	keyContactUID := generateProjectRoleUID(sfid)
-	membershipUID := generateAssetUID(role.AssetSFID)
-	productUID := generateProduct2UID(asset.Product2ID)
+	keyContactUID := generateDeterministicUID(sfid)
+	membershipUID := generateDeterministicUID(role.AssetSFID)
+	productUID := generateDeterministicUID(asset.Product2ID)
 
 	doc := IndexedKeyContact{
 		UID:            keyContactUID,
@@ -100,6 +110,9 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		Status:         role.Status,
 		BoardMember:    role.BoardMember,
 		PrimaryContact: role.PrimaryContact,
+		FirstName:      contact.FirstName,
+		LastName:       contact.LastName,
+		Title:          contact.Title,
 		Email:          email,
 		ProjectUID:     proj.uid,
 		ProjectName:    proj.name,
@@ -107,7 +120,6 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		Parents: []Parent{
 			{Type: "project", UID: proj.uid},
 			{Type: "project_members_b2b", UID: membershipUID},
-			{Type: "project_products_b2b", UID: productUID},
 		},
 		CreatedAt: parseTimestampOrNow(role.CreatedDate),
 		UpdatedAt: parseTimestampOrNow(role.LastModifiedDate),
@@ -118,13 +130,6 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		doc.CompanyName = account.Name
 		doc.CompanyLogoURL = account.LogoURL
 		doc.CompanyWebsite = account.Website
-	}
-
-	// Denormalize Contact fields when the contact record was resolved.
-	if contact != nil {
-		doc.FirstName = contact.FirstName
-		doc.LastName = contact.LastName
-		doc.Title = contact.Title
 	}
 
 	if err := c.indexer.publishUpsert(ctx, constants.IndexKeyContactSubject, doc); err != nil {
@@ -146,14 +151,12 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 	// Maintain forward-lookup indexes so that contact and asset updates can fan out
 	// to this project_role without a full KV scan. Mapping errors are logged but do
 	// not cause a retry — the indexer message has already been sent successfully.
-	if role.ContactSFID != "" {
-		if err := c.mapping.addProjectRoleToContact(ctx, role.ContactSFID, sfid); err != nil {
-			slog.WarnContext(ctx, "b2b handler_project_role: failed to update contact→project_role mapping",
-				"sfid", sfid,
-				"contact_sfid", role.ContactSFID,
-				"error", err,
-			)
-		}
+	if err := c.mapping.addProjectRoleToContact(ctx, role.ContactSFID, sfid); err != nil {
+		slog.WarnContext(ctx, "b2b handler_project_role: failed to update contact→project_role mapping",
+			"sfid", sfid,
+			"contact_sfid", role.ContactSFID,
+			"error", err,
+		)
 	}
 
 	if err := c.mapping.addProjectRoleToAsset(ctx, role.AssetSFID, sfid); err != nil {
@@ -167,11 +170,12 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 	return false
 }
 
-// handleProjectRoleDelete processes a salesforce_b2b-project_role__c delete event.
-// It publishes a delete message to the indexer and returns true if the message should
-// be retried.
-func (c *Consumer) handleProjectRoleDelete(ctx context.Context, sfid string) bool {
-	keyContactUID := generateProjectRoleUID(sfid)
+// handleProjectRoleDeleteWithCleanup processes a salesforce_b2b-project_role__c delete event.
+// It publishes a delete message to the indexer, and when old data is available (soft deletions)
+// it also cleans up the contact → project-roles and asset → project-roles forward-lookup indexes.
+// Returns true if the message should be retried.
+func (c *Consumer) handleProjectRoleDeleteWithCleanup(ctx context.Context, sfid string, oldData map[string]any) bool {
+	keyContactUID := generateDeterministicUID(sfid)
 
 	if err := c.indexer.publishDelete(ctx, constants.IndexKeyContactSubject, keyContactUID); err != nil {
 		slog.ErrorContext(ctx, "b2b handler_project_role: failed to publish delete to indexer",
@@ -187,63 +191,33 @@ func (c *Consumer) handleProjectRoleDelete(ctx context.Context, sfid string) boo
 		"key_contact_uid", keyContactUID,
 	)
 
-	return false
-}
+	// For soft deletions we have the old record data and can clean up forward-lookup
+	// indexes. For hard deletions (oldData == nil), the indexes will contain stale
+	// references that are tolerated on next read (KV fetch returns key-not-found).
+	if oldData != nil {
+		var role SFProjectRole
+		if err := decodeTyped(oldData, &role); err == nil {
+			if role.ContactSFID != "" {
+				if err := c.mapping.removeProjectRoleFromContact(ctx, role.ContactSFID, sfid); err != nil {
+					slog.WarnContext(ctx, "b2b handler_project_role: failed to remove contact→project_role mapping on delete",
+						"sfid", sfid,
+						"contact_sfid", role.ContactSFID,
+						"error", err,
+					)
+				}
+			}
 
-// handleContactUpdate fans out re-indexing of all key_contact documents linked to
-// the updated Contact record. Returns true if the message should be retried.
-func (c *Consumer) handleContactUpdate(ctx context.Context, sfid string, _ map[string]any) bool {
-	roleSFIDs, err := c.mapping.getProjectRolesForContact(ctx, sfid)
-	if err != nil {
-		slog.ErrorContext(ctx, "b2b handler_project_role: failed to retrieve contact→project_role mapping for fan-out",
-			"contact_sfid", sfid,
-			"error", err,
-		)
-		return false
-	}
-
-	if len(roleSFIDs) == 0 {
-		slog.DebugContext(ctx, "b2b handler_project_role: no project_roles linked to updated contact, skipping fan-out",
-			"contact_sfid", sfid,
-		)
-		return false
-	}
-
-	slog.InfoContext(ctx, "b2b handler_project_role: fanning out contact update to linked project_roles",
-		"contact_sfid", sfid,
-		"role_count", len(roleSFIDs),
-	)
-
-	shouldRetry := false
-
-	for _, roleSFID := range roleSFIDs {
-		roleData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-project_role__c.%s", roleSFID))
-		if fetchErr != nil {
-			slog.WarnContext(ctx, "b2b handler_project_role: failed to fetch project_role for contact fan-out, skipping",
-				"contact_sfid", sfid,
-				"role_sfid", roleSFID,
-				"error", fetchErr,
-			)
-			continue
-		}
-
-		if retry := c.handleProjectRoleUpsert(ctx, roleSFID, roleData); retry {
-			shouldRetry = true
+			if role.AssetSFID != "" {
+				if err := c.mapping.removeProjectRoleFromAsset(ctx, role.AssetSFID, sfid); err != nil {
+					slog.WarnContext(ctx, "b2b handler_project_role: failed to remove asset→project_role mapping on delete",
+						"sfid", sfid,
+						"asset_sfid", role.AssetSFID,
+						"error", err,
+					)
+				}
+			}
 		}
 	}
-
-	return shouldRetry
-}
-
-// handleProjectUpdate invalidates the project cache entry for the given project SFID
-// so that the next lookup will re-fetch the latest name/slug from the KV bucket.
-// Returns true if the message should be retried.
-func (c *Consumer) handleProjectUpdate(ctx context.Context, sfid string, _ map[string]any) bool {
-	c.projectCache.delete(sfid)
-
-	slog.DebugContext(ctx, "b2b handler_project_role: evicted project cache entry on update",
-		"project_sfid", sfid,
-	)
 
 	return false
 }
