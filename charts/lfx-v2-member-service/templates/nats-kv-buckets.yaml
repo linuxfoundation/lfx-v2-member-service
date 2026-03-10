@@ -1,6 +1,25 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 ---
+{{- if .Values.nats.kv_bucket_b2b_mapping.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.kv_bucket_b2b_mapping.name }}
+  namespace: lfx
+  {{- if .Values.nats.kv_bucket_b2b_mapping.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.kv_bucket_b2b_mapping.name }}
+  history: {{ .Values.nats.kv_bucket_b2b_mapping.history }}
+  storage: {{ .Values.nats.kv_bucket_b2b_mapping.storage }}
+  maxValueSize: {{ .Values.nats.kv_bucket_b2b_mapping.maxValueSize }}
+  maxBytes: {{ .Values.nats.kv_bucket_b2b_mapping.maxBytes }}
+  compression: {{ .Values.nats.kv_bucket_b2b_mapping.compression }}
+{{- end }}
+---
 {{- if .Values.nats.kv_bucket_memberships.creation }}
 apiVersion: jetstream.nats.io/v1beta2
 kind: KeyValue

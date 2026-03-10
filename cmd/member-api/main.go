@@ -16,6 +16,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/service"
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/consumer"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
 
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
@@ -95,6 +96,36 @@ func main() {
 	// Initialize the repositories based on configuration
 	memberReader := service.MemberReaderImpl(ctx)
 	defer service.CloseNATSClient()
+
+	// Start the b2b KV consumer when the NATS repository source is active.
+	// The consumer subscribes to salesforce_b2b-* keys in the v1-objects KV bucket
+	// and publishes denormalized indexer messages for project_products_b2b,
+	// project_members_b2b, and key_contact resource types.
+	natsClient := service.NATSClientInstance()
+	if natsClient != nil {
+		b2bConsumer, consumerErr := consumer.New(ctx, consumer.Config{
+			NATSConn: natsClient.Conn(),
+		})
+		if consumerErr != nil {
+			slog.ErrorContext(ctx, "failed to initialize b2b KV consumer", "error", consumerErr)
+			os.Exit(1)
+		}
+
+		var wgConsumer sync.WaitGroup
+		wgConsumer.Add(1)
+		go func() {
+			defer wgConsumer.Done()
+			if runErr := b2bConsumer.Run(ctx); runErr != nil {
+				slog.ErrorContext(ctx, "b2b KV consumer exited with error", "error", runErr)
+			}
+		}()
+		defer func() {
+			b2bConsumer.Stop()
+			wgConsumer.Wait()
+		}()
+	} else {
+		slog.InfoContext(ctx, "NATS client not available (mock mode), b2b KV consumer not started")
+	}
 
 	// Initialize the service with use cases
 	readMemberUseCase := usecaseSvc.NewMemberReaderOrchestrator(
