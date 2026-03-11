@@ -68,7 +68,7 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		return true
 	}
 	if proj == nil {
-		slog.WarnContext(ctx, "b2b handler_project_role: could not resolve project for Project_Role__c, skipping",
+		slog.InfoContext(ctx, "b2b handler_project_role: could not resolve project for Project_Role__c, skipping (project may not be in v2)",
 			"sfid", sfid,
 			"project_sfid", asset.ProjectsSFID,
 		)

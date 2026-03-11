@@ -89,7 +89,7 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 		return true
 	}
 	if proj == nil {
-		slog.WarnContext(ctx, "b2b handler_asset: could not resolve project for Asset, skipping",
+		slog.InfoContext(ctx, "b2b handler_asset: could not resolve project for Asset, skipping (project may not be in v2)",
 			"sfid", sfid,
 			"project_sfid", asset.ProjectsSFID,
 		)

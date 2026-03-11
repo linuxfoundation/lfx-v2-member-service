@@ -39,7 +39,7 @@ func (c *Consumer) resolveProject(ctx context.Context, projectSFID string) (*pro
 	projData, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			slog.WarnContext(ctx, "b2b resolvers: project__c record not found in v1-objects KV",
+			slog.InfoContext(ctx, "b2b resolvers: project__c record not found in v1-objects KV (project may not be in v2)",
 				"project_sfid", projectSFID,
 			)
 			return nil, false
@@ -66,7 +66,7 @@ func (c *Consumer) resolveProject(ctx context.Context, projectSFID string) (*pro
 		return nil, true
 	}
 	if projectUID == "" {
-		slog.WarnContext(ctx, "b2b resolvers: v2 project UID not found for SFID",
+		slog.InfoContext(ctx, "b2b resolvers: v2 project UID not found for SFID (project may not be in v2)",
 			"project_sfid", projectSFID,
 		)
 		return nil, false

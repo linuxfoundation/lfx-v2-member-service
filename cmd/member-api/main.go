@@ -45,9 +45,10 @@ func init() {
 
 func main() {
 	var (
-		dbgF = flag.Bool("d", false, "enable debug logging")
-		port = flag.String("p", defaultPort, "listen port")
-		bind = flag.String("bind", "*", "interface to bind on")
+		dbgF   = flag.Bool("d", false, "enable debug logging")
+		port   = flag.String("p", defaultPort, "listen port")
+		bind   = flag.String("bind", "*", "interface to bind on")
+		reload = flag.Bool("reload", false, "destroy all b2b consumers and re-consume in dependency order, then resume normal operation")
 	)
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -111,15 +112,31 @@ func main() {
 			os.Exit(1)
 		}
 
+		// Use a dedicated cancellable context for the consumer so that reload can
+		// restart it independently of the top-level application context.
+		consumerCtx, consumerCancel := context.WithCancel(ctx)
+
+		// When reload is requested, destroy all consumers and re-consume every
+		// table in dependency order before switching to normal consumption.
+		if *reload {
+			slog.InfoContext(ctx, "reload flag set — re-consuming all b2b tables in dependency order")
+			if reloadErr := b2bConsumer.Reload(consumerCtx); reloadErr != nil {
+				slog.ErrorContext(ctx, "b2b KV consumer reload failed", "error", reloadErr)
+				consumerCancel()
+				os.Exit(1)
+			}
+		}
+
 		var wgConsumer sync.WaitGroup
 		wgConsumer.Add(1)
 		go func() {
 			defer wgConsumer.Done()
-			if runErr := b2bConsumer.Run(ctx); runErr != nil {
+			if runErr := b2bConsumer.Run(consumerCtx); runErr != nil {
 				slog.ErrorContext(ctx, "b2b KV consumer exited with error", "error", runErr)
 			}
 		}()
 		defer func() {
+			consumerCancel()
 			b2bConsumer.Stop()
 			wgConsumer.Wait()
 		}()

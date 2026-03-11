@@ -38,7 +38,7 @@ func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data m
 		return true
 	}
 	if proj == nil {
-		slog.WarnContext(ctx, "b2b handler_product2: could not resolve project for Product2, skipping",
+		slog.InfoContext(ctx, "b2b handler_product2: could not resolve project for Product2, skipping (project may not be in v2)",
 			"sfid", sfid,
 			"project_sfid", projectSFID,
 		)

@@ -23,9 +23,6 @@ const (
 
 // NATS JetStream consumer configuration for the b2b KV consumer.
 const (
-	// B2BConsumerName is the durable consumer name for the salesforce_b2b KV consumer.
-	B2BConsumerName = "member-service-b2b-consumer"
-
 	// B2BConsumerStreamName is the JetStream stream name for the v1-objects KV bucket.
 	B2BConsumerStreamName = "KV_v1-objects"
 
@@ -39,18 +36,56 @@ const (
 	KVBucketNameB2BMapping = "project-membership-mapping"
 )
 
-// B2BConsumerFilterSubjects lists the exact per-table JetStream subjects to filter for
-// the b2b KV consumer. Using FilterSubjects (NATS 2.10+) with explicit per-table entries
-// is required because NATS wildcards (* and >) only match whole dot-delimited tokens, so
-// a pattern like "$KV.v1-objects.salesforce_b2b->" would never match 4-level subjects of
-// the form "$KV.v1-objects.salesforce_b2b-Account.{sfid}". Table names use the original
-// PostgreSQL mixed-case form to match the keys written by both the WAL listener and Meltano.
-var B2BConsumerFilterSubjects = []string{
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Account.*",
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Asset.*",
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Product2.*",
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Contact.*",
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Alternate_Email__c.*",
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Project__c.*",
-	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Project_Role__c.*",
+// B2BTableConsumerNames maps each salesforce_b2b table name to its durable JetStream
+// consumer name. One consumer per table ensures that a NAK/backoff on one table (e.g.
+// waiting for a missing FK dependency) does not delay processing of unrelated tables.
+// Table names use the original PostgreSQL mixed-case form to match the keys written by
+// both the WAL listener and Meltano.
+var B2BTableConsumerNames = map[string]string{
+	"salesforce_b2b-Project__c":       "member-service-b2b-project",
+	"salesforce_b2b-Account":          "member-service-b2b-account",
+	"salesforce_b2b-Product2":         "member-service-b2b-product2",
+	"salesforce_b2b-Asset":            "member-service-b2b-asset",
+	"salesforce_b2b-Contact":          "member-service-b2b-contact",
+	"salesforce_b2b-Alternate_Email__c": "member-service-b2b-alternate-email",
+	"salesforce_b2b-Project_Role__c":  "member-service-b2b-project-role",
+}
+
+// B2BTableFilterSubject returns the JetStream filter subject for a given table prefix.
+// NATS wildcards only match whole dot-delimited tokens, so each table requires an
+// explicit 4-level subject of the form "$KV.v1-objects.{table}.{sfid}".
+func B2BTableFilterSubject(tablePrefix string) string {
+	return "$KV." + V1ObjectsKVBucket + "." + tablePrefix + ".*"
+}
+
+// B2BReloadTableGroups defines the dependency-ordered groups used when reloading all
+// consumers. Each inner slice is a group of tables that may be
+// processed concurrently; groups must be processed sequentially so that FK dependencies
+// are satisfied before the tables that reference them.
+//
+// Dependency order:
+//   - Group 0: Project__c — referenced by Product2, Asset (via Projects__c)
+//   - Group 1: Account, Product2 — referenced by Asset; no FK between them
+//   - Group 2: Asset — referenced by Project_Role__c; depends on Account + Product2
+//   - Group 3: Contact, Alternate_Email__c — referenced by Project_Role__c; Contact has no
+//     FK on Asset; Alternate_Email__c depends on Contact being present first
+//   - Group 4: Project_Role__c — depends on Asset + Contact
+var B2BReloadTableGroups = [][]string{
+	{
+		"salesforce_b2b-Project__c",
+	},
+	{
+		"salesforce_b2b-Account",
+		"salesforce_b2b-Product2",
+	},
+	{
+		"salesforce_b2b-Asset",
+	},
+	{
+		"salesforce_b2b-Contact",
+		"salesforce_b2b-Alternate_Email__c",
+	},
+	{
+		"salesforce_b2b-Project_Role__c",
+	},
 }
