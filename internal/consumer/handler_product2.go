@@ -5,6 +5,7 @@ package consumer
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
@@ -77,7 +78,69 @@ func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data m
 		"project_uid", proj.uid,
 	)
 
+	// Fan out to re-index all project_members_b2b documents that reference this product,
+	// so that denormalized product name/family/type changes are propagated.
+	if retry := c.reindexAssetsForProduct2(ctx, sfid); retry {
+		return true
+	}
+
 	return false
+}
+
+// reindexAssetsForProduct2 re-indexes all project_members_b2b documents linked to the
+// given product2 SFID via the product2 → assets forward-lookup index. Soft-deleted or
+// missing (hard-deleted) assets are skipped with debug logging.
+func (c *Consumer) reindexAssetsForProduct2(ctx context.Context, product2SFID string) bool {
+	assetSFIDs, err := c.mapping.getAssetsForProduct2(ctx, product2SFID)
+	if err != nil {
+		slog.ErrorContext(ctx, "b2b handler_product2: failed to retrieve product2→asset mapping for fan-out",
+			"product2_sfid", product2SFID,
+			"error", err,
+		)
+		return false
+	}
+
+	if len(assetSFIDs) == 0 {
+		slog.DebugContext(ctx, "b2b handler_product2: no assets linked to product2, skipping fan-out",
+			"product2_sfid", product2SFID,
+		)
+		return false
+	}
+
+	slog.InfoContext(ctx, "b2b handler_product2: fanning out to linked assets",
+		"product2_sfid", product2SFID,
+		"asset_count", len(assetSFIDs),
+	)
+
+	shouldRetry := false
+
+	for _, assetSFID := range assetSFIDs {
+		assetData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-asset.%s", assetSFID))
+		if fetchErr != nil {
+			// Stale forward-index reference from a hard-deleted asset.
+			slog.DebugContext(ctx, "b2b handler_product2: stale asset reference in product2 index, skipping",
+				"product2_sfid", product2SFID,
+				"asset_sfid", assetSFID,
+				"error", fetchErr,
+			)
+			continue
+		}
+
+		// Skip soft-deleted assets.
+		if isSoftDeleted(assetData) {
+			slog.DebugContext(ctx, "b2b handler_product2: skipping soft-deleted asset during fan-out",
+				"product2_sfid", product2SFID,
+				"asset_sfid", assetSFID,
+			)
+			continue
+		}
+
+		if retry := c.handleAssetUpsert(ctx, assetSFID, assetData); retry {
+			shouldRetry = true
+		}
+	}
+
+	return shouldRetry
 }
 
 // handleProduct2Delete processes a salesforce_b2b-product2 delete event. It publishes
