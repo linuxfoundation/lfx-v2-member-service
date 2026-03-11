@@ -20,7 +20,7 @@ var corporateRecordTypeIDs = map[string]string{
 	"01241000001E1jAAAS": "Corporate",
 }
 
-// handleAssetUpsert processes a salesforce_b2b-asset upsert event. It resolves
+// handleAssetUpsert processes a salesforce_b2b-Asset upsert event. It resolves
 // the linked Account, Product2, and Project records, maintains the forward-lookup
 // mapping indexes, and publishes a project_members_b2b document to the indexer.
 // Returns true if the message should be retried.
@@ -196,7 +196,7 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 	return false
 }
 
-// handleAssetDelete processes a salesforce_b2b-asset delete event. It publishes a delete
+// handleAssetDelete processes a salesforce_b2b-Asset delete event. It publishes a delete
 // message to the indexer and returns true if the message should be retried.
 // Note: deletion cascades to key_contact records are not implemented (logged as warning).
 func (c *Consumer) handleAssetDelete(ctx context.Context, sfid string) bool {
@@ -287,7 +287,7 @@ func (c *Consumer) reindexAssetsForAccount(ctx context.Context, accountSFID stri
 	shouldRetry := false
 
 	for _, assetSFID := range assetSFIDs {
-		assetData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-asset.%s", assetSFID))
+		assetData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-Asset.%s", assetSFID))
 		if fetchErr != nil {
 			// Stale forward-index reference from a hard-deleted asset.
 			slog.DebugContext(ctx, "b2b handler_asset: stale asset reference in account index, skipping",
@@ -333,7 +333,7 @@ func (c *Consumer) reindexProjectRolesForAssets(ctx context.Context, contextSFID
 		}
 
 		for _, roleSFID := range roleSFIDs {
-			roleData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-project_role__c.%s", roleSFID))
+			roleData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-Project_Role__c.%s", roleSFID))
 			if fetchErr != nil {
 				// Stale forward-index reference from a hard-deleted project_role.
 				slog.DebugContext(ctx, "b2b handler_asset: stale project_role reference in asset index, skipping",

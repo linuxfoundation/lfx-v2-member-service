@@ -178,19 +178,19 @@ func (c *Consumer) handlePut(ctx context.Context, prefix, sfid string, data []by
 // Returns true if the message should be retried.
 func (c *Consumer) handleUpsert(ctx context.Context, prefix, sfid string, data map[string]any) bool {
 	switch prefix {
-	case "salesforce_b2b-product2":
+	case "salesforce_b2b-Product2":
 		return c.handleProduct2Upsert(ctx, sfid, data)
-	case "salesforce_b2b-asset":
+	case "salesforce_b2b-Asset":
 		return c.handleAssetUpsert(ctx, sfid, data)
-	case "salesforce_b2b-project_role__c":
+	case "salesforce_b2b-Project_Role__c":
 		return c.handleProjectRoleUpsert(ctx, sfid, data)
-	case "salesforce_b2b-account":
+	case "salesforce_b2b-Account":
 		return c.handleAccountUpdate(ctx, sfid, data)
-	case "salesforce_b2b-contact":
+	case "salesforce_b2b-Contact":
 		return c.handleContactUpdate(ctx, sfid, data)
-	case "salesforce_b2b-project__c":
+	case "salesforce_b2b-Project__c":
 		return c.handleProjectUpdate(ctx, sfid, data)
-	case "salesforce_b2b-alternate_email__c":
+	case "salesforce_b2b-Alternate_Email__c":
 		return c.handleAlternateEmailUpsert(ctx, sfid, data)
 	default:
 		slog.WarnContext(ctx, "b2b consumer received unknown key prefix on upsert, skipping",
@@ -207,17 +207,17 @@ func (c *Consumer) handleUpsert(ctx context.Context, prefix, sfid string, data m
 // Returns true if the message should be retried.
 func (c *Consumer) handleDelete(ctx context.Context, prefix, sfid string, oldData map[string]any) bool {
 	switch prefix {
-	case "salesforce_b2b-product2":
+	case "salesforce_b2b-Product2":
 		return c.handleProduct2Delete(ctx, sfid)
-	case "salesforce_b2b-asset":
+	case "salesforce_b2b-Asset":
 		return c.handleAssetDeleteWithCleanup(ctx, sfid, oldData)
-	case "salesforce_b2b-project_role__c":
+	case "salesforce_b2b-Project_Role__c":
 		return c.handleProjectRoleDeleteWithCleanup(ctx, sfid, oldData)
-	case "salesforce_b2b-alternate_email__c":
+	case "salesforce_b2b-Alternate_Email__c":
 		return c.handleAlternateEmailDelete(ctx, sfid, oldData)
-	case "salesforce_b2b-account",
-		"salesforce_b2b-contact",
-		"salesforce_b2b-project__c":
+	case "salesforce_b2b-Account",
+		"salesforce_b2b-Contact",
+		"salesforce_b2b-Project__c":
 		// Deletions of reference records (account, contact, project) are not cascaded
 		// to the indexer — dependent documents remain until their own delete event
 		// arrives. Log at debug level to avoid spurious warnings.
@@ -321,7 +321,7 @@ func (c *Consumer) triggerContactProjectRoleReindex(ctx context.Context, contact
 	}
 
 	for _, roleSFID := range roleSFIDs {
-		roleData, fetchErr := c.fetchKVRecord(ctx, "salesforce_b2b-project_role__c."+roleSFID)
+		roleData, fetchErr := c.fetchKVRecord(ctx, "salesforce_b2b-Project_Role__c."+roleSFID)
 		if fetchErr != nil {
 			slog.DebugContext(ctx, "b2b handler: stale project_role reference in contact index, skipping",
 				"contact_sfid", contactSFID,

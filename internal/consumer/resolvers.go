@@ -35,7 +35,7 @@ func (c *Consumer) resolveProject(ctx context.Context, projectSFID string) (*pro
 	}
 
 	// Fetch the Project__c record from the v1-objects KV bucket for name/slug.
-	kvKey := fmt.Sprintf("salesforce_b2b-project__c.%s", projectSFID)
+	kvKey := fmt.Sprintf("salesforce_b2b-Project__c.%s", projectSFID)
 	projData, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -85,7 +85,7 @@ func (c *Consumer) resolveProject(ctx context.Context, projectSFID string) (*pro
 	return &info, false
 }
 
-// resolveAccount fetches and decodes the salesforce_b2b-account record for the given
+// resolveAccount fetches and decodes the salesforce_b2b-Account record for the given
 // account SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the
 // record is not found, and (nil, true) on transient errors.
 func (c *Consumer) resolveAccount(ctx context.Context, accountSFID string) (*SFAccount, bool) {
@@ -93,7 +93,7 @@ func (c *Consumer) resolveAccount(ctx context.Context, accountSFID string) (*SFA
 		return nil, false
 	}
 
-	kvKey := fmt.Sprintf("salesforce_b2b-account.%s", accountSFID)
+	kvKey := fmt.Sprintf("salesforce_b2b-Account.%s", accountSFID)
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -121,7 +121,7 @@ func (c *Consumer) resolveAccount(ctx context.Context, accountSFID string) (*SFA
 	return &account, false
 }
 
-// resolveProduct2 fetches and decodes the salesforce_b2b-product2 record for the given
+// resolveProduct2 fetches and decodes the salesforce_b2b-Product2 record for the given
 // SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the record is not
 // found, and (nil, true) on transient errors.
 func (c *Consumer) resolveProduct2(ctx context.Context, product2SFID string) (*SFProduct2, bool) {
@@ -129,7 +129,7 @@ func (c *Consumer) resolveProduct2(ctx context.Context, product2SFID string) (*S
 		return nil, false
 	}
 
-	kvKey := fmt.Sprintf("salesforce_b2b-product2.%s", product2SFID)
+	kvKey := fmt.Sprintf("salesforce_b2b-Product2.%s", product2SFID)
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -157,7 +157,7 @@ func (c *Consumer) resolveProduct2(ctx context.Context, product2SFID string) (*S
 	return &product, false
 }
 
-// resolveAsset fetches and decodes the salesforce_b2b-asset record for the given
+// resolveAsset fetches and decodes the salesforce_b2b-Asset record for the given
 // SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the record is not
 // found, and (nil, true) on transient errors.
 func (c *Consumer) resolveAsset(ctx context.Context, assetSFID string) (*SFAsset, bool) {
@@ -165,7 +165,7 @@ func (c *Consumer) resolveAsset(ctx context.Context, assetSFID string) (*SFAsset
 		return nil, false
 	}
 
-	kvKey := fmt.Sprintf("salesforce_b2b-asset.%s", assetSFID)
+	kvKey := fmt.Sprintf("salesforce_b2b-Asset.%s", assetSFID)
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -193,7 +193,7 @@ func (c *Consumer) resolveAsset(ctx context.Context, assetSFID string) (*SFAsset
 	return &asset, false
 }
 
-// resolveContact fetches and decodes the salesforce_b2b-contact record for the given
+// resolveContact fetches and decodes the salesforce_b2b-Contact record for the given
 // SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the record is not
 // found, and (nil, true) on transient errors.
 func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFContact, bool) {
@@ -201,7 +201,7 @@ func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFC
 		return nil, false
 	}
 
-	kvKey := fmt.Sprintf("salesforce_b2b-contact.%s", contactSFID)
+	kvKey := fmt.Sprintf("salesforce_b2b-Contact.%s", contactSFID)
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -236,7 +236,7 @@ func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFC
 // The lookup strategy mirrors the v1-sync-helper logic:
 //  1. Retrieve the list of alternate_email SFIDs from the contact.emails index
 //     (populated when alternate_email__c upserts are processed).
-//  2. For each candidate, fetch the salesforce_b2b-alternate_email__c record and check
+//  2. For each candidate, fetch the salesforce_b2b-Alternate_Email__c record and check
 //     whether the record is active (Active__c == true), not soft-deleted (both SDC and
 //     SFDC deleted flags), and whether Primary_Email__c is true.
 //  3. If no primary email is found, fall back to the first active non-deleted email.
@@ -260,7 +260,7 @@ func (c *Consumer) resolvePrimaryEmail(ctx context.Context, contactSFID string) 
 	// Single pass: look for primary email while tracking first valid fallback.
 	var fallbackEmail string
 	for _, emailSFID := range emailSFIDs {
-		kvKey := fmt.Sprintf("salesforce_b2b-alternate_email__c.%s", emailSFID)
+		kvKey := fmt.Sprintf("salesforce_b2b-Alternate_Email__c.%s", emailSFID)
 		data, fetchErr := c.fetchKVRecord(ctx, kvKey)
 		if fetchErr != nil {
 			slog.DebugContext(ctx, "b2b resolvers: failed to fetch alternate email record",
@@ -327,7 +327,7 @@ func (c *Consumer) resolvePrimaryEmail(ctx context.Context, contactSFID string) 
 }
 
 // fetchKVRecord retrieves and auto-decodes (JSON or msgpack) a record from the v1-objects
-// KV bucket by key. The raw KV key (e.g. "salesforce_b2b-asset.{sfid}") is used directly.
+// KV bucket by key. The raw KV key (e.g. "salesforce_b2b-Asset.{sfid}") is used directly.
 // Returns a map[string]any suitable for decodeTyped, or an error.
 func (c *Consumer) fetchKVRecord(ctx context.Context, key string) (map[string]any, error) {
 	entry, err := c.v1ObjectsKV.Get(ctx, key)

@@ -29,9 +29,6 @@ const (
 	// B2BConsumerStreamName is the JetStream stream name for the v1-objects KV bucket.
 	B2BConsumerStreamName = "KV_v1-objects"
 
-	// B2BConsumerFilterSubject is the subject filter for salesforce_b2b keys in the v1-objects bucket.
-	B2BConsumerFilterSubject = "$KV.v1-objects.salesforce_b2b->"
-
 	// V1ObjectsKVBucket is the name of the v1-objects NATS KV bucket consumed by the b2b consumer.
 	V1ObjectsKVBucket = "v1-objects"
 
@@ -41,3 +38,19 @@ const (
 	// KVBucketNameB2BMapping is the name of the KV bucket for forward-lookup indexes owned by the member service.
 	KVBucketNameB2BMapping = "project-membership-mapping"
 )
+
+// B2BConsumerFilterSubjects lists the exact per-table JetStream subjects to filter for
+// the b2b KV consumer. Using FilterSubjects (NATS 2.10+) with explicit per-table entries
+// is required because NATS wildcards (* and >) only match whole dot-delimited tokens, so
+// a pattern like "$KV.v1-objects.salesforce_b2b->" would never match 4-level subjects of
+// the form "$KV.v1-objects.salesforce_b2b-Account.{sfid}". Table names use the original
+// PostgreSQL mixed-case form to match the keys written by both the WAL listener and Meltano.
+var B2BConsumerFilterSubjects = []string{
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Account.*",
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Asset.*",
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Product2.*",
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Contact.*",
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Alternate_Email__c.*",
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Project__c.*",
+	"$KV." + V1ObjectsKVBucket + ".salesforce_b2b-Project_Role__c.*",
+}

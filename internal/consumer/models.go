@@ -213,7 +213,7 @@ type DeleteRequest struct {
 
 // projectInfo caches resolved project information for a given Salesforce project SFID.
 // uid is the v2 project UID (resolved via NATS RPC to v1-sync-helper). name and slug
-// are the v1 B2B values from salesforce_b2b-project__c, which are expected to align
+// are the v1 B2B values from salesforce_b2b-Project__c, which are expected to align
 // with v2 project data and are safe to denormalize in v2 context.
 type projectInfo struct {
 	uid  string

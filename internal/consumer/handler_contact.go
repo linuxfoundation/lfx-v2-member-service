@@ -35,7 +35,7 @@ func (c *Consumer) handleContactUpdate(ctx context.Context, sfid string, _ map[s
 	shouldRetry := false
 
 	for _, roleSFID := range roleSFIDs {
-		roleData, fetchErr := c.fetchKVRecord(ctx, "salesforce_b2b-project_role__c."+roleSFID)
+		roleData, fetchErr := c.fetchKVRecord(ctx, "salesforce_b2b-Project_Role__c."+roleSFID)
 		if fetchErr != nil {
 			// Stale forward-index reference from a hard deletion — the project_role
 			// record no longer exists in KV. This is expected and only needs debug

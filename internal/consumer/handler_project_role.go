@@ -10,7 +10,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 )
 
-// handleProjectRoleUpsert processes a salesforce_b2b-project_role__c upsert event.
+// handleProjectRoleUpsert processes a salesforce_b2b-Project_Role__c upsert event.
 // It resolves the linked Asset (for membership/product/project context), Contact (for
 // personal fields), and primary Alternate_Email__c (for email), maintains the forward-lookup
 // mapping indexes, and publishes a key_contact document to the indexer.
@@ -170,7 +170,7 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 	return false
 }
 
-// handleProjectRoleDeleteWithCleanup processes a salesforce_b2b-project_role__c delete event.
+// handleProjectRoleDeleteWithCleanup processes a salesforce_b2b-Project_Role__c delete event.
 // It publishes a delete message to the indexer, and when old data is available (soft deletions)
 // it also cleans up the contact → project-roles and asset → project-roles forward-lookup indexes.
 // Returns true if the message should be retried.

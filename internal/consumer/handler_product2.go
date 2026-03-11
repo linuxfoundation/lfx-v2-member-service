@@ -11,7 +11,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 )
 
-// handleProduct2Upsert processes a salesforce_b2b-product2 upsert event. It resolves
+// handleProduct2Upsert processes a salesforce_b2b-Product2 upsert event. It resolves
 // the associated v2 project UID, publishes a project_products_b2b document to the
 // indexer, and returns true if the message should be retried.
 func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data map[string]any) bool {
@@ -115,7 +115,7 @@ func (c *Consumer) reindexAssetsForProduct2(ctx context.Context, product2SFID st
 	shouldRetry := false
 
 	for _, assetSFID := range assetSFIDs {
-		assetData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-asset.%s", assetSFID))
+		assetData, fetchErr := c.fetchKVRecord(ctx, fmt.Sprintf("salesforce_b2b-Asset.%s", assetSFID))
 		if fetchErr != nil {
 			// Stale forward-index reference from a hard-deleted asset.
 			slog.DebugContext(ctx, "b2b handler_product2: stale asset reference in product2 index, skipping",
@@ -143,7 +143,7 @@ func (c *Consumer) reindexAssetsForProduct2(ctx context.Context, product2SFID st
 	return shouldRetry
 }
 
-// handleProduct2Delete processes a salesforce_b2b-product2 delete event. It publishes
+// handleProduct2Delete processes a salesforce_b2b-Product2 delete event. It publishes
 // a delete message to the indexer and returns true if the message should be retried.
 func (c *Consumer) handleProduct2Delete(ctx context.Context, sfid string) bool {
 	productUID := generateDeterministicUID(sfid)

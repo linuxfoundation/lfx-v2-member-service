@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// Consumer subscribes to the v1-objects KV bucket (filtered to salesforce_b2b-* keys)
+// Consumer subscribes to the v1-objects KV bucket (filtered to salesforce_b2b table keys)
 // using a durable JetStream pull consumer and dispatches each entry to the appropriate
 // type handler. It publishes denormalized indexer messages for project_products_b2b,
 // project_members_b2b, and key_contact resource types.
@@ -118,7 +118,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		Durable:       constants.B2BConsumerName,
 		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubject: constants.B2BConsumerFilterSubject,
+		FilterSubjects: constants.B2BConsumerFilterSubjects,
 		MaxDeliver:    3,
 		AckWait:       30 * time.Second,
 		MaxAckPending: 1000,
@@ -151,7 +151,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 	slog.InfoContext(ctx, "b2b consumer: started",
 		"consumer", constants.B2BConsumerName,
 		"stream", constants.B2BConsumerStreamName,
-		"filter", constants.B2BConsumerFilterSubject,
+		"filters", constants.B2BConsumerFilterSubjects,
 	)
 
 	// Block until the context is cancelled.
