@@ -154,7 +154,6 @@ type IndexedProjectMemberB2B struct {
 	Status          string    `json:"status,omitempty"`
 	Year            string    `json:"year,omitempty"`
 	Tier            string    `json:"tier,omitempty"`
-	MembershipType  string    `json:"membership_type,omitempty"`
 	AnnualFullPrice float64   `json:"annual_full_price,omitempty"`
 	AgreementDate   string    `json:"agreement_date,omitempty"`
 	PurchaseDate    string    `json:"purchase_date,omitempty"`

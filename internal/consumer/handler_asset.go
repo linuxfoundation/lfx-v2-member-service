@@ -12,6 +12,14 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 )
 
+// corporateRecordTypeIDs maps Salesforce RecordTypeId values to known membership
+// categories. Only assets with a RecordTypeId present in this map are indexed.
+// Non-corporate record types (individual, supporter, non-membership products)
+// are expected to become distinct v2 resource types and are filtered out here.
+var corporateRecordTypeIDs = map[string]string{
+	"01241000001E1jAAAS": "Corporate",
+}
+
 // handleAssetUpsert processes a salesforce_b2b-asset upsert event. It resolves
 // the linked Account, Product2, and Project records, maintains the forward-lookup
 // mapping indexes, and publishes a project_members_b2b document to the indexer.
@@ -31,6 +39,15 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 		slog.DebugContext(ctx, "b2b handler_asset: Asset product family is not Membership, skipping indexing",
 			"sfid", sfid,
 			"product_family", asset.ProductFamily,
+		)
+		return false
+	}
+
+	// Only index assets with a recognized corporate RecordTypeId.
+	if _, ok := corporateRecordTypeIDs[asset.RecordTypeID]; !ok {
+		slog.DebugContext(ctx, "b2b handler_asset: Asset RecordTypeId is not a corporate membership type, skipping indexing",
+			"sfid", sfid,
+			"record_type_id", asset.RecordTypeID,
 		)
 		return false
 	}
@@ -118,7 +135,7 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 		Status:          asset.Status,
 		Year:            asset.Year,
 		Tier:            asset.Tier,
-		MembershipType:  asset.RecordTypeID,
+
 		AnnualFullPrice: asset.AnnualFullPrice,
 		AgreementDate:   asset.AgreementDate,
 		PurchaseDate:    coalesceDate(asset.PurchaseDate, asset.InstallDate, asset.CreatedDate),
