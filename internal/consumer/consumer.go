@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -56,6 +57,12 @@ type Consumer struct {
 	// keyed by Salesforce project SFID, with a 10-minute TTL.
 	projectCache *projectCache
 
+	// pgFallback provides optional PostgreSQL point-lookup queries for dependency
+	// records (Account, Product2, Contact, Alternate_Email__c) that may not yet be
+	// present in the v1-objects KV bucket during Meltano incremental backfills. When
+	// nil, the resolver returns "not found" and the message is ACKed without indexing.
+	pgFallback pgFallback
+
 	// lookupSubject is the NATS RPC subject used to translate v1 project SFIDs to v2
 	// project UIDs via the v1-sync-helper lookup handler.
 	lookupSubject string
@@ -75,6 +82,12 @@ type Config struct {
 	// LookupSubject is the NATS RPC subject for v1→v2 project UID lookups.
 	// Defaults to constants.V1MappingLookupSubject when empty.
 	LookupSubject string
+
+	// DB is an optional PostgreSQL connection used as a fallback for dependency
+	// lookups when a record is not yet present in the v1-objects KV bucket. When
+	// nil, missing KV records result in skipped (ACKed) messages. When set, the
+	// consumer falls back to point-lookup queries against the salesforce_b2b schema.
+	DB *sqlx.DB
 }
 
 // New creates and initialises a Consumer, opening all required KV bucket handles.
@@ -120,6 +133,14 @@ func New(ctx context.Context, cfg Config) (*Consumer, error) {
 		indexer:       newIndexer(cfg.NATSConn),
 		projectCache:  newProjectCache(),
 		lookupSubject: lookupSubject,
+	}
+
+	// Wire up the optional PostgreSQL fallback for dependency lookups.
+	if cfg.DB != nil {
+		c.pgFallback = newPGFallback(cfg.DB)
+		slog.InfoContext(ctx, "b2b consumer: PostgreSQL fallback enabled for dependency resolvers")
+	} else {
+		slog.InfoContext(ctx, "b2b consumer: PostgreSQL fallback not configured — missing KV records will be skipped")
 	}
 
 	return c, nil

@@ -86,8 +86,10 @@ func (c *Consumer) resolveProject(ctx context.Context, projectSFID string) (*pro
 }
 
 // resolveAccount fetches and decodes the salesforce_b2b-Account record for the given
-// account SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the
-// record is not found, and (nil, true) on transient errors.
+// account SFID from the v1-objects KV bucket. When the record is not found in KV and
+// a PostgreSQL fallback is configured, it falls back to a direct point-lookup query.
+// Returns nil (non-retryable) when the record is not found anywhere, and (nil, true)
+// on transient errors.
 func (c *Consumer) resolveAccount(ctx context.Context, accountSFID string) (*SFAccount, bool) {
 	if accountSFID == "" {
 		return nil, false
@@ -97,6 +99,23 @@ func (c *Consumer) resolveAccount(ctx context.Context, accountSFID string) (*SFA
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			// KV miss — try PostgreSQL fallback before giving up.
+			if c.pgFallback != nil {
+				account, pgErr := c.pgFallback.FetchAccount(ctx, accountSFID)
+				if pgErr != nil {
+					slog.ErrorContext(ctx, "b2b resolvers: pg fallback failed for account",
+						"account_sfid", accountSFID,
+						"error", pgErr,
+					)
+					return nil, true
+				}
+				if account != nil {
+					slog.InfoContext(ctx, "b2b resolvers: resolved account via pg fallback (not yet in KV)",
+						"account_sfid", accountSFID,
+					)
+					return account, false
+				}
+			}
 			slog.WarnContext(ctx, "b2b resolvers: account record not found in v1-objects KV",
 				"account_sfid", accountSFID,
 			)
@@ -122,8 +141,9 @@ func (c *Consumer) resolveAccount(ctx context.Context, accountSFID string) (*SFA
 }
 
 // resolveProduct2 fetches and decodes the salesforce_b2b-Product2 record for the given
-// SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the record is not
-// found, and (nil, true) on transient errors.
+// SFID from the v1-objects KV bucket. When the record is not found in KV and a PostgreSQL
+// fallback is configured, it falls back to a direct point-lookup query. Returns nil
+// (non-retryable) when the record is not found anywhere, and (nil, true) on transient errors.
 func (c *Consumer) resolveProduct2(ctx context.Context, product2SFID string) (*SFProduct2, bool) {
 	if product2SFID == "" {
 		return nil, false
@@ -133,6 +153,23 @@ func (c *Consumer) resolveProduct2(ctx context.Context, product2SFID string) (*S
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			// KV miss — try PostgreSQL fallback before giving up.
+			if c.pgFallback != nil {
+				product, pgErr := c.pgFallback.FetchProduct2(ctx, product2SFID)
+				if pgErr != nil {
+					slog.ErrorContext(ctx, "b2b resolvers: pg fallback failed for product2",
+						"product2_sfid", product2SFID,
+						"error", pgErr,
+					)
+					return nil, true
+				}
+				if product != nil {
+					slog.InfoContext(ctx, "b2b resolvers: resolved product2 via pg fallback (not yet in KV)",
+						"product2_sfid", product2SFID,
+					)
+					return product, false
+				}
+			}
 			slog.WarnContext(ctx, "b2b resolvers: product2 record not found in v1-objects KV",
 				"product2_sfid", product2SFID,
 			)
@@ -157,8 +194,9 @@ func (c *Consumer) resolveProduct2(ctx context.Context, product2SFID string) (*S
 	return &product, false
 }
 
-// resolveAsset fetches and decodes the salesforce_b2b-Asset record for the given
-// SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the record is not
+// resolveAsset fetches and decodes the salesforce_b2b-Asset record for the given SFID
+// from the v1-objects KV bucket. No PostgreSQL fallback is used here because Asset is a
+// trigger record (not a dependency). Returns nil (non-retryable) when the record is not
 // found, and (nil, true) on transient errors.
 func (c *Consumer) resolveAsset(ctx context.Context, assetSFID string) (*SFAsset, bool) {
 	if assetSFID == "" {
@@ -194,8 +232,9 @@ func (c *Consumer) resolveAsset(ctx context.Context, assetSFID string) (*SFAsset
 }
 
 // resolveContact fetches and decodes the salesforce_b2b-Contact record for the given
-// SFID from the v1-objects KV bucket. Returns nil (non-retryable) when the record is not
-// found, and (nil, true) on transient errors.
+// SFID from the v1-objects KV bucket. When the record is not found in KV and a PostgreSQL
+// fallback is configured, it falls back to a direct point-lookup query. Returns nil
+// (non-retryable) when the record is not found anywhere, and (nil, true) on transient errors.
 func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFContact, bool) {
 	if contactSFID == "" {
 		return nil, false
@@ -205,6 +244,23 @@ func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFC
 	data, err := c.fetchKVRecord(ctx, kvKey)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			// KV miss — try PostgreSQL fallback before giving up.
+			if c.pgFallback != nil {
+				contact, pgErr := c.pgFallback.FetchContact(ctx, contactSFID)
+				if pgErr != nil {
+					slog.ErrorContext(ctx, "b2b resolvers: pg fallback failed for contact",
+						"contact_sfid", contactSFID,
+						"error", pgErr,
+					)
+					return nil, true
+				}
+				if contact != nil {
+					slog.InfoContext(ctx, "b2b resolvers: resolved contact via pg fallback (not yet in KV)",
+						"contact_sfid", contactSFID,
+					)
+					return contact, false
+				}
+			}
 			slog.WarnContext(ctx, "b2b resolvers: contact record not found in v1-objects KV",
 				"contact_sfid", contactSFID,
 			)
@@ -231,7 +287,9 @@ func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFC
 
 // resolvePrimaryEmail finds the primary email address for the given contact SFID by
 // consulting the contact → emails forward-lookup index and then scanning the
-// alternate_email__c entries stored in the v1-objects KV bucket.
+// alternate_email__c entries stored in the v1-objects KV bucket. When the forward-lookup
+// index is empty and a PostgreSQL fallback is configured, it falls back to a direct
+// query against Alternate_Email__c.
 //
 // The lookup strategy mirrors the v1-sync-helper logic:
 //  1. Retrieve the list of alternate_email SFIDs from the contact.emails index
@@ -240,6 +298,8 @@ func (c *Consumer) resolveContact(ctx context.Context, contactSFID string) (*SFC
 //     whether the record is active (Active__c == true), not soft-deleted (both SDC and
 //     SFDC deleted flags), and whether Primary_Email__c is true.
 //  3. If no primary email is found, fall back to the first active non-deleted email.
+//  4. If the forward-lookup index has no entries and a PG fallback is available, query
+//     PostgreSQL directly.
 //
 // Returns an empty string when no email is found or on any error (non-fatal).
 func (c *Consumer) resolvePrimaryEmail(ctx context.Context, contactSFID string) string {
@@ -250,10 +310,26 @@ func (c *Consumer) resolvePrimaryEmail(ctx context.Context, contactSFID string) 
 			"contact_sfid", contactSFID,
 			"error", err,
 		)
-		return ""
+		// Fall through to PG fallback below.
+		emailSFIDs = nil
 	}
 
 	if len(emailSFIDs) == 0 {
+		// No KV email index entries — try PostgreSQL fallback.
+		if c.pgFallback != nil {
+			email, pgErr := c.pgFallback.FetchPrimaryEmail(ctx, contactSFID)
+			if pgErr != nil {
+				slog.WarnContext(ctx, "b2b resolvers: pg fallback failed for primary email",
+					"contact_sfid", contactSFID,
+					"error", pgErr,
+				)
+			} else if email != "" {
+				slog.InfoContext(ctx, "b2b resolvers: resolved primary email via pg fallback (not yet in KV)",
+					"contact_sfid", contactSFID,
+				)
+				return email
+			}
+		}
 		return ""
 	}
 

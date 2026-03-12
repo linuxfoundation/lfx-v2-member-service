@@ -18,6 +18,7 @@ import (
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/consumer"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/postgres"
 
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 
@@ -104,9 +105,26 @@ func main() {
 	// project_members_b2b, and key_contact resource types.
 	natsClient := service.NATSClientInstance()
 	if natsClient != nil {
-		b2bConsumer, consumerErr := consumer.New(ctx, consumer.Config{
+		consumerCfg := consumer.Config{
 			NATSConn: natsClient.Conn(),
-		})
+		}
+
+		// Wire up the optional PostgreSQL fallback for dependency resolvers.
+		// When RDSDB is set, the consumer falls back to point-lookup queries
+		// against salesforce_b2b when a dependency record is not yet in the
+		// v1-objects KV bucket (expected during multi-hour Meltano backfills).
+		if rdsDB := os.Getenv("RDSDB"); rdsDB != "" {
+			db, dbErr := postgres.NewClient(rdsDB)
+			if dbErr != nil {
+				slog.ErrorContext(ctx, "failed to connect to PostgreSQL for b2b consumer fallback", "error", dbErr)
+				os.Exit(1)
+			}
+			defer db.Close()
+			consumerCfg.DB = db
+			slog.InfoContext(ctx, "PostgreSQL fallback configured for b2b consumer dependency resolvers")
+		}
+
+		b2bConsumer, consumerErr := consumer.New(ctx, consumerCfg)
 		if consumerErr != nil {
 			slog.ErrorContext(ctx, "failed to initialize b2b KV consumer", "error", consumerErr)
 			os.Exit(1)
