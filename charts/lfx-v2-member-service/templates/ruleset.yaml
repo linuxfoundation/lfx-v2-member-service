@@ -47,8 +47,8 @@ spec:
         - authorizer: openfga_check
           config:
             values:
-              relation: member
-              object: "team:{{ .Values.sync.fgaAuditorTeamID }}"
+              relation: auditor
+              object: "project:{{ .Values.openfga.lfProjectUID }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests

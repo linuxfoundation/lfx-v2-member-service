@@ -190,12 +190,9 @@ openfga:
   # Note: If it is disabled, then the member service will allow all requests
   # (Disabling OpenFGA should only be used for local development).
   enabled: true
-
-# sync is the configuration for the membership sync job
-sync:
-  # fgaAuditorTeamID is the OpenFGA team ID whose members are granted auditor access
-  # on every membership object (maps to team:<id>#member in OpenFGA).
-  fgaAuditorTeamID: "membership-auditors"
+  # lfProjectUID is the v2 UID of the Linux Foundation project. Users must have the
+  # "auditor" relation on this project in OpenFGA to access the GET /members list endpoint.
+  lfProjectUID: ""
 
 # heimdall is the configuration for the heimdall middleware
 heimdall:

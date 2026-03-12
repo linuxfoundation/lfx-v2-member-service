@@ -6,7 +6,35 @@ package service
 import (
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/uid"
 )
+
+// emptyString is a convenience pointer to an empty string, used for ID fields that
+// must be redacted from API responses (e.g. Contact.ID has no v2 identity equivalent).
+var emptyString = func() *string { s := ""; return &s }()
+
+// memberUID derives the v2 member UID from a raw Salesforce Account SFID stored in the
+// model. The stored Account.ID is a raw SFID; callers must not pass a pre-converted UID.
+func memberUID(accountSFID string) *string {
+	// An empty SFID has no v2 identity; return empty rather than a synthetic UUID.
+	if accountSFID == "" {
+		return emptyString
+	}
+	s := uid.ForMember(accountSFID)
+	return &s
+}
+
+// membershipTierUID derives the v2 membership tier UID from a raw Salesforce Product2
+// SFID stored in the model. The stored Product.ID is a raw SFID; callers must not pass
+// a pre-converted UID.
+func membershipTierUID(product2SFID string) *string {
+	// An empty SFID has no v2 identity; return empty rather than a synthetic UUID.
+	if product2SFID == "" {
+		return emptyString
+	}
+	s := uid.ForMembershipTier(product2SFID)
+	return &s
+}
 
 // convertMemberToResponse converts a domain Member to a Goa response
 func convertMemberToResponse(m *model.Member) *membershipservice.MemberResponse {
@@ -56,11 +84,15 @@ func convertMemberToResponse(m *model.Member) *membershipservice.MemberResponse 
 				item.EndDate = &ms.EndDate
 			}
 			item.Product = &membershipservice.ProductType{
-				ID:   &ms.Product.ID,
+				// Product.ID: derive v2 membership tier UID from the raw Product2 SFID
+				// stored in the model. The stored value is always a raw SFID at this point.
+				ID:   membershipTierUID(ms.Product.ID),
 				Name: &ms.Product.Name,
 			}
 			item.Project = &membershipservice.ProjectType{
-				ID:   &ms.Project.ID,
+				// Project.ID stores a raw Salesforce SFID internally for KV lookup key
+				// construction and must not be exposed in the API response.
+				ID:   emptyString,
 				Name: &ms.Project.Name,
 			}
 			items = append(items, item)
@@ -126,9 +158,9 @@ func convertMembershipToResponse(m *model.Membership) *membershipservice.Members
 		result.EndDate = &m.EndDate
 	}
 
-	// Account
+	// Account — derive v2 member UID from the raw Account SFID stored in the model.
 	result.Account = &membershipservice.AccountType{
-		ID:   &m.Account.ID,
+		ID:   memberUID(m.Account.ID),
 		Name: &m.Account.Name,
 	}
 	if m.Account.LogoURL != "" {
@@ -138,9 +170,10 @@ func convertMembershipToResponse(m *model.Membership) *membershipservice.Members
 		result.Account.Website = &m.Account.Website
 	}
 
-	// Contact
+	// Contact — ID is intentionally empty: there is no v2 User identity available at
+	// this stage. Identity is conveyed by name and email only.
 	result.Contact = &membershipservice.ContactType{
-		ID:        &m.Contact.ID,
+		ID:        emptyString,
 		FirstName: &m.Contact.FirstName,
 		LastName:  &m.Contact.LastName,
 		Email:     &m.Contact.Email,
@@ -149,9 +182,10 @@ func convertMembershipToResponse(m *model.Membership) *membershipservice.Members
 		result.Contact.Title = &m.Contact.Title
 	}
 
-	// Product
+	// Product — derive v2 membership tier UID from the raw Product2 SFID stored in the
+	// model. The stored value is always a raw SFID at this point.
 	result.Product = &membershipservice.ProductType{
-		ID:     &m.Product.ID,
+		ID:     membershipTierUID(m.Product.ID),
 		Name:   &m.Product.Name,
 		Family: &m.Product.Family,
 	}
@@ -159,9 +193,10 @@ func convertMembershipToResponse(m *model.Membership) *membershipservice.Members
 		result.Product.Type = &m.Product.Type
 	}
 
-	// Project
+	// Project — ID stores a raw Salesforce SFID internally for KV lookup key construction
+	// and must not be exposed in the API response.
 	result.Project = &membershipservice.ProjectType{
-		ID:   &m.Project.ID,
+		ID:   emptyString,
 		Name: &m.Project.Name,
 	}
 	if m.Project.LogoURL != "" {
@@ -202,9 +237,10 @@ func convertKeyContactToResponse(c *model.KeyContact) *membershipservice.KeyCont
 		PrimaryContact: &c.PrimaryContact,
 	}
 
-	// Contact
+	// Contact — ID is intentionally empty: there is no v2 User identity available at
+	// this stage. Identity is conveyed by name and email only.
 	result.Contact = &membershipservice.ContactType{
-		ID:        &c.Contact.ID,
+		ID:        emptyString,
 		FirstName: &c.Contact.FirstName,
 		LastName:  &c.Contact.LastName,
 		Email:     &c.Contact.Email,
@@ -213,18 +249,19 @@ func convertKeyContactToResponse(c *model.KeyContact) *membershipservice.KeyCont
 		result.Contact.Title = &c.Contact.Title
 	}
 
-	// Project
+	// Project — ID stores a raw Salesforce SFID internally for KV lookup key construction
+	// and must not be exposed in the API response.
 	result.Project = &membershipservice.ProjectType{
-		ID:   &c.Project.ID,
+		ID:   emptyString,
 		Name: &c.Project.Name,
 	}
 	if c.Project.LogoURL != "" {
 		result.Project.LogoURL = &c.Project.LogoURL
 	}
 
-	// Organization
+	// Organization — derive v2 member UID from the raw Account SFID stored in the model.
 	result.Organization = &membershipservice.OrganizationType{
-		ID:   &c.Organization.ID,
+		ID:   memberUID(c.Organization.ID),
 		Name: &c.Organization.Name,
 	}
 	if c.Organization.LogoURL != "" {

@@ -17,16 +17,24 @@ import (
 
 // NATSClient wraps the NATS connection and provides KV store access
 type NATSClient struct {
-	conn    *nats.Conn
-	config  Config
-	kvStore map[string]jetstream.KeyValue
-	timeout time.Duration
+	conn        *nats.Conn
+	config      Config
+	kvStore     map[string]jetstream.KeyValue
+	v1ObjectsKV jetstream.KeyValue
+	timeout     time.Duration
 }
 
 // Conn returns the underlying *nats.Conn for callers that need direct NATS access,
 // such as the b2b KV consumer which publishes indexer messages over core NATS.
 func (c *NATSClient) Conn() *nats.Conn {
 	return c.conn
+}
+
+// V1ObjectsKV returns the handle to the v1-objects KV bucket, used by the storage
+// layer to resolve v2 project UIDs to B2B Salesforce project SFIDs for inbound
+// filter translation. Returns nil if the bucket was not opened successfully.
+func (c *NATSClient) V1ObjectsKV() jetstream.KeyValue {
+	return c.v1ObjectsKV
 }
 
 // Close gracefully closes the NATS connection
@@ -142,6 +150,30 @@ func NewClient(ctx context.Context, config Config) (*NATSClient, error) {
 		}
 		slog.InfoContext(ctx, "NATS key-value store initialized",
 			"bucket", bucketName,
+		)
+	}
+
+	// Open the v1-objects KV bucket for read-only access. This is used by the storage
+	// layer to translate v2 project UIDs to B2B Salesforce SFIDs for inbound filter
+	// resolution. A failure here is non-fatal — the storage layer degrades gracefully
+	// by treating the project_id filter value as a raw SFID when the bucket is absent.
+	js, jsErr := jetstream.New(conn)
+	if jsErr == nil {
+		v1KV, kvErr := js.KeyValue(ctx, constants.V1ObjectsKVBucket)
+		if kvErr != nil {
+			slog.WarnContext(ctx, "v1-objects KV bucket not available; project_id UID translation will be skipped",
+				"bucket", constants.V1ObjectsKVBucket,
+				"error", kvErr,
+			)
+		} else {
+			client.v1ObjectsKV = v1KV
+			slog.InfoContext(ctx, "v1-objects KV bucket opened for project UID resolution",
+				"bucket", constants.V1ObjectsKVBucket,
+			)
+		}
+	} else {
+		slog.WarnContext(ctx, "failed to create JetStream context for v1-objects KV; project_id UID translation will be skipped",
+			"error", jsErr,
 		)
 	}
 
