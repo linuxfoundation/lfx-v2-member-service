@@ -16,6 +16,10 @@ var emptyString = func() *string { s := ""; return &s }()
 // memberUID derives the v2 member UID from a raw Salesforce Account SFID stored in the
 // model. The stored Account.ID is a raw SFID; callers must not pass a pre-converted UID.
 func memberUID(accountSFID string) *string {
+	// An empty SFID has no v2 identity; return empty rather than a synthetic UUID.
+	if accountSFID == "" {
+		return emptyString
+	}
 	s := uid.ForMember(accountSFID)
 	return &s
 }
@@ -24,6 +28,10 @@ func memberUID(accountSFID string) *string {
 // SFID stored in the model. The stored Product.ID is a raw SFID; callers must not pass
 // a pre-converted UID.
 func membershipTierUID(product2SFID string) *string {
+	// An empty SFID has no v2 identity; return empty rather than a synthetic UUID.
+	if product2SFID == "" {
+		return emptyString
+	}
 	s := uid.ForMembershipTier(product2SFID)
 	return &s
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 const (
@@ -200,15 +201,19 @@ func (r *projectResolver) lookupB2BSFID(ctx context.Context, client *NATSClient,
 		return ""
 	}
 
-	// Decode as a generic map; the record may be JSON or msgpack but is typically
-	// JSON in the v1-objects bucket for salesforce-project__c entries.
+	// Decode as a generic map; the record may be JSON or msgpack. Try JSON
+	// first and fall back to msgpack if JSON decoding fails.
 	var record map[string]any
-	if jsonErr := json.Unmarshal(entry.Value(), &record); jsonErr != nil {
-		slog.WarnContext(ctx, "project resolver: failed to decode B2C project record",
-			"b2c_sfid", b2cSFID,
-			"error", jsonErr,
-		)
-		return ""
+	jsonErr := json.Unmarshal(entry.Value(), &record)
+	if jsonErr != nil {
+		if msgpackErr := msgpack.Unmarshal(entry.Value(), &record); msgpackErr != nil {
+			slog.WarnContext(ctx, "project resolver: failed to decode B2C project record as JSON or msgpack",
+				"b2c_sfid", b2cSFID,
+				"json_error", jsonErr,
+				"msgpack_error", msgpackErr,
+			)
+			return ""
+		}
 	}
 
 	// "saleforce_id" (note: intentional typo present in source data) holds the

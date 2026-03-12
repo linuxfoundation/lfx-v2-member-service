@@ -839,7 +839,14 @@ func (s *storage) resolveProjectFilterID(ctx context.Context, projectID string) 
 	return resolved
 }
 
-// matchesFilters checks if a membership matches the given filters
+// matchesFilters checks if a membership matches the given filters.
+//
+// The account_id, project_id, contact_id, and product_id filter keys are
+// internal lookup filters that compare against raw Salesforce SFIDs stored in
+// the domain model, not the v2 UIDs returned in API responses. If these are
+// ever exposed as public API filter parameters, they will need translation
+// from v2 UIDs to SFIDs (similar to how project_id is already translated in
+// resolveProjectFilterID before reaching this function).
 func matchesFilters(m *model.Membership, filters map[string]string) bool {
 	for key, value := range filters {
 		switch strings.ToLower(key) {
