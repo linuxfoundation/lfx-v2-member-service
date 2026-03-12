@@ -9,8 +9,8 @@ import "time"
 type MessageAction string
 
 const (
-	// MessageActionUpserted indicates the document was created or updated.
-	MessageActionUpserted MessageAction = "upserted"
+	// MessageActionUpdated indicates the document was created or updated.
+	MessageActionUpdated MessageAction = "updated"
 	// MessageActionDeleted indicates the document was deleted.
 	MessageActionDeleted MessageAction = "deleted"
 )
