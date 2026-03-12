@@ -5,6 +5,7 @@ package consumer
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
@@ -32,8 +33,8 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		return false
 	}
 
-	// A key contact without a linked Contact record is not useful — personal info is
-	// the whole point of a key_contact document.
+	// A key_contact document without a linked Contact record is not useful — personal
+	// info is the whole point of the record.
 	if role.ContactSFID == "" {
 		slog.WarnContext(ctx, "b2b handler_project_role: Project_Role__c has no Contact__c, skipping indexing",
 			"sfid", sfid,
@@ -117,12 +118,8 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		ProjectUID:     proj.uid,
 		ProjectName:    proj.name,
 		ProjectSlug:    proj.slug,
-		Parents: []Parent{
-			{Type: "project", UID: proj.uid},
-			{Type: "project_members_b2b", UID: membershipUID},
-		},
-		CreatedAt: parseTimestampOrNow(role.CreatedDate),
-		UpdatedAt: parseTimestampOrNow(role.LastModifiedDate),
+		CreatedAt:      parseTimestampOrNow(role.CreatedDate),
+		UpdatedAt:      parseTimestampOrNow(role.LastModifiedDate),
 	}
 
 	// Denormalize Account fields when the account record was resolved.
@@ -132,7 +129,23 @@ func (c *Consumer) handleProjectRoleUpsert(ctx context.Context, sfid string, dat
 		doc.CompanyWebsite = account.Website
 	}
 
-	if err := c.indexer.publishUpsert(ctx, constants.IndexKeyContactSubject, doc); err != nil {
+	displayName := contact.FirstName + " " + contact.LastName
+
+	cfg := &IndexingConfig{
+		ObjectID:             keyContactUID,
+		AccessCheckObject:    fmt.Sprintf("project:%s", proj.uid),
+		AccessCheckRelation:  "auditor",
+		HistoryCheckObject:   fmt.Sprintf("project:%s", proj.uid),
+		HistoryCheckRelation: "auditor",
+		NameAndAliases:       []string{displayName},
+		SortName:             contact.LastName,
+		ParentRefs: []string{
+			fmt.Sprintf("project:%s", proj.uid),
+			fmt.Sprintf("project_membership:%s", membershipUID),
+		},
+	}
+
+	if err := c.indexer.publishUpsert(ctx, constants.IndexKeyContactSubject, doc, cfg); err != nil {
 		slog.ErrorContext(ctx, "b2b handler_project_role: failed to publish upsert to indexer",
 			"sfid", sfid,
 			"key_contact_uid", keyContactUID,

@@ -8,7 +8,7 @@ import (
 	"log/slog"
 )
 
-// handleAccountUpdate fans out re-indexing of all project_members_b2b and key_contact
+// handleAccountUpdate fans out re-indexing of all project_membership and key_contact
 // documents linked to the updated Account record. When an account's name, logo, or
 // website changes, every denormalized document that references that account must be
 // refreshed.
@@ -49,7 +49,7 @@ func (c *Consumer) handleAccountUpdate(ctx context.Context, sfid string, data ma
 
 	shouldRetry := false
 
-	// Fan out to all project_members_b2b documents linked to this account.
+	// Fan out to all project_membership documents linked to this account.
 	if retry := c.reindexAssetsForAccount(ctx, sfid); retry {
 		shouldRetry = true
 	}

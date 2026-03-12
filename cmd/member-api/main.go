@@ -101,8 +101,8 @@ func main() {
 
 	// Start the b2b KV consumer when the NATS repository source is active.
 	// The consumer subscribes to salesforce_b2b-* keys in the v1-objects KV bucket
-	// and publishes denormalized indexer messages for project_products_b2b,
-	// project_members_b2b, and key_contact resource types.
+	// and publishes denormalized indexer messages for project_membership_tier,
+	// project_membership, and key_contact resource types.
 	natsClient := service.NATSClientInstance()
 	if natsClient != nil {
 		consumerCfg := consumer.Config{

@@ -22,7 +22,7 @@ var corporateRecordTypeIDs = map[string]string{
 
 // handleAssetUpsert processes a salesforce_b2b-Asset upsert event. It resolves
 // the linked Account, Product2, and Project records, maintains the forward-lookup
-// mapping indexes, and publishes a project_members_b2b document to the indexer.
+// mapping indexes, and publishes a project_membership document to the indexer.
 // Returns true if the message should be retried.
 func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[string]any) bool {
 	var asset SFAsset
@@ -128,7 +128,7 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 	// Build a display name for typeahead search in the format "{company_name} - {product_name}".
 	displayName := buildMembershipName(account.Name, product.Name)
 
-	doc := IndexedProjectMemberB2B{
+	doc := IndexedProjectMembership{
 		UID:             membershipUID,
 		Name:            displayName,
 		Aliases:         []string{displayName},
@@ -151,15 +151,25 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 		ProjectUID:      proj.uid,
 		ProjectName:     proj.name,
 		ProjectSlug:     proj.slug,
-		Parents: []Parent{
-			{Type: "project", UID: proj.uid},
-			{Type: "project_products_b2b", UID: productUID},
-		},
 		CreatedAt: parseTimestampOrNow(asset.CreatedDate),
 		UpdatedAt: parseTimestampOrNow(asset.LastModifiedDate),
 	}
 
-	if err := c.indexer.publishUpsert(ctx, constants.IndexProjectMembersB2BSubject, doc); err != nil {
+	cfg := &IndexingConfig{
+		ObjectID:             membershipUID,
+		AccessCheckObject:    fmt.Sprintf("project:%s", proj.uid),
+		AccessCheckRelation:  "auditor",
+		HistoryCheckObject:   fmt.Sprintf("project:%s", proj.uid),
+		HistoryCheckRelation: "auditor",
+		NameAndAliases:       []string{displayName},
+		SortName:             displayName,
+		ParentRefs: []string{
+			fmt.Sprintf("project:%s", proj.uid),
+			fmt.Sprintf("project_membership_tier:%s", productUID),
+		},
+	}
+
+	if err := c.indexer.publishUpsert(ctx, constants.IndexProjectMembershipSubject, doc, cfg); err != nil {
 		slog.ErrorContext(ctx, "b2b handler_asset: failed to publish upsert to indexer",
 			"sfid", sfid,
 			"membership_uid", membershipUID,
@@ -168,7 +178,7 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 		return true
 	}
 
-	slog.InfoContext(ctx, "b2b handler_asset: indexed project_members_b2b",
+	slog.InfoContext(ctx, "b2b handler_asset: indexed project_membership",
 		"sfid", sfid,
 		"membership_uid", membershipUID,
 		"project_uid", proj.uid,
@@ -202,7 +212,7 @@ func (c *Consumer) handleAssetUpsert(ctx context.Context, sfid string, data map[
 func (c *Consumer) handleAssetDelete(ctx context.Context, sfid string) bool {
 	membershipUID := generateDeterministicUID(sfid)
 
-	if err := c.indexer.publishDelete(ctx, constants.IndexProjectMembersB2BSubject, membershipUID); err != nil {
+	if err := c.indexer.publishDelete(ctx, constants.IndexProjectMembershipSubject, membershipUID); err != nil {
 		slog.ErrorContext(ctx, "b2b handler_asset: failed to publish delete to indexer",
 			"sfid", sfid,
 			"membership_uid", membershipUID,
@@ -211,14 +221,14 @@ func (c *Consumer) handleAssetDelete(ctx context.Context, sfid string) bool {
 		return true
 	}
 
-	slog.InfoContext(ctx, "b2b handler_asset: deleted project_members_b2b from index",
+	slog.InfoContext(ctx, "b2b handler_asset: deleted project_membership from index",
 		"sfid", sfid,
 		"membership_uid", membershipUID,
 	)
 
 	// Cascade deletion of associated key_contact records is not implemented.
 	// Child project_role__c records will be removed when their own delete events arrive.
-	slog.WarnContext(ctx, "b2b handler_asset: key_contact cascade delete not implemented; child records will be removed on their own delete events",
+	slog.WarnContext(ctx, "b2b handler_asset: key_contact cascade delete not implemented; child key_contact records will be removed on their own delete events",
 		"sfid", sfid,
 	)
 
@@ -259,7 +269,7 @@ func (c *Consumer) handleAssetDeleteWithCleanup(ctx context.Context, sfid string
 	return retry
 }
 
-// reindexAssetsForAccount re-indexes all project_members_b2b documents linked to the
+// reindexAssetsForAccount re-indexes all project_membership documents linked to the
 // given account SFID via the account → assets forward-lookup index. Soft-deleted or
 // missing (hard-deleted) assets are skipped with debug logging.
 func (c *Consumer) reindexAssetsForAccount(ctx context.Context, accountSFID string) bool {
@@ -315,7 +325,7 @@ func (c *Consumer) reindexAssetsForAccount(ctx context.Context, accountSFID stri
 	return shouldRetry
 }
 
-// reindexProjectRolesForAssets re-indexes all key_contact documents linked to the given
+// reindexProjectRolesForAssets re-indexes all key_contact documents linked to the
 // asset SFIDs via the asset → project_roles forward-lookup index. Soft-deleted or missing
 // (hard-deleted) project_role records are skipped with debug logging.
 func (c *Consumer) reindexProjectRolesForAssets(ctx context.Context, contextSFID string, assetSFIDs []string) bool {

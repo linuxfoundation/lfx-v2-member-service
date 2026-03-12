@@ -17,10 +17,27 @@ const (
 
 // IndexerMessage is the wire format for messages published to the LFX indexer.
 type IndexerMessage struct {
-	Action  MessageAction     `json:"action"`
-	Headers map[string]string `json:"headers"`
-	Data    any               `json:"data"`
-	Tags    []string          `json:"tags"`
+	Action        MessageAction          `json:"action"`
+	Headers       map[string]string      `json:"headers"`
+	Data          any                    `json:"data"`
+	Tags          []string               `json:"tags"`
+	IndexingConfig *IndexingConfig       `json:"indexing_config,omitempty"`
+}
+
+// IndexingConfig is the pre-computed indexing metadata included with each upsert message.
+// When present, the indexer bypasses its server-side enrichers and uses these values directly.
+type IndexingConfig struct {
+	ObjectID             string   `json:"object_id"`
+	AccessCheckObject    string   `json:"access_check_object"`
+	AccessCheckRelation  string   `json:"access_check_relation"`
+	HistoryCheckObject   string   `json:"history_check_object"`
+	HistoryCheckRelation string   `json:"history_check_relation"`
+	Public               *bool    `json:"public,omitempty"`
+	SortName             string   `json:"sort_name,omitempty"`
+	NameAndAliases       []string `json:"name_and_aliases,omitempty"`
+	ParentRefs           []string `json:"parent_refs,omitempty"`
+	Tags                 []string `json:"tags,omitempty"`
+	Fulltext             string   `json:"fulltext,omitempty"`
 }
 
 // ---- Salesforce source structs (decoded from v1-objects KV) ----
@@ -131,8 +148,8 @@ type SFProjectRole struct {
 
 // ---- Indexed document structs (published to LFX indexer) ----
 
-// IndexedProjectProductB2B is the indexer payload for a project_products_b2b document.
-type IndexedProjectProductB2B struct {
+// IndexedProjectMembershipTier is the indexer payload for a project_membership_tier document.
+type IndexedProjectMembershipTier struct {
 	UID         string    `json:"uid"`
 	Name        string    `json:"name"`
 	Aliases     []string  `json:"aliases,omitempty"`
@@ -141,13 +158,12 @@ type IndexedProjectProductB2B struct {
 	ProjectUID  string    `json:"project_uid"`
 	ProjectName string    `json:"project_name,omitempty"`
 	ProjectSlug string    `json:"project_slug,omitempty"`
-	Parents     []Parent  `json:"parents,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-// IndexedProjectMemberB2B is the indexer payload for a project_members_b2b document.
-type IndexedProjectMemberB2B struct {
+// IndexedProjectMembership is the indexer payload for a project_membership document.
+type IndexedProjectMembership struct {
 	UID             string    `json:"uid"`
 	Name            string    `json:"name"`
 	Aliases         []string  `json:"aliases,omitempty"`
@@ -169,7 +185,6 @@ type IndexedProjectMemberB2B struct {
 	ProjectUID      string    `json:"project_uid"`
 	ProjectName     string    `json:"project_name,omitempty"`
 	ProjectSlug     string    `json:"project_slug,omitempty"`
-	Parents         []Parent  `json:"parents,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -193,23 +208,17 @@ type IndexedKeyContact struct {
 	ProjectUID     string    `json:"project_uid"`
 	ProjectName    string    `json:"project_name,omitempty"`
 	ProjectSlug    string    `json:"project_slug,omitempty"`
-	Parents        []Parent  `json:"parents,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
-}
-
-// Parent represents a parent reference in an indexed document.
-type Parent struct {
-	// Type is the resource type (e.g. "project", "project_products_b2b", "project_members_b2b").
-	Type string `json:"type"`
-	// UID is the v2 UID of the parent resource.
-	UID string `json:"uid"`
 }
 
 // DeleteRequest is sent to the indexer when a document should be removed.
 type DeleteRequest struct {
 	UID string `json:"uid"`
 }
+
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool { return &b }
 
 // projectInfo caches resolved project information for a given Salesforce project SFID.
 // uid is the v2 project UID (resolved via NATS RPC to v1-sync-helper). name and slug

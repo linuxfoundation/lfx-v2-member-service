@@ -32,8 +32,8 @@ type tableConsumer struct {
 // using one durable JetStream pull consumer per table and dispatches each entry to the
 // appropriate type handler. Per-table consumers ensure that a NAK/backoff on one table
 // (e.g. waiting for a missing FK dependency) does not delay processing of unrelated
-// tables. It publishes denormalized indexer messages for project_products_b2b,
-// project_members_b2b, and key_contact resource types.
+// tables. It publishes denormalized indexer messages for project_membership_tier,
+// project_membership, and key_contact resource types.
 type Consumer struct {
 	// natsConn is the underlying core NATS connection used for request-reply RPC
 	// (v1-sync-helper project UID lookup) and indexer message publishing.
