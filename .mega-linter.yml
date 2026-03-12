@@ -3,6 +3,9 @@
 ---
 GITHUB_COMMENT_REPORTER: false
 DISABLE_LINTERS:
+  # Prefer Revive (golangci-lint version embedded in MegaLinter is older than
+  # the toolchain).
+  - GO_GOLANGCI_LINT
   # We are setting KUBERNETES_DIRECTORY to the helm chart so the
   # KUBERNETES_HELM linter can find the chart, but then this linter expects to
   # find raw Kubernetes manifests in this directory, which isn't the case.

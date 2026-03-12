@@ -23,6 +23,12 @@ type NATSClient struct {
 	timeout time.Duration
 }
 
+// Conn returns the underlying *nats.Conn for callers that need direct NATS access,
+// such as the b2b KV consumer which publishes indexer messages over core NATS.
+func (c *NATSClient) Conn() *nats.Conn {
+	return c.conn
+}
+
 // Close gracefully closes the NATS connection
 func (c *NATSClient) Close() error {
 	if c.conn != nil {

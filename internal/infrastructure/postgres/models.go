@@ -41,10 +41,10 @@ type SQLMembership struct {
 	AccountName      sql.NullString `db:"accountname"`
 	AccountLogoURL   sql.NullString `db:"accountlogourl"`
 	AccountWebsite   sql.NullString `db:"accountwebsite"`
-	ProjectName    sql.NullString `db:"projectname"`
-	ProjectLogoURL sql.NullString `db:"projectlogourl"`
-	ProjectSlug    sql.NullString `db:"projectslug"`
-	ProjectStatus  sql.NullString `db:"projectstatus"`
+	ProjectName      sql.NullString `db:"projectname"`
+	ProjectLogoURL   sql.NullString `db:"projectlogourl"`
+	ProjectSlug      sql.NullString `db:"projectslug"`
+	ProjectStatus    sql.NullString `db:"projectstatus"`
 	ContactTitle     sql.NullString `db:"contacttitle"`
 }
 

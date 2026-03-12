@@ -29,11 +29,11 @@ func newTestService() membershipservice.Service {
 
 func TestListMembers(t *testing.T) {
 	tests := []struct {
-		name       string
-		payload    *membershipservice.ListMembersPayload
-		wantErr    bool
-		wantCount  int
-		wantTotal  int
+		name      string
+		payload   *membershipservice.ListMembersPayload
+		wantErr   bool
+		wantCount int
+		wantTotal int
 	}{
 		{
 			name: "list all members",
@@ -254,9 +254,9 @@ func TestLivez(t *testing.T) {
 
 func TestParseFilters(t *testing.T) {
 	tests := []struct {
-		name    string
-		filter  *string
-		want    map[string]string
+		name   string
+		filter *string
+		want   map[string]string
 	}{
 		{
 			name:   "nil filter",
