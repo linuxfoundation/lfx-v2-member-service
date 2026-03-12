@@ -22,11 +22,6 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.externalSecretsOperator.enabled }}
-          envFrom:
-            - secretRef:
-                name: {{ .Chart.Name }}
-          {{- end }}
           env:
             - name: NATS_URL
               value: {{ .Values.nats.url }}
