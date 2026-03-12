@@ -79,7 +79,7 @@ spec:
           config:
             values:
               relation: auditor
-              object: "member:{{ "{{- .Request.URL.Captures.member_id -}}" }}"
+              object: "project:{{ .Values.openfga.lfProjectUID }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests
@@ -110,7 +110,7 @@ spec:
           config:
             values:
               relation: auditor
-              object: "member:{{ "{{- .Request.URL.Captures.member_id -}}" }}"
+              object: "project:{{ .Values.openfga.lfProjectUID }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests
