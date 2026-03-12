@@ -19,7 +19,8 @@ import (
 )
 
 type storage struct {
-	client *NATSClient
+	client          *NATSClient
+	projectResolver *projectResolver
 }
 
 // get retrieves a model from the NATS KV store by bucket and UID.
@@ -77,9 +78,12 @@ func (s *storage) ListMembers(ctx context.Context, params model.ListParams) ([]*
 
 	kv := s.client.kvStore[constants.KVBucketNameMembers]
 
-	// If filtering by project_id, use the lookup index for fast retrieval
+	// If filtering by project_id, use the lookup index for fast retrieval.
+	// When the caller supplies a v2 UUID, translate it to the B2B Salesforce
+	// Project__c SFID that the lookup index is keyed on.
 	if projectID, ok := params.Filters["project_id"]; ok {
-		return s.listMembersByProjectLookup(ctx, kv, projectID, params)
+		resolvedID := s.resolveProjectFilterID(ctx, projectID)
+		return s.listMembersByProjectLookup(ctx, kv, resolvedID, params)
 	}
 
 	// If filtering by member_id (SFID or UUID), resolve to member UID
@@ -359,8 +363,11 @@ func (s *storage) ListMemberships(ctx context.Context, params model.ListParams) 
 
 	kv := s.client.kvStore[constants.KVBucketNameMemberships]
 
-	// If filtering by project_id, use the lookup index for fast retrieval
+	// If filtering by project_id, use the lookup index for efficient retrieval.
+	// When the caller supplies a v2 UUID, translate it to the B2B Salesforce
+	// Project__c SFID that the lookup index is keyed on.
 	if projectID, ok := params.Filters["project_id"]; ok {
+		resolvedID := s.resolveProjectFilterID(ctx, projectID)
 		// Build remaining filters (excluding project_id which is handled by lookup)
 		remainingFilters := make(map[string]string)
 		for k, v := range params.Filters {
@@ -368,7 +375,7 @@ func (s *storage) ListMemberships(ctx context.Context, params model.ListParams) 
 				remainingFilters[k] = v
 			}
 		}
-		return s.listMembershipsByLookup(ctx, kv, fmt.Sprintf("lookup/project/%s/", projectID), params, remainingFilters)
+		return s.listMembershipsByLookup(ctx, kv, fmt.Sprintf("lookup/project/%s/", resolvedID), params, remainingFilters)
 	}
 
 	hasFilters := len(params.Filters) > 0
@@ -798,8 +805,38 @@ func (s *storage) IsReady(ctx context.Context) error {
 // NewStorage creates a new NATS storage implementation
 func NewStorage(client *NATSClient) *storage {
 	return &storage{
-		client: client,
+		client:          client,
+		projectResolver: newProjectResolver(),
 	}
+}
+
+// resolveProjectFilterID translates a project_id filter value to the B2B Salesforce
+// Project__c SFID used as the key in the membership lookup index. When the supplied
+// value is already a raw SFID (not a v2 UUID) it is returned unchanged, preserving
+// backward compatibility for callers that pass SFIDs directly.
+//
+// The two-stage resolution is:
+//  1. NATS RPC "project.uid.{v2_uid}" → B2C Salesforce SFID.
+//  2. v1-objects KV fetch "salesforce-project__c.{b2c_sfid}" → "saleforce_id" field
+//     (note: intentional typo in source data) → B2B Project__c.Id SFID.
+//
+// Returns the original value unchanged when resolution fails or is unavailable,
+// so that callers always have a usable lookup key.
+func (s *storage) resolveProjectFilterID(ctx context.Context, projectID string) string {
+	if !isV2UUID(projectID) {
+		// Already looks like a raw Salesforce SFID — use as-is.
+		return projectID
+	}
+
+	resolved := s.projectResolver.ResolveB2BSFID(ctx, s.client, projectID)
+	if resolved == "" {
+		slog.DebugContext(ctx, "project filter: could not resolve v2 UID to B2B SFID, using original value",
+			"project_id", projectID,
+		)
+		return projectID
+	}
+
+	return resolved
 }
 
 // matchesFilters checks if a membership matches the given filters

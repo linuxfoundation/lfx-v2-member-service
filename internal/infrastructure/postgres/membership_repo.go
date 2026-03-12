@@ -154,8 +154,10 @@ func convertSQLToMembership(s SQLMembership) *model.Membership {
 	return m
 }
 
-// generateDeterministicUID generates a deterministic UUID v5 from a Salesforce ID
+// generateDeterministicUID generates a deterministic UUID v5 from a Salesforce ID.
+// Uses the DNS namespace with the "lfx-membership:" prefix, matching the existing
+// sync job convention. Must remain consistent with stored KV data.
 func generateDeterministicUID(sfid string) string {
-	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // DNS namespace
+	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // DNS namespace.
 	return uuid.NewSHA1(namespace, []byte("lfx-membership:"+sfid)).String()
 }

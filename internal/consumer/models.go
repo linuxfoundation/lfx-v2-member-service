@@ -217,8 +217,6 @@ type DeleteRequest struct {
 	UID string `json:"uid"`
 }
 
-// boolPtr returns a pointer to the given bool value.
-func boolPtr(b bool) *bool { return &b }
 
 // projectInfo caches resolved project information for a given Salesforce project SFID.
 // uid is the v2 project UID (resolved via NATS RPC to v1-sync-helper). name and slug
