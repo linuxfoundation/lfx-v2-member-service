@@ -190,6 +190,9 @@ openfga:
   # Note: If it is disabled, then the member service will allow all requests
   # (Disabling OpenFGA should only be used for local development).
   enabled: true
+  # lfProjectUID is the v2 UID of the Linux Foundation project. Users must have the
+  # "auditor" relation on this project in OpenFGA to access the GET /members list endpoint.
+  lfProjectUID: ""
 
 # sync is the configuration for the membership sync job
 sync:
