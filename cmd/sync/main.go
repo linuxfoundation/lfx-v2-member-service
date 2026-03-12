@@ -73,11 +73,6 @@ func run() error {
 		return fmt.Errorf("invalid NATS reconnect wait duration: %w", err)
 	}
 
-	auditorTeamID := os.Getenv("FGA_AUDITOR_TEAM_ID")
-	if auditorTeamID == "" {
-		return fmt.Errorf("FGA_AUDITOR_TEAM_ID environment variable is required")
-	}
-
 	// Connect to PostgreSQL
 	db, err := postgres.NewClient(rdsDB)
 	if err != nil {
@@ -107,7 +102,6 @@ func run() error {
 	memberRepo := postgres.NewMemberRepo(db)
 	projectRepo := postgres.NewProjectRepo(db)
 	natsStorage := nats.NewStorage(natsClient)
-	fgaPublisher := nats.NewFGAPublisher(natsClient)
 
 	// Create a combined source reader
 	sourceReader := &combinedSourceReader{
@@ -117,7 +111,7 @@ func run() error {
 	}
 
 	// Create and run the syncer
-	syncer := usecaseSvc.NewMembershipSyncer(sourceReader, natsStorage, fgaPublisher, projectRepo, auditorTeamID)
+	syncer := usecaseSvc.NewMembershipSyncer(sourceReader, natsStorage, projectRepo)
 	if err := syncer.Sync(ctx); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}

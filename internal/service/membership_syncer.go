@@ -18,19 +18,15 @@ import (
 type MembershipSyncer struct {
 	sourceReader    port.MembershipSourceReader
 	kvWriter        port.MembershipKVWriter
-	fgaPublisher    port.FGAPublisher
 	projectIDMapper port.ProjectIDMapper
-	auditorTeamID   string
 }
 
 // NewMembershipSyncer creates a new MembershipSyncer
-func NewMembershipSyncer(sourceReader port.MembershipSourceReader, kvWriter port.MembershipKVWriter, fgaPublisher port.FGAPublisher, projectIDMapper port.ProjectIDMapper, auditorTeamID string) *MembershipSyncer {
+func NewMembershipSyncer(sourceReader port.MembershipSourceReader, kvWriter port.MembershipKVWriter, projectIDMapper port.ProjectIDMapper) *MembershipSyncer {
 	return &MembershipSyncer{
 		sourceReader:    sourceReader,
 		kvWriter:        kvWriter,
-		fgaPublisher:    fgaPublisher,
 		projectIDMapper: projectIDMapper,
-		auditorTeamID:   auditorTeamID,
 	}
 }
 
@@ -123,15 +119,6 @@ func (s *MembershipSyncer) Sync(ctx context.Context) error {
 			continue
 		}
 
-		// Publish FGA access for the member UID
-		if err := s.fgaPublisher.UpdateMemberAccess(ctx, member.UID, s.auditorTeamID); err != nil {
-			slog.ErrorContext(ctx, "failed to publish fga-sync access for member",
-				"error", err,
-				"member_uid", member.UID,
-			)
-			memberErrors++
-			continue
-		}
 	}
 
 	slog.InfoContext(ctx, "members synced",

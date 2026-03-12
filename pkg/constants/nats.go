@@ -3,12 +3,6 @@
 
 package constants
 
-// NATS subjects for fga-sync access control messages.
-const (
-	// FGASyncUpdateAccessSubject is the subject for creating/updating access control via fga-sync.
-	FGASyncUpdateAccessSubject = "lfx.fga-sync.update_access"
-)
-
 // NATS subjects for indexer messages published by the b2b consumer.
 const (
 	// IndexProjectMembershipTierSubject is the NATS subject for indexing project_membership_tier documents.
