@@ -12,7 +12,7 @@ import (
 )
 
 // handleProduct2Upsert processes a salesforce_b2b-Product2 upsert event. It resolves
-// the associated v2 project UID, publishes a project_products_b2b document to the
+// the associated v2 project UID, publishes a project_membership_tier document to the
 // indexer, and returns true if the message should be retried.
 func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data map[string]any) bool {
 	var product SFProduct2
@@ -47,7 +47,7 @@ func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data m
 
 	productUID := generateDeterministicUID(sfid)
 
-	doc := IndexedProjectProductB2B{
+	doc := IndexedProjectMembershipTier{
 		UID:         productUID,
 		Name:        product.Name,
 		Aliases:     []string{product.Name},
@@ -56,14 +56,22 @@ func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data m
 		ProjectUID:  proj.uid,
 		ProjectName: proj.name,
 		ProjectSlug: proj.slug,
-		Parents: []Parent{
-			{Type: "project", UID: proj.uid},
-		},
-		CreatedAt: parseTimestampOrNow(product.CreatedDate),
-		UpdatedAt: parseTimestampOrNow(product.LastModifiedDate),
+		CreatedAt:   parseTimestampOrNow(product.CreatedDate),
+		UpdatedAt:   parseTimestampOrNow(product.LastModifiedDate),
 	}
 
-	if err := c.indexer.publishUpsert(ctx, constants.IndexProjectProductsB2BSubject, doc); err != nil {
+	cfg := &IndexingConfig{
+		ObjectID:             productUID,
+		AccessCheckObject:    fmt.Sprintf("project:%s", proj.uid),
+		AccessCheckRelation:  "auditor",
+		HistoryCheckObject:   fmt.Sprintf("project:%s", proj.uid),
+		HistoryCheckRelation: "auditor",
+		NameAndAliases:       []string{product.Name},
+		SortName:             product.Name,
+		ParentRefs:           []string{fmt.Sprintf("project:%s", proj.uid)},
+	}
+
+	if err := c.indexer.publishUpsert(ctx, constants.IndexProjectMembershipTierSubject, doc, cfg); err != nil {
 		slog.ErrorContext(ctx, "b2b handler_product2: failed to publish upsert to indexer",
 			"sfid", sfid,
 			"product_uid", productUID,
@@ -72,7 +80,7 @@ func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data m
 		return true
 	}
 
-	slog.InfoContext(ctx, "b2b handler_product2: indexed project_products_b2b",
+	slog.InfoContext(ctx, "b2b handler_product2: indexed project_membership_tier",
 		"sfid", sfid,
 		"product_uid", productUID,
 		"project_uid", proj.uid,
@@ -87,7 +95,7 @@ func (c *Consumer) handleProduct2Upsert(ctx context.Context, sfid string, data m
 	return false
 }
 
-// reindexAssetsForProduct2 re-indexes all project_members_b2b documents linked to the
+// reindexAssetsForProduct2 re-indexes all project_membership documents linked to the
 // given product2 SFID via the product2 → assets forward-lookup index. Soft-deleted or
 // missing (hard-deleted) assets are skipped with debug logging.
 func (c *Consumer) reindexAssetsForProduct2(ctx context.Context, product2SFID string) bool {
@@ -148,7 +156,7 @@ func (c *Consumer) reindexAssetsForProduct2(ctx context.Context, product2SFID st
 func (c *Consumer) handleProduct2Delete(ctx context.Context, sfid string) bool {
 	productUID := generateDeterministicUID(sfid)
 
-	if err := c.indexer.publishDelete(ctx, constants.IndexProjectProductsB2BSubject, productUID); err != nil {
+	if err := c.indexer.publishDelete(ctx, constants.IndexProjectMembershipTierSubject, productUID); err != nil {
 		slog.ErrorContext(ctx, "b2b handler_product2: failed to publish delete to indexer",
 			"sfid", sfid,
 			"product_uid", productUID,
@@ -157,7 +165,7 @@ func (c *Consumer) handleProduct2Delete(ctx context.Context, sfid string) bool {
 		return true
 	}
 
-	slog.InfoContext(ctx, "b2b handler_product2: deleted project_products_b2b from index",
+	slog.InfoContext(ctx, "b2b handler_product2: deleted project_membership_tier from index",
 		"sfid", sfid,
 		"product_uid", productUID,
 	)

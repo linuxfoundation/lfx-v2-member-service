@@ -23,24 +23,26 @@ func newIndexer(conn *nats.Conn) *indexer {
 }
 
 // publishUpsert sends a document upsert message to the indexer on the given subject.
-// The data argument is the typed indexed document struct (e.g. IndexedProjectProductB2B).
-func (idx *indexer) publishUpsert(ctx context.Context, subject string, data any) error {
-	return idx.publish(ctx, subject, MessageActionUpserted, data)
+// The data argument is the typed indexed document struct (e.g. IndexedProjectMembershipTier).
+// cfg is the pre-computed indexing_config that bypasses server-side enrichers.
+func (idx *indexer) publishUpsert(ctx context.Context, subject string, data any, cfg *IndexingConfig) error {
+	return idx.publish(ctx, subject, MessageActionUpserted, data, cfg)
 }
 
 // publishDelete sends a document delete message to the indexer on the given subject.
 // uid is the v2 UID of the document to remove from the index.
 func (idx *indexer) publishDelete(ctx context.Context, subject, uid string) error {
-	return idx.publish(ctx, subject, MessageActionDeleted, DeleteRequest{UID: uid})
+	return idx.publish(ctx, subject, MessageActionDeleted, DeleteRequest{UID: uid}, nil)
 }
 
 // publish marshals and sends an IndexerMessage to the given NATS subject.
-func (idx *indexer) publish(ctx context.Context, subject string, action MessageAction, data any) error {
+func (idx *indexer) publish(ctx context.Context, subject string, action MessageAction, data any, cfg *IndexingConfig) error {
 	msg := IndexerMessage{
-		Action:  action,
-		Headers: systemHeaders(),
-		Data:    data,
-		Tags:    []string{},
+		Action:         action,
+		Headers:        systemHeaders(),
+		Data:           data,
+		Tags:           []string{},
+		IndexingConfig: cfg,
 	}
 
 	payload, err := json.Marshal(msg)

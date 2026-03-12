@@ -11,11 +11,11 @@ const (
 
 // NATS subjects for indexer messages published by the b2b consumer.
 const (
-	// IndexProjectProductsB2BSubject is the NATS subject for indexing project_products_b2b documents.
-	IndexProjectProductsB2BSubject = "lfx.index.project_products_b2b"
+	// IndexProjectMembershipTierSubject is the NATS subject for indexing project_membership_tier documents.
+	IndexProjectMembershipTierSubject = "lfx.index.project_membership_tier"
 
-	// IndexProjectMembersB2BSubject is the NATS subject for indexing project_members_b2b documents.
-	IndexProjectMembersB2BSubject = "lfx.index.project_members_b2b"
+	// IndexProjectMembershipSubject is the NATS subject for indexing project_membership documents.
+	IndexProjectMembershipSubject = "lfx.index.project_membership"
 
 	// IndexKeyContactSubject is the NATS subject for indexing key_contact documents.
 	IndexKeyContactSubject = "lfx.index.key_contact"
