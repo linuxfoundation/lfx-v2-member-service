@@ -26,7 +26,7 @@ func newIndexer(conn *nats.Conn) *indexer {
 // The data argument is the typed indexed document struct (e.g. IndexedProjectMembershipTier).
 // cfg is the pre-computed indexing_config that bypasses server-side enrichers.
 func (idx *indexer) publishUpsert(ctx context.Context, subject string, data any, cfg *IndexingConfig) error {
-	return idx.publish(ctx, subject, MessageActionUpserted, data, cfg)
+	return idx.publish(ctx, subject, MessageActionUpdated, data, cfg)
 }
 
 // publishDelete sends a document delete message to the indexer on the given subject.
@@ -63,9 +63,11 @@ func (idx *indexer) publish(ctx context.Context, subject string, action MessageA
 }
 
 // systemHeaders returns the minimal set of headers included with indexer messages
-// originating from a system-generated (non-user) event path. Currently empty because
-// the indexer expects a Heimdall-signed authorization header, which this service does
-// not have when triggered by incoming v1-objects data.
+// originating from a system-generated (non-user) event path. A dummy Bearer token is
+// included because the indexer's V2 header validation requires a non-empty authorization
+// header; there is no real user context for these system-generated events.
 func systemHeaders() map[string]string {
-	return map[string]string{}
+	return map[string]string{
+		"authorization": "Bearer member-service",
+	}
 }
