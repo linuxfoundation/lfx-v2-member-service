@@ -25,7 +25,7 @@ type NATSClient struct {
 }
 
 // Conn returns the underlying *nats.Conn for callers that need direct NATS access,
-// such as the b2b KV consumer which publishes indexer messages over core NATS.
+// such as the project resolver which uses RPC requests over core NATS.
 func (c *NATSClient) Conn() *nats.Conn {
 	return c.conn
 }
@@ -37,7 +37,7 @@ func (c *NATSClient) V1ObjectsKV() jetstream.KeyValue {
 	return c.v1ObjectsKV
 }
 
-// Close gracefully closes the NATS connection
+// Close gracefully closes the NATS connection.
 func (c *NATSClient) Close() error {
 	if c.conn != nil {
 		c.conn.Close()

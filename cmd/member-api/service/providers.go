@@ -23,12 +23,6 @@ var (
 	natsDoOnce  sync.Once
 )
 
-// NATSClientInstance returns the initialized NATS client, or nil if NATS has not
-// yet been initialized. Used by main.go to pass the raw connection to the b2b consumer.
-func NATSClientInstance() *nats.NATSClient {
-	return natsClient
-}
-
 func natsInit(ctx context.Context) {
 
 	natsDoOnce.Do(func() {
