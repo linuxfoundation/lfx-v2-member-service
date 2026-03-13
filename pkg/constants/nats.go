@@ -10,7 +10,9 @@ const (
 	// translation.
 	V1ObjectsKVBucket = "v1-objects"
 
-	// V1MappingLookupSubject is the NATS RPC subject for v1-to-v2 ID mapping lookups
-	// via v1-sync-helper. Used by the project resolver to map v2 UIDs to B2C SFIDs.
+	// V1MappingLookupSubject is the NATS RPC subject for bidirectional v1↔v2 ID mapping
+	// lookups via v1-sync-helper. Supports both v1→v2 (e.g. project.sfid.{sfid}) and
+	// v2→v1 (e.g. project.uid.{uuid}) key patterns. Used by the project resolver to map
+	// v2 UIDs to B2C SFIDs.
 	V1MappingLookupSubject = "lfx.lookup_v1_mapping"
 )
