@@ -13,6 +13,7 @@ metadata:
   {{- end }}
 spec:
   bucket: {{ .Values.nats.kv_bucket_memberships.name }}
+  replicas: {{ .Values.nats.kv_bucket_memberships.replicas }}
   history: {{ .Values.nats.kv_bucket_memberships.history }}
   storage: {{ .Values.nats.kv_bucket_memberships.storage }}
   maxValueSize: {{ .Values.nats.kv_bucket_memberships.maxValueSize }}
@@ -32,6 +33,7 @@ metadata:
   {{- end }}
 spec:
   bucket: {{ .Values.nats.kv_bucket_membership_contacts.name }}
+  replicas: {{ .Values.nats.kv_bucket_membership_contacts.replicas }}
   history: {{ .Values.nats.kv_bucket_membership_contacts.history }}
   storage: {{ .Values.nats.kv_bucket_membership_contacts.storage }}
   maxValueSize: {{ .Values.nats.kv_bucket_membership_contacts.maxValueSize }}
@@ -51,6 +53,7 @@ metadata:
   {{- end }}
 spec:
   bucket: {{ .Values.nats.kv_bucket_members.name }}
+  replicas: {{ .Values.nats.kv_bucket_members.replicas }}
   history: {{ .Values.nats.kv_bucket_members.history }}
   storage: {{ .Values.nats.kv_bucket_members.storage }}
   maxValueSize: {{ .Values.nats.kv_bucket_members.maxValueSize }}

@@ -109,6 +109,8 @@ nats:
     keep: true
     # name is the name of the KV bucket for storing membership records
     name: memberships
+    # replicas is the number of replicas for the KV bucket
+    replicas: 1
     # history is the number of history entries to keep for the KV bucket
     history: 20
     # storage is the storage type for the KV bucket
@@ -130,6 +132,8 @@ nats:
     keep: true
     # name is the name of the KV bucket for storing membership contacts
     name: membership-contacts
+    # replicas is the number of replicas for the KV bucket
+    replicas: 1
     # history is the number of history entries to keep for the KV bucket
     history: 20
     # storage is the storage type for the KV bucket
@@ -151,6 +155,8 @@ nats:
     keep: true
     # name is the name of the KV bucket for storing member records
     name: members
+    # replicas is the number of replicas for the KV bucket
+    replicas: 1
     # history is the number of history entries to keep for the KV bucket
     history: 20
     # storage is the storage type for the KV bucket
