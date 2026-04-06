@@ -82,7 +82,7 @@ This document is the authoritative reference for all data the member service sen
 | Field | Type | Description |
 |---|---|---|
 | `uid` | string | Membership unique identifier (invertible UUID v8 from `Asset.Id`) |
-| `tier_uid` | string | UID of the associated `MembershipTier` (`Product2`) |
+| `tier_uid` | string (may be empty) | UID of the associated `MembershipTier` (`Product2`); may be empty when the related `Asset` / tier relationship is unavailable or cannot be decoded |
 | `project_uid` | string | v2 UUID of the project this membership belongs to |
 | `project_slug` | string (optional) | URL slug of the associated project; omitted when empty |
 | `b2b_org_uid` | string (optional) | UID of the member company (`B2BOrg`, derived from `Account.Id`); omitted when empty |
@@ -122,9 +122,9 @@ This document is the authoritative reference for all data the member service sen
 | `status:{value}` | `status:Active` | Find memberships by status |
 | `year:{value}` | `year:2025` | Find memberships by year |
 | `company_name:{value}` | `company_name:The Linux Foundation` | Find memberships by company name |
-| `company_domain:{value}` | `company_domain:linuxfoundation.org` | Find memberships by company domain |
+| `company_domain:{value}` | `company_domain:https://linuxfoundation.org/about/` | Find memberships by company website value (may be a bare domain or full URL) |
 
-> Tags for `b2b_org_uid`, `status`, `year`, `company_name`, and `company_domain` are only emitted when the value is non-empty.
+> Tags for `b2b_org_uid`, `status`, `year`, `company_name`, and `company_domain` are only emitted when the source value is non-empty. For `company_domain`, the source value comes from the company website field and may be a bare domain or a full URL.
 
 ### Access Control (IndexingConfig)
 
@@ -149,7 +149,7 @@ This document is the authoritative reference for all data the member service sen
 | Ref | Condition |
 |---|---|
 | `project:{project_uid}` | Always set |
-| `membership_tier:{tier_uid}` | Always set |
+| `membership_tier:{tier_uid}` | Only when `tier_uid` is non-empty |
 | `b2b_org:{b2b_org_uid}` | Only when `b2b_org_uid` is non-empty |
 
 ---
@@ -166,7 +166,7 @@ This document is the authoritative reference for all data the member service sen
 |---|---|---|
 | `uid` | string | Key contact unique identifier (invertible UUID v8 from `Project_Role__c.Id`) |
 | `membership_uid` | string | UID of the associated `ProjectMembership` (`Asset`) |
-| `tier_uid` | string | UID of the associated `MembershipTier` (`Product2`) |
+| `tier_uid` | string (may be empty) | UID of the associated `MembershipTier` (`Product2`); may be empty when the related `Asset` / tier relationship is unavailable or cannot be decoded |
 | `project_uid` | string | v2 UUID of the project this key contact belongs to |
 | `b2b_org_uid` | string (optional) | UID of the member company (`B2BOrg`, derived from `Account.Id`); omitted when empty |
 | `role` | string | Contact role designation (e.g., `"Voting Representative"`) |
@@ -198,9 +198,9 @@ This document is the authoritative reference for all data the member service sen
 | `status:{value}` | `status:Active` | Find key contacts by status |
 | `email:{value}` | `email:user@example.com` | Find key contacts by email |
 | `company_name:{value}` | `company_name:The Linux Foundation` | Find key contacts by company name |
-| `company_domain:{value}` | `company_domain:linuxfoundation.org` | Find key contacts by company domain |
+| `company_domain:{value}` | `company_domain:https://linuxfoundation.org` | Find key contacts by company website/domain (`Account.Website` value) |
 
-> Tags for `b2b_org_uid`, `role`, `status`, `email`, `company_name`, and `company_domain` are only emitted when the value is non-empty.
+> Tags for `b2b_org_uid`, `role`, `status`, `email`, `company_name`, and `company_domain` are only emitted when the value is non-empty. `company_domain` is sourced from `Account.Website` and may be a full URL.
 
 ### Access Control (IndexingConfig)
 
