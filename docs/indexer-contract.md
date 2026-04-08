@@ -19,6 +19,10 @@ This document is the authoritative reference for all data the member service sen
 
 ## Membership Tier
 
+**Object type:** `membership_tier`
+
+**NATS subject:** `lfx.index.membership_tier`
+
 **Source struct:** `internal/domain/model/member.go` — `MembershipTier`
 
 **Indexed on:** create, update, delete of a membership tier (Salesforce `Product2`).
@@ -72,6 +76,10 @@ This document is the authoritative reference for all data the member service sen
 ---
 
 ## Project Membership
+
+**Object type:** `project_membership`
+
+**NATS subject:** `lfx.index.project_membership`
 
 **Source struct:** `internal/domain/model/membership.go` — `ProjectMembership`
 
@@ -156,6 +164,10 @@ This document is the authoritative reference for all data the member service sen
 
 ## Key Contact
 
+**Object type:** `key_contact`
+
+**NATS subject:** `lfx.index.key_contact`
+
 **Source struct:** `internal/domain/model/key_contact.go` — `KeyContact`
 
 **Indexed on:** create, update, delete of a key contact (Salesforce `Project_Role__c`).
@@ -231,6 +243,10 @@ This document is the authoritative reference for all data the member service sen
 ---
 
 ## B2B Org
+
+**Object type:** `b2b_org`
+
+**NATS subject:** `lfx.index.b2b_org`
 
 **Source struct:** `internal/domain/model/b2b_org.go` — `B2BOrg`
 
