@@ -27,7 +27,7 @@ func NewUserReader(client *NATSClient) port.UserReader {
 // UsernameByEmail resolves the registered LFID username for the given primary email address.
 // The auth service replies with a plain-text username on success, or a JSON error envelope on miss.
 func (u *userReader) UsernameByEmail(ctx context.Context, email string) (string, error) {
-	msg, err := u.client.Conn().RequestWithContext(ctx, constants.AuthEmailToUsernameLookupSubject, []byte(email))
+	msg, err := requestWithSpan(ctx, u.client.Conn(), constants.AuthEmailToUsernameLookupSubject, []byte(email))
 	if err != nil {
 		return "", errors.NewNotFound(fmt.Sprintf("username not found for email: %s", email), err)
 	}

@@ -10,6 +10,9 @@ import (
 
 	inviteapi "github.com/linuxfoundation/lfx-v2-invite-service/pkg/api"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
@@ -30,22 +33,35 @@ func SubscribeInviteAccepted(
 		inviteapi.InviteServiceAcceptedSubject,
 		"lfx-v2-member-service",
 		func(msg *nats.Msg) {
+			// Extract trace context from incoming headers and start a consumer span.
+			msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
+			msgCtx, span := tracer.Start(msgCtx, "nats.process",
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "nats"),
+					attribute.String("messaging.destination.name", inviteapi.InviteServiceAcceptedSubject),
+					attribute.String("messaging.operation.type", "process"),
+					attribute.Int("messaging.message.body.size", len(msg.Data)),
+				),
+			)
+			defer span.End()
+
 			// Inject a service-identity bearer so FGA/indexer calls downstream
 			// carry a recognised principal (mirrors committee message_handler.go:903).
-			ctx := context.WithValue(context.Background(), constants.AuthorizationContextID, constants.ServiceAccountBearer)
+			msgCtx = context.WithValue(msgCtx, constants.AuthorizationContextID, constants.ServiceAccountBearer)
 
 			var ev inviteapi.InviteServiceAcceptedEvent
 			if err := json.Unmarshal(msg.Data, &ev); err != nil {
-				slog.WarnContext(ctx, "invite_accepted: failed to decode event", "error", err)
+				slog.WarnContext(msgCtx, "invite_accepted: failed to decode event", "error", err)
 				return
 			}
-			slog.DebugContext(ctx, "invite_accepted: received",
+			slog.DebugContext(msgCtx, "invite_accepted: received",
 				"resource_type", ev.Resource.Type,
 				"resource_uid", ev.Resource.UID,
 				"recipient", redaction.RedactEmail(ev.Recipient.Email),
 			)
-			if err := handler(ctx, ev); err != nil {
-				slog.WarnContext(ctx, "invite_accepted: handle error", "error", err)
+			if err := handler(msgCtx, ev); err != nil {
+				slog.WarnContext(msgCtx, "invite_accepted: handle error", "error", err)
 			}
 		},
 	)

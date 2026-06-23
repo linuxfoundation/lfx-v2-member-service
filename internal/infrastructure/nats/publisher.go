@@ -64,7 +64,7 @@ func (p *messagePublisher) publish(ctx context.Context, subject string, msg any,
 }
 
 func (p *messagePublisher) publishAsync(ctx context.Context, subject string, data []byte, msgType string) error {
-	if err := p.client.conn.Publish(subject, data); err != nil {
+	if err := publishWithSpan(ctx, p.client.conn, subject, data); err != nil {
 		slog.ErrorContext(ctx, "failed to publish message",
 			"error", err, "subject", subject, "type", msgType)
 		return errors.NewServiceUnavailable("failed to publish message", err)
@@ -75,7 +75,9 @@ func (p *messagePublisher) publishAsync(ctx context.Context, subject string, dat
 }
 
 func (p *messagePublisher) request(ctx context.Context, subject string, data []byte, msgType string) error {
-	resp, err := p.client.conn.Request(subject, data, defaultPublishTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, defaultPublishTimeout)
+	defer cancel()
+	resp, err := requestWithSpan(reqCtx, p.client.conn, subject, data)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to send sync request",
 			"error", err, "subject", subject, "type", msgType, "timeout", defaultPublishTimeout)

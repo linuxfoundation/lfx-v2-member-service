@@ -19,6 +19,7 @@ import (
 	"time"
 
 	sf "github.com/k-capehart/go-salesforce/v3"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
@@ -58,6 +59,15 @@ type SObjectClient struct {
 // Salesforce client and an sObjectCacher implementation (e.g., NATS cache or
 // an in-memory stub for tests).
 func NewSObjectClient(sfClient *sf.Salesforce, cache sObjectCacher) *SObjectClient {
+	// Wrap the Salesforce library's HTTP transport so outbound requests are
+	// captured as OTel HTTP client spans.
+	if httpClient := sfClient.GetHTTPClient(); httpClient != nil {
+		underlying := httpClient.Transport
+		if underlying == nil {
+			underlying = http.DefaultTransport
+		}
+		httpClient.Transport = otelhttp.NewTransport(underlying)
+	}
 	return &SObjectClient{sf: sfClient, cache: cache}
 }
 
