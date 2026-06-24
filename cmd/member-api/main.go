@@ -56,11 +56,10 @@ func main() {
 	ctx := context.Background()
 
 	// Set up OpenTelemetry SDK.
-	otelConfig := utils.OTelConfigFromEnv()
-	if otelConfig.ServiceVersion == "" {
-		otelConfig.ServiceVersion = Version
+	if os.Getenv("OTEL_SERVICE_VERSION") == "" {
+		_ = os.Setenv("OTEL_SERVICE_VERSION", Version)
 	}
-	otelShutdown, err := utils.SetupOTelSDKWithConfig(ctx, otelConfig)
+	otelShutdown, err := utils.SetupOTelSDK(ctx)
 	if err != nil {
 		slog.ErrorContext(ctx, "error setting up OpenTelemetry SDK", "error", err)
 		os.Exit(1)
