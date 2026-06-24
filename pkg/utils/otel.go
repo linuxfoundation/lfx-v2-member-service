@@ -6,7 +6,9 @@ package utils
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"strconv"
 
 	"go.opentelemetry.io/contrib/exporters/autoexport"
 	"go.opentelemetry.io/contrib/propagators/autoprop"
@@ -17,9 +19,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
-)
 
-const defaultServiceName = "lfx-v2-member-service"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
+)
 
 // SetupOTelSDK bootstraps the OpenTelemetry pipeline.
 // Exporters are configured via OTEL_TRACES_EXPORTER, OTEL_METRICS_EXPORTER, and
@@ -43,7 +45,7 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 
 	serviceName := os.Getenv("OTEL_SERVICE_NAME")
 	if serviceName == "" {
-		serviceName = defaultServiceName
+		serviceName = constants.ServiceName
 	}
 
 	res, err := resource.Merge(
@@ -61,6 +63,19 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 
 	otel.SetTextMapPropagator(autoprop.NewTextMapPropagator())
 
+	sampler := trace.ParentBased(trace.AlwaysSample())
+	if ratio := os.Getenv("OTEL_TRACES_SAMPLE_RATIO"); ratio != "" {
+		if parsed, parseErr := strconv.ParseFloat(ratio, 64); parseErr == nil {
+			if parsed >= 0.0 && parsed <= 1.0 {
+				sampler = trace.ParentBased(trace.TraceIDRatioBased(parsed))
+			} else {
+				slog.Warn("OTEL_TRACES_SAMPLE_RATIO out of range [0,1], using 1.0", "value", ratio)
+			}
+		} else {
+			slog.Warn("invalid OTEL_TRACES_SAMPLE_RATIO, using 1.0", "value", ratio)
+		}
+	}
+
 	spanExporter, err := autoexport.NewSpanExporter(ctx)
 	if err != nil {
 		handleErr(err)
@@ -68,6 +83,7 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	}
 	tracerProvider := trace.NewTracerProvider(
 		trace.WithResource(res),
+		trace.WithSampler(sampler),
 		trace.WithBatcher(spanExporter),
 	)
 	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
