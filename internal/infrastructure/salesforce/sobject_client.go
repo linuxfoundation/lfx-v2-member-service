@@ -66,7 +66,9 @@ func NewSObjectClient(sfClient *sf.Salesforce, cache sObjectCacher) *SObjectClie
 		if underlying == nil {
 			underlying = http.DefaultTransport
 		}
-		httpClient.Transport = otelhttp.NewTransport(underlying)
+		if _, ok := underlying.(*otelhttp.Transport); !ok {
+			httpClient.Transport = otelhttp.NewTransport(underlying)
+		}
 	}
 	return &SObjectClient{sf: sfClient, cache: cache}
 }

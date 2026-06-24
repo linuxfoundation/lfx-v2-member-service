@@ -33,6 +33,9 @@ func (c natsHeaderCarrier) Get(key string) string {
 }
 
 func (c natsHeaderCarrier) Set(key string, value string) {
+	if c == nil {
+		return
+	}
 	c[key] = []string{value}
 }
 
@@ -74,8 +77,7 @@ func publishWithSpan(ctx context.Context, conn *nats.Conn, subject string, data 
 }
 
 // requestWithSpan wraps conn.RequestMsgWithContext with an OTel client span,
-// injecting trace context into the NATS message headers. A per-call timeout
-// context is created using the given conn timeout if ctx has no deadline.
+// injecting trace context into the NATS message headers.
 func requestWithSpan(ctx context.Context, conn *nats.Conn, subject string, data []byte) (*nats.Msg, error) {
 	ctx, span := tracer.Start(ctx, "nats.request",
 		trace.WithSpanKind(trace.SpanKindClient),
