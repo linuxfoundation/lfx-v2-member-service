@@ -615,7 +615,7 @@ func TestBuildB2BOrgSettingsIndexerView_FlatMembersWithRole(t *testing.T) {
 	settings := &model.B2BOrgSettings{
 		UID: "org-view-001",
 		Writers: []model.B2BOrgUser{
-			{Username: "alice", Email: "alice@acme.com", Name: "Alice A", InviteStatus: model.InviteStatusAccepted},
+			{Username: "alice", Email: "alice@acme.com", Name: "Alice A", Avatar: "https://example.com/alice.png", InviteStatus: model.InviteStatusAccepted},
 		},
 		Auditors: []model.B2BOrgUser{
 			{Username: "bob", Email: "bob@acme.com", Name: "Bob B", InviteStatus: model.InviteStatusAccepted},
@@ -627,8 +627,10 @@ func TestBuildB2BOrgSettingsIndexerView_FlatMembersWithRole(t *testing.T) {
 	require.Len(t, view.Members, 2)
 	assert.Equal(t, "alice", view.Members[0].Username)
 	assert.Equal(t, "writer", view.Members[0].Role)
+	assert.Equal(t, "https://example.com/alice.png", view.Members[0].Avatar, "avatar must surface on the indexer projection")
 	assert.Equal(t, "bob", view.Members[1].Username)
 	assert.Equal(t, "auditor", view.Members[1].Role)
+	assert.Empty(t, view.Members[1].Avatar)
 	assert.Equal(t, "org-view-001", view.UID)
 }
 

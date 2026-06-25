@@ -1012,6 +1012,10 @@ func (r *fakeUserReader) UsernameByEmail(_ context.Context, _ string) (string, e
 	return r.sub, r.err
 }
 
+func (r *fakeUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
+}
+
 // newProjectRoleCDCConsumer builds a CDCConsumer wired for a single
 // Project_Role__c upsert event keyed by kc.UID. Boring mocks (PM reader,
 // org reader, cache invalidator) are pre-filled so each test only passes

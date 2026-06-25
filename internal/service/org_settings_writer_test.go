@@ -422,6 +422,91 @@ func (s *stubInviteSender) SendInvite(_ context.Context, req inviteapi.SendInvit
 	return s.result, s.err
 }
 
+// UserMetadataByPrincipal satisfies the extended port.UserReader for the func-based fake; no-op
+// (returns empty metadata) so avatar enrichment is a no-op in tests that don't exercise it.
+func (f userReaderFunc) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
+}
+
+// avatarStubUserReader implements port.UserReader returning a fixed username + picture, for the
+// avatar-enrichment tests.
+type avatarStubUserReader struct {
+	username string
+	picture  string
+	metaErr  error
+}
+
+func (s avatarStubUserReader) UsernameByEmail(_ context.Context, _ string) (string, error) {
+	if s.username == "" {
+		return "", pkgerrors.NewNotFound("mock: no username")
+	}
+	return s.username, nil
+}
+
+func (s avatarStubUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	if s.metaErr != nil {
+		return port.UserMetadata{}, s.metaErr
+	}
+	return port.UserMetadata{Picture: s.picture}, nil
+}
+
+func TestOrgSettingsWriter_AddPrincipal_EnrichesAvatar(t *testing.T) {
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
+
+	userReader := avatarStubUserReader{username: "bob", picture: "https://example.com/bob.png"}
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, &stubInviteSender{}, nil)
+
+	result, err := writer.AddPrincipal(context.Background(), svc.B2BOrgSettingsAddPrincipal{
+		OrgUID: testOrgUID, Email: "bob@example.com", InvitedAs: "writer",
+	})
+
+	require.NoError(t, err)
+	require.Len(t, result.Writers, 1)
+	assert.Equal(t, "https://example.com/bob.png", result.Writers[0].Avatar, "accepted principal's avatar must be enriched from auth-service")
+}
+
+func TestOrgSettingsWriter_AddPrincipal_AvatarEnrichFailSoft(t *testing.T) {
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
+
+	// Metadata lookup fails: the username still resolves and the add succeeds with an empty avatar.
+	userReader := avatarStubUserReader{username: "bob", metaErr: errors.New("nats: metadata timeout")}
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, &stubInviteSender{}, nil)
+
+	result, err := writer.AddPrincipal(context.Background(), svc.B2BOrgSettingsAddPrincipal{
+		OrgUID: testOrgUID, Email: "bob@example.com", InvitedAs: "writer",
+	})
+
+	require.NoError(t, err, "a metadata lookup failure must not block the add")
+	require.Len(t, result.Writers, 1)
+	assert.Equal(t, "bob", result.Writers[0].Username)
+	assert.Empty(t, result.Writers[0].Avatar)
+}
+
+func TestOrgSettingsWriter_Update_EnrichesOnlyMissingAvatars(t *testing.T) {
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
+
+	userReader := avatarStubUserReader{username: "x", picture: "https://example.com/new.png"}
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, &stubInviteSender{}, nil)
+
+	in := svc.B2BOrgSettingsUpdate{OrgUID: testOrgUID, Writers: []model.B2BOrgUser{
+		{Email: "alice@example.com", Username: "alice", InviteStatus: model.InviteStatusAccepted},
+		{Email: "bob@example.com", Username: "bob", Avatar: "https://example.com/keep.png", InviteStatus: model.InviteStatusAccepted},
+	}}
+
+	result, err := writer.Update(context.Background(), in)
+
+	require.NoError(t, err)
+	require.Len(t, result.Writers, 2)
+	assert.Equal(t, "https://example.com/new.png", result.Writers[0].Avatar, "missing avatar must be enriched on write")
+	assert.Equal(t, "https://example.com/keep.png", result.Writers[1].Avatar, "existing avatar must be left untouched (refresh is the backfill's job)")
+}
+
 func TestOrgSettingsWriter_AddPrincipal_LFIDFound_AcceptsImmediately(t *testing.T) {
 	// When UsernameByEmail returns a username, the entry should be InviteStatusAccepted with no invite sent.
 	store := mock.NewMockB2BOrgSettings()

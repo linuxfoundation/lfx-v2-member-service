@@ -210,6 +210,10 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 		updated.Auditors = in.Auditors
 	}
 
+	// Enrich avatars at write-time (fail-soft; never blocks the write).
+	o.enrichAvatars(ctx, updated.Writers)
+	o.enrichAvatars(ctx, updated.Auditors)
+
 	if err := o.settingsWriter.UpdateSettings(ctx, updated, revision); err != nil {
 		return nil, err
 	}
@@ -222,6 +226,44 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 	o.publishAll(ctx, in, updated, action)
 
 	return updated, nil
+}
+
+// enrichAvatars enriches missing avatars on a bulk write only. Refreshing existing avatars is the
+// backfill's job; gating on empty avatar (and skipping revoked/expired) keeps an invite-acceptance
+// re-PUT of the full member list from re-issuing one auth-service RPC per existing member.
+func (o *orgSettingsWriterOrchestrator) enrichAvatars(ctx context.Context, users []model.B2BOrgUser) {
+	for i := range users {
+		u := &users[i]
+		if u.Avatar != "" {
+			continue
+		}
+		status := u.EffectiveStatus()
+		if status == model.InviteStatusRevoked || status == model.InviteStatusExpired {
+			continue
+		}
+		o.enrichAvatar(ctx, u)
+	}
+}
+
+// enrichAvatar refreshes one principal's avatar from auth-service. Best-effort: any miss/error leaves
+// the existing value untouched and never fails the write; no-op for pending invites (no username yet).
+func (o *orgSettingsWriterOrchestrator) enrichAvatar(ctx context.Context, u *model.B2BOrgUser) {
+	if o.userReader == nil || u == nil {
+		return
+	}
+	username := strings.TrimSpace(u.Username)
+	if username == "" {
+		return
+	}
+	meta, err := o.userReader.UserMetadataByPrincipal(ctx, username)
+	if err != nil {
+		if !pkgerrors.IsNotFound(err) {
+			slog.WarnContext(ctx, "avatar enrichment lookup failed; leaving existing avatar",
+				"username", redaction.Redact(username), "error", err)
+		}
+		return
+	}
+	u.Avatar = meta.Picture
 }
 
 // AddPrincipal adds (invites) one principal to writers/auditors. Existing members are
@@ -318,6 +360,7 @@ func (o *orgSettingsWriterOrchestrator) AddPrincipal(ctx context.Context, in B2B
 		entry.Username = username
 		entry.InviteStatus = model.InviteStatusAccepted
 		entry.AcceptedAt = &now
+		o.enrichAvatar(ctx, &entry)
 	} else {
 		entry.InviteStatus = model.InviteStatusPending
 		if !in.SuppressNotification {
