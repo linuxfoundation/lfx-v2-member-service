@@ -5,7 +5,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
 
@@ -405,9 +404,11 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 
 	if kc.MembershipUID != in.MembershipUID {
 		// The contact exists under another membership; tombstoning by UID here
-		// would delete the real indexed document. Return 404 only.
-		return pkgerrors.NewNotFound(
-			fmt.Sprintf("key contact %s not found in membership %s", in.UID, in.MembershipUID))
+		// would delete the real indexed document. Return generic 404 only — do not
+		// leak that the UID exists elsewhere.
+		slog.InfoContext(ctx, "key contact membership mismatch on delete — returning 404",
+			"uid", in.UID, "path_membership_uid", in.MembershipUID, "owner_membership_uid", kc.MembershipUID)
+		return pkgerrors.NewNotFound("key contact not found")
 	}
 
 	if in.IfMatch != "" {

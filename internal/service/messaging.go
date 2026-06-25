@@ -412,8 +412,10 @@ func PublishB2BOrgParentFGA(ctx context.Context, p port.MemberPublisher, org *mo
 	}
 }
 
-// buildIndexerInput is the shared logic for all build*IndexerInput helpers:
-// delete actions carry the UID string (indexer contract); create/update carry the full object.
+// buildIndexerInput is the shared logic for the b2b_org, project_membership, and key_contact
+// build*IndexerInput helpers: delete actions carry the UID string (indexer contract);
+// create/update carry the full object. Workspace and workspace-project publishers handle
+// this branching directly.
 func buildIndexerInput(uid string, obj any, action indexerConstants.MessageAction) any {
 	if action == indexerConstants.ActionDeleted {
 		return uid
