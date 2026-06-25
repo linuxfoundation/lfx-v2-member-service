@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -66,10 +65,11 @@ func (u *userReader) UserMetadataByPrincipal(ctx context.Context, principal stri
 		return port.UserMetadata{}, errors.NewUnexpected("failed to parse user_metadata response", errUnmarshal)
 	}
 	if !response.Success || response.Data == nil {
-		// A success:false body may carry a real application error, not just "no metadata"; surface it at
-		// debug so it isn't fully swallowed, while still returning NotFound (the contract for a miss).
-		if response.Error != "" {
-			slog.DebugContext(ctx, "user_metadata lookup unsuccessful", "principal", redaction.Redact(principal), "error", response.Error)
+		// Mirror ErrorMessageNATSResponse.CheckError: a "not found" (or an empty error on an absent body)
+		// is a genuine miss; any other error is a real auth-service failure that callers must be able to
+		// tell apart from a miss, so surface it as Unexpected rather than swallowing it as NotFound.
+		if response.Error != "" && !strings.Contains(response.Error, "not found") {
+			return port.UserMetadata{}, errors.NewUnexpected(fmt.Sprintf("user metadata lookup failed for principal %s: %s", redaction.Redact(principal), response.Error))
 		}
 		return port.UserMetadata{}, errors.NewNotFound(fmt.Sprintf("user metadata not found for principal: %s", redaction.Redact(principal)))
 	}

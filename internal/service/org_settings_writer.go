@@ -203,16 +203,17 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 		updated.Auditors = slices.Clone(existing.Auditors)
 	}
 
+	// Clone the caller-provided slices so write-time avatar enrichment never mutates the request's
+	// backing arrays, and only enrich the relations the caller actually provided — a single-list
+	// update must not issue avatar RPCs for the untouched (carried-over) relation.
 	if in.Writers != nil {
-		updated.Writers = in.Writers
+		updated.Writers = slices.Clone(in.Writers)
+		o.enrichAvatars(ctx, updated.Writers)
 	}
 	if in.Auditors != nil {
-		updated.Auditors = in.Auditors
+		updated.Auditors = slices.Clone(in.Auditors)
+		o.enrichAvatars(ctx, updated.Auditors)
 	}
-
-	// Enrich avatars at write-time (fail-soft; never blocks the write).
-	o.enrichAvatars(ctx, updated.Writers)
-	o.enrichAvatars(ctx, updated.Auditors)
 
 	if err := o.settingsWriter.UpdateSettings(ctx, updated, revision); err != nil {
 		return nil, err
