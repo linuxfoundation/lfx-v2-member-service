@@ -33,7 +33,7 @@ This rule applies to **every** member resource type: `b2b_org`, `project_members
 
 Implementation: each publisher in `internal/service/messaging.go` routes through a per-resource `build<Type>IndexerInput(x, action)` helper that returns the bare UID string on `ActionDeleted` and the struct/view on create/update. The helper returns a raw Go string — `json.Marshal` then emits `{"data":"uid"}`; do not pre-quote the UID.
 
-> **Already-missing endpoint deletes:** the `key_contact` (`DELETE /project_memberships/{membership_uid}/key_contacts/{uid}`) and `workspace` (`DELETE /b2b_orgs/{uid}/workspaces/{workspace_uid}`) endpoints publish a best-effort indexer delete (and, for key contacts, an FGA member_remove) keyed by the path UID even when the source record is already gone, then still return 404. This sweeps documents/tuples that outlived their source record. Cleanup runs only on a genuine NotFound — never on infrastructure errors, stale `If-Match`, or validation failures.
+> **Endpoint delete safety:** HTTP delete endpoints publish indexer/FGA cleanup only after the source record has been fetched, verified against the path parent, and deleted from the source store. If the source record is already missing or the child ID belongs under a different parent, the endpoint returns 404 and publishes no cleanup from path params. This avoids tombstoning a real document or FGA tuple owned by another membership/org. Repair for stale orphaned documents remains CDC replay, `/admin/reindex`, or an operational cleanup with authoritative ownership evidence.
 
 ---
 

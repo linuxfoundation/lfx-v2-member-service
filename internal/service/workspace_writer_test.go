@@ -7,11 +7,9 @@ import (
 	"context"
 	"testing"
 
-	indexerConstants "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
-	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -254,7 +252,7 @@ func TestWorkspaceWriter_DeleteWorkspace_WorkspaceNotFound_ReturnsNotFound(t *te
 	assert.True(t, pkgerrors.IsNotFound(err), "expected NotFound, got %T: %v", err, err)
 }
 
-func TestWorkspaceWriter_DeleteWorkspace_AlreadyMissing_SweepsAndReturns404(t *testing.T) {
+func TestWorkspaceWriter_DeleteWorkspace_AlreadyMissing_Returns404NoPublish(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore) // registry exists; the requested UID does not
 	pub := mock.NewMockMemberPublisher()
@@ -274,17 +272,9 @@ func TestWorkspaceWriter_DeleteWorkspace_AlreadyMissing_SweepsAndReturns404(t *t
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err), "already-missing delete must preserve 404, got %T: %v", err, err)
-
-	require.NotNil(t, pub.LastIndexerPayload, "already-missing sweep must publish a workspace indexer delete")
-	msg, ok := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
-	require.True(t, ok)
-	assert.Equal(t, indexerConstants.ActionDeleted, msg.Action)
-	assert.Equal(t, "nonexistent-uid", msg.Data, "sweep must carry the workspace UID string as data")
-	assert.Equal(t, constants.IndexOrgWorkspaceSubject, pub.LastIndexSubject)
-	// No workspace-project delete is possible without association IDs.
-	for _, c := range pub.CallOrder {
-		assert.NotEqual(t, "access", c, "workspace sweep must not publish FGA access messages")
-	}
+	assert.Nil(t, pub.LastIndexerPayload,
+		"missing workspace delete must not tombstone by path UID; the UID may belong to another org")
+	assert.Empty(t, pub.CallOrder, "missing workspace delete must publish nothing")
 }
 
 func TestWorkspaceWriter_DeleteWorkspace_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {

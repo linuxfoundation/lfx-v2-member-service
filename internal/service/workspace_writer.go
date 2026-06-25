@@ -279,11 +279,8 @@ func (o *workspaceWriterOrchestrator) DeleteWorkspace(ctx context.Context, in Wo
 	// Verify the workspace exists before publishing a delete.
 	found := existing.FindWorkspace(in.WorkspaceUID)
 	if found == nil {
-		// Already-missing sweep: the registry read succeeded but this workspace
-		// UID is gone, yet a stale indexed document may survive. Best-effort
-		// tombstone using path params, then preserve the 404. Association IDs are
-		// unavailable here, so only the workspace document is swept.
-		o.sweepAlreadyMissingWorkspace(ctx, in)
+		// Workspace UID is the index object ID, so a wrong-org path must not
+		// tombstone a real workspace owned by another org.
 		return pkgerrors.NewNotFound("workspace not found")
 	}
 
@@ -643,27 +640,6 @@ func (o *workspaceWriterOrchestrator) guardOrg(ctx context.Context, orgUID strin
 		return "", pkgerrors.NewNotFound("organization not found")
 	}
 	return org.Name, nil
-}
-
-// sweepAlreadyMissingWorkspace publishes a best-effort indexer delete for a
-// workspace whose UID is gone from the registry. Fire-and-forget: the endpoint
-// still returns 404, so a publish failure must not become a 500. Stub org and
-// workspace structs carry only the UIDs needed for the delete tombstone (the
-// indexer delete payload is the workspace UID string); no Salesforce/org fetch
-// is attempted. Workspace-project associations are skipped here to keep the
-// recovery path minimal — projects could be fetched via GetWorkspaceProjects
-// but are not needed for the indexer tombstone.
-func (o *workspaceWriterOrchestrator) sweepAlreadyMissingWorkspace(ctx context.Context, in WorkspaceDelete) {
-	if o.publisher == nil {
-		return
-	}
-	slog.InfoContext(ctx, "workspace already missing on delete — sweeping stale index state",
-		"org_uid", in.OrgUID, "workspace_uid", in.WorkspaceUID, "not_found", true)
-
-	PublishWorkspaceIndexer(ctx, o.publisher,
-		&model.B2BOrg{UID: in.OrgUID},
-		&model.Workspace{UID: in.WorkspaceUID},
-		indexerConstants.ActionDeleted)
 }
 
 // checkWorkspacesIfMatch validates the optional If-Match precondition against

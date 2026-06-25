@@ -392,8 +392,7 @@ func TestUpdateKeyContact_MembershipMismatch(t *testing.T) {
 }
 
 // TestDeleteKeyContact_MembershipMismatch verifies that DeleteKeyContact returns 404
-// when the orchestrator returns NotFound (cross-membership check and already-missing
-// sweep are now handled by the orchestrator).
+// when the orchestrator returns NotFound for missing or wrong-parent requests.
 func TestDeleteKeyContact_MembershipMismatch(t *testing.T) {
 	svc := newTestSvc(withKeyContactWriterUC(stubKeyContactWriterUC{
 		err: pkgerrors.NewNotFound("key contact not found in membership"),

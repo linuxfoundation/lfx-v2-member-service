@@ -108,7 +108,7 @@ func (s *seededStorage) GetKeyContact(_ context.Context, uid string) (*model.Key
 }
 
 // errorGetStorage is a port.MemberReader whose GetKeyContact returns a fixed
-// non-NotFound error, used to verify the delete path does not sweep on backend errors.
+// non-NotFound error, used to verify backend errors publish no cleanup.
 type errorGetStorage struct {
 	seededStorage
 	err error
@@ -495,11 +495,12 @@ func TestKeyContactWriter_Delete_IfMatch_Mismatch_PublishesNothing(t *testing.T)
 	assert.Empty(t, pub.calls(), "precondition failure must publish no indexer/FGA messages")
 }
 
-// ── Already-missing sweep tests ───────────────────────────────────────────────
-// When Delete finds the source record is gone (NotFound), it runs a best-effort
-// index/FGA sweep before returning 404. These tests exercise that path via Delete.
+// ── Missing and wrong-parent safety tests ─────────────────────────────────────
+// Missing-source deletes return 404 without publishing. Without a fetched source
+// record, the service cannot prove the UID is globally absent; tombstoning by path
+// params could delete a real document owned by another parent.
 
-func TestKeyContactWriter_Delete_AlreadyMissing_PublishesIndexerAndFGA(t *testing.T) {
+func TestKeyContactWriter_Delete_AlreadyMissing_ReturnsNotFoundNoPublish(t *testing.T) {
 	pub := &trackingPublisher{}
 	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
 		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
@@ -508,49 +509,8 @@ func TestKeyContactWriter_Delete_AlreadyMissing_PublishesIndexerAndFGA(t *testin
 	err := w.Delete(context.Background(), in)
 
 	require.True(t, pkgerrors.IsNotFound(err), "already-missing Delete must return NotFound")
-	calls := pub.calls()
-	var sawIndexer, sawFGARemove bool
-	for _, c := range calls {
-		if strings.Contains(c, "indexer:") {
-			sawIndexer = true
-		}
-		if strings.Contains(c, fgaconstants.GenericMemberRemoveSubject) {
-			sawFGARemove = true
-		}
-	}
-	assert.True(t, sawIndexer, "already-missing Delete must publish an indexer delete")
-	assert.True(t, sawFGARemove,
-		"already-missing Delete must publish an FGA remove even with empty username")
-}
-
-func TestKeyContactWriter_Delete_AlreadyMissing_FGARemovePayloadIsObjectIDOnly(t *testing.T) {
-	pub := &accessPayloadPublisher{}
-	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
-		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
-
-	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
-	err := w.Delete(context.Background(), in)
-
-	require.True(t, pkgerrors.IsNotFound(err), "already-missing Delete must return NotFound")
-	require.Len(t, pub.accessMsgs, 1, "exactly one FGA remove must be published on the sweep")
-	msg, ok := pub.accessMsgs[0].(fgatypes.GenericFGAMessage)
-	require.True(t, ok)
-	data, ok := msg.Data.(fgatypes.GenericMemberData)
-	require.True(t, ok)
-	assert.Equal(t, testMembershipUID, data.UID)
-	assert.Empty(t, data.Username, "sweep FGA remove must be object-id-only (empty username)")
-}
-
-func TestKeyContactWriter_Delete_AlreadyMissing_FGAPublishFailsNoSideEffect(t *testing.T) {
-	// FGA Access fails — sweep must not panic or propagate; Delete still returns NotFound.
-	pub := &errorFGARemovePublisher{}
-	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
-		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
-
-	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
-	var err error
-	assert.NotPanics(t, func() { err = w.Delete(context.Background(), in) })
-	assert.True(t, pkgerrors.IsNotFound(err), "FGA publish failure must not mask the NotFound")
+	assert.Empty(t, pub.calls(),
+		"already-missing delete must not publish indexer or FGA cleanup from path params")
 }
 
 func TestKeyContactWriter_Delete_MembershipMismatch_ReturnsNotFoundNoPublish(t *testing.T) {
