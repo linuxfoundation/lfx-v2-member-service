@@ -107,6 +107,17 @@ func (s *seededStorage) GetKeyContact(_ context.Context, uid string) (*model.Key
 	return nil, pkgerrors.NewNotFound("key contact not found")
 }
 
+// errorGetStorage is a port.MemberReader whose GetKeyContact returns a fixed
+// non-NotFound error, used to verify the delete path does not sweep on backend errors.
+type errorGetStorage struct {
+	seededStorage
+	err error
+}
+
+func (s *errorGetStorage) GetKeyContact(_ context.Context, _ string) (*model.KeyContact, error) {
+	return nil, s.err
+}
+
 func (s *seededStorage) ListKeyContactsForMembership(_ context.Context, _ string) ([]*model.KeyContact, error) {
 	var out []*model.KeyContact
 	for _, kc := range s.kcs {
@@ -466,6 +477,154 @@ func TestKeyContactWriter_Delete_IfMatch_Mismatch_PreconditionFailed(t *testing.
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsPreconditionFailed(err))
+}
+
+func TestKeyContactWriter_Delete_IfMatch_Mismatch_PublishesNothing(t *testing.T) {
+	kc := &model.KeyContact{UID: testKCUID, MembershipUID: testMembershipUID, UpdatedAt: time.Now()}
+	storage := newSeededStorage(kc)
+	pub := &trackingPublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(func(_ context.Context, _ string) (string, error) {
+		return "", nil
+	}))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID, IfMatch: "\"stale\""}
+	err := w.Delete(context.Background(), in)
+
+	require.True(t, pkgerrors.IsPreconditionFailed(err))
+	assert.Empty(t, pub.calls(), "precondition failure must publish no indexer/FGA messages")
+}
+
+// ── Already-missing sweep tests ───────────────────────────────────────────────
+// When Delete finds the source record is gone (NotFound), it runs a best-effort
+// index/FGA sweep before returning 404. These tests exercise that path via Delete.
+
+func TestKeyContactWriter_Delete_AlreadyMissing_PublishesIndexerAndFGA(t *testing.T) {
+	pub := &trackingPublisher{}
+	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.True(t, pkgerrors.IsNotFound(err), "already-missing Delete must return NotFound")
+	calls := pub.calls()
+	var sawIndexer, sawFGARemove bool
+	for _, c := range calls {
+		if strings.Contains(c, "indexer:") {
+			sawIndexer = true
+		}
+		if strings.Contains(c, fgaconstants.GenericMemberRemoveSubject) {
+			sawFGARemove = true
+		}
+	}
+	assert.True(t, sawIndexer, "already-missing Delete must publish an indexer delete")
+	assert.True(t, sawFGARemove,
+		"already-missing Delete must publish an FGA remove even with empty username")
+}
+
+func TestKeyContactWriter_Delete_AlreadyMissing_FGARemovePayloadIsObjectIDOnly(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.True(t, pkgerrors.IsNotFound(err), "already-missing Delete must return NotFound")
+	require.Len(t, pub.accessMsgs, 1, "exactly one FGA remove must be published on the sweep")
+	msg, ok := pub.accessMsgs[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	data, ok := msg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, testMembershipUID, data.UID)
+	assert.Empty(t, data.Username, "sweep FGA remove must be object-id-only (empty username)")
+}
+
+func TestKeyContactWriter_Delete_AlreadyMissing_FGAPublishFailsNoSideEffect(t *testing.T) {
+	// FGA Access fails — sweep must not panic or propagate; Delete still returns NotFound.
+	pub := &errorFGARemovePublisher{}
+	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	var err error
+	assert.NotPanics(t, func() { err = w.Delete(context.Background(), in) })
+	assert.True(t, pkgerrors.IsNotFound(err), "FGA publish failure must not mask the NotFound")
+}
+
+func TestKeyContactWriter_Delete_MembershipMismatch_ReturnsNotFoundNoPublish(t *testing.T) {
+	// Safety invariant: when the requested contact UID exists but belongs to a
+	// DIFFERENT membership, the endpoint must return 404 with NO indexer or FGA
+	// publish. Tombstoning by UID here would delete the contact's real indexed
+	// document and revoke FGA tuples owned by the other membership.
+	kc := &model.KeyContact{UID: testKCUID, MembershipUID: testMembershipUID}
+	storage := newSeededStorage(kc)
+	pub := &trackingPublisher{}
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: "other-membership-uid", UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsNotFound(err), "cross-membership delete must return 404 not 403")
+	assert.Empty(t, pub.calls(),
+		"cross-membership 404 MUST NOT publish any indexer or FGA message — the record belongs to another membership")
+}
+
+// ── Delete error-propagation tests ───────────────────────────────────────────
+
+func TestKeyContactWriter_Delete_BackendError_PropagatesError(t *testing.T) {
+	// Storage returns a non-NotFound error → original error returned, nothing published.
+	storage := &errorGetStorage{err: pkgerrors.NewUnexpected("nats unavailable", nil)}
+	pub := &trackingPublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(func(_ context.Context, _ string) (string, error) {
+		return "", nil
+	}))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.Error(t, err)
+	assert.False(t, pkgerrors.IsNotFound(err), "a backend error must not be reported as NotFound")
+	assert.Empty(t, pub.calls(), "a non-NotFound read error must publish nothing")
+}
+
+func TestKeyContactWriter_Delete_WriteFailsAfterRead_PublishesNothing(t *testing.T) {
+	// GetKeyContact succeeds (record exists), but DeleteKeyContact write fails.
+	// Expectation: original write error returned, no indexer-delete, no FGA-remove.
+	kc := &model.KeyContact{UID: testKCUID, MembershipUID: testMembershipUID, Email: "alice@example.com", Username: "alice"}
+	storage := newSeededStorage(kc)
+	pub := &trackingPublisher{}
+
+	// Wire a writer whose DeleteKeyContact always fails.
+	failWriter := &failingKeyContactWriter{err: pkgerrors.NewUnexpected("salesforce write unavailable", nil)}
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(failWriter),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil })),
+	)
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.Error(t, err)
+	assert.False(t, pkgerrors.IsNotFound(err), "a write failure must not be reported as NotFound")
+	assert.Empty(t, pub.calls(), "a delete write failure must not publish any indexer or FGA messages")
+}
+
+// failingKeyContactWriter is a port.KeyContactWriter whose DeleteKeyContact always fails.
+type failingKeyContactWriter struct {
+	mock.MockKeyContactWriterWithOK
+	err error
+}
+
+func (w *failingKeyContactWriter) DeleteKeyContact(_ context.Context, _ string, _ string) error {
+	return w.err
 }
 
 // ── Org-dashboard provisioning tests (Tasks 4, 5, 6) ─────────────────────────

@@ -17,6 +17,26 @@ This document is the authoritative reference for all data the member service sen
 
 ---
 
+## Delete Wire Contract (all resource types)
+
+For `action: deleted`, the indexer-service requires the message `data` field to be a plain JSON **string** holding the OpenSearch object ID — **not** a resource object. An object payload is rejected (`data must be a string (object ID) for deleted actions`) and the target document is never tombstoned, leaving a stale ("ghost") document in the query service.
+
+This rule applies to **every** member resource type: `b2b_org`, `project_membership`, `key_contact`, `org_workspace`, and `org_workspace_project`. The object ID equals each type's `IndexingConfig.ObjectID`:
+
+| Object type             | Delete `data` value                         |
+|-------------------------|---------------------------------------------|
+| `b2b_org`               | `org.UID`                                    |
+| `project_membership`    | `pm.UID`                                     |
+| `key_contact`           | `kc.UID`                                     |
+| `org_workspace`         | `workspace.UID`                             |
+| `org_workspace_project` | `"{workspaceUID}/{projectUID}"` (composite) |
+
+Implementation: each publisher in `internal/service/messaging.go` routes through a per-resource `build<Type>IndexerInput(x, action)` helper that returns the bare UID string on `ActionDeleted` and the struct/view on create/update. The helper returns a raw Go string — `json.Marshal` then emits `{"data":"uid"}`; do not pre-quote the UID.
+
+> **Already-missing endpoint deletes:** the `key_contact` (`DELETE /project_memberships/{membership_uid}/key_contacts/{uid}`) and `workspace` (`DELETE /b2b_orgs/{uid}/workspaces/{workspace_uid}`) endpoints publish a best-effort indexer delete (and, for key contacts, an FGA member_remove) keyed by the path UID even when the source record is already gone, then still return 404. This sweeps documents/tuples that outlived their source record. Cleanup runs only on a genuine NotFound — never on infrastructure errors, stale `If-Match`, or validation failures.
+
+---
+
 ## B2B Org
 
 **Object type:** `b2b_org`

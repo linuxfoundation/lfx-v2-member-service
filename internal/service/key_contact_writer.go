@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -392,10 +393,29 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 }
 
 // Delete deletes a key contact. Indexer delete is swallowed; FGA remove is propagated.
+//
+// Already-missing path: when storage returns NotFound, publish best-effort
+// indexer + FGA cleanup keyed by the path UID/membership, then return 404.
+//
+// Cross-membership path: when the contact exists but belongs to a different
+// membership, return 404 with NO publish — the contact's real document and FGA
+// tuple are owned by another membership and must not be tombstoned by a
+// mismatched path. This protects unrelated records from being swept by a
+// well-formed UID against the wrong membership.
 func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContactDeleteInput) error {
 	kc, err := o.storage.GetKeyContact(ctx, in.UID)
 	if err != nil {
+		if pkgerrors.IsNotFound(err) {
+			o.sweepMissing(ctx, in)
+		}
 		return err
+	}
+
+	if kc.MembershipUID != in.MembershipUID {
+		// No sweep — the contact exists under another membership; tombstoning by
+		// UID here would delete the real indexed document. Return 404 only.
+		return pkgerrors.NewNotFound(
+			fmt.Sprintf("key contact %s not found in membership %s", in.UID, in.MembershipUID))
 	}
 
 	if in.IfMatch != "" {
@@ -429,6 +449,38 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	}
 
 	return nil
+}
+
+// sweepMissing logs and calls publishSweep for a key contact whose source record
+// is confirmed gone from storage (storage returned NotFound).
+func (o *keyContactWriterOrchestrator) sweepMissing(ctx context.Context, in KeyContactDeleteInput) {
+	slog.InfoContext(ctx, "key contact already missing on delete — sweeping stale index/FGA state",
+		"uid", in.UID, "membership_uid", in.MembershipUID, "not_found", true)
+	o.publishSweep(ctx, in)
+}
+
+// publishSweep publishes best-effort indexer and FGA cleanup keyed by in.UID and
+// in.MembershipUID. Both publishes are fire-and-forget: the endpoint still returns
+// 404, so a publish failure must not become a 500.
+//
+// The FGA remove calls memberPublisher.Access directly with an empty username
+// rather than publishFGARemove — that helper short-circuits to nil when username
+// is empty, which would silently skip the sweep. An object-id-only remove lets
+// fga-sync clean up the dangling tuple by object id (mirrors the CDC delete path).
+func (o *keyContactWriterOrchestrator) publishSweep(ctx context.Context, in KeyContactDeleteInput) {
+	if o.memberPublisher == nil {
+		return
+	}
+	PublishKeyContactIndexer(ctx, o.memberPublisher,
+		&model.KeyContact{UID: in.UID, MembershipUID: in.MembershipUID},
+		indexerConstants.ActionDeleted)
+
+	if pubErr := o.memberPublisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject,
+		BuildKeyContactFGARemoveMessage(in.MembershipUID, ""), false); pubErr != nil {
+		slog.ErrorContext(ctx, "key contact sweep FGA remove failed — dangling tuple may require manual cleanup",
+			"uid", in.UID, "membership_uid", in.MembershipUID,
+			"error", pubErr, "fga_revoke_failed_dangling_tuple", true)
+	}
 }
 
 const legacyAuth0UsernamePrefix = "auth0|"
