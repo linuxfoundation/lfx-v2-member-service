@@ -38,18 +38,47 @@ func TestParseUserMetadataResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "genuine not-found envelope is a miss",
+			name: "search miss envelope is a miss",
 			body: `{"success":false,"error":"user not found"}`,
 			wantErr: func(t *testing.T, err error) {
 				assert.True(t, pkgerrors.IsNotFound(err), "not-found envelope must be NotFound, got %v", err)
 			},
 		},
 		{
-			name: "non not-found error envelope is unexpected (not swallowed as a miss)",
+			name: "get-by-id miss envelope is a miss",
+			body: `{"success":false,"error":"The user does not exist."}`,
+			wantErr: func(t *testing.T, err error) {
+				assert.True(t, pkgerrors.IsNotFound(err), "auth0| get-by-id 404 must be NotFound, got %v", err)
+			},
+		},
+		{
+			name: "rate-limit envelope is unexpected (transient, not a miss)",
+			body: `{"success":false,"error":"too_many_requests: Global limit has been reached"}`,
+			wantErr: func(t *testing.T, err error) {
+				require.Error(t, err)
+				assert.False(t, pkgerrors.IsNotFound(err), "a rate-limit error must NOT be reported as a miss")
+			},
+		},
+		{
+			name: "non-miss error envelope is unexpected (not swallowed as a miss)",
 			body: `{"success":false,"error":"internal server error"}`,
 			wantErr: func(t *testing.T, err error) {
 				require.Error(t, err)
 				assert.False(t, pkgerrors.IsNotFound(err), "an auth-service failure must NOT be reported as a miss")
+			},
+		},
+		{
+			name: "empty body is a miss",
+			body: ``,
+			wantErr: func(t *testing.T, err error) {
+				assert.True(t, pkgerrors.IsNotFound(err), "an absent body must be NotFound, got %v", err)
+			},
+		},
+		{
+			name: "whitespace-only body is a miss",
+			body: "   \n\t",
+			wantErr: func(t *testing.T, err error) {
+				assert.True(t, pkgerrors.IsNotFound(err), "a whitespace-only body must be NotFound, got %v", err)
 			},
 		},
 		{
