@@ -23,6 +23,17 @@ func TestMapUsernameToAuthSub(t *testing.T) {
 
 	// Deterministic: the same legacy username always maps to the same sub.
 	assert.Equal(t, hashed, MapUsernameToAuthSub("accept@example.com"))
+
+	// A 24+ char hex-like username matches safeNameRE but is forced through the
+	// hash branch to avoid colliding with a future Auth0 native DB hex user ID.
+	hexLike := "abcdef0123456789abcdef01"
+	hexHashed := MapUsernameToAuthSub(hexLike)
+	assert.NotEqual(t, "auth0|"+hexLike, hexHashed)
+	assert.True(t, strings.HasPrefix(hexHashed, "auth0|"))
+	assert.Equal(t, hexHashed, MapUsernameToAuthSub(hexLike))
+
+	// Shorter (<24) all-hex names fall outside hexUserRE and stay verbatim.
+	assert.Equal(t, "auth0|abcdef012345", MapUsernameToAuthSub("abcdef012345"))
 }
 
 func TestAuthSubLookupKey(t *testing.T) {
