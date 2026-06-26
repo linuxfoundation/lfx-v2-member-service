@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/auth"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
@@ -52,8 +53,13 @@ func (u *userReader) UsernameByEmail(ctx context.Context, email string) (string,
 }
 
 // UserMetadataByPrincipal resolves profile metadata via auth-service; an unsuccessful/absent body is a miss.
+//
+// A bare LFID username is mapped to its deterministic "auth0|" sub before the request so auth-service
+// resolves it with a get-by-id rather than a rate-limited Auth0 user search (the search path saturates
+// the shared tenant during bulk avatar enrichment); already-qualified principals pass through unchanged.
 func (u *userReader) UserMetadataByPrincipal(ctx context.Context, principal string) (port.UserMetadata, error) {
-	msg, err := u.client.Conn().RequestWithContext(ctx, constants.AuthUserMetadataReadSubject, []byte(principal))
+	lookupKey := auth.AuthSubLookupKey(principal)
+	msg, err := u.client.Conn().RequestWithContext(ctx, constants.AuthUserMetadataReadSubject, []byte(lookupKey))
 	if err != nil {
 		// Transport failure (no-responders/timeout) is unexpected, not a genuine miss — callers must be
 		// able to tell an auth-service outage apart from "this user has no metadata".
