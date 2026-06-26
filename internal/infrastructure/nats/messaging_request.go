@@ -69,16 +69,16 @@ func (u *userReader) UserMetadataByPrincipal(ctx context.Context, principal stri
 }
 
 // parseUserMetadataResponse parses the auth-service user_metadata reply body. Mirrors
-// ErrorMessageNATSResponse.CheckError: malformed JSON or a non-"not found" error envelope → Unexpected
-// (a real auth-service failure callers must tell apart from a miss); an absent/"not found" body →
-// NotFound (a genuine miss); success+data → the denormalized subset.
+// ErrorMessageNATSResponse.CheckError: malformed JSON or a non-miss error envelope → Unexpected
+// (a real auth-service failure callers must tell apart from a miss); an absent body or a genuine
+// "no such user" miss (see isUserMissError) → NotFound; success+data → the denormalized subset.
 func parseUserMetadataResponse(principal string, data []byte) (port.UserMetadata, error) {
 	var response UserMetadataNATSResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return port.UserMetadata{}, errors.NewUnexpected("failed to parse user_metadata response", err)
 	}
 	if !response.Success || response.Data == nil {
-		if response.Error != "" && !strings.Contains(response.Error, "not found") {
+		if response.Error != "" && !isUserMissError(response.Error) {
 			return port.UserMetadata{}, errors.NewUnexpected(fmt.Sprintf("user metadata lookup failed for principal %s: %s", redaction.Redact(principal), response.Error))
 		}
 		return port.UserMetadata{}, errors.NewNotFound(fmt.Sprintf("user metadata not found for principal: %s", redaction.Redact(principal)))
