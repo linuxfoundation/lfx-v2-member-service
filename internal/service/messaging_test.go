@@ -780,3 +780,101 @@ func TestPublishWorkspaceProjectIndexer_DeleteMessageDataIsCompoundID(t *testing
 	require.NoError(t, json.Unmarshal(payload, &wire))
 	assert.IsType(t, "", wire["data"], "indexer wire format requires string data for delete actions")
 }
+
+// ── B2BOrg / ProjectMembership / KeyContact delete payload ──────────────────────
+
+// assertDeleteDataIsUIDString marshals the message and asserts wire data is a JSON string.
+func assertDeleteDataIsUIDString(t *testing.T, msg *model.MemberIndexerMessage, wantUID string) {
+	t.Helper()
+	assert.Equal(t, indexerConstants.ActionDeleted, msg.Action)
+	assert.Equal(t, wantUID, msg.Data, "deleted indexer message must carry UID string as data")
+	payload, err := json.Marshal(msg)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(payload, &wire))
+	assert.IsType(t, "", wire["data"], "indexer wire format requires string data for delete actions")
+}
+
+func TestBuildB2BOrgIndexerInput_DeleteVsCreate(t *testing.T) {
+	org := &model.B2BOrg{UID: "org-uid-001", Name: "Red Hat"}
+	assert.Equal(t, "org-uid-001", buildB2BOrgIndexerInput(org, indexerConstants.ActionDeleted))
+	assert.Equal(t, org, buildB2BOrgIndexerInput(org, indexerConstants.ActionCreated))
+}
+
+func TestBuildProjectMembershipIndexerInput_DeleteVsCreate(t *testing.T) {
+	pm := &model.ProjectMembership{UID: "pm-uid-001"}
+	assert.Equal(t, "pm-uid-001", buildProjectMembershipIndexerInput(pm, indexerConstants.ActionDeleted))
+	assert.Equal(t, pm, buildProjectMembershipIndexerInput(pm, indexerConstants.ActionUpdated))
+}
+
+func TestBuildKeyContactIndexerInput_DeleteVsCreate(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-uid-001"}
+	assert.Equal(t, "kc-uid-001", buildKeyContactIndexerInput(kc, indexerConstants.ActionDeleted))
+	assert.Equal(t, kc, buildKeyContactIndexerInput(kc, indexerConstants.ActionCreated))
+}
+
+func TestPublishB2BOrgIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	org := &model.B2BOrg{UID: "org-del-001", Name: "Red Hat LLC"}
+
+	PublishB2BOrgIndexer(context.Background(), pub, org, indexerConstants.ActionDeleted)
+
+	require.NotNil(t, pub.LastIndexerPayload)
+	msg, ok := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+	require.True(t, ok)
+	assertDeleteDataIsUIDString(t, msg, "org-del-001")
+	assert.Equal(t, constants.IndexB2BOrgSubject, pub.LastIndexSubject)
+}
+
+func TestPublishProjectMembershipIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	pm := &model.ProjectMembership{UID: "pm-del-001"}
+
+	PublishProjectMembershipIndexer(context.Background(), pub, pm, indexerConstants.ActionDeleted)
+
+	require.NotNil(t, pub.LastIndexerPayload)
+	msg, ok := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+	require.True(t, ok)
+	assertDeleteDataIsUIDString(t, msg, "pm-del-001")
+	assert.Equal(t, constants.IndexProjectMembershipSubject, pub.LastIndexSubject)
+}
+
+func TestPublishKeyContactIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	kc := &model.KeyContact{UID: "kc-del-001", MembershipUID: "pm-001"}
+
+	PublishKeyContactIndexer(context.Background(), pub, kc, indexerConstants.ActionDeleted)
+
+	require.NotNil(t, pub.LastIndexerPayload)
+	msg, ok := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+	require.True(t, ok)
+	assertDeleteDataIsUIDString(t, msg, "kc-del-001")
+	assert.Equal(t, constants.IndexKeyContactSubject, pub.LastIndexSubject)
+}
+
+func TestPublishIndexer_CreateCarriesFullObject(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		publish func(*mock.MockMemberPublisher)
+		msg     string
+	}{
+		{"b2b_org", func(p *mock.MockMemberPublisher) {
+			PublishB2BOrgIndexer(ctx, p, &model.B2BOrg{UID: "org-c-001", Name: "Acme"}, indexerConstants.ActionCreated)
+		}, "create b2b_org must carry an object payload"},
+		{"project_membership", func(p *mock.MockMemberPublisher) {
+			PublishProjectMembershipIndexer(ctx, p, &model.ProjectMembership{UID: "pm-c-001"}, indexerConstants.ActionUpdated)
+		}, "update project_membership must carry an object payload"},
+		{"key_contact", func(p *mock.MockMemberPublisher) {
+			PublishKeyContactIndexer(ctx, p, &model.KeyContact{UID: "kc-c-001"}, indexerConstants.ActionCreated)
+		}, "create key_contact must carry an object payload"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := mock.NewMockMemberPublisher()
+			tc.publish(pub)
+			msg := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+			assert.IsType(t, map[string]any{}, msg.Data, tc.msg)
+		})
+	}
+}

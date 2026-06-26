@@ -197,6 +197,31 @@ func (p *subjectCapturingPublisher) indexerAction(i int) string {
 	return action
 }
 
+// indexerDataIsString reports whether the i-th indexer message's wire "data"
+// field is a JSON string (the indexer delete contract) and returns its value.
+func (p *subjectCapturingPublisher) indexerDataIsString(i int) (string, bool) {
+	if i >= len(p.indexerMessages) || p.indexerMessages[i] == nil {
+		return "", false
+	}
+	b, err := json.Marshal(p.indexerMessages[i])
+	if err != nil {
+		return "", false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return "", false
+	}
+	raw, ok := m["data"]
+	if !ok {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false // data is not a JSON string (e.g. an object)
+	}
+	return s, true
+}
+
 // ── Constructor helper ────────────────────────────────────────────────────────
 
 func newTestCDCConsumer(
@@ -421,6 +446,9 @@ func TestCDCConsumer_Account_Delete_PublishesIndexerAndFGA(t *testing.T) {
 	assert.NotEmpty(t, pub.access, "FGA access must be published on delete")
 	assert.Equal(t, 1, invalidator.B2BOrgCalls, "cache must be invalidated on delete")
 	assert.Equal(t, []byte("r3"), replay.saved)
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "b2b_org delete data must be a JSON string (object ID), not an object")
+	assert.Equal(t, sfid("org-uid-del"), data)
 }
 
 // ── Asset (project_membership) tests ─────────────────────────────────────────
@@ -471,6 +499,9 @@ func TestCDCConsumer_Asset_Delete_PublishesIndexerOnly(t *testing.T) {
 
 	assert.NotEmpty(t, pub.indexer, "indexer delete must be published")
 	assert.Empty(t, pub.access, "no FGA on membership delete (no tuple to revoke)")
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "project_membership delete data must be a JSON string (object ID), not an object")
+	assert.Equal(t, sfid("pm-uid-del"), data)
 }
 
 // ── Project_Role__c (key_contact) tests ──────────────────────────────────────
@@ -552,6 +583,9 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesIndexerAndFGAMemberRemove(t *te
 		"FGA member_remove must be published on key_contact delete; access calls: %v", pub.access)
 	assert.Equal(t, 1, invalidator.KeyContactCalls)
 	assert.Equal(t, []byte("r8"), replay.saved)
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "key_contact delete data must be a JSON string (object ID), not an object")
+	assert.Equal(t, sfid("kc-uid-del"), data)
 }
 
 // ── Error resilience ──────────────────────────────────────────────────────────

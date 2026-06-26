@@ -312,28 +312,16 @@ func (s *membershipServicesrvc) UpdateKeyContact(ctx context.Context, p *members
 }
 
 // DeleteKeyContact deletes a key contact.
-//
-// Cross-membership 404 check is performed here before delegating to the
-// orchestrator — avoids leaking record existence across membership boundaries.
 func (s *membershipServicesrvc) DeleteKeyContact(ctx context.Context, p *membershipservice.DeleteKeyContactPayload) error {
 	p.UID = normalizeSFID(p.UID)
 	p.MembershipUID = normalizeSFID(p.MembershipUID)
-
-	kc, err := s.storage.GetKeyContact(ctx, p.UID)
-	if err != nil {
-		return wrapError(ctx, err)
-	}
-	// 404 (not 403) to avoid leaking existence of contacts in other memberships.
-	if kc.MembershipUID != p.MembershipUID {
-		return wrapError(ctx, pkgerrors.NewNotFound(
-			fmt.Sprintf("key contact %s not found in membership %s", p.UID, p.MembershipUID)))
-	}
 
 	in := usecaseSvc.KeyContactDeleteInput{
 		MembershipUID: p.MembershipUID,
 		UID:           p.UID,
 		IfMatch:       derefStr(p.IfMatch),
 	}
+
 	if err := s.keyContactWriter.Delete(ctx, in); err != nil {
 		return wrapError(ctx, err)
 	}

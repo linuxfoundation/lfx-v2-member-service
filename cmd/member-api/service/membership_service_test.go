@@ -392,9 +392,11 @@ func TestUpdateKeyContact_MembershipMismatch(t *testing.T) {
 }
 
 // TestDeleteKeyContact_MembershipMismatch verifies that DeleteKeyContact returns 404
-// when the contact UID does not belong to the supplied membership_uid.
+// when the orchestrator returns NotFound for missing or wrong-parent requests.
 func TestDeleteKeyContact_MembershipMismatch(t *testing.T) {
-	svc := newTestSvc()
+	svc := newTestSvc(withKeyContactWriterUC(stubKeyContactWriterUC{
+		err: pkgerrors.NewNotFound("key contact not found in membership"),
+	}))
 
 	err := svc.DeleteKeyContact(context.Background(), &membershipservice.DeleteKeyContactPayload{
 		UID:           "contact-role-1",
@@ -404,7 +406,7 @@ func TestDeleteKeyContact_MembershipMismatch(t *testing.T) {
 	require.Error(t, err)
 	var serviceErr *goa.ServiceError
 	require.True(t, errors.As(err, &serviceErr))
-	assert.Equal(t, "NotFound", serviceErr.Name, "must return 404 to avoid leaking existence")
+	assert.Equal(t, "NotFound", serviceErr.Name, "orchestrator NotFound must map to 404")
 }
 
 // TestCreateKeyContact_MembershipNotFound verifies that CreateKeyContact returns 404
