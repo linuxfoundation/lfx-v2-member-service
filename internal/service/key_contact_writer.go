@@ -392,10 +392,23 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 }
 
 // Delete deletes a key contact. Indexer delete is swallowed; FGA remove is propagated.
+//
+// Missing and cross-membership paths return 404 with no publish. Without a
+// fetched source record we cannot prove the requested UID is globally absent;
+// tombstoning by path params could delete a real document owned elsewhere.
 func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContactDeleteInput) error {
 	kc, err := o.storage.GetKeyContact(ctx, in.UID)
 	if err != nil {
 		return err
+	}
+
+	if kc.MembershipUID != in.MembershipUID {
+		// The contact exists under another membership; tombstoning by UID here
+		// would delete the real indexed document. Return generic 404 only — do not
+		// leak that the UID exists elsewhere.
+		slog.InfoContext(ctx, "key contact membership mismatch on delete — returning 404",
+			"uid", in.UID, "path_membership_uid", in.MembershipUID, "owner_membership_uid", kc.MembershipUID)
+		return pkgerrors.NewNotFound("key contact not found")
 	}
 
 	if in.IfMatch != "" {

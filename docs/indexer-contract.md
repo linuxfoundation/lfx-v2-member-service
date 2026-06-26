@@ -17,6 +17,26 @@ This document is the authoritative reference for all data the member service sen
 
 ---
 
+## Delete Wire Contract (all resource types)
+
+For `action: deleted`, the indexer-service requires the message `data` field to be a plain JSON **string** holding the OpenSearch object ID — **not** a resource object. An object payload is rejected (`data must be a string (object ID) for deleted actions`) and the target document is never tombstoned, leaving a stale ("ghost") document in the query service.
+
+This rule applies to **every** member resource type: `b2b_org`, `project_membership`, `key_contact`, `org_workspace`, and `org_workspace_project`. The object ID equals each type's `IndexingConfig.ObjectID`:
+
+| Object type             | Delete `data` value                         |
+|-------------------------|---------------------------------------------|
+| `b2b_org`               | `org.UID`                                    |
+| `project_membership`    | `pm.UID`                                     |
+| `key_contact`           | `kc.UID`                                     |
+| `org_workspace`         | `workspace.UID`                             |
+| `org_workspace_project` | `"{workspaceUID}/{projectUID}"` (composite) |
+
+Implementation: the five resource publishers listed above (`b2b_org`, `project_membership`, `key_contact`, `org_workspace`, `org_workspace_project`) each route through a per-resource `build<Type>IndexerInput(x, action)` helper. For `b2b_org`, `project_membership`, and `key_contact` the helper delegates to the shared `buildIndexerInput` utility; workspace and workspace-project publishers apply the same branching directly. In all cases the helper returns the bare UID string on `ActionDeleted` and the struct/view on create/update. The helper returns a raw Go string — `json.Marshal` then emits `{"data":"uid"}`; do not pre-quote the UID.
+
+> **Endpoint delete safety:** HTTP delete endpoints publish indexer/FGA cleanup only after the source record has been fetched, verified against the path parent, and deleted from the source store. If the source record is already missing or the child ID belongs under a different parent, the endpoint returns 404 and publishes no cleanup from path params. This avoids tombstoning a real document or FGA tuple owned by another membership/org. Repair for stale orphaned documents remains CDC replay, `/admin/reindex`, or an operational cleanup with authoritative ownership evidence.
+
+---
+
 ## B2B Org
 
 **Object type:** `b2b_org`

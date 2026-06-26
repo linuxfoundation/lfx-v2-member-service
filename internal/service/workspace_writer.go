@@ -279,6 +279,8 @@ func (o *workspaceWriterOrchestrator) DeleteWorkspace(ctx context.Context, in Wo
 	// Verify the workspace exists before publishing a delete.
 	found := existing.FindWorkspace(in.WorkspaceUID)
 	if found == nil {
+		// Workspace UID is the index object ID, so a wrong-org path must not
+		// tombstone a real workspace owned by another org.
 		return pkgerrors.NewNotFound("workspace not found")
 	}
 
