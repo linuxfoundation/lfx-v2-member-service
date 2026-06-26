@@ -31,3 +31,16 @@ func (e *ErrorMessageNATSResponse) CheckError(message string) error {
 	}
 	return nil
 }
+
+// UserMetadataNATSResponse is the reply envelope from lfx.auth-service.user_metadata.read.
+type UserMetadataNATSResponse struct {
+	Success bool                      `json:"success"`
+	Error   string                    `json:"error,omitempty"`
+	Data    *UserMetadataNATSDataBody `json:"data,omitempty"`
+}
+
+// UserMetadataNATSDataBody holds the profile fields the member-service consumes from the
+// auth-service user_metadata response. Only the denormalized subset is parsed.
+type UserMetadataNATSDataBody struct {
+	Picture *string `json:"picture,omitempty"`
+}

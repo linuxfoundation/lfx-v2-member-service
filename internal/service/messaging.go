@@ -463,6 +463,7 @@ type b2bOrgMemberView struct {
 	Username     string             `json:"username,omitempty"`
 	Email        string             `json:"email"`
 	Name         string             `json:"name,omitempty"`
+	Avatar       string             `json:"avatar,omitempty"`
 	Role         string             `json:"role"`
 	InviteStatus model.InviteStatus `json:"invite_status"`
 	UpdatedAt    string             `json:"updated_at"`
@@ -508,6 +509,7 @@ func buildB2BOrgSettingsIndexerView(settings *model.B2BOrgSettings) b2bOrgSettin
 			Username:     u.Username,
 			Email:        u.Email,
 			Name:         u.Name,
+			Avatar:       u.Avatar,
 			Role:         role,
 			InviteStatus: status,
 			UpdatedAt:    u.UpdatedAt.UTC().Format(time.RFC3339Nano),

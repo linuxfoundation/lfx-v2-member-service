@@ -287,10 +287,10 @@ Flat `members[]` array — role is a first-class field on each entry. Both accep
 
 | Field        | Example value                                                |
 |--------------|--------------------------------------------------------------|
-| `uid`        | `0012M00002qnukOQAQ`                                         |
-| `members`    | `[{username, email, name, role, invite_status, updated_at}]` |
-| `created_at` | `2026-01-15T10:00:00Z`                                       |
-| `updated_at` | `2026-05-20T14:30:00Z`                                       |
+| `uid`        | `0012M00002qnukOQAQ`                                                  |
+| `members`    | `[{username, email, name, avatar, role, invite_status, updated_at}]`  |
+| `created_at` | `2026-01-15T10:00:00Z`                                                |
+| `updated_at` | `2026-05-20T14:30:00Z`                                                |
 
 Per-member entry shape:
 
@@ -299,6 +299,7 @@ Per-member entry shape:
 | `username`      | `<lfid>`               | Absent for pending invites                                            |
 | `email`         | `user@example.org`     | Always present                                                        |
 | `name`          | `Display Name`         | Optional                                                              |
+| `avatar`        | `https://…/<lfid>.png` | Optional; Auth0 `user_metadata.picture`, enriched at write-time/backfill; omitted when none |
 | `role`          | `writer`               | `"writer"` or `"auditor"`; writer takes precedence if user holds both |
 | `invite_status` | `accepted`             | `accepted`, `pending`                                                 |
 | `updated_at`    | `2026-01-15T10:00:00Z` | Last modification to this membership row                              |

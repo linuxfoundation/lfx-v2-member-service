@@ -575,3 +575,8 @@ func NewMockUserReader() *MockUserReader { return &MockUserReader{} }
 func (m *MockUserReader) UsernameByEmail(_ context.Context, _ string) (string, error) {
 	return "", nil
 }
+
+// UserMetadataByPrincipal returns empty metadata (mock mode enriches no avatar).
+func (m *MockUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
+}

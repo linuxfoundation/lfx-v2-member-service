@@ -121,3 +121,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log* 
 charts/lfx-v2-member-service/values.local.yaml
+
+# Local OrbStack/k8s dev deploy manifest (member-service-local-run/deploy flows)
+local-deploy.yaml
