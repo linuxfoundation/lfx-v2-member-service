@@ -513,6 +513,9 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		nc,
 		GlobalOrgAdminTeamUID(),
 		ProjectResolverImpl(ctx),
+		// Avatar enrichment collaborators (b2b_org_settings + EnrichAvatars path / avatar-backfill Job).
+		usecaseSvc.WithSettingsWriter(B2BOrgSettingsWriterImpl(ctx)),
+		usecaseSvc.WithUserReader(UserReaderImpl(ctx)),
 	)
 }
 

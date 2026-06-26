@@ -59,15 +59,19 @@ func (u *userReader) UserMetadataByPrincipal(ctx context.Context, principal stri
 		// able to tell an auth-service outage apart from "this user has no metadata".
 		return port.UserMetadata{}, errors.NewUnexpected(fmt.Sprintf("user metadata lookup failed for principal: %s", redaction.Redact(principal)), err)
 	}
+	return parseUserMetadataResponse(principal, msg.Data)
+}
 
+// parseUserMetadataResponse parses the auth-service user_metadata reply body. Mirrors
+// ErrorMessageNATSResponse.CheckError: malformed JSON or a non-"not found" error envelope → Unexpected
+// (a real auth-service failure callers must tell apart from a miss); an absent/"not found" body →
+// NotFound (a genuine miss); success+data → the denormalized subset.
+func parseUserMetadataResponse(principal string, data []byte) (port.UserMetadata, error) {
 	var response UserMetadataNATSResponse
-	if errUnmarshal := json.Unmarshal(msg.Data, &response); errUnmarshal != nil {
-		return port.UserMetadata{}, errors.NewUnexpected("failed to parse user_metadata response", errUnmarshal)
+	if err := json.Unmarshal(data, &response); err != nil {
+		return port.UserMetadata{}, errors.NewUnexpected("failed to parse user_metadata response", err)
 	}
 	if !response.Success || response.Data == nil {
-		// Mirror ErrorMessageNATSResponse.CheckError: a "not found" (or an empty error on an absent body)
-		// is a genuine miss; any other error is a real auth-service failure that callers must be able to
-		// tell apart from a miss, so surface it as Unexpected rather than swallowing it as NotFound.
 		if response.Error != "" && !strings.Contains(response.Error, "not found") {
 			return port.UserMetadata{}, errors.NewUnexpected(fmt.Sprintf("user metadata lookup failed for principal %s: %s", redaction.Redact(principal), response.Error))
 		}

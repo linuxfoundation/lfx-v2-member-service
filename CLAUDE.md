@@ -563,9 +563,25 @@ func TestEndpoint(t *testing.T) {
 | `AUDIENCE`                               | JWT audience                                | `lfx-v2-member-service`                 | No       |
 | `JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL` | Mock auth for local dev                     | `""`                                    | No       |
 | `REPOSITORY_SOURCE`                      | Storage backend (`salesforce` or `mock`)    | `salesforce`                            | No       |
-| `RUN_MODE`                               | `consumer` to run CDC consumer; omit for API | `""` (API mode)                        | No       |
+| `RUN_MODE`                               | `consumer` (CDC consumer) / `avatar-backfill` (one-off Job); omit for API | `""` (API mode)           | No       |
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
+
+### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
+
+A one-off Kubernetes Job that re-enriches `b2b_org_settings` writer/auditor avatars from the
+auth-service and republishes the indexer doc. It is **not** a separate backfill framework: it builds
+a full-mode, avatar-enriching `BackfillRequest` (`Types=["b2b_org_settings"]`, `EnrichAvatars=true`)
+and hands it to the same `Runner` that backs `POST /admin/reindex` — so it reuses the run-id, dry-run,
+and full-run lock control plane. Idempotent (an org with no avatar drift is skipped, so it doubles as
+the recurring refresh) and tolerant of a bounded number of transient auth-service lookup failures
+before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end without Salesforce creds.
+
+| Variable                      | Description                                              | Default |
+|-------------------------------|----------------------------------------------------------|---------|
+| `AVATAR_BACKFILL_DRY_RUN`     | Compute drift without writing (set `false` to persist)   | `true`  |
+| `AVATAR_BACKFILL_MISSING_ONLY`| Only enrich principals whose avatar is currently empty   | `false` |
+| `AVATAR_BACKFILL_SLEEP`       | Go duration between auth-service lookups (Auth0 rate cap) | `0`     |
 
 ### Consumer Mode Variables (only read when `RUN_MODE=consumer`)
 
