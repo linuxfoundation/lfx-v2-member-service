@@ -486,7 +486,10 @@ func TestOrgSettingsWriter_AddPrincipal_AvatarEnrichFailSoft(t *testing.T) {
 	assert.Empty(t, result.Writers[0].Avatar)
 }
 
-func TestOrgSettingsWriter_Update_EnrichesOnlyMissingAvatars(t *testing.T) {
+func TestOrgSettingsWriter_Update_DoesNotEnrichAvatars(t *testing.T) {
+	// Bulk Update never enriches avatars: a first-time PUT of a large member list must not issue
+	// one serial auth-service RPC per missing-avatar member inside the HTTP write. Bulk first-fills
+	// are owned by the avatar backfill; the write path enriches only the single just-accepted entry.
 	store := mock.NewMockB2BOrgSettings()
 	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
 
@@ -503,8 +506,8 @@ func TestOrgSettingsWriter_Update_EnrichesOnlyMissingAvatars(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, result.Writers, 2)
-	assert.Equal(t, "https://example.com/new.png", result.Writers[0].Avatar, "missing avatar must be enriched on write")
-	assert.Equal(t, "https://example.com/keep.png", result.Writers[1].Avatar, "existing avatar must be left untouched (refresh is the backfill's job)")
+	assert.Empty(t, result.Writers[0].Avatar, "bulk Update must not enrich a missing avatar (backfill owns bulk first-fills)")
+	assert.Equal(t, "https://example.com/keep.png", result.Writers[1].Avatar, "existing avatar must be left untouched")
 }
 
 func TestOrgSettingsWriter_AddPrincipal_LFIDFound_AcceptsImmediately(t *testing.T) {

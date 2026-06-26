@@ -203,16 +203,16 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 		updated.Auditors = slices.Clone(existing.Auditors)
 	}
 
-	// Clone the caller-provided slices so write-time avatar enrichment never mutates the request's
-	// backing arrays, and only enrich the relations the caller actually provided — a single-list
-	// update must not issue avatar RPCs for the untouched (carried-over) relation.
+	// Clone the caller-provided slices so the persisted record never aliases the request's
+	// backing arrays. Bulk Update does not enrich avatars: a first-time PUT of a large member
+	// list would otherwise issue one serial auth-service RPC per missing-avatar member inside
+	// the HTTP write. Bulk first-fills are owned by the avatar backfill; the write path enriches
+	// only the single just-accepted entry (see AddPrincipal).
 	if in.Writers != nil {
 		updated.Writers = slices.Clone(in.Writers)
-		o.enrichAvatars(ctx, updated.Writers)
 	}
 	if in.Auditors != nil {
 		updated.Auditors = slices.Clone(in.Auditors)
-		o.enrichAvatars(ctx, updated.Auditors)
 	}
 
 	if err := o.settingsWriter.UpdateSettings(ctx, updated, revision); err != nil {
@@ -227,23 +227,6 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 	o.publishAll(ctx, in, updated, action)
 
 	return updated, nil
-}
-
-// enrichAvatars enriches missing avatars on a bulk write only. Refreshing existing avatars is the
-// backfill's job; gating on empty avatar (and skipping revoked/expired) keeps an invite-acceptance
-// re-PUT of the full member list from re-issuing one auth-service RPC per existing member.
-func (o *orgSettingsWriterOrchestrator) enrichAvatars(ctx context.Context, users []model.B2BOrgUser) {
-	for i := range users {
-		u := &users[i]
-		if u.Avatar != "" {
-			continue
-		}
-		status := u.EffectiveStatus()
-		if status == model.InviteStatusRevoked || status == model.InviteStatusExpired {
-			continue
-		}
-		o.enrichAvatar(ctx, u)
-	}
 }
 
 // enrichAvatar refreshes one principal's avatar from auth-service. Best-effort: any miss/error leaves

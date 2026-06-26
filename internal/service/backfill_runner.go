@@ -396,13 +396,22 @@ func (r *Runner) resolveProjectUID(ctx context.Context, slug, current string) st
 }
 
 // enrichSettingsAvatars refreshes each accepted writer/auditor avatar in `settings` (in place) from
-// the auth-service and reports whether any value changed plus the count of lookup failures. A miss
-// (NotFound) leaves the existing value untouched; a transport/app error is counted and isolated so a
-// single transient failure never aborts the run (see maxToleratedAvatarFailures). Rate-limited by
-// req.AvatarSleep; honours MissingOnly. Caller persists the change.
+// the auth-service and reports whether any value changed plus the count of lookup failures. The
+// backfill keeps the projection in sync with the source (sync-and-clear), which is deliberately
+// asymmetric with the write path (which only ever fills empty avatars): a NotFound miss leaves the
+// existing value untouched, but a successful lookup whose picture is empty clears a previously-stored
+// avatar (a user who removed their Auth0 photo gets their indexed avatar blanked on the next pass). A
+// transport/app error is counted and isolated so a single transient failure never aborts the run (see
+// maxToleratedAvatarFailures); a context cancellation aborts the pass without counting as a failure.
+// Rate-limited by req.AvatarSleep; honours MissingOnly. Caller persists the change.
 func (r *Runner) enrichSettingsAvatars(ctx context.Context, log *slog.Logger, req BackfillRequest, uid string, settings *model.B2BOrgSettings) (changed bool, failures int) {
-	enrichList := func(users []model.B2BOrgUser) {
+	// enrichList returns true when the pass was aborted by context cancellation, so the caller
+	// stops before the next relation rather than counting clean-shutdown errors as failures.
+	enrichList := func(users []model.B2BOrgUser) (aborted bool) {
 		for i := range users {
+			if ctx.Err() != nil {
+				return true
+			}
 			u := &users[i]
 			status := u.EffectiveStatus()
 			if status == model.InviteStatusRevoked || status == model.InviteStatusExpired {
@@ -418,6 +427,11 @@ func (r *Runner) enrichSettingsAvatars(ctx context.Context, log *slog.Logger, re
 
 			meta, err := r.userReader.UserMetadataByPrincipal(ctx, username)
 			if err != nil {
+				// A context cancellation/deadline is a clean shutdown, not a lookup failure:
+				// abort the pass rather than counting it toward maxToleratedAvatarFailures.
+				if ctx.Err() != nil {
+					return true
+				}
 				if !errs.IsNotFound(err) {
 					failures++
 					log.WarnContext(ctx, "avatar enrichment lookup failed",
@@ -431,12 +445,15 @@ func (r *Runner) enrichSettingsAvatars(ctx context.Context, log *slog.Logger, re
 
 			if req.AvatarSleep > 0 {
 				if sleepErr := sleepWithContext(ctx, req.AvatarSleep); sleepErr != nil {
-					return
+					return true
 				}
 			}
 		}
+		return false
 	}
-	enrichList(settings.Writers)
+	if enrichList(settings.Writers) {
+		return changed, failures
+	}
 	enrichList(settings.Auditors)
 	return changed, failures
 }
@@ -579,9 +596,16 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 			}
 			if !req.DryRun {
 				if req.EnrichAvatars && r.settingsWriter != nil {
-					if wErr := r.settingsWriter.UpdateSettings(ctx, settings, revision); wErr != nil && !errs.IsConflict(wErr) {
-						log.WarnContext(ctx, "failed to persist enriched avatars (targeted)", "uid", item.UID, "error", wErr,
-							"publish_failed_for_backfill_repair", true)
+					if wErr := r.settingsWriter.UpdateSettings(ctx, settings, revision); wErr != nil {
+						// Skip publish on any persist failure (parity with full mode) so the indexer
+						// only ever sees avatars that were actually persisted — a benign revision
+						// conflict must not project the unpersisted enriched values.
+						if errs.IsConflict(wErr) {
+							log.InfoContext(ctx, "settings changed concurrently; skipping (will retry next run)", "uid", item.UID)
+						} else {
+							log.WarnContext(ctx, "failed to persist enriched avatars (targeted)", "uid", item.UID, "error", wErr,
+								"publish_failed_for_backfill_repair", true)
+						}
 						continue
 					}
 				}
