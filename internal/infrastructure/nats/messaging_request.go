@@ -73,6 +73,10 @@ func (u *userReader) UserMetadataByPrincipal(ctx context.Context, principal stri
 // (a real auth-service failure callers must tell apart from a miss); an absent body or a genuine
 // "no such user" miss (see isUserMissError) → NotFound; success+data → the denormalized subset.
 func parseUserMetadataResponse(principal string, data []byte) (port.UserMetadata, error) {
+	if strings.TrimSpace(string(data)) == "" {
+		return port.UserMetadata{}, errors.NewNotFound(fmt.Sprintf("user metadata not found for principal: %s", redaction.Redact(principal)))
+	}
+
 	var response UserMetadataNATSResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return port.UserMetadata{}, errors.NewUnexpected("failed to parse user_metadata response", err)

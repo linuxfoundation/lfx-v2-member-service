@@ -68,6 +68,20 @@ func TestParseUserMetadataResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "empty body is a miss",
+			body: ``,
+			wantErr: func(t *testing.T, err error) {
+				assert.True(t, pkgerrors.IsNotFound(err), "an absent body must be NotFound, got %v", err)
+			},
+		},
+		{
+			name: "whitespace-only body is a miss",
+			body: "   \n\t",
+			wantErr: func(t *testing.T, err error) {
+				assert.True(t, pkgerrors.IsNotFound(err), "a whitespace-only body must be NotFound, got %v", err)
+			},
+		},
+		{
 			name: "malformed JSON is unexpected",
 			body: `not json`,
 			wantErr: func(t *testing.T, err error) {
