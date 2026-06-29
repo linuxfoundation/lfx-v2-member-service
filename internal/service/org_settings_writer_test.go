@@ -404,6 +404,10 @@ func (r *seedB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string
 	return nil, nil
 }
 
+func (r *seedB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 // ── AddPrincipal (invite flow) ─────────────────────────────────────────────
 
 // stubInviteSender is a controllable stub for port.InviteSender.
@@ -416,6 +420,94 @@ type stubInviteSender struct {
 func (s *stubInviteSender) SendInvite(_ context.Context, req inviteapi.SendInviteRequest) (port.InviteResult, error) {
 	s.calls = append(s.calls, req)
 	return s.result, s.err
+}
+
+// UserMetadataByPrincipal satisfies the extended port.UserReader for the func-based fake; no-op
+// (returns empty metadata) so avatar enrichment is a no-op in tests that don't exercise it.
+func (f userReaderFunc) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
+}
+
+// avatarStubUserReader implements port.UserReader returning a fixed username + picture, for the
+// avatar-enrichment tests.
+type avatarStubUserReader struct {
+	username string
+	picture  string
+	metaErr  error
+}
+
+func (s avatarStubUserReader) UsernameByEmail(_ context.Context, _ string) (string, error) {
+	if s.username == "" {
+		return "", pkgerrors.NewNotFound("mock: no username")
+	}
+	return s.username, nil
+}
+
+func (s avatarStubUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	if s.metaErr != nil {
+		return port.UserMetadata{}, s.metaErr
+	}
+	return port.UserMetadata{Picture: s.picture}, nil
+}
+
+func TestOrgSettingsWriter_AddPrincipal_EnrichesAvatar(t *testing.T) {
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
+
+	userReader := avatarStubUserReader{username: "bob", picture: "https://example.com/bob.png"}
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, &stubInviteSender{}, nil)
+
+	result, err := writer.AddPrincipal(context.Background(), svc.B2BOrgSettingsAddPrincipal{
+		OrgUID: testOrgUID, Email: "bob@example.com", InvitedAs: "writer",
+	})
+
+	require.NoError(t, err)
+	require.Len(t, result.Writers, 1)
+	assert.Equal(t, "https://example.com/bob.png", result.Writers[0].Avatar, "accepted principal's avatar must be enriched from auth-service")
+}
+
+func TestOrgSettingsWriter_AddPrincipal_AvatarEnrichFailSoft(t *testing.T) {
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
+
+	// Metadata lookup fails: the username still resolves and the add succeeds with an empty avatar.
+	userReader := avatarStubUserReader{username: "bob", metaErr: errors.New("nats: metadata timeout")}
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, &stubInviteSender{}, nil)
+
+	result, err := writer.AddPrincipal(context.Background(), svc.B2BOrgSettingsAddPrincipal{
+		OrgUID: testOrgUID, Email: "bob@example.com", InvitedAs: "writer",
+	})
+
+	require.NoError(t, err, "a metadata lookup failure must not block the add")
+	require.Len(t, result.Writers, 1)
+	assert.Equal(t, "bob", result.Writers[0].Username)
+	assert.Empty(t, result.Writers[0].Avatar)
+}
+
+func TestOrgSettingsWriter_Update_DoesNotEnrichAvatars(t *testing.T) {
+	// Bulk Update never enriches avatars: a first-time PUT of a large member list must not issue
+	// one serial auth-service RPC per missing-avatar member inside the HTTP write. Bulk first-fills
+	// are owned by the avatar backfill; the write path enriches only the single just-accepted entry.
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{UID: testOrgUID}, 1)
+
+	userReader := avatarStubUserReader{username: "x", picture: "https://example.com/new.png"}
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, &stubInviteSender{}, nil)
+
+	in := svc.B2BOrgSettingsUpdate{OrgUID: testOrgUID, Writers: []model.B2BOrgUser{
+		{Email: "alice@example.com", Username: "alice", InviteStatus: model.InviteStatusAccepted},
+		{Email: "bob@example.com", Username: "bob", Avatar: "https://example.com/keep.png", InviteStatus: model.InviteStatusAccepted},
+	}}
+
+	result, err := writer.Update(context.Background(), in)
+
+	require.NoError(t, err)
+	require.Len(t, result.Writers, 2)
+	assert.Empty(t, result.Writers[0].Avatar, "bulk Update must not enrich a missing avatar (backfill owns bulk first-fills)")
+	assert.Equal(t, "https://example.com/keep.png", result.Writers[1].Avatar, "existing avatar must be left untouched")
 }
 
 func TestOrgSettingsWriter_AddPrincipal_LFIDFound_AcceptsImmediately(t *testing.T) {
@@ -690,6 +782,10 @@ func (r *countingOrgReader) GetB2BOrg(ctx context.Context, uid string) (*model.B
 
 func (r *countingOrgReader) FetchChildUIDsByParentUID(ctx context.Context, uid string) ([]string, error) {
 	return r.inner.FetchChildUIDsByParentUID(ctx, uid)
+}
+
+func (r *countingOrgReader) FetchChildUIDsByParentUIDs(ctx context.Context, uids []string) (map[string][]string, error) {
+	return r.inner.FetchChildUIDsByParentUIDs(ctx, uids)
 }
 
 // ── AddPrincipal (SuppressNotification) ──────────────────────────────────────

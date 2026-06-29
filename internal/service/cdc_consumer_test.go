@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -111,12 +112,18 @@ func (r *reparentingB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, p
 	}
 	return nil, nil
 }
+func (r *reparentingB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
 
 // fakeB2BOrgReader returns a pre-seeded org.
 type fakeB2BOrgReader struct {
-	org      *model.B2BOrg
-	children []string
-	orgErr   error
+	org            *model.B2BOrg
+	children       []string
+	orgErr         error
+	childMap       map[string][]string
+	batchErr       error
+	batchCallCount atomic.Int32
 }
 
 func (r *fakeB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg, error) {
@@ -124,6 +131,13 @@ func (r *fakeB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg
 }
 func (r *fakeB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) ([]string, error) {
 	return r.children, nil
+}
+func (r *fakeB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	r.batchCallCount.Add(1)
+	if r.childMap != nil {
+		return r.childMap, r.batchErr
+	}
+	return map[string][]string{}, r.batchErr
 }
 
 // subjectCapturingPublisher captures subjects and message payloads for
@@ -183,6 +197,31 @@ func (p *subjectCapturingPublisher) indexerAction(i int) string {
 	return action
 }
 
+// indexerDataIsString reports whether the i-th indexer message's wire "data"
+// field is a JSON string (the indexer delete contract) and returns its value.
+func (p *subjectCapturingPublisher) indexerDataIsString(i int) (string, bool) {
+	if i >= len(p.indexerMessages) || p.indexerMessages[i] == nil {
+		return "", false
+	}
+	b, err := json.Marshal(p.indexerMessages[i])
+	if err != nil {
+		return "", false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return "", false
+	}
+	raw, ok := m["data"]
+	if !ok {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false // data is not a JSON string (e.g. an object)
+	}
+	return s, true
+}
+
 // ── Constructor helper ────────────────────────────────────────────────────────
 
 func newTestCDCConsumer(
@@ -208,6 +247,129 @@ func newTestCDCConsumer(
 }
 
 // ── Account (b2b_org) tests ───────────────────────────────────────────────────
+
+// indexerIsParent extracts data.is_parent from an indexer message captured by
+// subjectCapturingPublisher. Returns false if the field is absent (omitempty).
+func indexerIsParent(msg any) bool {
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return false
+	}
+	var envelope struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(b, &envelope); err != nil {
+		return false
+	}
+	raw, ok := envelope.Data["is_parent"]
+	if !ok {
+		return false
+	}
+	var v bool
+	_ = json.Unmarshal(raw, &v)
+	return v
+}
+
+// TestCDCConsumer_Account_BatchSetsIsParentFromChildUIDsBatch verifies that the
+// CDC batch path calls FetchChildUIDsByParentUIDs exactly once per batch via
+// b2bOrgReader and uses the result to set is_parent on each org before publishing.
+func TestCDCConsumer_Account_BatchSetsIsParentFromChildUIDsBatch(t *testing.T) {
+	t.Parallel()
+
+	parentOrg := &model.B2BOrg{UID: sfid("parent-org")}
+	leafOrg := &model.B2BOrg{UID: sfid("leaf-org")}
+
+	// parentOrg has a child; leafOrg does not appear in the map → is_parent=false.
+	orgReader := &fakeB2BOrgReader{
+		childMap: map[string][]string{
+			parentOrg.UID: {"some-child-uid"},
+		},
+	}
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeUpdate,
+				RecordIDs: []string{sfid("parent-org"), sfid("leaf-org")}, ReplayID: []byte("bp1")},
+		}},
+		&mock.MockControllableMemberReader{},
+		&mock.MockControllableProjectMembershipReader{},
+		orgReader,
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{parentOrg, leafOrg}}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	// FetchChildUIDsByParentUIDs called exactly once for the whole batch — not once per org.
+	assert.Equal(t, int32(1), orgReader.batchCallCount.Load(),
+		"FetchChildUIDsByParentUIDs must be called once per batch, not per org")
+
+	// Two indexer messages published (one per org).
+	require.Len(t, pub.indexerMessages, 2, "both orgs must publish an indexer message")
+
+	// Identify messages by UID rather than position (order is not guaranteed).
+	var gotParentIsParent, gotLeafIsParent bool
+	for _, msg := range pub.indexerMessages {
+		b, _ := json.Marshal(msg)
+		var env struct {
+			Data struct {
+				UID      string `json:"uid"`
+				IsParent bool   `json:"is_parent"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(b, &env); err != nil {
+			continue
+		}
+		if env.Data.UID == parentOrg.UID {
+			gotParentIsParent = env.Data.IsParent
+		}
+		if env.Data.UID == leafOrg.UID {
+			gotLeafIsParent = env.Data.IsParent
+		}
+	}
+	assert.True(t, gotParentIsParent, "parent org must have is_parent=true in indexer message")
+	assert.False(t, gotLeafIsParent, "leaf org must have is_parent=false in indexer message")
+}
+
+// TestCDCConsumer_Account_BatchChildFetchError_ContinuesBatchWithFalse verifies
+// that a FetchChildUIDsByParentUIDs failure is non-fatal: all orgs are still
+// published with is_parent=false.
+func TestCDCConsumer_Account_BatchChildFetchError_ContinuesBatchWithFalse(t *testing.T) {
+	t.Parallel()
+
+	org := &model.B2BOrg{UID: sfid("parent-would-be")}
+
+	orgReader := &fakeB2BOrgReader{
+		batchErr: errors.New("salesforce timeout"),
+	}
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeUpdate,
+				RecordIDs: []string{sfid("parent-would-be")}, ReplayID: []byte("bp2")},
+		}},
+		&mock.MockControllableMemberReader{},
+		&mock.MockControllableProjectMembershipReader{},
+		orgReader,
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{org}}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	// Batch must continue despite the error — org still published.
+	require.Len(t, pub.indexerMessages, 1, "org must still be published even when FetchChildUIDsByParentUIDs fails")
+
+	// is_parent degrades to false when the fetch fails.
+	assert.False(t, indexerIsParent(pub.indexerMessages[0]),
+		"is_parent must be false when FetchChildUIDsByParentUIDs errors")
+}
 
 func TestCDCConsumer_Account_Upsert_PublishesIndexerAndFGA(t *testing.T) {
 	org := &model.B2BOrg{UID: sfid("org-uid-1")}
@@ -284,6 +446,9 @@ func TestCDCConsumer_Account_Delete_PublishesIndexerAndFGA(t *testing.T) {
 	assert.NotEmpty(t, pub.access, "FGA access must be published on delete")
 	assert.Equal(t, 1, invalidator.B2BOrgCalls, "cache must be invalidated on delete")
 	assert.Equal(t, []byte("r3"), replay.saved)
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "b2b_org delete data must be a JSON string (object ID), not an object")
+	assert.Equal(t, sfid("org-uid-del"), data)
 }
 
 // ── Asset (project_membership) tests ─────────────────────────────────────────
@@ -334,6 +499,9 @@ func TestCDCConsumer_Asset_Delete_PublishesIndexerOnly(t *testing.T) {
 
 	assert.NotEmpty(t, pub.indexer, "indexer delete must be published")
 	assert.Empty(t, pub.access, "no FGA on membership delete (no tuple to revoke)")
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "project_membership delete data must be a JSON string (object ID), not an object")
+	assert.Equal(t, sfid("pm-uid-del"), data)
 }
 
 // ── Project_Role__c (key_contact) tests ──────────────────────────────────────
@@ -415,6 +583,9 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesIndexerAndFGAMemberRemove(t *te
 		"FGA member_remove must be published on key_contact delete; access calls: %v", pub.access)
 	assert.Equal(t, 1, invalidator.KeyContactCalls)
 	assert.Equal(t, []byte("r8"), replay.saved)
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "key_contact delete data must be a JSON string (object ID), not an object")
+	assert.Equal(t, sfid("kc-uid-del"), data)
 }
 
 // ── Error resilience ──────────────────────────────────────────────────────────
@@ -873,6 +1044,10 @@ type fakeUserReader struct {
 
 func (r *fakeUserReader) UsernameByEmail(_ context.Context, _ string) (string, error) {
 	return r.sub, r.err
+}
+
+func (r *fakeUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
 }
 
 // newProjectRoleCDCConsumer builds a CDCConsumer wired for a single

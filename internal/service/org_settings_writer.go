@@ -203,11 +203,16 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 		updated.Auditors = slices.Clone(existing.Auditors)
 	}
 
+	// Clone the caller-provided slices so the persisted record never aliases the request's
+	// backing arrays. Bulk Update does not enrich avatars: a first-time PUT of a large member
+	// list would otherwise issue one serial auth-service RPC per missing-avatar member inside
+	// the HTTP write. Bulk first-fills are owned by the avatar backfill; the write path enriches
+	// only the single just-accepted entry (see AddPrincipal).
 	if in.Writers != nil {
-		updated.Writers = in.Writers
+		updated.Writers = slices.Clone(in.Writers)
 	}
 	if in.Auditors != nil {
-		updated.Auditors = in.Auditors
+		updated.Auditors = slices.Clone(in.Auditors)
 	}
 
 	if err := o.settingsWriter.UpdateSettings(ctx, updated, revision); err != nil {
@@ -222,6 +227,27 @@ func (o *orgSettingsWriterOrchestrator) Update(ctx context.Context, in B2BOrgSet
 	o.publishAll(ctx, in, updated, action)
 
 	return updated, nil
+}
+
+// enrichAvatar refreshes one principal's avatar from auth-service. Best-effort: any miss/error leaves
+// the existing value untouched and never fails the write; no-op for pending invites (no username yet).
+func (o *orgSettingsWriterOrchestrator) enrichAvatar(ctx context.Context, u *model.B2BOrgUser) {
+	if o.userReader == nil || u == nil {
+		return
+	}
+	username := strings.TrimSpace(u.Username)
+	if username == "" {
+		return
+	}
+	meta, err := o.userReader.UserMetadataByPrincipal(ctx, username)
+	if err != nil {
+		if !pkgerrors.IsNotFound(err) {
+			slog.WarnContext(ctx, "avatar enrichment lookup failed; leaving existing avatar",
+				"username", redaction.Redact(username), "error", err)
+		}
+		return
+	}
+	u.Avatar = meta.Picture
 }
 
 // AddPrincipal adds (invites) one principal to writers/auditors. Existing members are
@@ -318,6 +344,7 @@ func (o *orgSettingsWriterOrchestrator) AddPrincipal(ctx context.Context, in B2B
 		entry.Username = username
 		entry.InviteStatus = model.InviteStatusAccepted
 		entry.AcceptedAt = &now
+		o.enrichAvatar(ctx, &entry)
 	} else {
 		entry.InviteStatus = model.InviteStatusPending
 		if !in.SuppressNotification {

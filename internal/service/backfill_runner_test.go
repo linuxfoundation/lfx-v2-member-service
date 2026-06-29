@@ -5,6 +5,7 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -172,13 +173,18 @@ func (r *seededB2BOrgReaderForBackfill) FetchChildUIDsByParentUID(_ context.Cont
 	return nil, nil
 }
 
+func (r *seededB2BOrgReaderForBackfill) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 // seededB2BOrgReaderWithChildren returns orgs with configurable child relationships and tracks fetch calls.
 type seededB2BOrgReaderWithChildren struct {
-	orgs             []*model.B2BOrg
-	children         map[string][]string // parentUID → childUIDs
-	fetchCallCount   atomic.Int32
-	fetchedUIDs      map[string]bool // tracks which UIDs were fetched
-	fetchedUIDsMutex sync.Mutex
+	orgs                []*model.B2BOrg
+	children            map[string][]string // parentUID → childUIDs
+	fetchCallCount      atomic.Int32
+	batchFetchCallCount atomic.Int32
+	fetchedUIDs         map[string]bool // tracks which UIDs were fetched
+	fetchedUIDsMutex    sync.Mutex
 }
 
 func (r *seededB2BOrgReaderWithChildren) GetB2BOrg(ctx context.Context, uid string) (*model.B2BOrg, error) {
@@ -205,6 +211,19 @@ func (r *seededB2BOrgReaderWithChildren) FetchChildUIDsByParentUID(_ context.Con
 	return []string{}, nil
 }
 
+func (r *seededB2BOrgReaderWithChildren) FetchChildUIDsByParentUIDs(_ context.Context, parentUIDs []string) (map[string][]string, error) {
+	r.batchFetchCallCount.Add(1)
+	result := make(map[string][]string)
+	if r.children != nil {
+		for _, uid := range parentUIDs {
+			if uids, ok := r.children[uid]; ok {
+				result[uid] = uids
+			}
+		}
+	}
+	return result, nil
+}
+
 func (r *seededB2BOrgReaderWithChildren) getFetchCallCount() int32 {
 	return r.fetchCallCount.Load()
 }
@@ -223,9 +242,7 @@ func TestBackfillRunner_B2BOrgs_PopulatesChildrenFromCache(t *testing.T) {
 	childReader := &seededB2BOrgReaderWithChildren{
 		orgs: []*model.B2BOrg{parentOrg, child1Org, child2Org},
 		children: map[string][]string{
-			"parent-uid":  {"child-1-uid", "child-2-uid"},
-			"child-1-uid": {},
-			"child-2-uid": {},
+			"parent-uid": {"child-1-uid", "child-2-uid"},
 		},
 		fetchedUIDs: map[string]bool{},
 	}
@@ -241,11 +258,9 @@ func TestBackfillRunner_B2BOrgs_PopulatesChildrenFromCache(t *testing.T) {
 	// All 3 orgs should be published (parent + 2 children)
 	assert.Equal(t, int32(3), publishCount.Load(), "should publish all orgs")
 
-	// Parent should have children populated
-	assert.True(t, childReader.fetchedUIDs["parent-uid"], "parent UID should be fetched for children")
-	// Child UIDs should also be fetched (for their own children) but not others
-	assert.True(t, childReader.fetchedUIDs["child-1-uid"], "child-1 UID should be fetched")
-	assert.True(t, childReader.fetchedUIDs["child-2-uid"], "child-2 UID should be fetched")
+	// Batch fetch called once for the whole page; single fetch never called on IterB2BOrgs path.
+	assert.Equal(t, int32(1), childReader.batchFetchCallCount.Load(), "batch fetch called once per page")
+	assert.Equal(t, int32(0), childReader.getFetchCallCount(), "single per-org fetch not called on IterB2BOrgs path")
 }
 
 func TestBackfillRunner_B2BOrgs_MemoizesFetchesPerPage(t *testing.T) {
@@ -276,11 +291,12 @@ func TestBackfillRunner_B2BOrgs_MemoizesFetchesPerPage(t *testing.T) {
 	req := svc.BackfillRequest{RunID: "test-run", Types: []string{"b2b_org"}}
 	runner.Run(context.Background(), req)
 
-	// Even though we have 3 orgs, the shared parent should only be fetched once
-	// Fetch calls should be: shared-parent-uid (once), child-1-uid (once), child-2-uid (once) = 3 total
-	expectedFetches := int32(3)
-	assert.Equal(t, expectedFetches, childReader.getFetchCallCount(),
-		"should memoize parent children fetches within a page")
+	// Batch fetch called once for the whole page regardless of org count.
+	// Single per-org fetch is never called on the IterB2BOrgs path.
+	assert.Equal(t, int32(1), childReader.batchFetchCallCount.Load(),
+		"batch fetch called once per page regardless of org count")
+	assert.Equal(t, int32(0), childReader.getFetchCallCount(),
+		"single per-org fetch not called on IterB2BOrgs path")
 }
 
 func TestBackfillRunner_TargetedB2BOrg_PopulatesChildren(t *testing.T) {
@@ -416,6 +432,10 @@ func (r *multiOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) 
 	return nil, nil
 }
 
+func (r *multiOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 // ── GlobalOrgAdminFGA publish ────────────────────────────────────────────────
 
 func TestBackfillRunner_B2BOrg_GlobalAdminFGA(t *testing.T) {
@@ -481,6 +501,101 @@ func (p *countingAccessPublisher) Indexer(_ context.Context, _ string, _ any, _ 
 func (p *countingAccessPublisher) Access(_ context.Context, _ string, _ any, _ bool) error {
 	p.accessCount.Add(1)
 	return nil
+}
+
+// capturingBackfillPublisher captures both indexer message payloads and access
+// call count so tests can assert on is_parent and FGA parent tuple messages.
+type capturingBackfillPublisher struct {
+	mu              sync.Mutex
+	indexerMessages []any
+	accessCount     int
+}
+
+func (p *capturingBackfillPublisher) Indexer(_ context.Context, _ string, msg any, _ bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.indexerMessages = append(p.indexerMessages, msg)
+	return nil
+}
+
+func (p *capturingBackfillPublisher) Access(_ context.Context, _ string, _ any, _ bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.accessCount++
+	return nil
+}
+
+// indexerIsParentForUID returns true if any captured indexer message has
+// data.uid == uid and data.is_parent == true.
+func (p *capturingBackfillPublisher) indexerIsParentForUID(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, msg := range p.indexerMessages {
+		b, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		var env struct {
+			Data struct {
+				UID      string `json:"uid"`
+				IsParent bool   `json:"is_parent"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(b, &env); err != nil {
+			continue
+		}
+		if env.Data.UID == uid && env.Data.IsParent {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBackfillRunner_B2BOrgs_IsParentAndFGATuplesFromBatch verifies that after
+// the batch child-list fetch, parent orgs have is_parent=true in the indexer
+// message and FGA parent tuple Access calls are emitted for child orgs whose
+// parent has entries in the batch result.
+func TestBackfillRunner_B2BOrgs_IsParentAndFGATuplesFromBatch(t *testing.T) {
+	t.Parallel()
+
+	// parentOrg has children; child1 and child2 are those children (ParentUID set).
+	parentOrg := &model.B2BOrg{UID: "parent-uid-fga"}
+	child1 := &model.B2BOrg{UID: "child-uid-1", ParentUID: "parent-uid-fga"}
+	child2 := &model.B2BOrg{UID: "child-uid-2", ParentUID: "parent-uid-fga"}
+
+	childReader := &seededB2BOrgReaderWithChildren{
+		orgs: []*model.B2BOrg{parentOrg, child1, child2},
+		children: map[string][]string{
+			"parent-uid-fga": {"child-uid-1", "child-uid-2"},
+			"child-uid-1":    {},
+			"child-uid-2":    {},
+		},
+	}
+
+	pub := &capturingBackfillPublisher{}
+	iter := &mock.MockBackfillIterator{
+		B2BOrgs: [][]*model.B2BOrg{{parentOrg, child1, child2}},
+	}
+
+	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Types: []string{"b2b_org"}})
+
+	// Batch fetch called once — not per org.
+	assert.Equal(t, int32(1), childReader.batchFetchCallCount.Load(),
+		"FetchChildUIDsByParentUIDs must be called once per page")
+	assert.Equal(t, int32(0), childReader.getFetchCallCount(),
+		"single per-org FetchChildUIDsByParentUID must not be called on IterB2BOrgs path")
+
+	// parentOrg has children → is_parent=true in its indexer message.
+	assert.True(t, pub.indexerIsParentForUID("parent-uid-fga"),
+		"parent org must have is_parent=true in indexer message")
+
+	// child1 and child2 have a ParentUID whose children are in the cache →
+	// PublishB2BOrgParentFGA emits Access calls for each child with a parent.
+	// 3 indexer + at least 2 FGA parent tuple access calls (one per child with ParentUID).
+	assert.Equal(t, 3, len(pub.indexerMessages), "all 3 orgs must be published")
+	assert.GreaterOrEqual(t, pub.accessCount, 2,
+		"FGA parent tuple Access calls must be emitted for child orgs")
 }
 
 // ── ValidateAndBuildRequest ──────────────────────────────────────────────────

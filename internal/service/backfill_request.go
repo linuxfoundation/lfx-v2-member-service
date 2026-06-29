@@ -19,12 +19,34 @@ type BackfillRequest struct {
 	Since  *time.Time // nil = full reindex
 	Items  []ReindexItem
 	DryRun bool
+
+	// EnrichAvatars re-enriches b2b_org_settings writer/auditor avatars from the auth-service before
+	// republishing. Set by the avatar-backfill Job; not exposed on the HTTP /admin/reindex payload.
+	EnrichAvatars bool
+	// AvatarMissingOnly limits enrichment to principals with an empty avatar.
+	AvatarMissingOnly bool
+	// AvatarSleep waits between auth-service lookups to respect Auth0 rate limits.
+	AvatarSleep time.Duration
 }
 
 // ReindexItem identifies a single entity in targeted (items) mode.
 type ReindexItem struct {
 	Type string
 	UID  string
+}
+
+// AvatarBackfillRequest builds a full-mode b2b_org_settings request with avatar enrichment enabled —
+// the request the avatar-backfill Job hands to Runner.Run. It reuses the Runner's control plane
+// (run_id, dry-run, full-run lock) rather than a separate backfill path.
+func AvatarBackfillRequest(runID string, dryRun, missingOnly bool, sleep time.Duration) BackfillRequest {
+	return BackfillRequest{
+		RunID:             runID,
+		Types:             []string{entityTypeB2BOrgSettings},
+		DryRun:            dryRun,
+		EnrichAvatars:     true,
+		AvatarMissingOnly: missingOnly,
+		AvatarSleep:       sleep,
+	}
 }
 
 // ValidateAndBuildRequest validates the payload and returns a BackfillRequest.

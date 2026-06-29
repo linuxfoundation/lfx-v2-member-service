@@ -6,6 +6,7 @@ module github.com/linuxfoundation/lfx-v2-member-service
 go 1.26.0
 
 require (
+	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
 	github.com/auth0/go-jwt-middleware/v2 v2.3.1
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/uuid v1.6.0

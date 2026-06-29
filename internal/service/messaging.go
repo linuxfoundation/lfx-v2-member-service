@@ -412,6 +412,22 @@ func PublishB2BOrgParentFGA(ctx context.Context, p port.MemberPublisher, org *mo
 	}
 }
 
+// buildIndexerInput is the shared logic for the b2b_org, project_membership, and key_contact
+// build*IndexerInput helpers: delete actions carry the UID string (indexer contract);
+// create/update carry the full object. Workspace and workspace-project publishers handle
+// this branching directly.
+func buildIndexerInput(uid string, obj any, action indexerConstants.MessageAction) any {
+	if action == indexerConstants.ActionDeleted {
+		return uid
+	}
+	return obj
+}
+
+// buildB2BOrgIndexerInput returns the indexer message data for a b2b_org.
+func buildB2BOrgIndexerInput(org *model.B2BOrg, action indexerConstants.MessageAction) any {
+	return buildIndexerInput(org.UID, org, action)
+}
+
 // PublishB2BOrgIndexer builds and publishes a MemberIndexerMessage for a B2BOrg.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, action indexerConstants.MessageAction) {
@@ -420,7 +436,7 @@ func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *mode
 		Tags:           org.Tags(),
 		IndexingConfig: BuildB2BOrgIndexingConfig(org),
 	}
-	builtMsg, err := indexMsg.Build(ctx, org)
+	builtMsg, err := indexMsg.Build(ctx, buildB2BOrgIndexerInput(org, action))
 	if err != nil {
 		slog.WarnContext(ctx, "failed to build b2b org indexer message",
 			"uid", org.UID,
@@ -447,6 +463,7 @@ type b2bOrgMemberView struct {
 	Username     string             `json:"username,omitempty"`
 	Email        string             `json:"email"`
 	Name         string             `json:"name,omitempty"`
+	Avatar       string             `json:"avatar,omitempty"`
 	Role         string             `json:"role"`
 	InviteStatus model.InviteStatus `json:"invite_status"`
 	UpdatedAt    string             `json:"updated_at"`
@@ -492,6 +509,7 @@ func buildB2BOrgSettingsIndexerView(settings *model.B2BOrgSettings) b2bOrgSettin
 			Username:     u.Username,
 			Email:        u.Email,
 			Name:         u.Name,
+			Avatar:       u.Avatar,
 			Role:         role,
 			InviteStatus: status,
 			UpdatedAt:    u.UpdatedAt.UTC().Format(time.RFC3339Nano),
@@ -531,6 +549,11 @@ func PublishB2BOrgSettingsIndexer(ctx context.Context, p port.MemberPublisher, o
 	}
 }
 
+// buildProjectMembershipIndexerInput returns the indexer message data for a project_membership.
+func buildProjectMembershipIndexerInput(pm *model.ProjectMembership, action indexerConstants.MessageAction) any {
+	return buildIndexerInput(pm.UID, pm, action)
+}
+
 // PublishProjectMembershipIndexer builds and publishes a MemberIndexerMessage for a ProjectMembership.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership, action indexerConstants.MessageAction) {
@@ -539,7 +562,7 @@ func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher
 		Tags:           pm.Tags(),
 		IndexingConfig: BuildProjectMembershipIndexingConfig(pm),
 	}
-	builtMsg, err := indexMsg.Build(ctx, pm)
+	builtMsg, err := indexMsg.Build(ctx, buildProjectMembershipIndexerInput(pm, action))
 	if err != nil {
 		slog.WarnContext(ctx, "failed to build project membership indexer message",
 			"uid", pm.UID,
@@ -593,6 +616,11 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, kc *model
 	}
 }
 
+// buildKeyContactIndexerInput returns the indexer message data for a key_contact.
+func buildKeyContactIndexerInput(kc *model.KeyContact, action indexerConstants.MessageAction) any {
+	return buildIndexerInput(kc.UID, kc, action)
+}
+
 // PublishKeyContactIndexer builds and publishes a MemberIndexerMessage for a KeyContact.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishKeyContactIndexer(ctx context.Context, p port.MemberPublisher, kc *model.KeyContact, action indexerConstants.MessageAction) {
@@ -601,7 +629,7 @@ func PublishKeyContactIndexer(ctx context.Context, p port.MemberPublisher, kc *m
 		Tags:           kc.Tags(),
 		IndexingConfig: BuildKeyContactIndexingConfig(kc),
 	}
-	builtMsg, err := indexMsg.Build(ctx, kc)
+	builtMsg, err := indexMsg.Build(ctx, buildKeyContactIndexerInput(kc, action))
 	if err != nil {
 		slog.WarnContext(ctx, "failed to build key contact indexer message",
 			"uid", kc.UID,
@@ -652,6 +680,23 @@ func buildWorkspaceIndexerView(ws *model.Workspace) any {
 	return ws
 }
 
+// buildWorkspaceIndexerInput returns the indexer message data for a workspace.
+// Delete actions must carry the UID string (indexer contract); create/update carry the struct.
+func buildWorkspaceIndexerInput(ws *model.Workspace, action indexerConstants.MessageAction) any {
+	if action == indexerConstants.ActionDeleted {
+		return ws.UID
+	}
+	return buildWorkspaceIndexerView(ws)
+}
+
+// buildWorkspaceProjectIndexerInput returns the indexer message data for a workspace-project association.
+func buildWorkspaceProjectIndexerInput(orgUID, workspaceUID string, wp model.WorkspaceProject, wps model.WorkspaceProjects, action indexerConstants.MessageAction) any {
+	if action == indexerConstants.ActionDeleted {
+		return wp.AssociationID(workspaceUID)
+	}
+	return buildWorkspaceProjectIndexerView(orgUID, workspaceUID, wp, wps)
+}
+
 // PublishWorkspaceIndexer builds and publishes a MemberIndexerMessage for a Workspace.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishWorkspaceIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, ws *model.Workspace, action indexerConstants.MessageAction) {
@@ -660,7 +705,7 @@ func PublishWorkspaceIndexer(ctx context.Context, p port.MemberPublisher, org *m
 		Tags:           ws.Tags(org.UID),
 		IndexingConfig: BuildWorkspaceIndexingConfig(org, ws),
 	}
-	builtMsg, err := indexMsg.Build(ctx, buildWorkspaceIndexerView(ws))
+	builtMsg, err := indexMsg.Build(ctx, buildWorkspaceIndexerInput(ws, action))
 	if err != nil {
 		slog.WarnContext(ctx, "failed to build workspace indexer message",
 			"workspace_uid", ws.UID,
@@ -687,7 +732,7 @@ func PublishWorkspaceProjectIndexer(ctx context.Context, p port.MemberPublisher,
 		Tags:           wp.Tags(org.UID, ws.UID),
 		IndexingConfig: BuildWorkspaceProjectIndexingConfig(org, ws, wp),
 	}
-	builtMsg, err := indexMsg.Build(ctx, buildWorkspaceProjectIndexerView(org.UID, ws.UID, wp, wps))
+	builtMsg, err := indexMsg.Build(ctx, buildWorkspaceProjectIndexerInput(org.UID, ws.UID, wp, wps, action))
 	if err != nil {
 		slog.WarnContext(ctx, "failed to build workspace project indexer message",
 			"workspace_uid", ws.UID,

@@ -68,6 +68,10 @@ func (s stubB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string)
 	return nil, nil
 }
 
+func (s stubB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 // ── AddPrincipal ──────────────────────────────────────────────────────────────
 
 func TestOrgSettingsWriter_AddPrincipal_PreservesExistingMembers(t *testing.T) {

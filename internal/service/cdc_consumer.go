@@ -344,6 +344,23 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
 	o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountDelete)
 
+	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
+	uids := make([]string, len(orgs))
+	for i, org := range orgs {
+		uids[i] = org.UID
+	}
+	childMap, childMapErr := o.b2bOrgReader.FetchChildUIDsByParentUIDs(ctx, uids)
+	if childMapErr != nil {
+		slog.WarnContext(ctx, "cdc: failed to bulk-fetch child UIDs; is_parent may be false for orgs outside successful chunks",
+			"error", childMapErr, "publish_failed_for_backfill_repair", true)
+		if childMap == nil {
+			childMap = map[string][]string{}
+		}
+	}
+	for _, org := range orgs {
+		org.IsParent = len(childMap[org.UID]) > 0
+	}
+
 	// CDC always passes globalOrgAdminTeamUID (not create-only like the writer).
 	for _, org := range orgs {
 		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID)

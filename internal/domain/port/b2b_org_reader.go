@@ -22,4 +22,11 @@ type B2BOrgReader interface {
 	// empty slice when the parent has no children. Used to build the FGA child-list
 	// tuples that enable the b2b_org hierarchy view cascade.
 	FetchChildUIDsByParentUID(ctx context.Context, parentUID string) ([]string, error)
+
+	// FetchChildUIDsByParentUIDs returns a map of parentUID → []childUID for all
+	// given parent UIDs that have at least one direct member-eligible child Account.
+	// Parents with no qualifying children are absent from the result map.
+	// Used to bulk-compute is_parent and FGA parent tuples for a batch of orgs in
+	// place of N individual FetchChildUIDsByParentUID calls.
+	FetchChildUIDsByParentUIDs(ctx context.Context, parentUIDs []string) (map[string][]string, error)
 }

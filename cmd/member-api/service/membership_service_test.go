@@ -88,6 +88,10 @@ func (r *seededB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ stri
 	return nil, nil
 }
 
+func (r *seededB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 // sampleB2BOrg is the canonical test fixture returned by seeded mocks.
 var sampleB2BOrg = &model.B2BOrg{
 	UID:       "lf-uid-001",
@@ -388,9 +392,11 @@ func TestUpdateKeyContact_MembershipMismatch(t *testing.T) {
 }
 
 // TestDeleteKeyContact_MembershipMismatch verifies that DeleteKeyContact returns 404
-// when the contact UID does not belong to the supplied membership_uid.
+// when the orchestrator returns NotFound for missing or wrong-parent requests.
 func TestDeleteKeyContact_MembershipMismatch(t *testing.T) {
-	svc := newTestSvc()
+	svc := newTestSvc(withKeyContactWriterUC(stubKeyContactWriterUC{
+		err: pkgerrors.NewNotFound("key contact not found in membership"),
+	}))
 
 	err := svc.DeleteKeyContact(context.Background(), &membershipservice.DeleteKeyContactPayload{
 		UID:           "contact-role-1",
@@ -400,7 +406,7 @@ func TestDeleteKeyContact_MembershipMismatch(t *testing.T) {
 	require.Error(t, err)
 	var serviceErr *goa.ServiceError
 	require.True(t, errors.As(err, &serviceErr))
-	assert.Equal(t, "NotFound", serviceErr.Name, "must return 404 to avoid leaking existence")
+	assert.Equal(t, "NotFound", serviceErr.Name, "orchestrator NotFound must map to 404")
 }
 
 // TestCreateKeyContact_MembershipNotFound verifies that CreateKeyContact returns 404

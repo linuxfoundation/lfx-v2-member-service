@@ -252,6 +252,31 @@ func TestWorkspaceWriter_DeleteWorkspace_WorkspaceNotFound_ReturnsNotFound(t *te
 	assert.True(t, pkgerrors.IsNotFound(err), "expected NotFound, got %T: %v", err, err)
 }
 
+func TestWorkspaceWriter_DeleteWorkspace_AlreadyMissing_Returns404NoPublish(t *testing.T) {
+	wsStore := mock.NewMockOrgWorkspaces()
+	seedWorkspace(wsStore) // registry exists; the requested UID does not
+	pub := mock.NewMockMemberPublisher()
+	writer := svc.NewWorkspaceWriter(
+		svc.WithWorkspacesReader(wsStore),
+		svc.WithWorkspacesWriter(wsStore),
+		svc.WithWorkspaceProjectsReader(mock.NewMockWorkspaceProjects()),
+		svc.WithWorkspaceProjectsWriter(mock.NewMockWorkspaceProjects()),
+		svc.WithWorkspacesProjectResolver(mock.NewMockProjectResolver()),
+		svc.WithWorkspacesPublisher(pub),
+	)
+
+	err := writer.DeleteWorkspace(context.Background(), svc.WorkspaceDelete{
+		OrgUID:       wsOrgUID,
+		WorkspaceUID: "nonexistent-uid",
+	})
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsNotFound(err), "already-missing delete must preserve 404, got %T: %v", err, err)
+	assert.Nil(t, pub.LastIndexerPayload,
+		"missing workspace delete must not tombstone by path UID; the UID may belong to another org")
+	assert.Empty(t, pub.CallOrder, "missing workspace delete must publish nothing")
+}
+
 func TestWorkspaceWriter_DeleteWorkspace_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore)

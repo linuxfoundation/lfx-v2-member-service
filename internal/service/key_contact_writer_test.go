@@ -107,6 +107,17 @@ func (s *seededStorage) GetKeyContact(_ context.Context, uid string) (*model.Key
 	return nil, pkgerrors.NewNotFound("key contact not found")
 }
 
+// errorGetStorage is a port.MemberReader whose GetKeyContact returns a fixed
+// non-NotFound error, used to verify backend errors publish no cleanup.
+type errorGetStorage struct {
+	seededStorage
+	err error
+}
+
+func (s *errorGetStorage) GetKeyContact(_ context.Context, _ string) (*model.KeyContact, error) {
+	return nil, s.err
+}
+
 func (s *seededStorage) ListKeyContactsForMembership(_ context.Context, _ string) ([]*model.KeyContact, error) {
 	var out []*model.KeyContact
 	for _, kc := range s.kcs {
@@ -466,6 +477,114 @@ func TestKeyContactWriter_Delete_IfMatch_Mismatch_PreconditionFailed(t *testing.
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsPreconditionFailed(err))
+}
+
+func TestKeyContactWriter_Delete_IfMatch_Mismatch_PublishesNothing(t *testing.T) {
+	kc := &model.KeyContact{UID: testKCUID, MembershipUID: testMembershipUID, UpdatedAt: time.Now()}
+	storage := newSeededStorage(kc)
+	pub := &trackingPublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(func(_ context.Context, _ string) (string, error) {
+		return "", nil
+	}))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID, IfMatch: "\"stale\""}
+	err := w.Delete(context.Background(), in)
+
+	require.True(t, pkgerrors.IsPreconditionFailed(err))
+	assert.Empty(t, pub.calls(), "precondition failure must publish no indexer/FGA messages")
+}
+
+// ── Missing and wrong-parent safety tests ─────────────────────────────────────
+// Missing-source deletes return 404 without publishing. Without a fetched source
+// record, the service cannot prove the UID is globally absent; tombstoning by path
+// params could delete a real document owned by another parent.
+
+func TestKeyContactWriter_Delete_AlreadyMissing_ReturnsNotFoundNoPublish(t *testing.T) {
+	pub := &trackingPublisher{}
+	w := newKCWriter(newSeededStorage(), &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.True(t, pkgerrors.IsNotFound(err), "already-missing Delete must return NotFound")
+	assert.Empty(t, pub.calls(),
+		"already-missing delete must not publish indexer or FGA cleanup from path params")
+}
+
+func TestKeyContactWriter_Delete_MembershipMismatch_ReturnsNotFoundNoPublish(t *testing.T) {
+	// Safety invariant: when the requested contact UID exists but belongs to a
+	// DIFFERENT membership, the endpoint must return 404 with NO indexer or FGA
+	// publish. Tombstoning by UID here would delete the contact's real indexed
+	// document and revoke FGA tuples owned by the other membership.
+	kc := &model.KeyContact{UID: testKCUID, MembershipUID: testMembershipUID}
+	storage := newSeededStorage(kc)
+	pub := &trackingPublisher{}
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil }))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: "other-membership-uid", UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsNotFound(err), "cross-membership delete must return 404 not 403")
+	assert.Empty(t, pub.calls(),
+		"cross-membership 404 MUST NOT publish any indexer or FGA message — the record belongs to another membership")
+}
+
+// ── Delete error-propagation tests ───────────────────────────────────────────
+
+func TestKeyContactWriter_Delete_BackendError_PropagatesError(t *testing.T) {
+	// Storage returns a non-NotFound error → original error returned, nothing published.
+	storage := &errorGetStorage{err: pkgerrors.NewUnexpected("nats unavailable", nil)}
+	pub := &trackingPublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(func(_ context.Context, _ string) (string, error) {
+		return "", nil
+	}))
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.Error(t, err)
+	assert.False(t, pkgerrors.IsNotFound(err), "a backend error must not be reported as NotFound")
+	assert.Empty(t, pub.calls(), "a non-NotFound read error must publish nothing")
+}
+
+func TestKeyContactWriter_Delete_WriteFailsAfterRead_PublishesNothing(t *testing.T) {
+	// GetKeyContact succeeds (record exists), but DeleteKeyContact write fails.
+	// Expectation: original write error returned, no indexer-delete, no FGA-remove.
+	kc := &model.KeyContact{UID: testKCUID, MembershipUID: testMembershipUID, Email: "alice@example.com", Username: "alice"}
+	storage := newSeededStorage(kc)
+	pub := &trackingPublisher{}
+
+	// Wire a writer whose DeleteKeyContact always fails.
+	failWriter := &failingKeyContactWriter{err: pkgerrors.NewUnexpected("salesforce write unavailable", nil)}
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(failWriter),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil })),
+	)
+
+	in := svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID}
+	err := w.Delete(context.Background(), in)
+
+	require.Error(t, err)
+	assert.False(t, pkgerrors.IsNotFound(err), "a write failure must not be reported as NotFound")
+	assert.Empty(t, pub.calls(), "a delete write failure must not publish any indexer or FGA messages")
+}
+
+// failingKeyContactWriter is a port.KeyContactWriter whose DeleteKeyContact always fails.
+type failingKeyContactWriter struct {
+	mock.MockKeyContactWriterWithOK
+	err error
+}
+
+func (w *failingKeyContactWriter) DeleteKeyContact(_ context.Context, _ string, _ string) error {
+	return w.err
 }
 
 // ── Org-dashboard provisioning tests (Tasks 4, 5, 6) ─────────────────────────

@@ -143,6 +143,97 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 	return all, conversionErrorSFIDs, nil
 }
 
+// soqlParentChild is a minimal projection for the batched child-list query.
+// No aggregate alias — uses the same plain json.Unmarshal path as soqlAccountID.
+type soqlParentChild struct {
+	ParentID string `json:"ParentId"`
+	ID       string `json:"Id"`
+}
+
+// normalizeParentUIDs converts caller UIDs to 18-char SFIDs and builds a
+// reverse sfid→callerUID map. Invalid UIDs are logged and skipped.
+func normalizeParentUIDs(ctx context.Context, parentUIDs []string) (sfids []string, sfidToUID map[string]string) {
+	sfids = make([]string, 0, len(parentUIDs))
+	sfidToUID = make(map[string]string, len(parentUIDs))
+	for _, uid := range parentUIDs {
+		sfid, err := sfuuid.Normalize18(uid)
+		if err != nil {
+			slog.WarnContext(ctx, "parent UID could not be normalized, skipping",
+				"uid", uid, "error", err)
+			continue
+		}
+		sfids = append(sfids, sfid)
+		sfidToUID[sfid] = uid
+	}
+	return sfids, sfidToUID
+}
+
+// fetchChildUIDsByParents issues one chunked SOQL query per <=200 parents and
+// returns child UIDs grouped by caller-supplied parent UID. Chunking mirrors
+// FetchAccountsBySFIDs (account_repo.go:117). All normalization and the
+// membership Asset semi-join live here; callers see only domain UIDs.
+func (r *AccountRepo) fetchChildUIDsByParents(
+	ctx context.Context, parentUIDs []string,
+) (map[string][]string, error) {
+	if len(parentUIDs) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	slog.DebugContext(ctx, "batch-fetching child UIDs from Salesforce", "parent_count", len(parentUIDs))
+
+	sfids, sfidToUID := normalizeParentUIDs(ctx, parentUIDs)
+	if len(sfids) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	out := make(map[string][]string)
+
+	const chunkSize = 200
+	for start := 0; start < len(sfids); start += chunkSize {
+		chunk := sfids[start:min(start+chunkSize, len(sfids))]
+
+		query := "SELECT ParentId, Id FROM Account" +
+			" WHERE ParentId IN (" + buildSOQLInClause(chunk) + ")" +
+			" AND IsDeleted = false" +
+			" AND Id IN (SELECT AccountId FROM Asset" +
+			" WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
+
+		records, _, err := QueryAllPages[soqlParentChild](ctx, r.client, query, "")
+		if err != nil {
+			return out, fmt.Errorf("fetching child UIDs for %d parents (chunk starting at %d): %w",
+				len(chunk), start, err)
+		}
+
+		for _, rec := range records {
+			pid, pidErr := sfuuid.Normalize18(rec.ParentID)
+			if pidErr != nil {
+				continue
+			}
+			callerUID, ok := sfidToUID[pid]
+			if !ok {
+				continue
+			}
+			childUID, convErr := sfuuid.Normalize18(rec.ID)
+			if convErr != nil {
+				slog.WarnContext(ctx, "child SFID could not be normalized, skipping",
+					"parent_uid", callerUID, "child_sfid", rec.ID, "error", convErr)
+				continue
+			}
+			out[callerUID] = append(out[callerUID], childUID)
+		}
+	}
+	return out, nil
+}
+
+// FetchChildUIDsByParentUIDs returns child UIDs grouped by parent UID for a
+// batch of parents. Used by the backfill runner to compute is_parent and FGA
+// parent tuples in one query instead of N per-org calls.
+func (r *AccountRepo) FetchChildUIDsByParentUIDs(
+	ctx context.Context, parentUIDs []string,
+) (map[string][]string, error) {
+	return r.fetchChildUIDsByParents(ctx, parentUIDs)
+}
+
 // Ensure AccountRepo satisfies the port at compile time.
 var _ port.AccountBatchReader = (*AccountRepo)(nil)
 

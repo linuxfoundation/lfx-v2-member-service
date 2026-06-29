@@ -55,3 +55,11 @@ func (r *B2BOrgReader) FetchChildUIDsByParentUID(ctx context.Context, parentUID 
 	}
 	return r.accountRepo.FetchChildUIDsByParentUID(ctx, parentUID)
 }
+
+// FetchChildUIDsByParentUIDs delegates to AccountRepo for the batched SOQL child-list query.
+func (r *B2BOrgReader) FetchChildUIDsByParentUIDs(ctx context.Context, parentUIDs []string) (map[string][]string, error) {
+	if r.accountRepo == nil {
+		return nil, fmt.Errorf("accountRepo not initialised")
+	}
+	return r.accountRepo.FetchChildUIDsByParentUIDs(ctx, parentUIDs)
+}

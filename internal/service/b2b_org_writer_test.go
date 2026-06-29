@@ -61,6 +61,10 @@ func (r *seededOrgReader) FetchChildUIDsByParentUID(_ context.Context, parentUID
 	return nil, nil
 }
 
+func (r *seededOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 // capturingPublisher captures published indexer messages to inspect payload contents.
 type capturingPublisher struct {
 	mu               sync.Mutex

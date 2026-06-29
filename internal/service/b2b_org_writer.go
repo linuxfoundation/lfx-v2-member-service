@@ -106,6 +106,15 @@ func (o *b2bOrgWriterOrchestrator) Update(ctx context.Context, uid string, input
 // (update_access + reparenting child-list messages). Publish failures are
 // swallowed and logged — /admin/reindex recovers missed records.
 func (o *b2bOrgWriterOrchestrator) publishEvents(ctx context.Context, current, org *model.B2BOrg, action indexerConstants.MessageAction) {
+	// Writer path is single-org (one HTTP request) — use the single-record fetch.
+	// CDC uses FetchChildUIDsByParentUIDs in batch before calling publishB2BOrgUpsertEvents.
+	childUIDs, err := o.b2bOrgReader.FetchChildUIDsByParentUID(ctx, org.UID)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to fetch child UIDs for indexer", "org_uid", org.UID, "err", err)
+	} else {
+		org.IsParent = len(childUIDs) > 0
+	}
+
 	orgAdminTeamUID := ""
 	if action == indexerConstants.ActionCreated {
 		orgAdminTeamUID = o.globalOrgAdminTeamUID
@@ -119,6 +128,11 @@ func (o *b2bOrgWriterOrchestrator) publishEvents(ctx context.Context, current, o
 // whether the global org-admin team relation is included in the FGA message
 // (writers pass it only on ActionCreated; CDC always passes it for ActionUpdated).
 // Publish failures are swallowed — /admin/reindex recovers missed records.
+//
+// Precondition: callers must set org.IsParent before calling. The writer uses
+// FetchChildUIDsByParentUID (single-org); the CDC consumer uses
+// FetchChildUIDsByParentUIDs (batched, one call per batch) and derives the bool
+// inline. This function publishes the pre-computed value.
 func publishB2BOrgUpsertEvents(
 	ctx context.Context,
 	reader port.B2BOrgReader,
@@ -127,13 +141,6 @@ func publishB2BOrgUpsertEvents(
 	action indexerConstants.MessageAction,
 	orgAdminTeamUID string,
 ) {
-	childUIDs, err := reader.FetchChildUIDsByParentUID(ctx, org.UID)
-	if err != nil {
-		slog.WarnContext(ctx, "failed to fetch child UIDs for indexer", "org_uid", org.UID, "err", err)
-	} else {
-		org.IsParent = len(childUIDs) > 0
-	}
-
 	// Indexer first — must be sequential (before the errgroup).
 	PublishB2BOrgIndexer(ctx, publisher, org, action)
 

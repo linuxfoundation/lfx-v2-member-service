@@ -27,6 +27,10 @@ const (
 	// Request: plain-text email. Reply: plain-text username on success, JSON error envelope on miss.
 	AuthEmailToUsernameLookupSubject = "lfx.auth-service.email_to_username"
 
+	// AuthUserMetadataReadSubject resolves profile metadata (picture, name, …) for a principal.
+	// Request: plain-text principal (LFID username / sub). Reply: {"success":true,"data":{"picture":…}}.
+	AuthUserMetadataReadSubject = "lfx.auth-service.user_metadata.read"
+
 	// IndexOrgWorkspaceSubject is the NATS subject for indexing org workspace metadata records.
 	IndexOrgWorkspaceSubject = "lfx.index.org_workspace"
 

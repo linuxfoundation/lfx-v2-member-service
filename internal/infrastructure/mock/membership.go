@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
@@ -362,6 +363,14 @@ func (m *MockB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string
 	return nil, nil
 }
 
+// FetchChildUIDsByParentUIDs returns an empty map in mock mode.
+func (m *MockB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
+// compile-time check.
+var _ port.B2BOrgReader = (*MockB2BOrgReader)(nil)
+
 // MockB2BOrgWriter is a stub implementation of port.B2BOrgWriter for local
 // development when REPOSITORY_SOURCE=mock. All methods return NotImplemented.
 type MockB2BOrgWriter struct{}
@@ -565,4 +574,9 @@ func NewMockUserReader() *MockUserReader { return &MockUserReader{} }
 // local development without auth-service.
 func (m *MockUserReader) UsernameByEmail(_ context.Context, _ string) (string, error) {
 	return "", nil
+}
+
+// UserMetadataByPrincipal returns empty metadata (mock mode enriches no avatar).
+func (m *MockUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
 }

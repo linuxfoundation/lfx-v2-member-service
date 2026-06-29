@@ -13,6 +13,9 @@ image:
 # replicaCount is the number of replicas for the deployment
 replicaCount: 3
 
+# topologySpreadConstraints controls how pods are spread across nodes/zones.
+topologySpreadConstraints: []
+
 # resources is the configuration for container resource limits and requests
 resources:
   # limits is the maximum amount of resources the container can use
