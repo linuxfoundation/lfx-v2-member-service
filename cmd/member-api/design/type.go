@@ -679,7 +679,9 @@ var WorkspaceProjectAddBody = dsl.Type("workspace-project-add-body", func() {
 // WorkspaceProjectsBulkAddBody is the request body for POST /b2b_orgs/{uid}/workspaces/{workspace_uid}/projects/bulk.
 var WorkspaceProjectsBulkAddBody = dsl.Type("workspace-projects-bulk-add-body", func() {
 	dsl.Description("Request body for adding multiple projects to a workspace in one operation")
-	dsl.Attribute("project_ids", dsl.ArrayOf(dsl.String), "Opaque project reference strings; at most 100 per request", func() {
+	dsl.Attribute("project_ids", dsl.ArrayOf(dsl.String, func() {
+		dsl.MaxLength(512)
+	}), "Opaque project reference strings; at most 100 per request, each at most 512 characters", func() {
 		dsl.MinLength(1)
 		dsl.MaxLength(100)
 	})

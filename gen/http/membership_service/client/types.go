@@ -175,7 +175,8 @@ type AddB2bOrgWorkspaceProjectRequestBody struct {
 // "membership-service" service "bulk-add-b2b-org-workspace-projects" endpoint
 // HTTP request body.
 type BulkAddB2bOrgWorkspaceProjectsRequestBody struct {
-	// Opaque project reference strings; at most 100 per request
+	// Opaque project reference strings; at most 100 per request, each at most 512
+	// characters
 	ProjectIds []string `form:"project_ids" json:"project_ids" xml:"project_ids"`
 }
 

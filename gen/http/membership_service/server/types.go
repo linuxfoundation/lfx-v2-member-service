@@ -177,7 +177,8 @@ type AddB2bOrgWorkspaceProjectRequestBody struct {
 // "membership-service" service "bulk-add-b2b-org-workspace-projects" endpoint
 // HTTP request body.
 type BulkAddB2bOrgWorkspaceProjectsRequestBody struct {
-	// Opaque project reference strings; at most 100 per request
+	// Opaque project reference strings; at most 100 per request, each at most 512
+	// characters
 	ProjectIds []string `form:"project_ids,omitempty" json:"project_ids,omitempty" xml:"project_ids,omitempty"`
 }
 
@@ -5653,6 +5654,11 @@ func ValidateBulkAddB2bOrgWorkspaceProjectsRequestBody(body *BulkAddB2bOrgWorksp
 	}
 	if len(body.ProjectIds) > 100 {
 		err = goa.MergeErrors(err, goa.InvalidLengthError("body.project_ids", body.ProjectIds, len(body.ProjectIds), 100, false))
+	}
+	for _, e := range body.ProjectIds {
+		if utf8.RuneCountInString(e) > 512 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.project_ids[*]", e, utf8.RuneCountInString(e), 512, false))
+		}
 	}
 	return
 }

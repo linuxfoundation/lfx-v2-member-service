@@ -32,7 +32,7 @@ paths:
                         schema:
                             $ref: '#/components/schemas/AdminReindexPayload'
                         example:
-                            dry_run: false
+                            dry_run: true
                             items:
                                 - type: b2b_org
                                   uid: 001B000000IqhSLIAZ
@@ -524,15 +524,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -627,19 +627,13 @@ paths:
                                   invited_as: writer
                                   name: Alice Smith
                                   username: alice
-                                - avatar: https://avatars.githubusercontent.com/u/12345
-                                  email: alice@example.com
-                                  invite_status: accepted
-                                  invited_as: writer
-                                  name: Alice Smith
-                                  username: alice
-                                - avatar: https://avatars.githubusercontent.com/u/12345
-                                  email: alice@example.com
-                                  invite_status: accepted
-                                  invited_as: writer
-                                  name: Alice Smith
-                                  username: alice
                             writers:
+                                - avatar: https://avatars.githubusercontent.com/u/12345
+                                  email: alice@example.com
+                                  invite_status: accepted
+                                  invited_as: writer
+                                  name: Alice Smith
+                                  username: alice
                                 - avatar: https://avatars.githubusercontent.com/u/12345
                                   email: alice@example.com
                                   invite_status: accepted
@@ -694,15 +688,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -836,15 +830,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -978,15 +972,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1127,15 +1121,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1258,22 +1252,6 @@ paths:
                                 created_by: alice
                                 name: My Workspace
                                 projects:
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
                                       project_name: ""
@@ -1510,22 +1488,6 @@ paths:
                                       project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -1649,22 +1611,6 @@ paths:
                                 created_by: alice
                                 name: My Workspace
                                 projects:
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
                                       project_name: ""
@@ -1822,22 +1768,6 @@ paths:
                                       project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
-                                    - created_at: "2026-01-01T00:00:00Z"
-                                      created_by: alice
-                                      project_name: ""
-                                      project_sfid: ""
-                                      project_slug: ""
-                                      project_uid: my-project
-                                      updated_at: "2026-01-01T00:00:00Z"
-                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -1934,9 +1864,8 @@ paths:
                             $ref: '#/components/schemas/WorkspaceProjectsBulkAddBody'
                         example:
                             project_ids:
-                                - Dolorem porro maxime voluptas repellat.
-                                - Labore quia facilis.
-                                - Pariatur hic officia qui.
+                                - eq4
+                                - 55r
             responses:
                 "200":
                     description: OK response.
@@ -1967,8 +1896,6 @@ paths:
                                       project_id: unknown-project
                                     - error: unknown project
                                       project_id: unknown-project
-                                    - error: unknown project
-                                      project_id: unknown-project
                                 succeeded:
                                     - a1b2c3d4-e5f6-7890-abcd-ef1234567890
                                 workspace:
@@ -1976,22 +1903,6 @@ paths:
                                     created_by: alice
                                     name: My Workspace
                                     projects:
-                                        - created_at: "2026-01-01T00:00:00Z"
-                                          created_by: alice
-                                          project_name: ""
-                                          project_sfid: ""
-                                          project_slug: ""
-                                          project_uid: my-project
-                                          updated_at: "2026-01-01T00:00:00Z"
-                                          updated_by: alice
-                                        - created_at: "2026-01-01T00:00:00Z"
-                                          created_by: alice
-                                          project_name: ""
-                                          project_sfid: ""
-                                          project_slug: ""
-                                          project_uid: my-project
-                                          updated_at: "2026-01-01T00:00:00Z"
-                                          updated_by: alice
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
                                           project_name: ""
@@ -2456,7 +2367,7 @@ paths:
                             email: john.doe@example.com
                             primary_contact: false
                             role: Technical Contact
-                            send_invite: true
+                            send_invite: false
                             status: Active
                             title: CTO
             responses:
@@ -2706,7 +2617,7 @@ components:
                     type: boolean
                     description: When true, walk SOQL/live-path but skip publishing. Final log includes would_publish_count.
                     default: false
-                    example: true
+                    example: false
                 items:
                     type: array
                     items:
@@ -2729,7 +2640,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Suscipit rerum blanditiis consectetur eaque natus.
+                        example: Quis hic dignissimos.
                     description: 'Entity types to reindex (optional; default = all in-scope: b2b_org, project_membership, key_contact, b2b_org_settings). Mutually exclusive with items.'
                     example:
                         - b2b_org
@@ -2795,7 +2706,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Hic dignissimos aut ea qui ipsum ad.
+                        example: Quia reiciendis delectus consequatur molestiae.
                     description: Additional domains; each item is a bare host with the same normalization as primary_domain
                     example:
                         - example.org
@@ -2902,18 +2813,6 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
                 created_at:
                     type: string
                     description: Settings record creation timestamp
@@ -2942,6 +2841,18 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
             description: 'Access-control settings for a b2b_org: writers and auditors'
             example:
                 auditors:
@@ -2957,15 +2868,15 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
+                created_at: "2025-01-01T00:00:00Z"
+                updated_at: "2025-06-01T12:00:00Z"
+                writers:
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                created_at: "2025-01-01T00:00:00Z"
-                updated_at: "2025-06-01T12:00:00Z"
-                writers:
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -3005,18 +2916,18 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                writers:
-                    type: array
-                    items:
-                        $ref: '#/components/schemas/OrgUser'
-                    description: Complete replacement list for org writers. Nil = leave unchanged; [] = remove all.
-                    example:
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                writers:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/OrgUser'
+                    description: Complete replacement list for org writers. Nil = leave unchanged; [] = remove all.
+                    example:
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
@@ -3057,18 +2968,6 @@ components:
                       name: Alice Smith
                       username: alice
                 writers:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -3163,14 +3062,14 @@ components:
                 timeout:
                     type: boolean
                     description: Is the error a timeout?
-                    example: true
+                    example: false
             description: Endpoint not implemented
             example:
                 fault: true
                 id: 123abc
                 message: parameter 'p' must be an integer
                 name: bad_request
-                temporary: false
+                temporary: true
                 timeout: true
             required:
                 - name
@@ -3241,7 +3140,7 @@ components:
                 last_name: Doe
                 primary_contact: false
                 role: Technical Contact
-                send_invite: true
+                send_invite: false
                 status: Active
                 title: CTO
             required:
@@ -3782,6 +3681,12 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                 writers:
                     type: array
                     items:
@@ -3814,25 +3719,7 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                 writers:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -3879,7 +3766,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: true
+                    example: false
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -3896,7 +3783,7 @@ components:
                 email: john.doe@example.com
                 primary_contact: false
                 role: Technical Contact
-                send_invite: false
+                send_invite: true
                 status: Active
                 title: CTO
         WorkspaceBulkAddItemError:
@@ -3934,10 +3821,6 @@ components:
                           project_id: unknown-project
                         - error: unknown project
                           project_id: unknown-project
-                        - error: unknown project
-                          project_id: unknown-project
-                        - error: unknown project
-                          project_id: unknown-project
                 last_modified:
                     type: string
                     description: Last-Modified header value (HTTP date format)
@@ -3946,7 +3829,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Nobis nisi qui et.
+                        example: Rem explicabo qui enim harum aut.
                     description: Project references that were successfully added (or were already present)
                     example:
                         - a1b2c3d4-e5f6-7890-abcd-ef1234567890
@@ -3956,10 +3839,6 @@ components:
             example:
                 etag: "123"
                 failed:
-                    - error: unknown project
-                      project_id: unknown-project
-                    - error: unknown project
-                      project_id: unknown-project
                     - error: unknown project
                       project_id: unknown-project
                     - error: unknown project
@@ -4014,7 +3893,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Dolorum culpa perferendis.
+                        example: Cumque magnam nobis nisi qui.
                     description: Project references that were successfully added (or were already present)
                     example:
                         - a1b2c3d4-e5f6-7890-abcd-ef1234567890
@@ -4028,6 +3907,8 @@ components:
                       project_id: unknown-project
                     - error: unknown project
                       project_id: unknown-project
+                    - error: unknown project
+                      project_id: unknown-project
                 succeeded:
                     - a1b2c3d4-e5f6-7890-abcd-ef1234567890
                 workspace:
@@ -4035,22 +3916,6 @@ components:
                     created_by: alice
                     name: My Workspace
                     projects:
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: ""
-                          project_sfid: ""
-                          project_slug: ""
-                          project_uid: my-project
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: ""
-                          project_sfid: ""
-                          project_slug: ""
-                          project_uid: my-project
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: ""
@@ -4157,17 +4022,19 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Qui enim harum aut.
-                    description: Opaque project reference strings; at most 100 per request
+                        example: zwf
+                        maxLength: 512
+                    description: Opaque project reference strings; at most 100 per request, each at most 512 characters
                     example:
-                        - Sit sunt omnis.
+                        - dqr
+                        - mh5
+                        - gfb
                     minItems: 1
                     maxItems: 100
             description: Request body for adding multiple projects to a workspace in one operation
             example:
                 project_ids:
-                    - Molestiae possimus suscipit.
-                    - Sit velit aut sint cumque.
+                    - qq2
             required:
                 - project_ids
         WorkspaceResponse:
@@ -4208,22 +4075,6 @@ components:
                           project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: ""
-                          project_sfid: ""
-                          project_slug: ""
-                          project_uid: my-project
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: ""
-                          project_sfid: ""
-                          project_slug: ""
-                          project_uid: my-project
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
                 uid:
                     type: string
                     description: Workspace UID
@@ -4244,14 +4095,6 @@ components:
                 created_by: alice
                 name: My Workspace
                 projects:
-                    - created_at: "2026-01-01T00:00:00Z"
-                      created_by: alice
-                      project_name: ""
-                      project_sfid: ""
-                      project_slug: ""
-                      project_uid: my-project
-                      updated_at: "2026-01-01T00:00:00Z"
-                      updated_by: alice
                     - created_at: "2026-01-01T00:00:00Z"
                       created_by: alice
                       project_name: ""

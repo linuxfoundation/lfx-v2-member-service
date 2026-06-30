@@ -272,7 +272,8 @@ type BulkAddB2bOrgWorkspaceProjectsPayload struct {
 	WorkspaceUID string
 	// If-Match header value for conditional requests
 	IfMatch *string
-	// Opaque project reference strings; at most 100 per request
+	// Opaque project reference strings; at most 100 per request, each at most 512
+	// characters
 	ProjectIds []string
 }
 

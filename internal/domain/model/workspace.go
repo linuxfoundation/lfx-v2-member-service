@@ -22,11 +22,11 @@ type ProjectInfo struct {
 type WorkspaceProject struct {
 	// ProjectUID is the stored opaque project reference.
 	ProjectUID string `json:"project_uid"`
-	// ProjectSFID is optional caller-supplied metadata.
+	// ProjectSFID is reserved; the write path does not populate it.
 	ProjectSFID string `json:"project_sfid,omitempty"`
-	// ProjectSlug is optional caller-supplied metadata.
+	// ProjectSlug is reserved; the write path does not populate it.
 	ProjectSlug string `json:"project_slug,omitempty"`
-	// ProjectName is optional caller-supplied display metadata.
+	// ProjectName is reserved; the write path does not populate it.
 	ProjectName string `json:"project_name,omitempty"`
 	// CreatedBy is the LFID username of the principal who added this project.
 	CreatedBy string `json:"created_by,omitempty"`
