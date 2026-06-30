@@ -8,14 +8,9 @@ import (
 	"time"
 )
 
-// ProjectInfo carries the enriched project fields stored as a write-time
-// snapshot on each WorkspaceProject. Populated from the ProjectResolver port
-// when a project is added to a workspace.
-//
-// NOTE: these fields are a snapshot as of the last write that touched this
-// association. Salesforce renames or re-slugs a project without re-writing
-// the workspace; downstream reads may see stale name/slug/sfid until the next
-// write operation on the association.
+// ProjectInfo carries the persisted project reference for a workspace
+// association. Workspace writes treat project identifiers as opaque strings and
+// do not validate or enrich them.
 type ProjectInfo struct {
 	UID  string `json:"uid"`
 	SFID string `json:"sfid,omitempty"`
@@ -23,16 +18,15 @@ type ProjectInfo struct {
 	Slug string `json:"slug,omitempty"`
 }
 
-// WorkspaceProject is a project associated with a workspace. The enrichment
-// fields (ProjectSFID, ProjectSlug, ProjectName) are write-time snapshots.
+// WorkspaceProject is a project reference associated with a workspace.
 type WorkspaceProject struct {
-	// ProjectUID is the v2 project UID (from project-service).
+	// ProjectUID is the stored opaque project reference.
 	ProjectUID string `json:"project_uid"`
-	// ProjectSFID is the Salesforce Project__c.Id (write-time snapshot).
+	// ProjectSFID is optional caller-supplied metadata.
 	ProjectSFID string `json:"project_sfid,omitempty"`
-	// ProjectSlug is the project URL slug (write-time snapshot).
+	// ProjectSlug is optional caller-supplied metadata.
 	ProjectSlug string `json:"project_slug,omitempty"`
-	// ProjectName is the project display name (write-time snapshot).
+	// ProjectName is optional caller-supplied display metadata.
 	ProjectName string `json:"project_name,omitempty"`
 	// CreatedBy is the LFID username of the principal who added this project.
 	CreatedBy string `json:"created_by,omitempty"`

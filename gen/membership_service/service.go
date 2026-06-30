@@ -146,7 +146,7 @@ type AddB2bOrgWorkspaceProjectPayload struct {
 	WorkspaceUID string
 	// If-Match header value for conditional requests
 	IfMatch *string
-	// Project identifier: v2 UUID or URL slug
+	// Opaque project reference string
 	ProjectID string
 }
 
@@ -270,7 +270,7 @@ type BulkAddB2bOrgWorkspaceProjectsPayload struct {
 	WorkspaceUID string
 	// If-Match header value for conditional requests
 	IfMatch *string
-	// Project identifiers (v2 UUIDs or slugs); at most 100 per request
+	// Opaque project reference strings; at most 100 per request
 	ProjectIds []string
 }
 
@@ -861,7 +861,7 @@ type WorkspaceBulkAddItemError struct {
 type WorkspaceBulkResponse struct {
 	// The workspace after all successful additions
 	Workspace *WorkspaceResponse
-	// Project UIDs that were successfully added (or were already present)
+	// Project references that were successfully added (or were already present)
 	Succeeded []string
 	// Projects that could not be added with per-item error detail
 	Failed []*WorkspaceBulkAddItemError
@@ -871,15 +871,19 @@ type WorkspaceBulkResponse struct {
 	LastModified *string
 }
 
-// A project association within a workspace (write-time snapshot)
+// A project association within a workspace
 type WorkspaceProjectResponse struct {
-	// v2 project UID
+	// Opaque project reference stored verbatim from the caller (for example, an
+	// Org Lens project slug); not validated or resolved to a v2 project UUID
 	ProjectUID string
-	// Salesforce Project__c.Id (snapshot)
+	// Reserved project metadata; the workspace write path does not populate it, so
+	// it is always empty
 	ProjectSfid *string
-	// Project URL slug (snapshot)
+	// Reserved project metadata; the workspace write path does not populate it, so
+	// it is always empty
 	ProjectSlug *string
-	// Project display name (snapshot)
+	// Reserved project metadata; the workspace write path does not populate it, so
+	// it is always empty
 	ProjectName *string
 	// LFID username of the principal who added this project
 	CreatedBy *string

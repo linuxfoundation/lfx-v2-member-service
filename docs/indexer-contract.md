@@ -456,7 +456,7 @@ GET /query/resources?v=1&type=org_workspace&tags=b2b_org_uid:{orgUID}
 
 **Note:** `ObjectID` is `"{workspaceUID}/{projectUID}"` (composite key, see `WorkspaceProject.AssociationID`). Each association is a separate indexed document.
 
-**Known limitation (enrichment staleness):** Project `name`, `slug`, and `sfid` stored in each document are a write-time snapshot captured via Salesforce SOQL when the project was added. If a project is later renamed or re-slugged in Salesforce, the stored copy becomes stale until the association is re-added. There is no read-path re-enrichment.
+**Project reference is opaque:** The workspace project write path stores the caller-supplied project identifier verbatim as `project_uid` and does not validate it against a project catalog or resolve it to a v2 project UUID. The string a caller submits (for example, an Org Lens project slug) is exactly what is stored and indexed. The consumer that supplied the reference owns any catalog lookup, display-name resolution, and hydration on read. The write endpoints accept only `project_id` / `project_ids` — there is no field to supply project metadata, and no Salesforce enrichment is performed at write time — so `project_sfid`, `project_slug`, and `project_name` are reserved on the schema but always empty in this contract.
 
 ### Payload Fields
 
@@ -464,10 +464,10 @@ GET /query/resources?v=1&type=org_workspace&tags=b2b_org_uid:{orgUID}
 |-------------------------|-----------|------------------------------------------------------------|
 | `b2b_org_uid`           | string    | Org UID (owner of the workspace)                           |
 | `b2b_org_workspace_uid` | string    | Workspace UID                                              |
-| `project_uid`           | string    | v2 project UUID                                            |
-| `project_sfid`          | string    | Salesforce Project__c.Id (write-time snapshot)             |
-| `project_slug`          | string    | Project URL slug (write-time snapshot)                     |
-| `project_name`          | string    | Project display name (write-time snapshot)                 |
+| `project_uid`           | string    | Opaque project reference stored verbatim from the caller (e.g. an Org Lens project slug); not validated or resolved to a v2 project UUID |
+| `project_sfid`          | string    | Reserved project metadata; no write-endpoint field supplies it, so always empty |
+| `project_slug`          | string    | Reserved project metadata; no write-endpoint field supplies it, so always empty |
+| `project_name`          | string    | Reserved project metadata; no write-endpoint field supplies it, so always empty |
 | `created_by`            | string    | Principal who added the project to this workspace          |
 | `updated_by`            | string    | Principal who last updated this association                |
 | `created_at`            | timestamp | Time the project was added (RFC3339)                       |
@@ -478,12 +478,12 @@ GET /query/resources?v=1&type=org_workspace&tags=b2b_org_uid:{orgUID}
 
 | Tag Format                          | Example                                | Purpose                                            |
 |-------------------------------------|----------------------------------------|----------------------------------------------------|
-| `{workspaceUID}/{projectUID}`       | `550e8400-.../abc-123...`              | Direct lookup by association (composite key)        |
+| `{workspaceUID}/{projectUID}`       | `550e8400-.../kubevirt`                | Direct lookup by association (composite key); `{projectUID}` is the opaque project reference |
 | `b2b_org_uid:{orgUID}`              | `b2b_org_uid:0012M00002qnukOQAQ`       | Find all associations for an org                   |
 | `b2b_org_workspace_uid:{wsUID}`     | `b2b_org_workspace_uid:550e8400-...`   | Find all projects in a workspace                   |
-| `project_uid:{projectUID}`          | `project_uid:abc-123...`               | Find all workspaces containing a project (by UID)  |
-| `project_sfid:{projectSFID}`        | `project_sfid:a2T2M000000ABCdUAG`      | Find all workspaces containing a project (by SFID) |
-| `project_slug:{slug}`               | `project_slug:cncf`                    | Find all workspaces containing a project (by slug) |
+| `project_uid:{projectUID}`          | `project_uid:kubevirt`                 | Find all workspaces containing a project by its stored reference |
+| `project_sfid:{projectSFID}`        | `project_sfid:a2T2M000000ABCdUAG`      | Not emitted in this contract — no write-endpoint field supplies `project_sfid` |
+| `project_slug:{slug}`               | `project_slug:cncf`                    | Not emitted in this contract — no write-endpoint field supplies `project_slug` |
 
 ### Access Control (IndexingConfig)
 
@@ -501,6 +501,8 @@ GET /query/resources?v=1&type=org_workspace&tags=b2b_org_uid:{orgUID}
 | `sort_name`      | `strings.ToLower(projectName)`               |
 | `name_aliases`   | `[projectName]`                              |
 | `fulltext`       | `projectName + " " + projectSlug`            |
+
+> These fields derive from `project_name` / `project_slug`, which the workspace write path never populates (no endpoint supplies them). They are therefore always empty, so name/slug keyword search and name sorting do not apply to a workspace project association. Lookup by stored reference still works via the `project_uid:` tag, and the consumer that owns the reference is responsible for resolving display data on read.
 
 ### Parent References
 

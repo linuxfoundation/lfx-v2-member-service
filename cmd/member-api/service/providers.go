@@ -678,7 +678,6 @@ func WorkspaceWriterUseCase(ctx context.Context) usecaseSvc.WorkspaceWriter {
 		usecaseSvc.WithWorkspaceProjectsReader(WorkspaceProjectsReaderImpl(ctx)),
 		usecaseSvc.WithWorkspaceProjectsWriter(WorkspaceProjectsWriterImpl(ctx)),
 		usecaseSvc.WithWorkspacesB2BOrgReader(B2BOrgReaderImpl(ctx)),
-		usecaseSvc.WithWorkspacesProjectResolver(ProjectResolverImpl(ctx)),
 		usecaseSvc.WithWorkspacesPublisher(MemberPublisherImpl(ctx)),
 	)
 }

@@ -169,7 +169,7 @@ type UpdateB2bOrgWorkspaceRequestBody struct {
 // AddB2bOrgWorkspaceProjectRequestBody is the type of the "membership-service"
 // service "add-b2b-org-workspace-project" endpoint HTTP request body.
 type AddB2bOrgWorkspaceProjectRequestBody struct {
-	// Project identifier: v2 UUID or URL slug
+	// Opaque project reference string
 	ProjectID *string `form:"project_id,omitempty" json:"project_id,omitempty" xml:"project_id,omitempty"`
 }
 
@@ -177,7 +177,7 @@ type AddB2bOrgWorkspaceProjectRequestBody struct {
 // "membership-service" service "bulk-add-b2b-org-workspace-projects" endpoint
 // HTTP request body.
 type BulkAddB2bOrgWorkspaceProjectsRequestBody struct {
-	// Project identifiers (v2 UUIDs or slugs); at most 100 per request
+	// Opaque project reference strings; at most 100 per request
 	ProjectIds []string `form:"project_ids,omitempty" json:"project_ids,omitempty" xml:"project_ids,omitempty"`
 }
 
@@ -256,7 +256,7 @@ type AddB2bOrgWorkspaceProjectResponseBody WorkspaceResponseResponseBody
 type BulkAddB2bOrgWorkspaceProjectsResponseBody struct {
 	// The workspace after all successful additions
 	Workspace *WorkspaceResponseResponseBody `form:"workspace" json:"workspace" xml:"workspace"`
-	// Project UIDs that were successfully added (or were already present)
+	// Project references that were successfully added (or were already present)
 	Succeeded []string `form:"succeeded" json:"succeeded" xml:"succeeded"`
 	// Projects that could not be added with per-item error detail
 	Failed []*WorkspaceBulkAddItemErrorResponseBody `form:"failed" json:"failed" xml:"failed"`
@@ -2742,13 +2742,17 @@ type WorkspaceResponseResponseBody struct {
 // WorkspaceProjectResponseResponseBody is used to define fields on response
 // body types.
 type WorkspaceProjectResponseResponseBody struct {
-	// v2 project UID
+	// Opaque project reference stored verbatim from the caller (for example, an
+	// Org Lens project slug); not validated or resolved to a v2 project UUID
 	ProjectUID string `form:"project_uid" json:"project_uid" xml:"project_uid"`
-	// Salesforce Project__c.Id (snapshot)
+	// Reserved project metadata; the workspace write path does not populate it, so
+	// it is always empty
 	ProjectSfid *string `form:"project_sfid,omitempty" json:"project_sfid,omitempty" xml:"project_sfid,omitempty"`
-	// Project URL slug (snapshot)
+	// Reserved project metadata; the workspace write path does not populate it, so
+	// it is always empty
 	ProjectSlug *string `form:"project_slug,omitempty" json:"project_slug,omitempty" xml:"project_slug,omitempty"`
-	// Project display name (snapshot)
+	// Reserved project metadata; the workspace write path does not populate it, so
+	// it is always empty
 	ProjectName *string `form:"project_name,omitempty" json:"project_name,omitempty" xml:"project_name,omitempty"`
 	// LFID username of the principal who added this project
 	CreatedBy *string `form:"created_by,omitempty" json:"created_by,omitempty" xml:"created_by,omitempty"`

@@ -29,14 +29,13 @@ const (
 func newWorkspaceWriter(
 	wsStore *mock.MockOrgWorkspaces,
 	wpStore *mock.MockWorkspaceProjects,
-	resolver *mock.MockProjectResolver,
+	_ *mock.MockProjectResolver,
 ) svc.WorkspaceWriter {
 	return svc.NewWorkspaceWriter(
 		svc.WithWorkspacesReader(wsStore),
 		svc.WithWorkspacesWriter(wsStore),
 		svc.WithWorkspaceProjectsReader(wpStore),
 		svc.WithWorkspaceProjectsWriter(wpStore),
-		svc.WithWorkspacesProjectResolver(resolver),
 	)
 }
 
@@ -261,7 +260,6 @@ func TestWorkspaceWriter_DeleteWorkspace_AlreadyMissing_Returns404NoPublish(t *t
 		svc.WithWorkspacesWriter(wsStore),
 		svc.WithWorkspaceProjectsReader(mock.NewMockWorkspaceProjects()),
 		svc.WithWorkspaceProjectsWriter(mock.NewMockWorkspaceProjects()),
-		svc.WithWorkspacesProjectResolver(mock.NewMockProjectResolver()),
 		svc.WithWorkspacesPublisher(pub),
 	)
 
@@ -297,10 +295,8 @@ func TestWorkspaceWriter_DeleteWorkspace_StaleIfMatch_ReturnsPreconditionFailed(
 func TestWorkspaceWriter_AddProject_HappyPath(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID, SFID: "a2C000001AAA", Slug: "test-proj", Name: "Test Project"})
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
 
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
@@ -315,9 +311,9 @@ func TestWorkspaceWriter_AddProject_HappyPath(t *testing.T) {
 	assert.Len(t, result.Projects.Projects, 1)
 	wp := result.Projects.Projects[0]
 	assert.Equal(t, wsProjectUID, wp.ProjectUID)
-	assert.Equal(t, "a2C000001AAA", wp.ProjectSFID, "write-time enrichment: SFID must be snapshotted")
-	assert.Equal(t, "test-proj", wp.ProjectSlug, "write-time enrichment: Slug must be snapshotted")
-	assert.Equal(t, "Test Project", wp.ProjectName, "write-time enrichment: Name must be snapshotted")
+	assert.Empty(t, wp.ProjectSlug, "member-service should not infer whether a reference is a slug")
+	assert.Empty(t, wp.ProjectSFID)
+	assert.Empty(t, wp.ProjectName)
 }
 
 func TestWorkspaceWriter_AddProject_Idempotent_NoSpuriousRevisionBump(t *testing.T) {
@@ -348,20 +344,25 @@ func TestWorkspaceWriter_AddProject_Idempotent_NoSpuriousRevisionBump(t *testing
 	assert.EqualValues(t, 3, rev, "idempotent re-add must not bump revision")
 }
 
-func TestWorkspaceWriter_AddProject_UnknownProject_ReturnsValidation(t *testing.T) {
+func TestWorkspaceWriter_AddProject_OpaqueStringIsStored(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
+	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
 
-	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
+	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
 		ProjectID:    "does-not-exist",
 		CreatedBy:    wsUser,
 	})
 
-	require.Error(t, err)
-	assert.True(t, pkgerrors.IsValidation(err), "unknown project should be Validation error, got %T: %v", err, err)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Projects.Projects, 1)
+	wp := result.Projects.Projects[0]
+	assert.Equal(t, "does-not-exist", wp.ProjectUID)
+	assert.Empty(t, wp.ProjectSlug)
 }
 
 func TestWorkspaceWriter_AddProject_WorkspaceNotFound_ReturnsNotFound(t *testing.T) {
@@ -403,53 +404,62 @@ func TestWorkspaceWriter_AddProject_StaleIfMatch_ReturnsPreconditionFailed(t *te
 	assert.True(t, pkgerrors.IsPreconditionFailed(err), "expected PreconditionFailed, got %T: %v", err, err)
 }
 
-func TestWorkspaceWriter_AddProject_NilResolver_ReturnsUnexpected(t *testing.T) {
+func TestWorkspaceWriter_AddProject_NilResolver_StillStoresReference(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
+	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
 	// No resolver wired in.
 	writer := svc.NewWorkspaceWriter(
 		svc.WithWorkspacesReader(wsStore),
 		svc.WithWorkspacesWriter(wsStore),
-		svc.WithWorkspaceProjectsReader(mock.NewMockWorkspaceProjects()),
-		svc.WithWorkspaceProjectsWriter(mock.NewMockWorkspaceProjects()),
+		svc.WithWorkspaceProjectsReader(wpStore),
+		svc.WithWorkspaceProjectsWriter(wpStore),
 	)
 
-	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
+	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    wsProjectUID,
-		CreatedBy:    wsUser,
-	})
-
-	require.Error(t, err)
-	// Must not panic; error should not be Validation (no blame on the caller).
-	assert.False(t, pkgerrors.IsValidation(err), "nil resolver should not produce Validation error")
-}
-
-// ── AddProjectsBulk ───────────────────────────────────────────────────────────
-
-func TestWorkspaceWriter_AddProjectsBulk_PartialSuccess(t *testing.T) {
-	wsStore := mock.NewMockOrgWorkspaces()
-	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
-	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID, SFID: "a2C000001AAA", Name: "Good"})
-	// "bad-id" is NOT seeded → will fail validation.
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
-
-	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
-		OrgUID:       wsOrgUID,
-		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{wsProjectUID, "bad-id"},
+		ProjectID:    "test-project-alpha",
 		CreatedBy:    wsUser,
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Len(t, result.Succeeded, 1)
-	assert.Equal(t, wsProjectUID, result.Succeeded[0].UID)
-	assert.NotNil(t, result.Failed[1], "index 1 (bad-id) should have an error")
-	assert.Nil(t, result.Failed[0], "index 0 (good) should have no error")
+	require.Len(t, result.Projects.Projects, 1)
+	assert.Equal(t, "test-project-alpha", result.Projects.Projects[0].ProjectUID)
+	assert.Empty(t, result.Projects.Projects[0].ProjectSlug)
+}
+
+// ── AddProjectsBulk ───────────────────────────────────────────────────────────
+
+func TestWorkspaceWriter_AddProjectsBulk_StoresOpaqueStrings(t *testing.T) {
+	wsStore := mock.NewMockOrgWorkspaces()
+	wpStore := mock.NewMockWorkspaceProjects()
+	resolver := mock.NewMockProjectResolver()
+	seedWorkspace(wsStore)
+	resolver.ResolveBatchFunc = func(_ context.Context, _ []string) ([]model.ProjectInfo, []error) {
+		t.Fatal("workspace bulk add must not resolve project identifiers")
+		return nil, nil
+	}
+	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+
+	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
+		OrgUID:       wsOrgUID,
+		WorkspaceUID: wsUID,
+		ProjectIDs:   []string{"test-project-alpha", "test-project-beta"},
+		CreatedBy:    wsUser,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Len(t, result.Succeeded, 2)
+	assert.Empty(t, result.Failed[0])
+	assert.Empty(t, result.Failed[1])
+	require.Len(t, result.Projects.Projects, 2)
+	assert.Equal(t, "test-project-alpha", result.Projects.Projects[0].ProjectUID)
+	assert.Equal(t, "test-project-beta", result.Projects.Projects[1].ProjectUID)
+	assert.Empty(t, result.Projects.Projects[0].ProjectSlug)
+	assert.Empty(t, result.Projects.Projects[1].ProjectSlug)
 }
 
 func TestWorkspaceWriter_AddProjectsBulk_AllAlreadyAssociated_NoRevisionBump(t *testing.T) {
@@ -481,33 +491,24 @@ func TestWorkspaceWriter_AddProjectsBulk_AllAlreadyAssociated_NoRevisionBump(t *
 	assert.NotNil(t, result.Projects)
 }
 
-func TestWorkspaceWriter_AddProjectsBulk_InfraError_FailsWholeRequest(t *testing.T) {
-	// Infrastructure errors (not IsValidation) from the resolver must propagate and
-	// abort the whole request — partial-success 200 would mask a dependency outage.
+func TestWorkspaceWriter_AddProjectsBulk_BlankProjectID_ReturnsItemFailure(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
-	resolver := mock.NewMockProjectResolver()
+	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
+	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
 
-	infraErr := pkgerrors.NewUnexpected("NATS timeout")
-	resolver.ResolveBatchFunc = func(_ context.Context, ids []string) ([]model.ProjectInfo, []error) {
-		errs := make([]error, len(ids))
-		infos := make([]model.ProjectInfo, len(ids))
-		for i := range ids {
-			errs[i] = infraErr
-		}
-		return infos, errs
-	}
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), resolver)
-
-	_, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
+	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{wsProjectUID},
+		ProjectIDs:   []string{"test-project-alpha", " "},
 		CreatedBy:    wsUser,
 	})
 
-	require.Error(t, err)
-	assert.False(t, pkgerrors.IsValidation(err), "infra error must not be wrapped as Validation")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Len(t, result.Succeeded, 1)
+	assert.NotNil(t, result.Failed[1], "blank project_id should fail validation")
+	assert.Nil(t, result.Failed[0])
 }
 
 func TestWorkspaceWriter_AddProjectsBulk_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {

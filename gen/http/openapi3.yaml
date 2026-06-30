@@ -1260,34 +1260,34 @@ paths:
                                 projects:
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -1496,34 +1496,34 @@ paths:
                                 projects:
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -1651,34 +1651,34 @@ paths:
                                 projects:
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -1808,34 +1808,34 @@ paths:
                                 projects:
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
-                                      project_name: My Project
-                                      project_sfid: a2F000000000001AAA
-                                      project_slug: my-project
-                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      project_name: ""
+                                      project_sfid: ""
+                                      project_slug: ""
+                                      project_uid: my-project
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -1978,34 +1978,34 @@ paths:
                                     projects:
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
-                                          project_name: My Project
-                                          project_sfid: a2F000000000001AAA
-                                          project_slug: my-project
-                                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                          project_name: ""
+                                          project_sfid: ""
+                                          project_slug: ""
+                                          project_uid: my-project
                                           updated_at: "2026-01-01T00:00:00Z"
                                           updated_by: alice
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
-                                          project_name: My Project
-                                          project_sfid: a2F000000000001AAA
-                                          project_slug: my-project
-                                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                          project_name: ""
+                                          project_sfid: ""
+                                          project_slug: ""
+                                          project_uid: my-project
                                           updated_at: "2026-01-01T00:00:00Z"
                                           updated_by: alice
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
-                                          project_name: My Project
-                                          project_sfid: a2F000000000001AAA
-                                          project_slug: my-project
-                                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                          project_name: ""
+                                          project_sfid: ""
+                                          project_slug: ""
+                                          project_uid: my-project
                                           updated_at: "2026-01-01T00:00:00Z"
                                           updated_by: alice
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
-                                          project_name: My Project
-                                          project_sfid: a2F000000000001AAA
-                                          project_slug: my-project
-                                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                          project_name: ""
+                                          project_sfid: ""
+                                          project_slug: ""
+                                          project_uid: my-project
                                           updated_at: "2026-01-01T00:00:00Z"
                                           updated_by: alice
                                     uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -3947,7 +3947,7 @@ components:
                     items:
                         type: string
                         example: Nobis nisi qui et.
-                    description: Project UIDs that were successfully added (or were already present)
+                    description: Project references that were successfully added (or were already present)
                     example:
                         - a1b2c3d4-e5f6-7890-abcd-ef1234567890
                 workspace:
@@ -3974,18 +3974,18 @@ components:
                     projects:
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                     uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -4015,7 +4015,7 @@ components:
                     items:
                         type: string
                         example: Dolorum culpa perferendis.
-                    description: Project UIDs that were successfully added (or were already present)
+                    description: Project references that were successfully added (or were already present)
                     example:
                         - a1b2c3d4-e5f6-7890-abcd-ef1234567890
                 workspace:
@@ -4037,34 +4037,34 @@ components:
                     projects:
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                     uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
@@ -4093,7 +4093,7 @@ components:
             properties:
                 project_id:
                     type: string
-                    description: 'Project identifier: v2 UUID or URL slug'
+                    description: Opaque project reference string
                     example: my-project
                     maxLength: 512
             description: Request body for adding a single project to a workspace
@@ -4115,20 +4115,20 @@ components:
                     example: alice
                 project_name:
                     type: string
-                    description: Project display name (snapshot)
-                    example: My Project
+                    description: Reserved project metadata; the workspace write path does not populate it, so it is always empty
+                    example: ""
                 project_sfid:
                     type: string
-                    description: Salesforce Project__c.Id (snapshot)
-                    example: a2F000000000001AAA
+                    description: Reserved project metadata; the workspace write path does not populate it, so it is always empty
+                    example: ""
                 project_slug:
                     type: string
-                    description: Project URL slug (snapshot)
-                    example: my-project
+                    description: Reserved project metadata; the workspace write path does not populate it, so it is always empty
+                    example: ""
                 project_uid:
                     type: string
-                    description: v2 project UID
-                    example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    description: Opaque project reference stored verbatim from the caller (for example, an Org Lens project slug); not validated or resolved to a v2 project UUID
+                    example: my-project
                 updated_at:
                     type: string
                     description: Timestamp when this association was last updated
@@ -4138,14 +4138,14 @@ components:
                     type: string
                     description: LFID username of the principal who last updated this association
                     example: alice
-            description: A project association within a workspace (write-time snapshot)
+            description: A project association within a workspace
             example:
                 created_at: "2026-01-01T00:00:00Z"
                 created_by: alice
-                project_name: My Project
-                project_sfid: a2F000000000001AAA
-                project_slug: my-project
-                project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                project_name: ""
+                project_sfid: ""
+                project_slug: ""
+                project_uid: my-project
                 updated_at: "2026-01-01T00:00:00Z"
                 updated_by: alice
             required:
@@ -4158,7 +4158,7 @@ components:
                     items:
                         type: string
                         example: Qui enim harum aut.
-                    description: Project identifiers (v2 UUIDs or slugs); at most 100 per request
+                    description: Opaque project reference strings; at most 100 per request
                     example:
                         - Sit sunt omnis.
                     minItems: 1
@@ -4194,34 +4194,34 @@ components:
                     example:
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
-                          project_name: My Project
-                          project_sfid: a2F000000000001AAA
-                          project_slug: my-project
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          project_name: ""
+                          project_sfid: ""
+                          project_slug: ""
+                          project_uid: my-project
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
                 uid:
@@ -4246,26 +4246,26 @@ components:
                 projects:
                     - created_at: "2026-01-01T00:00:00Z"
                       created_by: alice
-                      project_name: My Project
-                      project_sfid: a2F000000000001AAA
-                      project_slug: my-project
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                      project_name: ""
+                      project_sfid: ""
+                      project_slug: ""
+                      project_uid: my-project
                       updated_at: "2026-01-01T00:00:00Z"
                       updated_by: alice
                     - created_at: "2026-01-01T00:00:00Z"
                       created_by: alice
-                      project_name: My Project
-                      project_sfid: a2F000000000001AAA
-                      project_slug: my-project
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                      project_name: ""
+                      project_sfid: ""
+                      project_slug: ""
+                      project_uid: my-project
                       updated_at: "2026-01-01T00:00:00Z"
                       updated_by: alice
                     - created_at: "2026-01-01T00:00:00Z"
                       created_by: alice
-                      project_name: My Project
-                      project_sfid: a2F000000000001AAA
-                      project_slug: my-project
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                      project_name: ""
+                      project_sfid: ""
+                      project_slug: ""
+                      project_uid: my-project
                       updated_at: "2026-01-01T00:00:00Z"
                       updated_by: alice
                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff

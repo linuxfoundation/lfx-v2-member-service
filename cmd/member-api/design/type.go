@@ -586,18 +586,18 @@ var AdminReindexResult = dsl.Type("admin-reindex-result", func() {
 
 // WorkspaceProjectResponse is the DSL type for a project associated with a workspace.
 var WorkspaceProjectResponse = dsl.Type("workspace-project-response", func() {
-	dsl.Description("A project association within a workspace (write-time snapshot)")
-	dsl.Attribute("project_uid", dsl.String, "v2 project UID", func() {
-		dsl.Example("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
-	})
-	dsl.Attribute("project_sfid", dsl.String, "Salesforce Project__c.Id (snapshot)", func() {
-		dsl.Example("a2F000000000001AAA")
-	})
-	dsl.Attribute("project_slug", dsl.String, "Project URL slug (snapshot)", func() {
+	dsl.Description("A project association within a workspace")
+	dsl.Attribute("project_uid", dsl.String, "Opaque project reference stored verbatim from the caller (for example, an Org Lens project slug); not validated or resolved to a v2 project UUID", func() {
 		dsl.Example("my-project")
 	})
-	dsl.Attribute("project_name", dsl.String, "Project display name (snapshot)", func() {
-		dsl.Example("My Project")
+	dsl.Attribute("project_sfid", dsl.String, "Reserved project metadata; the workspace write path does not populate it, so it is always empty", func() {
+		dsl.Example("")
+	})
+	dsl.Attribute("project_slug", dsl.String, "Reserved project metadata; the workspace write path does not populate it, so it is always empty", func() {
+		dsl.Example("")
+	})
+	dsl.Attribute("project_name", dsl.String, "Reserved project metadata; the workspace write path does not populate it, so it is always empty", func() {
+		dsl.Example("")
 	})
 	dsl.Attribute("created_by", dsl.String, "LFID username of the principal who added this project", func() {
 		dsl.Example("alice")
@@ -669,7 +669,7 @@ var WorkspaceUpdateBody = dsl.Type("workspace-update-body", func() {
 // WorkspaceProjectAddBody is the request body for POST /b2b_orgs/{uid}/workspaces/{workspace_uid}/projects.
 var WorkspaceProjectAddBody = dsl.Type("workspace-project-add-body", func() {
 	dsl.Description("Request body for adding a single project to a workspace")
-	dsl.Attribute("project_id", dsl.String, "Project identifier: v2 UUID or URL slug", func() {
+	dsl.Attribute("project_id", dsl.String, "Opaque project reference string", func() {
 		dsl.MaxLength(512)
 		dsl.Example("my-project")
 	})
@@ -679,7 +679,7 @@ var WorkspaceProjectAddBody = dsl.Type("workspace-project-add-body", func() {
 // WorkspaceProjectsBulkAddBody is the request body for POST /b2b_orgs/{uid}/workspaces/{workspace_uid}/projects/bulk.
 var WorkspaceProjectsBulkAddBody = dsl.Type("workspace-projects-bulk-add-body", func() {
 	dsl.Description("Request body for adding multiple projects to a workspace in one operation")
-	dsl.Attribute("project_ids", dsl.ArrayOf(dsl.String), "Project identifiers (v2 UUIDs or slugs); at most 100 per request", func() {
+	dsl.Attribute("project_ids", dsl.ArrayOf(dsl.String), "Opaque project reference strings; at most 100 per request", func() {
 		dsl.MinLength(1)
 		dsl.MaxLength(100)
 	})
@@ -702,7 +702,7 @@ var WorkspaceBulkAddItemError = dsl.Type("workspace-bulk-add-item-error", func()
 var WorkspaceBulkResponse = dsl.Type("workspace-bulk-response", func() {
 	dsl.Description("Result of a bulk workspace project add: the updated workspace plus per-item success/failure detail")
 	dsl.Attribute("workspace", WorkspaceResponse, "The workspace after all successful additions")
-	dsl.Attribute("succeeded", dsl.ArrayOf(dsl.String), "Project UIDs that were successfully added (or were already present)", func() {
+	dsl.Attribute("succeeded", dsl.ArrayOf(dsl.String), "Project references that were successfully added (or were already present)", func() {
 		dsl.Example([]string{"a1b2c3d4-e5f6-7890-abcd-ef1234567890"})
 	})
 	dsl.Attribute("failed", dsl.ArrayOf(WorkspaceBulkAddItemError), "Projects that could not be added with per-item error detail")

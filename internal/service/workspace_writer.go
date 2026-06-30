@@ -48,7 +48,7 @@ type WorkspaceDelete struct {
 type WorkspaceProjectAdd struct {
 	OrgUID       string
 	WorkspaceUID string
-	ProjectID    string // UID or slug
+	ProjectID    string // opaque caller-owned project reference
 	CreatedBy    string
 	IfMatch      string
 }
@@ -58,7 +58,7 @@ type WorkspaceProjectAdd struct {
 type WorkspaceProjectsBulkAdd struct {
 	OrgUID       string
 	WorkspaceUID string
-	ProjectIDs   []string // UIDs or slugs
+	ProjectIDs   []string // opaque caller-owned project references
 	CreatedBy    string
 	IfMatch      string
 }
@@ -97,7 +97,7 @@ type WorkspaceBulkResult struct {
 	Workspace *model.Workspace
 	// Projects is the updated projects document for the workspace.
 	Projects *model.WorkspaceProjects
-	// Succeeded holds the ProjectInfo for each successfully added project.
+	// Succeeded holds the opaque project references that were successfully added.
 	Succeeded []model.ProjectInfo
 	// Failed holds per-item errors aligned to the input ProjectIDs slice.
 	// Indices where addition succeeded carry a nil error.
@@ -124,7 +124,6 @@ type workspaceWriterOrchestrator struct {
 	workspaceProjectsReader port.WorkspaceProjectsReader
 	workspaceProjectsWriter port.WorkspaceProjectsWriter
 	b2bOrgReader            port.B2BOrgReader
-	projectResolver         port.ProjectResolver
 	publisher               port.MemberPublisher
 }
 
@@ -149,10 +148,6 @@ func WithWorkspaceProjectsWriter(w port.WorkspaceProjectsWriter) WorkspaceWriter
 
 func WithWorkspacesB2BOrgReader(r port.B2BOrgReader) WorkspaceWriterOption {
 	return func(o *workspaceWriterOrchestrator) { o.b2bOrgReader = r }
-}
-
-func WithWorkspacesProjectResolver(r port.ProjectResolver) WorkspaceWriterOption {
-	return func(o *workspaceWriterOrchestrator) { o.projectResolver = r }
 }
 
 func WithWorkspacesPublisher(p port.MemberPublisher) WorkspaceWriterOption {
@@ -341,10 +336,10 @@ func (o *workspaceWriterOrchestrator) DeleteWorkspace(ctx context.Context, in Wo
 	return nil
 }
 
-// AddProject enriches and appends a single project to a workspace's projects document.
+// AddProject appends a single project reference to a workspace's projects document.
 // Idempotent: if the project is already associated, returns the current state
-// without error (BR-6). Returns NotFound if the workspace does not exist and
-// Validation (→ HTTP 400) if the project cannot be resolved.
+// without error. Returns NotFound if the workspace does not exist and Validation
+// (→ HTTP 400) if the supplied project identifier is blank.
 func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in WorkspaceProjectAdd) (*WorkspaceProjectResult, error) {
 	existing, _, err := o.workspacesReader.GetWorkspaces(ctx, in.OrgUID)
 	if err != nil {
@@ -359,14 +354,9 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 		return nil, pkgerrors.NewNotFound("workspace not found")
 	}
 
-	if o.projectResolver == nil {
-		return nil, pkgerrors.NewUnexpected("project resolver not configured")
-	}
-
-	// Enrich project (write-time snapshot).
-	info, resolveErr := o.projectResolver.ResolveProject(ctx, in.ProjectID)
-	if resolveErr != nil {
-		return nil, resolveErr
+	wp, err := workspaceProjectFromIdentifier(in.ProjectID, in.CreatedBy, time.Now().UTC())
+	if err != nil {
+		return nil, err
 	}
 
 	// Read the projects document (lazy create if not exists).
@@ -383,7 +373,7 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 	}
 
 	// Idempotency: already associated → return current state without cloning.
-	if existingProjects != nil && existingProjects.WorkspaceProjectByUID(info.UID) != nil {
+	if existingProjects != nil && existingProjects.WorkspaceProjectByUID(wp.ProjectUID) != nil {
 		wsCopy := *ws
 		return &WorkspaceProjectResult{
 			Workspace: &wsCopy,
@@ -391,18 +381,9 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 		}, nil
 	}
 
-	now := time.Now().UTC()
+	now := wp.CreatedAt
 	updatedProjects := model.CloneWorkspaceProjects(existingProjects, in.WorkspaceUID, in.OrgUID, now)
-	updatedProjects.Projects = append(updatedProjects.Projects, model.WorkspaceProject{
-		ProjectUID:  info.UID,
-		ProjectSFID: info.SFID,
-		ProjectSlug: info.Slug,
-		ProjectName: info.Name,
-		CreatedBy:   in.CreatedBy,
-		UpdatedBy:   in.CreatedBy,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	})
+	updatedProjects.Projects = append(updatedProjects.Projects, wp)
 	updatedProjects.UpdatedAt = now
 
 	// CAS write projects document (lazy create: projectsRevision==0 on first add).
@@ -414,9 +395,9 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 	if o.b2bOrgReader != nil && o.publisher != nil {
 		org, orgErr := o.b2bOrgReader.GetB2BOrg(ctx, in.OrgUID)
 		if orgErr == nil && org != nil {
-			wp := updatedProjects.WorkspaceProjectByUID(info.UID)
-			if wp != nil {
-				PublishWorkspaceProjectIndexer(ctx, o.publisher, org, ws, *wp, *updatedProjects, indexerConstants.ActionCreated)
+			added := updatedProjects.WorkspaceProjectByUID(wp.ProjectUID)
+			if added != nil {
+				PublishWorkspaceProjectIndexer(ctx, o.publisher, org, ws, *added, *updatedProjects, indexerConstants.ActionCreated)
 			}
 		}
 	}
@@ -428,9 +409,8 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 	}, nil
 }
 
-// AddProjectsBulk adds multiple projects to a workspace using a batch SOQL enrichment.
-// Per-item resolution failures are collected; only successfully enriched projects are
-// persisted in a single CAS write.
+// AddProjectsBulk adds multiple project references to a workspace without
+// validating them against a project catalog.
 func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in WorkspaceProjectsBulkAdd) (*WorkspaceBulkResult, error) {
 	existing, _, err := o.workspacesReader.GetWorkspaces(ctx, in.OrgUID)
 	if err != nil {
@@ -444,13 +424,6 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 	if ws == nil {
 		return nil, pkgerrors.NewNotFound("workspace not found")
 	}
-
-	if o.projectResolver == nil {
-		return nil, pkgerrors.NewUnexpected("project resolver not configured")
-	}
-
-	// Batch-resolve all project identifiers in one round-trip.
-	infos, resolveErrs := o.projectResolver.ResolveProjectsBatch(ctx, in.ProjectIDs)
 
 	var succeeded []model.ProjectInfo
 	failedOut := make([]error, len(in.ProjectIDs))
@@ -472,35 +445,20 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 	updatedProjects := model.CloneWorkspaceProjects(existingProjects, in.WorkspaceUID, in.OrgUID, now)
 	newlyAdded := []*model.WorkspaceProject{}
 
-	for i, info := range infos {
-		if resolveErrs[i] != nil {
-			// Infrastructure errors (NATS/Salesforce down) are not per-item failures —
-			// fail the whole request so the caller retries rather than receiving a
-			// partial-success 200 that masks a dependency outage.
-			if !pkgerrors.IsValidation(resolveErrs[i]) {
-				return nil, resolveErrs[i]
-			}
-			failedOut[i] = resolveErrs[i]
+	for i, projectID := range in.ProjectIDs {
+		wp, itemErr := workspaceProjectFromIdentifier(projectID, in.CreatedBy, now)
+		if itemErr != nil {
+			failedOut[i] = itemErr
 			continue
 		}
 		// Idempotency: skip already-associated projects.
-		if updatedProjects.WorkspaceProjectByUID(info.UID) != nil {
-			succeeded = append(succeeded, info)
+		if updatedProjects.WorkspaceProjectByUID(wp.ProjectUID) != nil {
+			succeeded = append(succeeded, workspaceProjectInfo(wp))
 			continue
-		}
-		wp := model.WorkspaceProject{
-			ProjectUID:  info.UID,
-			ProjectSFID: info.SFID,
-			ProjectSlug: info.Slug,
-			ProjectName: info.Name,
-			CreatedBy:   in.CreatedBy,
-			UpdatedBy:   in.CreatedBy,
-			CreatedAt:   now,
-			UpdatedAt:   now,
 		}
 		updatedProjects.Projects = append(updatedProjects.Projects, wp)
 		newlyAdded = append(newlyAdded, &wp)
-		succeeded = append(succeeded, info)
+		succeeded = append(succeeded, workspaceProjectInfo(wp))
 	}
 
 	projectsResult := existingProjects
@@ -640,6 +598,31 @@ func (o *workspaceWriterOrchestrator) guardOrg(ctx context.Context, orgUID strin
 		return "", pkgerrors.NewNotFound("organization not found")
 	}
 	return org.Name, nil
+}
+
+func workspaceProjectFromIdentifier(projectID, principal string, now time.Time) (model.WorkspaceProject, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return model.WorkspaceProject{}, pkgerrors.NewValidation("project_id is required")
+	}
+
+	wp := model.WorkspaceProject{
+		ProjectUID: projectID,
+		CreatedBy:  principal,
+		UpdatedBy:  principal,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	return wp, nil
+}
+
+func workspaceProjectInfo(wp model.WorkspaceProject) model.ProjectInfo {
+	return model.ProjectInfo{
+		UID:  wp.ProjectUID,
+		SFID: wp.ProjectSFID,
+		Name: wp.ProjectName,
+		Slug: wp.ProjectSlug,
+	}
 }
 
 // checkWorkspacesIfMatch validates the optional If-Match precondition against
