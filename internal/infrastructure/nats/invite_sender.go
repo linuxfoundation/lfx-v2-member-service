@@ -39,7 +39,7 @@ func (s *inviteSender) SendInvite(ctx context.Context, req inviteapi.SendInviteR
 		return port.InviteResult{}, errors.NewUnexpected("failed to marshal invite request", err)
 	}
 
-	reply, err := s.client.conn.RequestMsgWithContext(ctx, &nats.Msg{
+	reply, err := requestMsgWithSpan(ctx, s.client.conn, &nats.Msg{
 		Subject: inviteapi.SendInviteSubject,
 		Data:    data,
 	})

@@ -56,7 +56,7 @@ func (n *orgRoleNotifier) NotifyRoleAssigned(ctx context.Context, notif port.Org
 	ctx, cancel := context.WithTimeout(ctx, defaultPublishTimeout)
 	defer cancel()
 
-	reply, err := n.client.conn.RequestMsgWithContext(ctx, &natsgo.Msg{
+	reply, err := requestMsgWithSpan(ctx, n.client.conn, &natsgo.Msg{
 		Subject: emailapi.SendEmailSubject,
 		Data:    data,
 	})
