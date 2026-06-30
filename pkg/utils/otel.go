@@ -25,7 +25,8 @@ import (
 
 // SetupOTelSDK bootstraps the OpenTelemetry pipeline.
 // Exporters are configured via OTEL_TRACES_EXPORTER, OTEL_METRICS_EXPORTER, and
-// OTEL_LOGS_EXPORTER environment variables (default: "otlp").
+// OTEL_LOGS_EXPORTER environment variables (autoexport library default: "otlp";
+// Helm chart default: "none").
 // Propagators are configured via OTEL_PROPAGATORS (default: "tracecontext,baggage").
 func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, err error) {
 	var shutdownFuncs []func(context.Context) error
