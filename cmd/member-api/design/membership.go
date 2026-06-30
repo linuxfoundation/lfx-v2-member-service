@@ -933,7 +933,7 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("add-b2b-org-workspace-project", func() {
-		dsl.Description("Add a single project to a workspace. Idempotent: already-associated projects are a no-op. Returns HTTP 400 for unknown project identifiers.")
+		dsl.Description("Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.")
 
 		dsl.Security(JWTAuth)
 
@@ -960,7 +960,7 @@ var _ = dsl.Service("membership-service", func() {
 		})
 
 		dsl.Error("NotFound", dsl.ErrorResult, "Workspace not found")
-		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request or unknown project identifier")
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request (e.g. blank project identifier)")
 		dsl.Error("Conflict", dsl.ErrorResult, "Concurrent modification — retry")
 		dsl.Error("PreconditionFailed", dsl.ErrorResult, "Precondition failed")
 		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
@@ -988,7 +988,7 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("bulk-add-b2b-org-workspace-projects", func() {
-		dsl.Description("Add multiple projects to a workspace in one operation. Partially succeeds: successfully enriched projects are written; per-item failures are reported in the response.")
+		dsl.Description("Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.")
 
 		dsl.Security(JWTAuth)
 
@@ -1051,9 +1051,9 @@ var _ = dsl.Service("membership-service", func() {
 				dsl.Format(dsl.FormatUUID)
 				dsl.Example("4c46585f-9f01-8bda-a0a5-f0c8eeef7fff")
 			})
-			dsl.Attribute("project_uid", dsl.String, "Project UID to remove", func() {
-				dsl.Format(dsl.FormatUUID)
-				dsl.Example("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+			dsl.Attribute("project_uid", dsl.String, "Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)", func() {
+				dsl.MaxLength(512)
+				dsl.Example("my-project")
 			})
 			IfMatchAttribute()
 			dsl.Required("uid", "workspace_uid", "project_uid")

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	goahttp "goa.design/goa/v3/http"
@@ -3368,7 +3369,9 @@ func DecodeRemoveB2bOrgWorkspaceProjectRequest(mux goahttp.Muxer, decoder func(*
 		workspaceUID = params["workspace_uid"]
 		err = goa.MergeErrors(err, goa.ValidateFormat("workspace_uid", workspaceUID, goa.FormatUUID))
 		projectUID = params["project_uid"]
-		err = goa.MergeErrors(err, goa.ValidateFormat("project_uid", projectUID, goa.FormatUUID))
+		if utf8.RuneCountInString(projectUID) > 512 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("project_uid", projectUID, utf8.RuneCountInString(projectUID), 512, false))
+		}
 		versionRaw := r.URL.Query().Get("v")
 		if versionRaw != "" {
 			version = &versionRaw

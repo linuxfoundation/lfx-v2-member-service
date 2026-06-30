@@ -1163,7 +1163,9 @@ func BuildRemoveB2bOrgWorkspaceProjectPayload(membershipServiceRemoveB2bOrgWorks
 	var projectUID string
 	{
 		projectUID = membershipServiceRemoveB2bOrgWorkspaceProjectProjectUID
-		err = goa.MergeErrors(err, goa.ValidateFormat("project_uid", projectUID, goa.FormatUUID))
+		if utf8.RuneCountInString(projectUID) > 512 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("project_uid", projectUID, utf8.RuneCountInString(projectUID), 512, false))
+		}
 		if err != nil {
 			return nil, err
 		}

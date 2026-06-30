@@ -69,12 +69,14 @@ type Service interface {
 	UpdateB2bOrgWorkspace(context.Context, *UpdateB2bOrgWorkspacePayload) (res *UpdateB2bOrgWorkspaceResult, err error)
 	// Delete a workspace and all its project associations (cascade delete).
 	DeleteB2bOrgWorkspace(context.Context, *DeleteB2bOrgWorkspacePayload) (err error)
-	// Add a single project to a workspace. Idempotent: already-associated projects
-	// are a no-op. Returns HTTP 400 for unknown project identifiers.
+	// Add a single project to a workspace. The project reference is stored
+	// verbatim as an opaque string (not validated against a project catalog).
+	// Idempotent: already-associated projects are a no-op.
 	AddB2bOrgWorkspaceProject(context.Context, *AddB2bOrgWorkspaceProjectPayload) (res *AddB2bOrgWorkspaceProjectResult, err error)
-	// Add multiple projects to a workspace in one operation. Partially succeeds:
-	// successfully enriched projects are written; per-item failures are reported
-	// in the response.
+	// Add multiple projects to a workspace in one operation. Project references
+	// are stored verbatim as opaque strings (not validated against a project
+	// catalog). Partially succeeds: valid references are written; per-item
+	// failures (e.g. blank identifiers) are reported in the response.
 	BulkAddB2bOrgWorkspaceProjects(context.Context, *BulkAddB2bOrgWorkspaceProjectsPayload) (res *WorkspaceBulkResponse, err error)
 	// Remove a project association from a workspace.
 	RemoveB2bOrgWorkspaceProject(context.Context, *RemoveB2bOrgWorkspaceProjectPayload) (res *RemoveB2bOrgWorkspaceProjectResult, err error)
@@ -656,7 +658,8 @@ type RemoveB2bOrgWorkspaceProjectPayload struct {
 	UID string
 	// Workspace UID
 	WorkspaceUID string
-	// Project UID to remove
+	// Opaque project reference to remove — the same string that was stored when
+	// the project was added (e.g. an Org Lens slug or a v2 project UUID)
 	ProjectUID string
 	// If-Match header value for conditional requests
 	IfMatch *string

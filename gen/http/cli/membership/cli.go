@@ -187,7 +187,7 @@ func ParseEndpoint(
 		membershipServiceRemoveB2bOrgWorkspaceProjectFlags            = flag.NewFlagSet("remove-b2b-org-workspace-project", flag.ExitOnError)
 		membershipServiceRemoveB2bOrgWorkspaceProjectUIDFlag          = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("uid", "REQUIRED", "B2B organization UID")
 		membershipServiceRemoveB2bOrgWorkspaceProjectWorkspaceUIDFlag = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("workspace-uid", "REQUIRED", "Workspace UID")
-		membershipServiceRemoveB2bOrgWorkspaceProjectProjectUIDFlag   = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("project-uid", "REQUIRED", "Project UID to remove")
+		membershipServiceRemoveB2bOrgWorkspaceProjectProjectUIDFlag   = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("project-uid", "REQUIRED", "Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)")
 		membershipServiceRemoveB2bOrgWorkspaceProjectVersionFlag      = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("version", "", "")
 		membershipServiceRemoveB2bOrgWorkspaceProjectBearerTokenFlag  = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("bearer-token", "", "")
 		membershipServiceRemoveB2bOrgWorkspaceProjectIfMatchFlag      = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("if-match", "", "")
@@ -447,8 +447,8 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    create-b2b-org-workspace: Create a new workspace within a b2b_org. Name must be unique within the org.`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-workspace: Rename an existing workspace. Name must be unique within the org.`)
 	fmt.Fprintln(os.Stderr, `    delete-b2b-org-workspace: Delete a workspace and all its project associations (cascade delete).`)
-	fmt.Fprintln(os.Stderr, `    add-b2b-org-workspace-project: Add a single project to a workspace. Idempotent: already-associated projects are a no-op. Returns HTTP 400 for unknown project identifiers.`)
-	fmt.Fprintln(os.Stderr, `    bulk-add-b2b-org-workspace-projects: Add multiple projects to a workspace in one operation. Partially succeeds: successfully enriched projects are written; per-item failures are reported in the response.`)
+	fmt.Fprintln(os.Stderr, `    add-b2b-org-workspace-project: Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.`)
+	fmt.Fprintln(os.Stderr, `    bulk-add-b2b-org-workspace-projects: Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.`)
 	fmt.Fprintln(os.Stderr, `    remove-b2b-org-workspace-project: Remove a project association from a workspace.`)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Additional help:")
@@ -951,7 +951,7 @@ func membershipServiceAddB2bOrgWorkspaceProjectUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Add a single project to a workspace. Idempotent: already-associated projects are a no-op. Returns HTTP 400 for unknown project identifiers.`)
+	fmt.Fprintln(os.Stderr, `Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -body JSON: `)
@@ -979,7 +979,7 @@ func membershipServiceBulkAddB2bOrgWorkspaceProjectsUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Add multiple projects to a workspace in one operation. Partially succeeds: successfully enriched projects are written; per-item failures are reported in the response.`)
+	fmt.Fprintln(os.Stderr, `Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -body JSON: `)
@@ -1012,12 +1012,12 @@ func membershipServiceRemoveB2bOrgWorkspaceProjectUsage() {
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -uid STRING: B2B organization UID`)
 	fmt.Fprintln(os.Stderr, `    -workspace-uid STRING: Workspace UID`)
-	fmt.Fprintln(os.Stderr, `    -project-uid STRING: Project UID to remove`)
+	fmt.Fprintln(os.Stderr, `    -project-uid STRING: Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)`)
 	fmt.Fprintln(os.Stderr, `    -version STRING: `)
 	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
 	fmt.Fprintln(os.Stderr, `    -if-match STRING: `)
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service remove-b2b-org-workspace-project --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --project-uid \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service remove-b2b-org-workspace-project --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --project-uid \"my-project\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }

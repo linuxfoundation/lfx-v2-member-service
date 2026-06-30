@@ -888,7 +888,7 @@ paths:
             tags:
                 - membership-service
             summary: add-b2b-org-workspace-project membership-service
-            description: 'Add a single project to a workspace. Idempotent: already-associated projects are a no-op. Returns HTTP 400 for unknown project identifiers.'
+            description: 'Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.'
             operationId: membership-service#add-b2b-org-workspace-project
             parameters:
                 - name: v
@@ -997,10 +997,10 @@ paths:
                   format: uuid
                 - name: project_uid
                   in: path
-                  description: Project UID to remove
+                  description: Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)
                   required: true
                   type: string
-                  format: uuid
+                  maxLength: 512
                 - name: Authorization
                   in: header
                   description: JWT token issued by Heimdall
@@ -1059,7 +1059,7 @@ paths:
             tags:
                 - membership-service
             summary: bulk-add-b2b-org-workspace-projects membership-service
-            description: 'Add multiple projects to a workspace in one operation. Partially succeeds: successfully enriched projects are written; per-item failures are reported in the response.'
+            description: 'Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.'
             operationId: membership-service#bulk-add-b2b-org-workspace-projects
             parameters:
                 - name: v
@@ -2076,7 +2076,7 @@ definitions:
                 type: boolean
                 description: Is the error a timeout?
                 example: false
-        description: Bad request or unknown project identifier (default view)
+        description: Bad request (e.g. blank project identifier) (default view)
         example:
             fault: true
             id: 123abc

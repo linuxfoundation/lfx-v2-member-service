@@ -443,7 +443,7 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 
 	now := time.Now().UTC()
 	updatedProjects := model.CloneWorkspaceProjects(existingProjects, in.WorkspaceUID, in.OrgUID, now)
-	newlyAdded := []*model.WorkspaceProject{}
+	newlyAdded := []model.WorkspaceProject{}
 
 	for i, projectID := range in.ProjectIDs {
 		wp, itemErr := workspaceProjectFromIdentifier(projectID, in.CreatedBy, now)
@@ -457,7 +457,7 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 			continue
 		}
 		updatedProjects.Projects = append(updatedProjects.Projects, wp)
-		newlyAdded = append(newlyAdded, &wp)
+		newlyAdded = append(newlyAdded, wp)
 		succeeded = append(succeeded, workspaceProjectInfo(wp))
 	}
 
@@ -473,8 +473,8 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 		if o.b2bOrgReader != nil && o.publisher != nil {
 			org, orgErr := o.b2bOrgReader.GetB2BOrg(ctx, in.OrgUID)
 			if orgErr == nil && org != nil {
-				for _, wp := range newlyAdded {
-					PublishWorkspaceProjectIndexer(ctx, o.publisher, org, ws, *wp, *updatedProjects, indexerConstants.ActionCreated)
+				for i := range newlyAdded {
+					PublishWorkspaceProjectIndexer(ctx, o.publisher, org, ws, newlyAdded[i], *updatedProjects, indexerConstants.ActionCreated)
 				}
 			}
 		}

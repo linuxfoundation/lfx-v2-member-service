@@ -1572,7 +1572,7 @@ paths:
             tags:
                 - membership-service
             summary: add-b2b-org-workspace-project membership-service
-            description: 'Add a single project to a workspace. Idempotent: already-associated projects are a no-op. Returns HTTP 400 for unknown project identifiers.'
+            description: 'Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.'
             operationId: membership-service#add-b2b-org-workspace-project
             parameters:
                 - name: v
@@ -1685,7 +1685,7 @@ paths:
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
                 "400":
-                    description: 'BadRequest: Bad request or unknown project identifier'
+                    description: 'BadRequest: Bad request (e.g. blank project identifier)'
                     content:
                         application/vnd.goa.error:
                             schema:
@@ -1762,14 +1762,14 @@ paths:
                   example: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                 - name: project_uid
                   in: path
-                  description: Project UID to remove
+                  description: Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)
                   required: true
                   schema:
                     type: string
-                    description: Project UID to remove
-                    example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                    format: uuid
-                  example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    description: Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)
+                    example: my-project
+                    maxLength: 512
+                  example: my-project
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
@@ -1884,7 +1884,7 @@ paths:
             tags:
                 - membership-service
             summary: bulk-add-b2b-org-workspace-projects membership-service
-            description: 'Add multiple projects to a workspace in one operation. Partially succeeds: successfully enriched projects are written; per-item failures are reported in the response.'
+            description: 'Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.'
             operationId: membership-service#bulk-add-b2b-org-workspace-projects
             parameters:
                 - name: v
