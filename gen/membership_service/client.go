@@ -423,7 +423,7 @@ func (c *Client) DeleteB2bOrgWorkspace(ctx context.Context, p *DeleteB2bOrgWorks
 // of the "membership-service" service.
 // AddB2bOrgWorkspaceProject may return the following errors:
 //   - "NotFound" (type *goa.ServiceError): Workspace not found
-//   - "BadRequest" (type *goa.ServiceError): Bad request (e.g. blank project identifier)
+//   - "BadRequest" (type *goa.ServiceError): Bad request (e.g. blank project_slug)
 //   - "Conflict" (type *goa.ServiceError): Concurrent modification — retry
 //   - "PreconditionFailed" (type *goa.ServiceError): Precondition failed
 //   - "InternalServerError" (type *goa.ServiceError): Internal server error

@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
@@ -18,10 +19,12 @@ import (
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const (
-	wsOrgUID     = "001dy00000u0UnRAAU" // Salesforce SFID
-	wsUID        = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-	wsProjectUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-	wsUser       = "alice"
+	wsOrgUID      = "001dy00000u0UnRAAU" // Salesforce SFID
+	wsUID         = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	wsProjectUID  = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" // a generated association UID, used for seed/delete
+	wsProjectSlug = "test-project-primary"
+	wsProjectName = "Test Project Primary"
+	wsUser        = "alice"
 )
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -291,7 +294,7 @@ func TestWorkspaceWriter_DeleteWorkspace_StaleIfMatch_ReturnsPreconditionFailed(
 
 // ── AddProject ────────────────────────────────────────────────────────────────
 
-func TestWorkspaceWriter_AddProject_HappyPath(t *testing.T) {
+func TestWorkspaceWriter_AddProject_HappyPath_GeneratesUID(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
@@ -300,37 +303,41 @@ func TestWorkspaceWriter_AddProject_HappyPath(t *testing.T) {
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    wsProjectUID,
+		ProjectSlug:  wsProjectSlug,
+		ProjectName:  wsProjectName,
 		CreatedBy:    wsUser,
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.Projects)
-	assert.Len(t, result.Projects.Projects, 1)
+	require.Len(t, result.Projects.Projects, 1)
 	wp := result.Projects.Projects[0]
-	assert.Equal(t, wsProjectUID, wp.ProjectUID)
-	assert.Empty(t, wp.ProjectSlug, "member-service should not infer whether a reference is a slug")
-	assert.Empty(t, wp.ProjectSFID)
-	assert.Empty(t, wp.ProjectName)
+	assert.Equal(t, wsProjectSlug, wp.ProjectSlug)
+	assert.Equal(t, wsProjectName, wp.ProjectName)
+	// project_uid is a member-service-generated UUID, distinct from the slug.
+	require.NotEmpty(t, wp.ProjectUID)
+	_, parseErr := uuid.Parse(wp.ProjectUID)
+	assert.NoError(t, parseErr, "project_uid must be a generated UUID")
+	assert.NotEqual(t, wsProjectSlug, wp.ProjectUID)
 }
 
-func TestWorkspaceWriter_AddProject_Idempotent_NoSpuriousRevisionBump(t *testing.T) {
+func TestWorkspaceWriter_AddProject_Idempotent_SameSlug_NoSpuriousRevisionBump(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
-	// Pre-seed the projects doc with the project already associated.
+	// Pre-seed the projects doc with the slug already associated.
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{
 		WorkspaceUID: wsUID,
 		OrgUID:       wsOrgUID,
-		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID}},
+		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID, ProjectSlug: wsProjectSlug}},
 	}, 3)
 	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    wsProjectUID,
+		ProjectSlug:  wsProjectSlug,
 		CreatedBy:    wsUser,
 	})
 
@@ -338,28 +345,27 @@ func TestWorkspaceWriter_AddProject_Idempotent_NoSpuriousRevisionBump(t *testing
 	require.NotNil(t, result)
 	// Revision must not change — no write should have occurred.
 	_, rev, _ := wpStore.GetWorkspaceProjects(context.Background(), wsUID)
-	assert.EqualValues(t, 3, rev, "idempotent re-add must not bump revision")
+	assert.EqualValues(t, 3, rev, "idempotent re-add of the same slug must not bump revision")
+	// The pre-existing generated UID is preserved (no new UID minted).
+	require.Len(t, result.Projects.Projects, 1)
+	assert.Equal(t, wsProjectUID, result.Projects.Projects[0].ProjectUID)
 }
 
-func TestWorkspaceWriter_AddProject_OpaqueStringIsStored(t *testing.T) {
+func TestWorkspaceWriter_AddProject_BlankSlug_ReturnsValidation(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
 	writer := newWorkspaceWriter(wsStore, wpStore)
 
-	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
+	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    "does-not-exist",
+		ProjectSlug:  "  ",
 		CreatedBy:    wsUser,
 	})
 
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Len(t, result.Projects.Projects, 1)
-	wp := result.Projects.Projects[0]
-	assert.Equal(t, "does-not-exist", wp.ProjectUID)
-	assert.Empty(t, wp.ProjectSlug)
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsValidation(err), "blank project_slug should fail validation, got %T: %v", err, err)
 }
 
 func TestWorkspaceWriter_AddProject_WorkspaceNotFound_ReturnsNotFound(t *testing.T) {
@@ -369,7 +375,7 @@ func TestWorkspaceWriter_AddProject_WorkspaceNotFound_ReturnsNotFound(t *testing
 	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    wsProjectUID,
+		ProjectSlug:  wsProjectSlug,
 		CreatedBy:    wsUser,
 	})
 
@@ -388,7 +394,7 @@ func TestWorkspaceWriter_AddProject_StaleIfMatch_ReturnsPreconditionFailed(t *te
 	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    wsProjectUID,
+		ProjectSlug:  wsProjectSlug,
 		CreatedBy:    wsUser,
 		IfMatch:      "stale-etag",
 	})
@@ -397,7 +403,7 @@ func TestWorkspaceWriter_AddProject_StaleIfMatch_ReturnsPreconditionFailed(t *te
 	assert.True(t, pkgerrors.IsPreconditionFailed(err), "expected PreconditionFailed, got %T: %v", err, err)
 }
 
-func TestWorkspaceWriter_AddProject_DirectConstruction_StoresReference(t *testing.T) {
+func TestWorkspaceWriter_AddProject_DirectConstruction_StoresSlugAndGeneratesUID(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
@@ -412,20 +418,20 @@ func TestWorkspaceWriter_AddProject_DirectConstruction_StoresReference(t *testin
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectID:    "test-project-alpha",
+		ProjectSlug:  "test-project-alpha",
 		CreatedBy:    wsUser,
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, result.Projects.Projects, 1)
-	assert.Equal(t, "test-project-alpha", result.Projects.Projects[0].ProjectUID)
-	assert.Empty(t, result.Projects.Projects[0].ProjectSlug)
+	assert.Equal(t, "test-project-alpha", result.Projects.Projects[0].ProjectSlug)
+	require.NotEmpty(t, result.Projects.Projects[0].ProjectUID)
 }
 
 // ── AddProjectsBulk ───────────────────────────────────────────────────────────
 
-func TestWorkspaceWriter_AddProjectsBulk_StoresOpaqueStrings(t *testing.T) {
+func TestWorkspaceWriter_AddProjectsBulk_GeneratesUIDsPerSlug(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
@@ -434,20 +440,31 @@ func TestWorkspaceWriter_AddProjectsBulk_StoresOpaqueStrings(t *testing.T) {
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{"test-project-alpha", "test-project-beta"},
-		CreatedBy:    wsUser,
+		Projects: []svc.WorkspaceProjectItem{
+			{Slug: "test-project-alpha", Name: "Alpha"},
+			{Slug: "test-project-beta"},
+		},
+		CreatedBy: wsUser,
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Len(t, result.Succeeded, 2)
-	assert.Empty(t, result.Failed[0])
-	assert.Empty(t, result.Failed[1])
+	assert.NoError(t, result.Failed[0])
+	assert.NoError(t, result.Failed[1])
 	require.Len(t, result.Projects.Projects, 2)
-	assert.Equal(t, "test-project-alpha", result.Projects.Projects[0].ProjectUID)
-	assert.Equal(t, "test-project-beta", result.Projects.Projects[1].ProjectUID)
-	assert.Empty(t, result.Projects.Projects[0].ProjectSlug)
-	assert.Empty(t, result.Projects.Projects[1].ProjectSlug)
+	assert.Equal(t, "test-project-alpha", result.Projects.Projects[0].ProjectSlug)
+	assert.Equal(t, "test-project-beta", result.Projects.Projects[1].ProjectSlug)
+	// Each association gets its own distinct, non-empty generated UID.
+	uid0 := result.Projects.Projects[0].ProjectUID
+	uid1 := result.Projects.Projects[1].ProjectUID
+	require.NotEmpty(t, uid0)
+	require.NotEmpty(t, uid1)
+	assert.NotEqual(t, uid0, uid1)
+	for _, info := range result.Succeeded {
+		assert.NotEmpty(t, info.UID, "succeeded entry must carry the generated UID")
+		assert.NotEmpty(t, info.Slug, "succeeded entry must carry the caller slug")
+	}
 }
 
 func TestWorkspaceWriter_AddProjectsBulk_AllAlreadyAssociated_NoRevisionBump(t *testing.T) {
@@ -457,19 +474,21 @@ func TestWorkspaceWriter_AddProjectsBulk_AllAlreadyAssociated_NoRevisionBump(t *
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{
 		WorkspaceUID: wsUID,
 		OrgUID:       wsOrgUID,
-		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID}},
+		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID, ProjectSlug: wsProjectSlug}},
 	}, 5)
 	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{wsProjectUID},
+		Projects:     []svc.WorkspaceProjectItem{{Slug: wsProjectSlug}},
 		CreatedBy:    wsUser,
 	})
 
 	require.NoError(t, err)
-	assert.Len(t, result.Succeeded, 1)
+	require.Len(t, result.Succeeded, 1)
+	// Idempotent success reports the existing generated UID, not a fresh one.
+	assert.Equal(t, wsProjectUID, result.Succeeded[0].UID)
 	// No new write — revision must not change.
 	_, rev, _ := wpStore.GetWorkspaceProjects(context.Background(), wsUID)
 	assert.EqualValues(t, 5, rev, "idempotent bulk re-add must not bump revision")
@@ -477,7 +496,7 @@ func TestWorkspaceWriter_AddProjectsBulk_AllAlreadyAssociated_NoRevisionBump(t *
 	assert.NotNil(t, result.Projects)
 }
 
-func TestWorkspaceWriter_AddProjectsBulk_BlankProjectID_ReturnsItemFailure(t *testing.T) {
+func TestWorkspaceWriter_AddProjectsBulk_BlankSlug_ReturnsItemFailure(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
@@ -486,15 +505,15 @@ func TestWorkspaceWriter_AddProjectsBulk_BlankProjectID_ReturnsItemFailure(t *te
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{"test-project-alpha", " "},
+		Projects:     []svc.WorkspaceProjectItem{{Slug: "test-project-alpha"}, {Slug: " "}},
 		CreatedBy:    wsUser,
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Len(t, result.Succeeded, 1)
-	assert.NotNil(t, result.Failed[1], "blank project_id should fail validation")
-	assert.Nil(t, result.Failed[0])
+	assert.Error(t, result.Failed[1], "blank project_slug should fail validation")
+	assert.NoError(t, result.Failed[0])
 }
 
 func TestWorkspaceWriter_AddProjectsBulk_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {
@@ -508,7 +527,7 @@ func TestWorkspaceWriter_AddProjectsBulk_StaleIfMatch_ReturnsPreconditionFailed(
 	_, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{wsProjectUID},
+		Projects:     []svc.WorkspaceProjectItem{{Slug: wsProjectSlug}},
 		CreatedBy:    wsUser,
 		IfMatch:      "stale-etag",
 	})
@@ -528,7 +547,7 @@ func TestWorkspaceWriter_AddProjectsBulk_ValidIfMatch_Succeeds(t *testing.T) {
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
 		WorkspaceUID: wsUID,
-		ProjectIDs:   []string{wsProjectUID},
+		Projects:     []svc.WorkspaceProjectItem{{Slug: wsProjectSlug}},
 		CreatedBy:    wsUser,
 		IfMatch:      mustEtag(t, existingProjects),
 	})

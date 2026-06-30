@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"unicode/utf8"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	goahttp "goa.design/goa/v3/http"
@@ -3369,9 +3368,7 @@ func DecodeRemoveB2bOrgWorkspaceProjectRequest(mux goahttp.Muxer, decoder func(*
 		workspaceUID = params["workspace_uid"]
 		err = goa.MergeErrors(err, goa.ValidateFormat("workspace_uid", workspaceUID, goa.FormatUUID))
 		projectUID = params["project_uid"]
-		if utf8.RuneCountInString(projectUID) > 512 {
-			err = goa.MergeErrors(err, goa.InvalidLengthError("project_uid", projectUID, utf8.RuneCountInString(projectUID), 512, false))
-		}
+		err = goa.MergeErrors(err, goa.ValidateFormat("project_uid", projectUID, goa.FormatUUID))
 		versionRaw := r.URL.Query().Get("v")
 		if versionRaw != "" {
 			version = &versionRaw
@@ -3559,13 +3556,24 @@ func marshalMembershipserviceWorkspaceProjectResponseToWorkspaceProjectResponseR
 	}
 	res := &WorkspaceProjectResponseResponseBody{
 		ProjectUID:  v.ProjectUID,
-		ProjectSfid: v.ProjectSfid,
 		ProjectSlug: v.ProjectSlug,
 		ProjectName: v.ProjectName,
 		CreatedBy:   v.CreatedBy,
 		UpdatedBy:   v.UpdatedBy,
 		CreatedAt:   v.CreatedAt,
 		UpdatedAt:   v.UpdatedAt,
+	}
+
+	return res
+}
+
+// unmarshalWorkspaceProjectAddItemRequestBodyToMembershipserviceWorkspaceProjectAddItem
+// builds a value of type *membershipservice.WorkspaceProjectAddItem from a
+// value of type *WorkspaceProjectAddItemRequestBody.
+func unmarshalWorkspaceProjectAddItemRequestBodyToMembershipserviceWorkspaceProjectAddItem(v *WorkspaceProjectAddItemRequestBody) *membershipservice.WorkspaceProjectAddItem {
+	res := &membershipservice.WorkspaceProjectAddItem{
+		ProjectSlug: *v.ProjectSlug,
+		ProjectName: v.ProjectName,
 	}
 
 	return res
@@ -3602,8 +3610,8 @@ func marshalMembershipserviceWorkspaceResponseToWorkspaceResponseResponseBody(v 
 // of type *membershipservice.WorkspaceBulkAddItemError.
 func marshalMembershipserviceWorkspaceBulkAddItemErrorToWorkspaceBulkAddItemErrorResponseBody(v *membershipservice.WorkspaceBulkAddItemError) *WorkspaceBulkAddItemErrorResponseBody {
 	res := &WorkspaceBulkAddItemErrorResponseBody{
-		ProjectID: v.ProjectID,
-		Error:     v.Error,
+		ProjectSlug: v.ProjectSlug,
+		Error:       v.Error,
 	}
 
 	return res

@@ -48,9 +48,16 @@ type WorkspaceDelete struct {
 type WorkspaceProjectAdd struct {
 	OrgUID       string
 	WorkspaceUID string
-	ProjectID    string // opaque caller-owned project reference
+	ProjectSlug  string // caller-owned identifier; idempotency key within the workspace
+	ProjectName  string // optional human-readable name for indexer search/display
 	CreatedBy    string
 	IfMatch      string
+}
+
+// WorkspaceProjectItem is a single project to add in a bulk request.
+type WorkspaceProjectItem struct {
+	Slug string
+	Name string
 }
 
 // WorkspaceProjectsBulkAdd carries the validated parameters for adding multiple
@@ -58,13 +65,13 @@ type WorkspaceProjectAdd struct {
 type WorkspaceProjectsBulkAdd struct {
 	OrgUID       string
 	WorkspaceUID string
-	ProjectIDs   []string // opaque caller-owned project references
+	Projects     []WorkspaceProjectItem
 	CreatedBy    string
 	IfMatch      string
 }
 
 // WorkspaceProjectRemove carries the validated parameters for removing a project
-// from a workspace.
+// from a workspace. ProjectUID is the member-service-generated association UID.
 type WorkspaceProjectRemove struct {
 	OrgUID       string
 	WorkspaceUID string
@@ -97,9 +104,10 @@ type WorkspaceBulkResult struct {
 	Workspace *model.Workspace
 	// Projects is the updated projects document for the workspace.
 	Projects *model.WorkspaceProjects
-	// Succeeded holds the opaque project references that were successfully added.
+	// Succeeded holds the projects that were successfully added (or were
+	// already present), each carrying the generated UID plus the caller slug.
 	Succeeded []model.ProjectInfo
-	// Failed holds per-item errors aligned to the input ProjectIDs slice.
+	// Failed holds per-item errors aligned to the input Projects slice.
 	// Indices where addition succeeded carry a nil error.
 	Failed []error
 }
@@ -354,7 +362,7 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 		return nil, pkgerrors.NewNotFound("workspace not found")
 	}
 
-	wp, err := workspaceProjectFromIdentifier(in.ProjectID, in.CreatedBy, time.Now().UTC())
+	wp, err := workspaceProjectFromSlug(in.ProjectSlug, in.ProjectName, in.CreatedBy, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -372,8 +380,9 @@ func (o *workspaceWriterOrchestrator) AddProject(ctx context.Context, in Workspa
 		return nil, err
 	}
 
-	// Idempotency: already associated → return current state without cloning.
-	if existingProjects != nil && existingProjects.WorkspaceProjectByUID(wp.ProjectUID) != nil {
+	// Idempotency keyed on slug: already associated → return current state
+	// without cloning or minting a new UID.
+	if existingProjects != nil && existingProjects.WorkspaceProjectBySlug(wp.ProjectSlug) != nil {
 		wsCopy := *ws
 		return &WorkspaceProjectResult{
 			Workspace: &wsCopy,
@@ -426,7 +435,7 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 	}
 
 	var succeeded []model.ProjectInfo
-	failedOut := make([]error, len(in.ProjectIDs))
+	failedOut := make([]error, len(in.Projects))
 
 	// Read the projects document (lazy create if not exists).
 	existingProjects, projectsRevision, err := o.workspaceProjectsReader.GetWorkspaceProjects(ctx, in.WorkspaceUID)
@@ -445,15 +454,16 @@ func (o *workspaceWriterOrchestrator) AddProjectsBulk(ctx context.Context, in Wo
 	updatedProjects := model.CloneWorkspaceProjects(existingProjects, in.WorkspaceUID, in.OrgUID, now)
 	newlyAdded := []model.WorkspaceProject{}
 
-	for i, projectID := range in.ProjectIDs {
-		wp, itemErr := workspaceProjectFromIdentifier(projectID, in.CreatedBy, now)
+	for i, item := range in.Projects {
+		wp, itemErr := workspaceProjectFromSlug(item.Slug, item.Name, in.CreatedBy, now)
 		if itemErr != nil {
 			failedOut[i] = itemErr
 			continue
 		}
-		// Idempotency: skip already-associated projects.
-		if updatedProjects.WorkspaceProjectByUID(wp.ProjectUID) != nil {
-			succeeded = append(succeeded, workspaceProjectInfo(wp))
+		// Idempotency keyed on slug: report the existing record (its UID),
+		// not the freshly-minted one that would be discarded.
+		if existingWP := updatedProjects.WorkspaceProjectBySlug(wp.ProjectSlug); existingWP != nil {
+			succeeded = append(succeeded, workspaceProjectInfo(*existingWP))
 			continue
 		}
 		updatedProjects.Projects = append(updatedProjects.Projects, wp)
@@ -600,18 +610,23 @@ func (o *workspaceWriterOrchestrator) guardOrg(ctx context.Context, orgUID strin
 	return org.Name, nil
 }
 
-func workspaceProjectFromIdentifier(projectID, principal string, now time.Time) (model.WorkspaceProject, error) {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		return model.WorkspaceProject{}, pkgerrors.NewValidation("project_id is required")
+// workspaceProjectFromSlug builds a new association from the caller-owned slug,
+// generating the member-service-owned ProjectUID. The slug is the idempotency
+// key; the name is optional indexer metadata.
+func workspaceProjectFromSlug(slug, name, principal string, now time.Time) (model.WorkspaceProject, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return model.WorkspaceProject{}, pkgerrors.NewValidation("project_slug is required")
 	}
 
 	wp := model.WorkspaceProject{
-		ProjectUID: projectID,
-		CreatedBy:  principal,
-		UpdatedBy:  principal,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ProjectUID:  uuid.NewString(),
+		ProjectSlug: slug,
+		ProjectName: strings.TrimSpace(name),
+		CreatedBy:   principal,
+		UpdatedBy:   principal,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	return wp, nil
 }
@@ -619,7 +634,6 @@ func workspaceProjectFromIdentifier(projectID, principal string, now time.Time) 
 func workspaceProjectInfo(wp model.WorkspaceProject) model.ProjectInfo {
 	return model.ProjectInfo{
 		UID:  wp.ProjectUID,
-		SFID: wp.ProjectSFID,
 		Name: wp.ProjectName,
 		Slug: wp.ProjectSlug,
 	}

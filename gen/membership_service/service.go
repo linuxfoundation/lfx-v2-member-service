@@ -69,16 +69,18 @@ type Service interface {
 	UpdateB2bOrgWorkspace(context.Context, *UpdateB2bOrgWorkspacePayload) (res *UpdateB2bOrgWorkspaceResult, err error)
 	// Delete a workspace and all its project associations (cascade delete).
 	DeleteB2bOrgWorkspace(context.Context, *DeleteB2bOrgWorkspacePayload) (err error)
-	// Add a single project to a workspace. The project reference is stored
-	// verbatim as an opaque string (not validated against a project catalog).
-	// Idempotent: already-associated projects are a no-op.
+	// Add a single project to a workspace. The caller supplies project_slug (and
+	// optional project_name); member-service generates the project_uid. Idempotent
+	// on project_slug: re-adding the same slug is a no-op.
 	AddB2bOrgWorkspaceProject(context.Context, *AddB2bOrgWorkspaceProjectPayload) (res *AddB2bOrgWorkspaceProjectResult, err error)
-	// Add multiple projects to a workspace in one operation. Project references
-	// are stored verbatim as opaque strings (not validated against a project
-	// catalog). Partially succeeds: valid references are written; per-item
-	// failures (e.g. blank identifiers) are reported in the response.
+	// Add multiple projects to a workspace in one operation. Each item supplies
+	// project_slug (and optional project_name); member-service generates a
+	// project_uid per item. Idempotent on project_slug. Partially succeeds: valid
+	// items are written; per-item failures (e.g. blank project_slug) are reported
+	// in the response.
 	BulkAddB2bOrgWorkspaceProjects(context.Context, *BulkAddB2bOrgWorkspaceProjectsPayload) (res *WorkspaceBulkResponse, err error)
-	// Remove a project association from a workspace.
+	// Remove a project association from a workspace by its
+	// member-service-generated project_uid.
 	RemoveB2bOrgWorkspaceProject(context.Context, *RemoveB2bOrgWorkspaceProjectPayload) (res *RemoveB2bOrgWorkspaceProjectResult, err error)
 }
 
@@ -148,8 +150,12 @@ type AddB2bOrgWorkspaceProjectPayload struct {
 	WorkspaceUID string
 	// If-Match header value for conditional requests
 	IfMatch *string
-	// Opaque project reference string
-	ProjectID string
+	// Caller-owned project identifier (for example, an Org Lens project slug).
+	// Idempotency key within the workspace; member-service generates the
+	// project_uid.
+	ProjectSlug string
+	// Optional human-readable project name for indexer search and display
+	ProjectName *string
 }
 
 // AddB2bOrgWorkspaceProjectResult is the result type of the membership-service
@@ -272,9 +278,8 @@ type BulkAddB2bOrgWorkspaceProjectsPayload struct {
 	WorkspaceUID string
 	// If-Match header value for conditional requests
 	IfMatch *string
-	// Opaque project reference strings; at most 100 per request, each at most 512
-	// characters
-	ProjectIds []string
+	// Projects to add; at most 100 per request
+	Projects []*WorkspaceProjectAddItem
 }
 
 // CreateB2bOrgPayload is the payload type of the membership-service service
@@ -659,8 +664,8 @@ type RemoveB2bOrgWorkspaceProjectPayload struct {
 	UID string
 	// Workspace UID
 	WorkspaceUID string
-	// Opaque project reference to remove — the same string that was stored when
-	// the project was added (e.g. an Org Lens slug or a v2 project UUID)
+	// Association UID to remove — the member-service-generated UUID returned when
+	// the project was added (see project_uid in the workspace projects list)
 	ProjectUID string
 	// If-Match header value for conditional requests
 	IfMatch *string
@@ -854,8 +859,8 @@ type UpdateKeyContactResult struct {
 
 // Per-item failure detail in a bulk workspace project add
 type WorkspaceBulkAddItemError struct {
-	// The project identifier that failed
-	ProjectID string
+	// The project slug that failed
+	ProjectSlug string
 	// Reason the project could not be added
 	Error string
 }
@@ -865,7 +870,7 @@ type WorkspaceBulkAddItemError struct {
 type WorkspaceBulkResponse struct {
 	// The workspace after all successful additions
 	Workspace *WorkspaceResponse
-	// Project references that were successfully added (or were already present)
+	// Slugs of the projects that were successfully added (or were already present)
 	Succeeded []string
 	// Projects that could not be added with per-item error detail
 	Failed []*WorkspaceBulkAddItemError
@@ -875,19 +880,25 @@ type WorkspaceBulkResponse struct {
 	LastModified *string
 }
 
+// A single project to add to a workspace in a bulk request
+type WorkspaceProjectAddItem struct {
+	// Caller-owned project identifier (for example, an Org Lens project slug).
+	// Idempotency key within the workspace; member-service generates the
+	// project_uid.
+	ProjectSlug string
+	// Optional human-readable project name for indexer search and display
+	ProjectName *string
+}
+
 // A project association within a workspace
 type WorkspaceProjectResponse struct {
-	// Opaque project reference stored verbatim from the caller (for example, an
-	// Org Lens project slug); not validated or resolved to a v2 project UUID
+	// Association UID — a UUID generated by member-service. Stable for indexing
+	// and is the delete key.
 	ProjectUID string
-	// Reserved project metadata; the workspace write path does not populate it, so
-	// it is always empty
-	ProjectSfid *string
-	// Reserved project metadata; the workspace write path does not populate it, so
-	// it is always empty
-	ProjectSlug *string
-	// Reserved project metadata; the workspace write path does not populate it, so
-	// it is always empty
+	// Caller-owned project identifier supplied on add (for example, an Org Lens
+	// project slug)
+	ProjectSlug string
+	// Optional human-readable project name supplied on add
 	ProjectName *string
 	// LFID username of the principal who added this project
 	CreatedBy *string

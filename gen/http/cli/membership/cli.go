@@ -187,7 +187,7 @@ func ParseEndpoint(
 		membershipServiceRemoveB2bOrgWorkspaceProjectFlags            = flag.NewFlagSet("remove-b2b-org-workspace-project", flag.ExitOnError)
 		membershipServiceRemoveB2bOrgWorkspaceProjectUIDFlag          = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("uid", "REQUIRED", "B2B organization UID")
 		membershipServiceRemoveB2bOrgWorkspaceProjectWorkspaceUIDFlag = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("workspace-uid", "REQUIRED", "Workspace UID")
-		membershipServiceRemoveB2bOrgWorkspaceProjectProjectUIDFlag   = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("project-uid", "REQUIRED", "Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)")
+		membershipServiceRemoveB2bOrgWorkspaceProjectProjectUIDFlag   = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("project-uid", "REQUIRED", "Association UID to remove — the member-service-generated UUID returned when the project was added (see project_uid in the workspace projects list)")
 		membershipServiceRemoveB2bOrgWorkspaceProjectVersionFlag      = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("version", "", "")
 		membershipServiceRemoveB2bOrgWorkspaceProjectBearerTokenFlag  = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("bearer-token", "", "")
 		membershipServiceRemoveB2bOrgWorkspaceProjectIfMatchFlag      = membershipServiceRemoveB2bOrgWorkspaceProjectFlags.String("if-match", "", "")
@@ -447,9 +447,9 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    create-b2b-org-workspace: Create a new workspace within a b2b_org. Name must be unique within the org.`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-workspace: Rename an existing workspace. Name must be unique within the org.`)
 	fmt.Fprintln(os.Stderr, `    delete-b2b-org-workspace: Delete a workspace and all its project associations (cascade delete).`)
-	fmt.Fprintln(os.Stderr, `    add-b2b-org-workspace-project: Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.`)
-	fmt.Fprintln(os.Stderr, `    bulk-add-b2b-org-workspace-projects: Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.`)
-	fmt.Fprintln(os.Stderr, `    remove-b2b-org-workspace-project: Remove a project association from a workspace.`)
+	fmt.Fprintln(os.Stderr, `    add-b2b-org-workspace-project: Add a single project to a workspace. The caller supplies project_slug (and optional project_name); member-service generates the project_uid. Idempotent on project_slug: re-adding the same slug is a no-op.`)
+	fmt.Fprintln(os.Stderr, `    bulk-add-b2b-org-workspace-projects: Add multiple projects to a workspace in one operation. Each item supplies project_slug (and optional project_name); member-service generates a project_uid per item. Idempotent on project_slug. Partially succeeds: valid items are written; per-item failures (e.g. blank project_slug) are reported in the response.`)
+	fmt.Fprintln(os.Stderr, `    remove-b2b-org-workspace-project: Remove a project association from a workspace by its member-service-generated project_uid.`)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Additional help:")
 	fmt.Fprintf(os.Stderr, "    %s membership-service COMMAND --help\n", os.Args[0])
@@ -573,7 +573,7 @@ func membershipServiceUpdateB2bOrgSettingsUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-b2b-org-settings --body '{\n      \"auditors\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ],\n      \"writers\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ]\n   }' --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-b2b-org-settings --body '{\n      \"auditors\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ],\n      \"writers\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ]\n   }' --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }
 
 func membershipServiceAddB2bOrgSettingsUserUsage() {
@@ -759,7 +759,7 @@ func membershipServiceUpdateKeyContactUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-key-contact --body '{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": false,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }' --membership-uid \"02i2M000009ABCdIAM\" --uid \"a0K2M000000ABCdUAG\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-key-contact --body '{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": true,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }' --membership-uid \"02i2M000009ABCdIAM\" --uid \"a0K2M000000ABCdUAG\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }
 
 func membershipServiceDeleteKeyContactUsage() {
@@ -807,7 +807,7 @@ func membershipServiceAdminReindexUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service admin-reindex --body '{\n      \"dry_run\": true,\n      \"items\": [\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"types\": [\n         \"b2b_org\",\n         \"project_membership\"\n      ]\n   }' --version \"1\" --bearer-token \"eyJhbGci...\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service admin-reindex --body '{\n      \"dry_run\": false,\n      \"items\": [\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"types\": [\n         \"b2b_org\",\n         \"project_membership\"\n      ]\n   }' --version \"1\" --bearer-token \"eyJhbGci...\"")
 }
 
 func membershipServiceReadyzUsage() {
@@ -951,7 +951,7 @@ func membershipServiceAddB2bOrgWorkspaceProjectUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Add a single project to a workspace. The project reference is stored verbatim as an opaque string (not validated against a project catalog). Idempotent: already-associated projects are a no-op.`)
+	fmt.Fprintln(os.Stderr, `Add a single project to a workspace. The caller supplies project_slug (and optional project_name); member-service generates the project_uid. Idempotent on project_slug: re-adding the same slug is a no-op.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -body JSON: `)
@@ -963,7 +963,7 @@ func membershipServiceAddB2bOrgWorkspaceProjectUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service add-b2b-org-workspace-project --body '{\n      \"project_id\": \"my-project\"\n   }' --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service add-b2b-org-workspace-project --body '{\n      \"project_name\": \"Kubernetes\",\n      \"project_slug\": \"kubernetes\"\n   }' --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }
 
 func membershipServiceBulkAddB2bOrgWorkspaceProjectsUsage() {
@@ -979,7 +979,7 @@ func membershipServiceBulkAddB2bOrgWorkspaceProjectsUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Add multiple projects to a workspace in one operation. Project references are stored verbatim as opaque strings (not validated against a project catalog). Partially succeeds: valid references are written; per-item failures (e.g. blank identifiers) are reported in the response.`)
+	fmt.Fprintln(os.Stderr, `Add multiple projects to a workspace in one operation. Each item supplies project_slug (and optional project_name); member-service generates a project_uid per item. Idempotent on project_slug. Partially succeeds: valid items are written; per-item failures (e.g. blank project_slug) are reported in the response.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -body JSON: `)
@@ -991,7 +991,7 @@ func membershipServiceBulkAddB2bOrgWorkspaceProjectsUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service bulk-add-b2b-org-workspace-projects --body '{\n      \"project_ids\": [\n         \"eq4\",\n         \"55r\"\n      ]\n   }' --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service bulk-add-b2b-org-workspace-projects --body '{\n      \"projects\": [\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         }\n      ]\n   }' --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }
 
 func membershipServiceRemoveB2bOrgWorkspaceProjectUsage() {
@@ -1007,17 +1007,17 @@ func membershipServiceRemoveB2bOrgWorkspaceProjectUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Remove a project association from a workspace.`)
+	fmt.Fprintln(os.Stderr, `Remove a project association from a workspace by its member-service-generated project_uid.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -uid STRING: B2B organization UID`)
 	fmt.Fprintln(os.Stderr, `    -workspace-uid STRING: Workspace UID`)
-	fmt.Fprintln(os.Stderr, `    -project-uid STRING: Opaque project reference to remove — the same string that was stored when the project was added (e.g. an Org Lens slug or a v2 project UUID)`)
+	fmt.Fprintln(os.Stderr, `    -project-uid STRING: Association UID to remove — the member-service-generated UUID returned when the project was added (see project_uid in the workspace projects list)`)
 	fmt.Fprintln(os.Stderr, `    -version STRING: `)
 	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
 	fmt.Fprintln(os.Stderr, `    -if-match STRING: `)
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service remove-b2b-org-workspace-project --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --project-uid \"my-project\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service remove-b2b-org-workspace-project --uid \"001B000000IqhSLIAZ\" --workspace-uid \"4c46585f-9f01-8bda-a0a5-f0c8eeef7fff\" --project-uid \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }
