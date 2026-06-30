@@ -29,7 +29,6 @@ const (
 func newWorkspaceWriter(
 	wsStore *mock.MockOrgWorkspaces,
 	wpStore *mock.MockWorkspaceProjects,
-	_ *mock.MockProjectResolver,
 ) svc.WorkspaceWriter {
 	return svc.NewWorkspaceWriter(
 		svc.WithWorkspacesReader(wsStore),
@@ -55,7 +54,7 @@ func seedWorkspace(wsStore *mock.MockOrgWorkspaces) *model.OrgWorkspaces {
 
 func TestWorkspaceWriter_CreateWorkspace_HappyPath(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	result, err := writer.CreateWorkspace(context.Background(), svc.WorkspaceCreate{
 		OrgUID:    wsOrgUID,
@@ -72,7 +71,7 @@ func TestWorkspaceWriter_CreateWorkspace_HappyPath(t *testing.T) {
 func TestWorkspaceWriter_CreateWorkspace_DuplicateName_ReturnsConflict(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.CreateWorkspace(context.Background(), svc.WorkspaceCreate{
 		OrgUID:    wsOrgUID,
@@ -87,7 +86,7 @@ func TestWorkspaceWriter_CreateWorkspace_DuplicateName_ReturnsConflict(t *testin
 func TestWorkspaceWriter_CreateWorkspace_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.CreateWorkspace(context.Background(), svc.WorkspaceCreate{
 		OrgUID:    wsOrgUID,
@@ -103,7 +102,7 @@ func TestWorkspaceWriter_CreateWorkspace_StaleIfMatch_ReturnsPreconditionFailed(
 func TestWorkspaceWriter_CreateWorkspace_CASConflict_ReturnsConflict(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wsStore.SetPutError(pkgerrors.NewConflict("concurrent write"))
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.CreateWorkspace(context.Background(), svc.WorkspaceCreate{
 		OrgUID:    wsOrgUID,
@@ -120,7 +119,7 @@ func TestWorkspaceWriter_CreateWorkspace_CASConflict_ReturnsConflict(t *testing.
 func TestWorkspaceWriter_UpdateWorkspace_HappyPath(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	result, err := writer.UpdateWorkspace(context.Background(), svc.WorkspaceUpdate{
 		OrgUID:       wsOrgUID,
@@ -137,7 +136,7 @@ func TestWorkspaceWriter_UpdateWorkspace_HappyPath(t *testing.T) {
 func TestWorkspaceWriter_UpdateWorkspace_NotFound_ReturnsNotFound(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	// No document seeded — org has no workspaces.
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.UpdateWorkspace(context.Background(), svc.WorkspaceUpdate{
 		OrgUID:       wsOrgUID,
@@ -161,7 +160,7 @@ func TestWorkspaceWriter_UpdateWorkspace_DuplicateName_ReturnsConflict(t *testin
 		},
 	}
 	wsStore.Seed(wsOrgUID, reg, 1)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.UpdateWorkspace(context.Background(), svc.WorkspaceUpdate{
 		OrgUID:       wsOrgUID,
@@ -183,7 +182,7 @@ func TestWorkspaceWriter_DeleteWorkspace_HappyPath_ClearsProjectsDoc(t *testing.
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{
 		WorkspaceUID: wsUID, OrgUID: wsOrgUID,
 	}, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	err := writer.DeleteWorkspace(context.Background(), svc.WorkspaceDelete{
 		OrgUID:       wsOrgUID,
@@ -202,7 +201,7 @@ func TestWorkspaceWriter_DeleteWorkspace_HappyPath_RemovesFromRegistry(t *testin
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{WorkspaceUID: wsUID, OrgUID: wsOrgUID}, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	err := writer.DeleteWorkspace(context.Background(), svc.WorkspaceDelete{
 		OrgUID:       wsOrgUID,
@@ -223,7 +222,7 @@ func TestWorkspaceWriter_DeleteWorkspace_ProjectsDocDeleteFails_RegistryNotCommi
 	seedWorkspace(wsStore)
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{WorkspaceUID: wsUID, OrgUID: wsOrgUID}, 1)
 	wpStore.SetDeleteError(pkgerrors.NewUnexpected("NATS timeout"))
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	err := writer.DeleteWorkspace(context.Background(), svc.WorkspaceDelete{
 		OrgUID:       wsOrgUID,
@@ -240,7 +239,7 @@ func TestWorkspaceWriter_DeleteWorkspace_ProjectsDocDeleteFails_RegistryNotCommi
 func TestWorkspaceWriter_DeleteWorkspace_WorkspaceNotFound_ReturnsNotFound(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	err := writer.DeleteWorkspace(context.Background(), svc.WorkspaceDelete{
 		OrgUID:       wsOrgUID,
@@ -278,7 +277,7 @@ func TestWorkspaceWriter_DeleteWorkspace_AlreadyMissing_Returns404NoPublish(t *t
 func TestWorkspaceWriter_DeleteWorkspace_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	err := writer.DeleteWorkspace(context.Background(), svc.WorkspaceDelete{
 		OrgUID:       wsOrgUID,
@@ -296,7 +295,7 @@ func TestWorkspaceWriter_AddProject_HappyPath(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
@@ -319,16 +318,14 @@ func TestWorkspaceWriter_AddProject_HappyPath(t *testing.T) {
 func TestWorkspaceWriter_AddProject_Idempotent_NoSpuriousRevisionBump(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID, SFID: "a2C000001AAA"})
 	// Pre-seed the projects doc with the project already associated.
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{
 		WorkspaceUID: wsUID,
 		OrgUID:       wsOrgUID,
 		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID}},
 	}, 3)
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
@@ -348,7 +345,7 @@ func TestWorkspaceWriter_AddProject_OpaqueStringIsStored(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
@@ -367,9 +364,7 @@ func TestWorkspaceWriter_AddProject_OpaqueStringIsStored(t *testing.T) {
 
 func TestWorkspaceWriter_AddProject_WorkspaceNotFound_ReturnsNotFound(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
-	resolver := mock.NewMockProjectResolver()
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID})
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), resolver)
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
@@ -385,12 +380,10 @@ func TestWorkspaceWriter_AddProject_WorkspaceNotFound_ReturnsNotFound(t *testing
 func TestWorkspaceWriter_AddProject_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID})
 	existingProjects := &model.WorkspaceProjects{WorkspaceUID: wsUID, OrgUID: wsOrgUID}
 	wpStore.Seed(wsUID, existingProjects, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	_, err := writer.AddProject(context.Background(), svc.WorkspaceProjectAdd{
 		OrgUID:       wsOrgUID,
@@ -404,11 +397,11 @@ func TestWorkspaceWriter_AddProject_StaleIfMatch_ReturnsPreconditionFailed(t *te
 	assert.True(t, pkgerrors.IsPreconditionFailed(err), "expected PreconditionFailed, got %T: %v", err, err)
 }
 
-func TestWorkspaceWriter_AddProject_NilResolver_StillStoresReference(t *testing.T) {
+func TestWorkspaceWriter_AddProject_DirectConstruction_StoresReference(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
-	// No resolver wired in.
+	// Build the writer directly from options rather than via the helper.
 	writer := svc.NewWorkspaceWriter(
 		svc.WithWorkspacesReader(wsStore),
 		svc.WithWorkspacesWriter(wsStore),
@@ -435,13 +428,8 @@ func TestWorkspaceWriter_AddProject_NilResolver_StillStoresReference(t *testing.
 func TestWorkspaceWriter_AddProjectsBulk_StoresOpaqueStrings(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.ResolveBatchFunc = func(_ context.Context, _ []string) ([]model.ProjectInfo, []error) {
-		t.Fatal("workspace bulk add must not resolve project identifiers")
-		return nil, nil
-	}
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
@@ -465,15 +453,13 @@ func TestWorkspaceWriter_AddProjectsBulk_StoresOpaqueStrings(t *testing.T) {
 func TestWorkspaceWriter_AddProjectsBulk_AllAlreadyAssociated_NoRevisionBump(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID, SFID: "a2C000001AAA"})
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{
 		WorkspaceUID: wsUID,
 		OrgUID:       wsOrgUID,
 		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID}},
 	}, 5)
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
@@ -495,7 +481,7 @@ func TestWorkspaceWriter_AddProjectsBulk_BlankProjectID_ReturnsItemFailure(t *te
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
@@ -514,12 +500,10 @@ func TestWorkspaceWriter_AddProjectsBulk_BlankProjectID_ReturnsItemFailure(t *te
 func TestWorkspaceWriter_AddProjectsBulk_StaleIfMatch_ReturnsPreconditionFailed(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID, SFID: "a2C000001AAA"})
 	existingProjects := &model.WorkspaceProjects{WorkspaceUID: wsUID, OrgUID: wsOrgUID}
 	wpStore.Seed(wsUID, existingProjects, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	_, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
@@ -536,12 +520,10 @@ func TestWorkspaceWriter_AddProjectsBulk_StaleIfMatch_ReturnsPreconditionFailed(
 func TestWorkspaceWriter_AddProjectsBulk_ValidIfMatch_Succeeds(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
-	resolver.SeedProject(model.ProjectInfo{UID: wsProjectUID, SFID: "a2C000001AAA"})
 	existingProjects := &model.WorkspaceProjects{WorkspaceUID: wsUID, OrgUID: wsOrgUID}
 	wpStore.Seed(wsUID, existingProjects, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.AddProjectsBulk(context.Background(), svc.WorkspaceProjectsBulkAdd{
 		OrgUID:       wsOrgUID,
@@ -561,14 +543,13 @@ func TestWorkspaceWriter_AddProjectsBulk_ValidIfMatch_Succeeds(t *testing.T) {
 func TestWorkspaceWriter_RemoveProject_HappyPath(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
 	wpStore := mock.NewMockWorkspaceProjects()
-	resolver := mock.NewMockProjectResolver()
 	seedWorkspace(wsStore)
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{
 		WorkspaceUID: wsUID,
 		OrgUID:       wsOrgUID,
 		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID}},
 	}, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, resolver)
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	result, err := writer.RemoveProject(context.Background(), svc.WorkspaceProjectRemove{
 		OrgUID:       wsOrgUID,
@@ -586,7 +567,7 @@ func TestWorkspaceWriter_RemoveProject_ProjectNotAssociated_ReturnsNotFound(t *t
 	wpStore := mock.NewMockWorkspaceProjects()
 	seedWorkspace(wsStore)
 	wpStore.Seed(wsUID, &model.WorkspaceProjects{WorkspaceUID: wsUID, OrgUID: wsOrgUID}, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	_, err := writer.RemoveProject(context.Background(), svc.WorkspaceProjectRemove{
 		OrgUID:       wsOrgUID,
@@ -600,7 +581,7 @@ func TestWorkspaceWriter_RemoveProject_ProjectNotAssociated_ReturnsNotFound(t *t
 
 func TestWorkspaceWriter_RemoveProject_WorkspaceNotFound_ReturnsNotFound(t *testing.T) {
 	wsStore := mock.NewMockOrgWorkspaces()
-	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects(), mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, mock.NewMockWorkspaceProjects())
 
 	_, err := writer.RemoveProject(context.Background(), svc.WorkspaceProjectRemove{
 		OrgUID:       wsOrgUID,
@@ -621,7 +602,7 @@ func TestWorkspaceWriter_RemoveProject_StaleIfMatch_ReturnsPreconditionFailed(t 
 		OrgUID:       wsOrgUID,
 		Projects:     []model.WorkspaceProject{{ProjectUID: wsProjectUID}},
 	}, 1)
-	writer := newWorkspaceWriter(wsStore, wpStore, mock.NewMockProjectResolver())
+	writer := newWorkspaceWriter(wsStore, wpStore)
 
 	_, err := writer.RemoveProject(context.Background(), svc.WorkspaceProjectRemove{
 		OrgUID:       wsOrgUID,
