@@ -11,6 +11,9 @@ import (
 	"log/slog"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
@@ -62,7 +65,18 @@ func processProjectIDMapRequest(ctx context.Context, data []byte, resolver port.
 
 func SubscribeProjectIDMap(conn *nats.Conn, resolver port.ProjectResolver) (*nats.Subscription, error) {
 	sub, err := conn.Subscribe(constants.ProjectIDMapLookupSubject, func(msg *nats.Msg) {
-		replyJSON(msg, processProjectIDMapRequest(context.Background(), msg.Data, resolver))
+		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
+		msgCtx, span := tracer.Start(msgCtx, "nats.process",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.destination.name", constants.ProjectIDMapLookupSubject),
+				attribute.String("messaging.operation.type", "process"),
+				attribute.Int("messaging.message.body.size", len(msg.Data)),
+			),
+		)
+		defer span.End()
+		replyJSON(msg, processProjectIDMapRequest(msgCtx, msg.Data, resolver))
 	})
 	if err != nil {
 		return nil, err

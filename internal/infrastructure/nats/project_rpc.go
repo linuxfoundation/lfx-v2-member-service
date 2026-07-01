@@ -82,7 +82,7 @@ func (r *ProjectRPC) request(ctx context.Context, subject, payload string) (stri
 		Data:    []byte(payload),
 	}
 
-	reply, err := r.conn.RequestMsgWithContext(ctx, msg)
+	reply, err := requestMsgWithSpan(ctx, r.conn, msg)
 	if err != nil {
 		return "", err
 	}
