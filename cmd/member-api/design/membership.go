@@ -933,7 +933,7 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("add-b2b-org-workspace-project", func() {
-		dsl.Description("Add a single project to a workspace. Idempotent: already-associated projects are a no-op. Returns HTTP 400 for unknown project identifiers.")
+		dsl.Description("Add a single project to a workspace. The caller supplies project_slug (and optional project_name); member-service generates the project_uid. Idempotent on project_slug: re-adding the same slug is a no-op.")
 
 		dsl.Security(JWTAuth)
 
@@ -960,7 +960,7 @@ var _ = dsl.Service("membership-service", func() {
 		})
 
 		dsl.Error("NotFound", dsl.ErrorResult, "Workspace not found")
-		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request or unknown project identifier")
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request (e.g. blank project_slug)")
 		dsl.Error("Conflict", dsl.ErrorResult, "Concurrent modification — retry")
 		dsl.Error("PreconditionFailed", dsl.ErrorResult, "Precondition failed")
 		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
@@ -988,7 +988,7 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("bulk-add-b2b-org-workspace-projects", func() {
-		dsl.Description("Add multiple projects to a workspace in one operation. Partially succeeds: successfully enriched projects are written; per-item failures are reported in the response.")
+		dsl.Description("Add multiple projects to a workspace in one operation. Each item supplies project_slug (and optional project_name); member-service generates a project_uid per item. Idempotent on project_slug. Partially succeeds: valid items are written; per-item failures (e.g. blank project_slug) are reported in the response.")
 
 		dsl.Security(JWTAuth)
 
@@ -1037,7 +1037,7 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("remove-b2b-org-workspace-project", func() {
-		dsl.Description("Remove a project association from a workspace.")
+		dsl.Description("Remove a project association from a workspace by its member-service-generated project_uid.")
 
 		dsl.Security(JWTAuth)
 
@@ -1051,7 +1051,7 @@ var _ = dsl.Service("membership-service", func() {
 				dsl.Format(dsl.FormatUUID)
 				dsl.Example("4c46585f-9f01-8bda-a0a5-f0c8eeef7fff")
 			})
-			dsl.Attribute("project_uid", dsl.String, "Project UID to remove", func() {
+			dsl.Attribute("project_uid", dsl.String, "Association UID to remove — the member-service-generated UUID returned when the project was added (see project_uid in the workspace projects list)", func() {
 				dsl.Format(dsl.FormatUUID)
 				dsl.Example("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 			})

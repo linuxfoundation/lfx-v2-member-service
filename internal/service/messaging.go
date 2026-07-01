@@ -790,7 +790,6 @@ type workspaceProjectIndexerView struct {
 	B2BOrgUID           string    `json:"b2b_org_uid"`
 	B2BOrgWorkspaceUID  string    `json:"b2b_org_workspace_uid"`
 	ProjectUID          string    `json:"project_uid"`
-	ProjectSFID         string    `json:"project_sfid,omitempty"`
 	ProjectSlug         string    `json:"project_slug,omitempty"`
 	ProjectName         string    `json:"project_name,omitempty"`
 	CreatedBy           string    `json:"created_by,omitempty"`
@@ -807,7 +806,6 @@ func buildWorkspaceProjectIndexerView(orgUID, workspaceUID string, wp model.Work
 		B2BOrgUID:           orgUID,
 		B2BOrgWorkspaceUID:  workspaceUID,
 		ProjectUID:          wp.ProjectUID,
-		ProjectSFID:         wp.ProjectSFID,
 		ProjectSlug:         wp.ProjectSlug,
 		ProjectName:         wp.ProjectName,
 		CreatedBy:           wp.CreatedBy,

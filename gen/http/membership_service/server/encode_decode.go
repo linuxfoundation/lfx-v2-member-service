@@ -3556,13 +3556,24 @@ func marshalMembershipserviceWorkspaceProjectResponseToWorkspaceProjectResponseR
 	}
 	res := &WorkspaceProjectResponseResponseBody{
 		ProjectUID:  v.ProjectUID,
-		ProjectSfid: v.ProjectSfid,
 		ProjectSlug: v.ProjectSlug,
 		ProjectName: v.ProjectName,
 		CreatedBy:   v.CreatedBy,
 		UpdatedBy:   v.UpdatedBy,
 		CreatedAt:   v.CreatedAt,
 		UpdatedAt:   v.UpdatedAt,
+	}
+
+	return res
+}
+
+// unmarshalWorkspaceProjectAddItemRequestBodyToMembershipserviceWorkspaceProjectAddItem
+// builds a value of type *membershipservice.WorkspaceProjectAddItem from a
+// value of type *WorkspaceProjectAddItemRequestBody.
+func unmarshalWorkspaceProjectAddItemRequestBodyToMembershipserviceWorkspaceProjectAddItem(v *WorkspaceProjectAddItemRequestBody) *membershipservice.WorkspaceProjectAddItem {
+	res := &membershipservice.WorkspaceProjectAddItem{
+		ProjectSlug: *v.ProjectSlug,
+		ProjectName: v.ProjectName,
 	}
 
 	return res
@@ -3599,8 +3610,8 @@ func marshalMembershipserviceWorkspaceResponseToWorkspaceResponseResponseBody(v 
 // of type *membershipservice.WorkspaceBulkAddItemError.
 func marshalMembershipserviceWorkspaceBulkAddItemErrorToWorkspaceBulkAddItemErrorResponseBody(v *membershipservice.WorkspaceBulkAddItemError) *WorkspaceBulkAddItemErrorResponseBody {
 	res := &WorkspaceBulkAddItemErrorResponseBody{
-		ProjectID: v.ProjectID,
-		Error:     v.Error,
+		ProjectSlug: v.ProjectSlug,
+		Error:       v.Error,
 	}
 
 	return res

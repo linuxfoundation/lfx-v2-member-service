@@ -817,7 +817,8 @@ func (s *membershipServicesrvc) AddB2bOrgWorkspaceProject(ctx context.Context, p
 	in := usecaseSvc.WorkspaceProjectAdd{
 		OrgUID:       p.UID,
 		WorkspaceUID: p.WorkspaceUID,
-		ProjectID:    p.ProjectID,
+		ProjectSlug:  p.ProjectSlug,
+		ProjectName:  derefStr(p.ProjectName),
 		CreatedBy:    principal,
 		IfMatch:      derefStr(p.IfMatch),
 	}
@@ -836,10 +837,22 @@ func (s *membershipServicesrvc) AddB2bOrgWorkspaceProject(ctx context.Context, p
 func (s *membershipServicesrvc) BulkAddB2bOrgWorkspaceProjects(ctx context.Context, p *membershipservice.BulkAddB2bOrgWorkspaceProjectsPayload) (*membershipservice.WorkspaceBulkResponse, error) {
 	p.UID = normalizeSFID(p.UID)
 	principal, _ := ctx.Value(constants.PrincipalContextID).(string)
+	items := make([]usecaseSvc.WorkspaceProjectItem, 0, len(p.Projects))
+	for _, it := range p.Projects {
+		// Keep index alignment: a nil array element becomes a blank-slug item
+		// so it surfaces as a per-item validation failure rather than being
+		// silently dropped from both succeeded and failed.
+		var item usecaseSvc.WorkspaceProjectItem
+		if it != nil {
+			item.Slug = it.ProjectSlug
+			item.Name = derefStr(it.ProjectName)
+		}
+		items = append(items, item)
+	}
 	in := usecaseSvc.WorkspaceProjectsBulkAdd{
 		OrgUID:       p.UID,
 		WorkspaceUID: p.WorkspaceUID,
-		ProjectIDs:   p.ProjectIds,
+		Projects:     items,
 		CreatedBy:    principal,
 		IfMatch:      derefStr(p.IfMatch),
 	}
@@ -849,18 +862,18 @@ func (s *membershipServicesrvc) BulkAddB2bOrgWorkspaceProjects(ctx context.Conte
 	}
 	succeeded := make([]string, 0, len(result.Succeeded))
 	for _, info := range result.Succeeded {
-		succeeded = append(succeeded, info.UID)
+		succeeded = append(succeeded, info.Slug)
 	}
-	failed := make([]*membershipservice.WorkspaceBulkAddItemError, 0, len(p.ProjectIds))
+	failed := make([]*membershipservice.WorkspaceBulkAddItemError, 0, len(items))
 	for i, ferr := range result.Failed {
 		if ferr != nil {
-			id := ""
-			if i < len(p.ProjectIds) {
-				id = p.ProjectIds[i]
+			slug := ""
+			if i < len(items) {
+				slug = items[i].Slug
 			}
 			failed = append(failed, &membershipservice.WorkspaceBulkAddItemError{
-				ProjectID: id,
-				Error:     ferr.Error(),
+				ProjectSlug: slug,
+				Error:       ferr.Error(),
 			})
 		}
 	}
@@ -922,13 +935,8 @@ func workspaceToResponse(ws *model.Workspace) *membershipservice.WorkspaceRespon
 // workspaceProjectToResponse maps a domain WorkspaceProject to the generated type.
 func workspaceProjectToResponse(p model.WorkspaceProject) *membershipservice.WorkspaceProjectResponse {
 	out := &membershipservice.WorkspaceProjectResponse{
-		ProjectUID: p.ProjectUID,
-	}
-	if p.ProjectSFID != "" {
-		out.ProjectSfid = &p.ProjectSFID
-	}
-	if p.ProjectSlug != "" {
-		out.ProjectSlug = &p.ProjectSlug
+		ProjectUID:  p.ProjectUID,
+		ProjectSlug: p.ProjectSlug,
 	}
 	if p.ProjectName != "" {
 		out.ProjectName = &p.ProjectName
