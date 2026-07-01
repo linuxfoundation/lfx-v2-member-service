@@ -753,7 +753,7 @@ func PublishWorkspaceProjectIndexer(ctx context.Context, p port.MemberPublisher,
 }
 
 // BuildWorkspaceProjectIndexingConfig constructs an IndexingConfig for a workspace-project
-// association. ObjectID is "{workspaceUID}/{projectUID}" — a compound key that uniquely
+// association. ObjectID is "{workspaceUID}:{projectUID}" — a compound key that uniquely
 // identifies the association.
 func BuildWorkspaceProjectIndexingConfig(org *model.B2BOrg, ws *model.Workspace, wp model.WorkspaceProject) *indexerTypes.IndexingConfig {
 	parentRefs := []string{"org_workspace:" + ws.UID, "b2b_org:" + org.UID}
