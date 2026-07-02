@@ -36,7 +36,7 @@ func samplerFromEnv() trace.Sampler {
 			return 1.0
 		}
 		r, err := strconv.ParseFloat(arg, 64)
-		if err != nil || r < 0.0 || r > 1.0 {
+		if err != nil || !(r >= 0.0 && r <= 1.0) {
 			slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, defaulting to 1.0", "value", arg)
 			return 1.0
 		}
