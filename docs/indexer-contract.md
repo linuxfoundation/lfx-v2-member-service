@@ -29,7 +29,7 @@ This rule applies to **every** member resource type: `b2b_org`, `project_members
 | `project_membership`    | `pm.UID`                                     |
 | `key_contact`           | `kc.UID`                                     |
 | `org_workspace`         | `workspace.UID`                             |
-| `org_workspace_project` | `"{workspaceUID}/{projectUID}"` (composite) |
+| `org_workspace_project` | `"{workspaceUID}:{projectUID}"` (composite) |
 
 Implementation: the five resource publishers listed above (`b2b_org`, `project_membership`, `key_contact`, `org_workspace`, `org_workspace_project`) each route through a per-resource `build<Type>IndexerInput(x, action)` helper. For `b2b_org`, `project_membership`, and `key_contact` the helper delegates to the shared `buildIndexerInput` utility; workspace and workspace-project publishers apply the same branching directly. In all cases the helper returns the bare UID string on `ActionDeleted` and the struct/view on create/update. The helper returns a raw Go string — `json.Marshal` then emits `{"data":"uid"}`; do not pre-quote the UID.
 
@@ -454,7 +454,7 @@ GET /query/resources?v=1&type=org_workspace&tags=b2b_org_uid:{orgUID}
 
 **Trigger:** Any write that adds or removes a project from a workspace — `POST /b2b_orgs/{uid}/workspaces/{workspace_uid}/projects`, `POST /b2b_orgs/{uid}/workspaces/{workspace_uid}/projects/bulk`, `DELETE /b2b_orgs/{uid}/workspaces/{workspace_uid}/projects/{project_uid}`. Also triggered on workspace delete (cascade: one delete event per former association).
 
-**Note:** `ObjectID` is `"{workspaceUID}/{projectUID}"` (composite key, see `WorkspaceProject.AssociationID`). Each association is a separate indexed document.
+**Note:** `ObjectID` is `"{workspaceUID}:{projectUID}"` (composite key, see `WorkspaceProject.AssociationID`). The separator is a colon: this value is used as the OpenSearch document `_id`, and a slash would be read as an extra URL path segment on the index request — the OpenSearch client does not escape it — so the write fails with 400. Each association is a separate indexed document.
 
 **Identifier model:** The caller supplies `project_slug` (its own identifier — for example, an Org Lens project slug) and an optional `project_name`. Member-service generates `project_uid` as a UUID — the association's own primary key, stable for indexing and the key used to delete the association. The write path does not validate the slug against a project catalog or resolve it to a v2 project UUID; the consumer that supplied the slug owns any catalog lookup and hydration on read. There is no Salesforce enrichment, so `project_sfid` is not part of this contract.
 
@@ -482,6 +482,8 @@ GET /query/resources?v=1&type=org_workspace&tags=b2b_org_uid:{orgUID}
 | `b2b_org_workspace_uid:{wsUID}`     | `b2b_org_workspace_uid:550e8400-...`   | Find all projects in a workspace                   |
 | `project_uid:{projectUID}`          | `project_uid:a1b2c3d4-...`             | Find an association by its generated UUID          |
 | `project_slug:{slug}`               | `project_slug:kubernetes`              | Find all workspaces containing a project by its caller-supplied slug |
+
+> The bare compound lookup tag keeps the `/` separator (`{workspaceUID}/{projectUID}`). It is a tag value, not a URL path, so it is unaffected by the document `_id` escaping constraint that makes the `ObjectID` use a colon.
 
 ### Access Control (IndexingConfig)
 

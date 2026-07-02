@@ -719,7 +719,7 @@ func TestBuildWorkspaceProjectIndexerInput_DeleteCarriesCompoundID(t *testing.T)
 		model.WorkspaceProjects{},
 		indexerConstants.ActionDeleted,
 	)
-	assert.Equal(t, "ws-uid-001/proj-uid-001", input)
+	assert.Equal(t, "ws-uid-001:proj-uid-001", input)
 }
 
 func TestBuildWorkspaceProjectIndexerInput_CreateCarriesView(t *testing.T) {
@@ -733,7 +733,21 @@ func TestBuildWorkspaceProjectIndexerInput_CreateCarriesView(t *testing.T) {
 		indexerConstants.ActionCreated,
 	)
 	assert.Equal(t, buildWorkspaceProjectIndexerView("org-uid-001", "ws-uid-001", wp, wps), input)
-	assert.NotEqual(t, "ws-uid-001/proj-uid-001", input, "create must carry the view struct, not the delete ID string")
+	assert.NotEqual(t, "ws-uid-001:proj-uid-001", input, "create must carry the view struct, not the delete ID string")
+}
+
+func TestBuildWorkspaceProjectIndexingConfig_ObjectIDIsColonCompound(t *testing.T) {
+	org := &model.B2BOrg{UID: "org-uid-001"}
+	ws := &model.Workspace{UID: "ws-uid-001"}
+	wp := model.WorkspaceProject{ProjectUID: "proj-uid-001", ProjectSlug: "cncf"}
+
+	cfg := BuildWorkspaceProjectIndexingConfig(org, ws, wp)
+
+	require.NotNil(t, cfg)
+	// ObjectID becomes the OpenSearch document _id. The separator must be ':' —
+	// a '/' is read as an extra URL path segment on the index request (the
+	// OpenSearch client does not escape it) and the write fails with 400.
+	assert.Equal(t, "ws-uid-001:proj-uid-001", cfg.ObjectID)
 }
 
 func TestPublishWorkspaceIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
@@ -771,7 +785,7 @@ func TestPublishWorkspaceProjectIndexer_DeleteMessageDataIsCompoundID(t *testing
 	msg, ok := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
 	require.True(t, ok)
 	assert.Equal(t, indexerConstants.ActionDeleted, msg.Action)
-	assert.Equal(t, "ws-uid-del-001/proj-uid-cncf", msg.Data)
+	assert.Equal(t, "ws-uid-del-001:proj-uid-cncf", msg.Data)
 	assert.Equal(t, constants.IndexOrgWorkspaceProjectSubject, pub.LastIndexSubject)
 
 	payload, err := json.Marshal(msg)

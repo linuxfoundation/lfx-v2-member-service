@@ -38,9 +38,9 @@ type WorkspaceProject struct {
 }
 
 // AssociationID returns the compound ObjectID used in the indexer:
-// "{workspaceUID}/{projectUID}".
+// "{workspaceUID}:{projectUID}".
 func (wp *WorkspaceProject) AssociationID(workspaceUID string) string {
-	return workspaceUID + "/" + wp.ProjectUID
+	return workspaceUID + ":" + wp.ProjectUID
 }
 
 // Tags returns the indexer tags for a workspace-project association.
