@@ -160,10 +160,10 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 
 	for event := range eventCh {
 		// Wrap the handler in a closure so that defers guarantee span.End()
-		// and handleCancel() run even if o.handle panics. span.End() is
-		// deferred after handleCancel() so it fires first in LIFO order,
-		// keeping span duration scoped to the handler rather than including
-		// the replay-cursor save that follows.
+		// and handleCancel() run even if o.handle panics. Both defers run
+		// before the closure returns, so neither is included in the
+		// replay-cursor save that follows. span.End() fires first because it
+		// is deferred after handleCancel() (LIFO order).
 		handleErr := func(event model.CDCEvent) error {
 			// Give each handler a short-lived background context so that an
 			// in-flight Salesforce fetch or NATS cache write is not aborted by a
