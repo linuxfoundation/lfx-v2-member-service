@@ -158,24 +158,31 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 	}
 
 	for event := range eventCh {
-		// Give each handler a short-lived background context so that an
-		// in-flight Salesforce fetch or NATS cache write is not aborted by a
-		// concurrent graceful shutdown. 30 s matches the graceful-shutdown
-		// window; any handler that runs longer than that is already a problem.
-		handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		handleCtx, span := cdcTracer.Start(handleCtx, "salesforce.cdc.process",
-			trace.WithSpanKind(trace.SpanKindConsumer),
-			trace.WithAttributes(
-				attribute.String("messaging.system", "salesforce"),
-				attribute.String("messaging.destination.name", channel),
-				attribute.String("cdc.entity", event.Entity),
-				attribute.String("cdc.change_type", string(event.ChangeType)),
-				attribute.Int("cdc.record_count", len(event.RecordIDs)),
-			),
-		)
-		handleErr := o.handle(handleCtx, event)
-		span.End()
-		handleCancel()
+		// Wrap the handler in a closure so that defers guarantee span.End()
+		// and handleCancel() run even if o.handle panics. span.End() is
+		// deferred before handleCancel() so it fires first (LIFO), keeping
+		// span duration scoped to the handler rather than including the
+		// replay-cursor save that follows.
+		handleErr := func(event model.CDCEvent) error {
+			// Give each handler a short-lived background context so that an
+			// in-flight Salesforce fetch or NATS cache write is not aborted by a
+			// concurrent graceful shutdown. 30 s matches the graceful-shutdown
+			// window; any handler that runs longer than that is already a problem.
+			handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer handleCancel()
+			handleCtx, span := cdcTracer.Start(handleCtx, "salesforce.cdc.process",
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "salesforce"),
+					attribute.String("messaging.destination.name", channel),
+					attribute.String("cdc.entity", event.Entity),
+					attribute.String("cdc.change_type", string(event.ChangeType)),
+					attribute.Int("cdc.record_count", len(event.RecordIDs)),
+				),
+			)
+			defer span.End()
+			return o.handle(handleCtx, event)
+		}(event)
 		if handleErr != nil {
 			// Log and continue — /admin/reindex is the backstop for missed events.
 			slog.ErrorContext(ctx, "cdc: event handling failed, continuing",
