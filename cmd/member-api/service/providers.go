@@ -724,6 +724,15 @@ func QueueSubscriptions(ctx context.Context) error {
 		apiSubs = append(apiSubs, sub.Drain)
 	}
 
+	// b2b_org_lookup: resolve organization ids to indexed b2b_orgs (LFXV2-2400).
+	if reader := B2BOrgReaderImpl(ctx); reader != nil {
+		sub, err := nats.SubscribeB2BOrgLookup(natsClient.Conn(), reader)
+		if err != nil {
+			return fmt.Errorf("subscribe b2b_org_lookup: %w", err)
+		}
+		apiSubs = append(apiSubs, sub.Drain)
+	}
+
 	// invite_accepted: always registered; mock mode wires a no-op invite sender.
 	invSub, err := nats.SubscribeInviteAccepted(natsClient.Conn(), InviteAcceptedServiceImpl(ctx).Handle)
 	if err != nil {
