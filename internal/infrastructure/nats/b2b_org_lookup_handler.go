@@ -49,9 +49,14 @@ func processB2BOrgLookupRequest(ctx context.Context, data []byte, reader port.B2
 	if id == "" {
 		return b2bOrgLookupResponse{Error: "id is required"}
 	}
-	if normalized, err := sfuuid.Normalize18(id); err == nil {
-		id = normalized
+	normalized, err := sfuuid.Normalize18(id)
+	if err != nil {
+		// b2b_org.uid is always an 18-char Account SFID; CDP UUIDs and other non-SFIDs
+		// can never resolve, so treat them as not found (not infrastructure failure).
+		slog.DebugContext(ctx, "b2b_org_lookup: org not found (non-SFID id)", "id", req.ID)
+		return b2bOrgLookupResponse{Error: "b2b org not found"}
 	}
+	id = normalized
 
 	org, err := reader.GetB2BOrg(ctx, id)
 	if err != nil {

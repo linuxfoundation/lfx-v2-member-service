@@ -57,15 +57,40 @@ func TestProcessB2BOrgLookupRequest_found(t *testing.T) {
 
 func TestProcessB2BOrgLookupRequest_notFound(t *testing.T) {
 	reader := stubB2BOrgReader{err: errs.NewNotFound("b2b org not found")}
-	got := processB2BOrgLookupRequest(context.Background(), []byte(`{"id":"51fde723-67df-4e0e-91c6-936d01d59559"}`), reader)
+	got := processB2BOrgLookupRequest(context.Background(), []byte(`{"id":"001000000000000AAA"}`), reader)
 
 	data, _ := json.Marshal(got)
 	var resp struct {
 		Error string `json:"error"`
 	}
 	_ = json.Unmarshal(data, &resp)
-	if resp.Error == "" {
-		t.Fatal("expected error response")
+	if resp.Error != "b2b org not found" {
+		t.Fatalf("error = %q, want %q", resp.Error, "b2b org not found")
+	}
+}
+
+func TestProcessB2BOrgLookupRequest_nonSFIDReturnsNotFound(t *testing.T) {
+	// Non-SFIDs (e.g. CDP UUIDs) must short-circuit to not-found without calling the reader.
+	reader := stubB2BOrgReader{err: errs.NewValidation("invalid b2b_org UID")}
+	for _, id := range []string{
+		"51fde723-67df-4e0e-91c6-936d01d59559",
+		"not-a-sfid",
+	} {
+		t.Run(id, func(t *testing.T) {
+			body, err := json.Marshal(b2bOrgLookupRequest{ID: id})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := processB2BOrgLookupRequest(context.Background(), body, reader)
+			data, _ := json.Marshal(got)
+			var resp struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(data, &resp)
+			if resp.Error != "b2b org not found" {
+				t.Fatalf("error = %q, want %q", resp.Error, "b2b org not found")
+			}
+		})
 	}
 }
 
