@@ -422,6 +422,7 @@ Implemented in `internal/infrastructure/nats/project_id_map_handler.go`. Resolut
 |---------------|------------------------------------|
 | **Subject**   | `lfx.member.project-id-map.lookup` |
 | **Transport** | NATS core request/reply            |
+| **Queue group** | `lfx-v2-member-service`          |
 
 **Request:** `{"project_uid": "<v2 project UUID>"}`
 
@@ -437,6 +438,7 @@ Implemented in `internal/infrastructure/nats/b2b_org_lookup_handler.go`. Validat
 |---------------|-------------------------------|
 | **Subject**   | `lfx.member.b2b_org_lookup`   |
 | **Transport** | NATS core request/reply       |
+| **Queue group** | `lfx-v2-member-service`     |
 
 **Request:** `{"id": "<b2b_org uid or 15/18-char Account SFID>"}`
 

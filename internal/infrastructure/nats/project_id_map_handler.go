@@ -37,9 +37,9 @@ type projectIDMapResponse struct {
 // SubscribeProjectIDMap registers a NATS core request/reply subscription on
 // constants.ProjectIDMapLookupSubject. On each request it resolves the v2
 // project UID in the JSON body to a Salesforce Project__c.Id using the supplied
-// resolver and replies with a JSON response. The subscription is synchronous per
-// message (no queue group); callers that want load-balanced processing should
-// pass a queue group via NATS options instead.
+// resolver and replies with a JSON response. Uses queue group
+// constants.ServiceName so exactly one member-api replica handles each request
+// when horizontally scaled.
 //
 // The returned *nats.Subscription can be used to drain or unsubscribe on
 // shutdown. A non-nil error means the subscription could not be established.
@@ -64,7 +64,7 @@ func processProjectIDMapRequest(ctx context.Context, data []byte, resolver port.
 }
 
 func SubscribeProjectIDMap(conn *nats.Conn, resolver port.ProjectResolver) (*nats.Subscription, error) {
-	sub, err := conn.Subscribe(constants.ProjectIDMapLookupSubject, func(msg *nats.Msg) {
+	sub, err := conn.QueueSubscribe(constants.ProjectIDMapLookupSubject, constants.ServiceName, func(msg *nats.Msg) {
 		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
 		msgCtx, span := tracer.Start(msgCtx, "nats.process",
 			trace.WithSpanKind(trace.SpanKindConsumer),
@@ -84,6 +84,7 @@ func SubscribeProjectIDMap(conn *nats.Conn, resolver port.ProjectResolver) (*nat
 
 	slog.Info("subscribed to project-id-map lookup RPC",
 		"subject", constants.ProjectIDMapLookupSubject,
+		"queue_group", constants.ServiceName,
 	)
 
 	return sub, nil

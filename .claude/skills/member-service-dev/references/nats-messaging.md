@@ -10,8 +10,8 @@ Platform NATS/KV ownership and handoffs live in
 
 ## Inbound RPC handled by this service
 
-Subjects are defined in `pkg/constants/nats.go`. Each is a plain `Subscribe`
-request/reply handler, drained on shutdown. (The earlier
+Subjects are defined in `pkg/constants/nats.go`. Each is a `QueueSubscribe`
+request/reply handler (queue group `lfx-v2-member-service`), drained on shutdown. (The earlier
 `lfx.member.sfid-to-uuid.lookup` / `lfx.member.uuid-to-sfid.lookup` subjects
 and their handler were removed in LFXV2-2049 — the canonical uid is now the
 18-char SFID itself.)
@@ -32,7 +32,7 @@ KV cache → project-service NATS RPC → Salesforce SOQL.
 | --- | --- |
 | Subject | `lfx.member.project-id-map.lookup` |
 | Transport | NATS core request/reply |
-| Subscription | Plain `Subscribe`; drained on shutdown |
+| Subscription | `QueueSubscribe` queue group `lfx-v2-member-service`; drained on shutdown |
 
 Request body (JSON):
 
@@ -66,7 +66,7 @@ sObject cache → Salesforce Account fetch via `GetB2BOrg`.
 | --- | --- |
 | Subject | `lfx.member.b2b_org_lookup` |
 | Transport | NATS core request/reply |
-| Subscription | Plain `Subscribe`; drained on shutdown |
+| Subscription | `QueueSubscribe` queue group `lfx-v2-member-service`; drained on shutdown |
 
 Request body (JSON):
 

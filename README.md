@@ -126,6 +126,7 @@ Salesforce SOQL query.
 |-------|-------|
 | **Subject** | `lfx.member.project-id-map.lookup` |
 | **Transport** | NATS core request/reply |
+| **Queue group** | `lfx-v2-member-service` |
 
 **Request body (JSON):**
 
@@ -165,6 +166,7 @@ sObject cache → Salesforce Account fetch via `GetB2BOrg`.
 |-------|-------|
 | **Subject** | `lfx.member.b2b_org_lookup` |
 | **Transport** | NATS core request/reply |
+| **Queue group** | `lfx-v2-member-service` |
 
 **Request body (JSON):**
 

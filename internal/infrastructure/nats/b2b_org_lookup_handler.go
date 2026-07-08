@@ -76,9 +76,10 @@ func processB2BOrgLookupRequest(ctx context.Context, data []byte, reader port.B2
 }
 
 // SubscribeB2BOrgLookup registers a NATS request/reply subscription on
-// constants.B2BOrgLookupSubject.
+// constants.B2BOrgLookupSubject. Uses queue group constants.ServiceName so
+// exactly one member-api replica handles each request when horizontally scaled.
 func SubscribeB2BOrgLookup(conn *nats.Conn, reader port.B2BOrgReader) (*nats.Subscription, error) {
-	sub, err := conn.Subscribe(constants.B2BOrgLookupSubject, func(msg *nats.Msg) {
+	sub, err := conn.QueueSubscribe(constants.B2BOrgLookupSubject, constants.ServiceName, func(msg *nats.Msg) {
 		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
 		msgCtx, span := tracer.Start(msgCtx, "nats.process",
 			trace.WithSpanKind(trace.SpanKindConsumer),
@@ -102,6 +103,7 @@ func SubscribeB2BOrgLookup(conn *nats.Conn, reader port.B2BOrgReader) (*nats.Sub
 
 	slog.Info("subscribed to b2b org lookup RPC",
 		"subject", constants.B2BOrgLookupSubject,
+		"queue_group", constants.ServiceName,
 	)
 
 	return sub, nil
