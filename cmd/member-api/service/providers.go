@@ -709,9 +709,10 @@ func InviteAcceptedServiceImpl(ctx context.Context) *usecaseSvc.InviteAcceptedSe
 }
 
 // QueueSubscriptions registers all runAPI NATS subscriptions. It initialises
-// NATS, conditionally registers the project-id-map RPC handler (skipped in mock
-// mode), and always registers the invite_accepted handler. Drain callbacks are
-// collected in apiSubs; call DrainAPISubscriptions on shutdown.
+// NATS, conditionally registers inbound RPC handlers (project-id-map and
+// b2b_org_lookup; skipped in mock mode), and always registers the
+// invite_accepted handler. Drain callbacks are collected in apiSubs; call
+// DrainAPISubscriptions on shutdown.
 func QueueSubscriptions(ctx context.Context) error {
 	natsInit(ctx)
 

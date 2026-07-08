@@ -131,12 +131,13 @@ endpoint is (re)added:
 - Keep subject strings in repo-owned constants (see `pkg/constants` and
   `internal/infrastructure/nats/`). Do not hardcode subject strings at call
   sites.
-- The single inbound RPC handler is registered with plain NATS `Subscribe`
-  and drained during shutdown: the project-id-map lookup
-  (`lfx.member.project-id-map.lookup`). The earlier SFID/UUID lookup subjects
-  were removed in LFXV2-2049 (the canonical uid is now the 18-char SFID). Do
-  not document the handler as a queue-group handler unless the code is
-  changed.
+- The inbound RPC handlers are registered with plain NATS `Subscribe`
+  and drained during shutdown:
+  - project-id-map lookup (`lfx.member.project-id-map.lookup`)
+  - b2b_org lookup (`lfx.member.b2b_org_lookup`)
+  The earlier SFID/UUID lookup subjects were removed in LFXV2-2049 (the
+  canonical uid is now the 18-char SFID). Do not document the handlers as
+  queue-group handlers unless the code is changed.
 - If adding another horizontally scaled request/reply handler, choose an
   explicit queue group and document it in `references/nats-messaging.md`.
 - Do not write directly to another service's KV bucket. This repo owns

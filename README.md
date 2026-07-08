@@ -54,9 +54,10 @@ Key-Value cache to minimise round-trips.
 - **Project ID resolution**: The `ProjectResolver` translates v2 project UIDs to
   Salesforce `Project__c.Id` values by chaining a NATS RPC to the project-service
   and a SOQL lookup, backed by the same KV cache.
-- **NATS RPC endpoint**: Exposes a request/reply subject so other services can
-  resolve a v2 project UID to a Salesforce `Project__c.Id` without querying
-  Salesforce or PostgreSQL directly.
+- **NATS RPC endpoints**: Exposes request/reply subjects so other services can
+  resolve identifiers without querying Salesforce directly:
+  - `lfx.member.project-id-map.lookup` — v2 project UID → Salesforce `Project__c.Id`
+  - `lfx.member.b2b_org_lookup` — validate a `b2b_org` id and return the canonical 18-char Account SFID
 - **Clean Architecture**: Follows hexagonal architecture with clear separation of
   domain, service, and infrastructure layers.
 - **Authorization**: JWT-based authentication with Heimdall middleware integration
@@ -153,11 +154,60 @@ Salesforce SOQL query.
 The reply is always valid JSON. Check for the presence of the `"error"` key to
 detect failure.
 
+### B2B Org Lookup
+
+Validates that an organization id resolves to an indexed `b2b_org` and returns
+the canonical 18-char Salesforce Account SFID. Used by write-path validators in
+consumer services (e.g. committee-service) per LFXV2-2400. Resolution chains:
+sObject cache → Salesforce Account fetch via `GetB2BOrg`.
+
+| Field | Value |
+|-------|-------|
+| **Subject** | `lfx.member.b2b_org_lookup` |
+| **Transport** | NATS core request/reply |
+
+**Request body (JSON):**
+
+```json
+{"id": "<b2b_org uid or 15/18-char Account SFID>"}
+```
+
+**Response — success:**
+
+```json
+{"id": "<canonical 18-char Account SFID>"}
+```
+
+**Response — not found:**
+
+```json
+{"error": "b2b org not found"}
+```
+
+**Response — bad request:**
+
+```json
+{"error": "id is required"}
+```
+
+**Response — lookup failure (infrastructure error):**
+
+```json
+{"error": "b2b org lookup failed"}
+```
+
+The reply is always valid JSON. Check for the presence of the `"error"` key to
+detect failure. A not-found response means the id does not resolve to a `b2b_org`
+(e.g. CDP UUID, unknown SFID); infrastructure failures return a distinct error
+message.
+
 ### B2B Org UID Resolution
 
-As of the SFID-as-uid change, `b2b_org.uid` equals the canonical 18-char Salesforce Account
-SFID directly — no NATS RPC lookup is required. Callers that have the Account SFID can use
-it as the `b2b_org` UID without any further resolution.
+As of LFXV2-2049, `b2b_org.uid` equals the canonical 18-char Salesforce Account
+SFID. Callers that already hold a verified Account SFID can use it directly as
+the `b2b_org` UID without further translation. When a caller receives an opaque
+`organization.id` (15/18-char SFID or other shape), use `lfx.member.b2b_org_lookup`
+to confirm the org exists and obtain the normalized 18-char SFID.
 
 ## Development
 

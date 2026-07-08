@@ -10,14 +10,15 @@ Platform NATS/KV ownership and handoffs live in
 
 ## Inbound RPC handled by this service
 
-The subject is defined in `pkg/constants/nats.go`. It is a plain
-`Subscribe` request/reply handler, drained on shutdown. (The earlier
+Subjects are defined in `pkg/constants/nats.go`. Each is a plain `Subscribe`
+request/reply handler, drained on shutdown. (The earlier
 `lfx.member.sfid-to-uuid.lookup` / `lfx.member.uuid-to-sfid.lookup` subjects
 and their handler were removed in LFXV2-2049 — the canonical uid is now the
 18-char SFID itself.)
 
 ```go
 ProjectIDMapLookupSubject = "lfx.member.project-id-map.lookup"
+B2BOrgLookupSubject       = "lfx.member.b2b_org_lookup"
 ```
 
 ### Project ID map lookup
@@ -53,6 +54,44 @@ Error response:
 
 All replies are always valid JSON. Callers must check for the `"error"` key
 to detect failure.
+
+### B2B org lookup
+
+Validates that an organization id resolves to an indexed `b2b_org` and returns
+the canonical 18-char Account SFID. Implemented in
+`internal/infrastructure/nats/b2b_org_lookup_handler.go`. Resolution chains
+sObject cache → Salesforce Account fetch via `GetB2BOrg`.
+
+| Field | Value |
+| --- | --- |
+| Subject | `lfx.member.b2b_org_lookup` |
+| Transport | NATS core request/reply |
+| Subscription | Plain `Subscribe`; drained on shutdown |
+
+Request body (JSON):
+
+```json
+{"id": "<b2b_org uid or 15/18-char Account SFID>"}
+```
+
+Success response:
+
+```json
+{"id": "<canonical 18-char Account SFID>"}
+```
+
+Error response (not found):
+
+```json
+{"error": "b2b org not found"}
+```
+
+Other errors use the same `{"error": "..."}` shape (e.g. `id is required`,
+`b2b org lookup failed`). Callers must treat non-`b2b org not found` errors as
+infrastructure failures, not as a simple miss.
+
+Since LFXV2-2049, `b2b_org.uid` is the 18-char Account SFID — this RPC
+confirms existence and normalizes SFID form; it does not translate CDP UUIDs.
 
 ## Outbound RPC this service makes
 
