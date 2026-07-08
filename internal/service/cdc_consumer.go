@@ -13,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -160,9 +161,9 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 	for event := range eventCh {
 		// Wrap the handler in a closure so that defers guarantee span.End()
 		// and handleCancel() run even if o.handle panics. span.End() is
-		// deferred before handleCancel() so it fires first (LIFO), keeping
-		// span duration scoped to the handler rather than including the
-		// replay-cursor save that follows.
+		// deferred after handleCancel() so it fires first in LIFO order,
+		// keeping span duration scoped to the handler rather than including
+		// the replay-cursor save that follows.
 		handleErr := func(event model.CDCEvent) error {
 			// Give each handler a short-lived background context so that an
 			// in-flight Salesforce fetch or NATS cache write is not aborted by a
@@ -175,13 +176,19 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 				trace.WithAttributes(
 					attribute.String("messaging.system", "salesforce"),
 					attribute.String("messaging.destination.name", channel),
+					attribute.String("messaging.operation.type", "process"),
 					attribute.String("cdc.entity", event.Entity),
 					attribute.String("cdc.change_type", string(event.ChangeType)),
 					attribute.Int("cdc.record_count", len(event.RecordIDs)),
 				),
 			)
 			defer span.End()
-			return o.handle(handleCtx, event)
+			err := o.handle(handleCtx, event)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			return err
 		}(event)
 		if handleErr != nil {
 			// Log and continue — /admin/reindex is the backstop for missed events.
