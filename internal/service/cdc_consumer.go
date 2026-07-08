@@ -11,6 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	indexerConstants "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/constants"
 
@@ -20,6 +25,11 @@ import (
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
+
+// cdcTracer is safe to initialize at package level — otel.Tracer() returns a
+// delegating tracer that forwards to whatever TracerProvider is registered at
+// call time, so otel.SetTracerProvider() updates it regardless of init order.
+var cdcTracer = otel.Tracer("github.com/linuxfoundation/lfx-v2-member-service/internal/service")
 
 // defaultQuotaSkipThreshold is the fraction of the daily Salesforce REST API
 // quota at which the CDC consumer begins skipping upsert re-fetches to
@@ -149,13 +159,37 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 	}
 
 	for event := range eventCh {
-		// Give each handler a short-lived background context so that an
-		// in-flight Salesforce fetch or NATS cache write is not aborted by a
-		// concurrent graceful shutdown. 30 s matches the graceful-shutdown
-		// window; any handler that runs longer than that is already a problem.
-		handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		handleErr := o.handle(handleCtx, event)
-		handleCancel()
+		// Wrap the handler in a closure so that defers guarantee span.End()
+		// and handleCancel() run even if o.handle panics. Both defers run
+		// before the closure returns, so neither is included in the
+		// replay-cursor save that follows. span.End() fires first because it
+		// is deferred after handleCancel() (LIFO order).
+		handleErr := func(event model.CDCEvent) error {
+			// Give each handler a short-lived background context so that an
+			// in-flight Salesforce fetch or NATS cache write is not aborted by a
+			// concurrent graceful shutdown. 30 s matches the graceful-shutdown
+			// window; any handler that runs longer than that is already a problem.
+			handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer handleCancel()
+			handleCtx, span := cdcTracer.Start(handleCtx, "salesforce.cdc.process",
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "salesforce"),
+					attribute.String("messaging.destination.name", channel),
+					attribute.String("messaging.operation.type", "process"),
+					attribute.String("cdc.entity", event.Entity),
+					attribute.String("cdc.change_type", string(event.ChangeType)),
+					attribute.Int("cdc.record_count", len(event.RecordIDs)),
+				),
+			)
+			defer span.End()
+			err := o.handle(handleCtx, event)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			return err
+		}(event)
 		if handleErr != nil {
 			// Log and continue — /admin/reindex is the backstop for missed events.
 			slog.ErrorContext(ctx, "cdc: event handling failed, continuing",
