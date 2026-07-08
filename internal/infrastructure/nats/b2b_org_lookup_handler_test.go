@@ -28,6 +28,10 @@ func (s stubB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string)
 	return nil, nil
 }
 
+func (s stubB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
+	return nil, nil
+}
+
 func TestProcessB2BOrgLookupRequest_found(t *testing.T) {
 	reader := stubB2BOrgReader{org: &model.B2BOrg{UID: "0014100000Te2ovAAB"}}
 	got := processB2BOrgLookupRequest(context.Background(), []byte(`{"id":"0014100000Te2ovAAB"}`), reader)

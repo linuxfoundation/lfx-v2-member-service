@@ -9,14 +9,22 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
+
+// b2bOrgLookupHandlerTimeout bounds downstream GetB2BOrg work (KV cache / Salesforce)
+// so a hung dependency cannot pin the subscription callback indefinitely.
+const b2bOrgLookupHandlerTimeout = 30 * time.Second
 
 // b2bOrgLookupRequest is the JSON request body for the b2b_org lookup RPC.
 type b2bOrgLookupRequest struct {
@@ -66,7 +74,22 @@ func processB2BOrgLookupRequest(ctx context.Context, data []byte, reader port.B2
 // constants.B2BOrgLookupSubject.
 func SubscribeB2BOrgLookup(conn *nats.Conn, reader port.B2BOrgReader) (*nats.Subscription, error) {
 	sub, err := conn.Subscribe(constants.B2BOrgLookupSubject, func(msg *nats.Msg) {
-		replyJSON(msg, processB2BOrgLookupRequest(context.Background(), msg.Data, reader))
+		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
+		msgCtx, span := tracer.Start(msgCtx, "nats.process",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.destination.name", constants.B2BOrgLookupSubject),
+				attribute.String("messaging.operation.type", "process"),
+				attribute.Int("messaging.message.body.size", len(msg.Data)),
+			),
+		)
+		defer span.End()
+
+		msgCtx, cancel := context.WithTimeout(msgCtx, b2bOrgLookupHandlerTimeout)
+		defer cancel()
+
+		replyJSON(msg, processB2BOrgLookupRequest(msgCtx, msg.Data, reader))
 	})
 	if err != nil {
 		return nil, err
