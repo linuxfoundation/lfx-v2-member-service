@@ -168,7 +168,7 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 			trace.WithAttributes(
 				attribute.String("messaging.system", "salesforce"),
 				attribute.String("messaging.destination.name", channel),
-				attribute.String("cdc.entity", string(event.Entity)),
+				attribute.String("cdc.entity", event.Entity),
 				attribute.String("cdc.change_type", string(event.ChangeType)),
 				attribute.Int("cdc.record_count", len(event.RecordIDs)),
 			),
