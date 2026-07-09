@@ -114,7 +114,7 @@ func (w *B2BOrgWriter) UpdateB2BOrg(ctx context.Context, uid string, input model
 	slog.DebugContext(ctx, "b2b org updated in Salesforce", "uid", uid, "sfid", sfid)
 
 	// Invalidate the sObject cache so the re-fetch below sees fresh data.
-	if err := w.client.InvalidateB2BOrg(ctx, uid); err != nil {
+	if err := w.client.InvalidateB2BOrg(ctx, sfid); err != nil {
 		slog.WarnContext(ctx, "failed to invalidate b2b org cache after update",
 			"uid", uid, "error", err)
 	}
