@@ -14,19 +14,18 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
 )
 
-// TestInvalidateB2BOrg_ClearsAllThreeKeys verifies that InvalidateB2BOrg
-// evicts the full-org, flat-account, and parent-brief cache entries for the
-// same UID, not only the full-org entry (see LFXV2-2654: before the B2BOrg
-// cache key split, these three fetch shapes shared a single key, so a single
-// InvalidateCache call covered all of them; splitting the read keys without
-// updating invalidation would leave the other two stale).
-func TestInvalidateB2BOrg_ClearsAllThreeKeys(t *testing.T) {
+// TestInvalidateB2BOrg_ClearsAllFourKeys verifies that InvalidateB2BOrg evicts
+// the legacy full-org, current full-org, flat-account, and parent-brief cache
+// entries for the same UID. After the field-list split, deploys can see both
+// the legacy and current full-org keys until the old entries age out.
+func TestInvalidateB2BOrg_ClearsAllFourKeys(t *testing.T) {
 	t.Parallel()
 
 	const uid = "00000000-0000-0000-0000-000000000001"
 
 	cache := newMemCache()
 	entry := &nats.SObjectCacheEntry{Body: json.RawMessage(`{}`)}
+	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid), entry))
 	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid), entry))
 	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid), entry))
 	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid), entry))
@@ -39,6 +38,7 @@ func TestInvalidateB2BOrg_ClearsAllThreeKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, key := range []string{
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid),
@@ -50,8 +50,8 @@ func TestInvalidateB2BOrg_ClearsAllThreeKeys(t *testing.T) {
 }
 
 // TestInvalidateB2BOrg_NoErrorWhenNoEntriesExist verifies that invalidating a
-// UID with no cached entries under any of the three keys is a no-op, not an
-// error.
+// UID with no cached entries under any of the legacy/current B2BOrg keys is a
+// no-op, not an error.
 func TestInvalidateB2BOrg_NoErrorWhenNoEntriesExist(t *testing.T) {
 	t.Parallel()
 
