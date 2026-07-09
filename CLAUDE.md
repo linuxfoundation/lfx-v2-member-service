@@ -71,6 +71,7 @@ internal/
 │   │   ├── client.go        # NATSClient with KV bucket initialisation
 │   │   ├── config.go        # NATS configuration
 │   │   ├── project_id_map_handler.go  # RPC handler for lfx.member.project-id-map.lookup
+│   │   ├── b2b_org_lookup_handler.go  # RPC handler for lfx.member.b2b_org_lookup
 │   │   ├── project_rpc.go   # NATS RPC calls to the project-service
 │   │   └── storage.go       # KV cache Get/Put helpers for each record type
 │   ├── project/             # ProjectResolver implementation
@@ -421,12 +422,33 @@ Implemented in `internal/infrastructure/nats/project_id_map_handler.go`. Resolut
 |---------------|------------------------------------|
 | **Subject**   | `lfx.member.project-id-map.lookup` |
 | **Transport** | NATS core request/reply            |
+| **Queue group** | `lfx-v2-member-service`          |
 
 **Request:** `{"project_uid": "<v2 project UUID>"}`
 
 **Response — success:** `{"project_sfid": "<Salesforce Project__c.Id>"}`
 
 **Response — error:** `{"error": "<human-readable message>"}`
+
+### B2B Org Lookup (`lfx.member.b2b_org_lookup`)
+
+Implemented in `internal/infrastructure/nats/b2b_org_lookup_handler.go`. Validates that an id resolves to an indexed `b2b_org` via `B2BOrgReader.GetB2BOrg` (sObject cache → Salesforce Account). Returns the canonical 18-char Account SFID on success. Used by consumer services (e.g. committee-service) to validate `organization.id` on write paths (LFXV2-2400).
+
+| Field         | Value                         |
+|---------------|-------------------------------|
+| **Subject**   | `lfx.member.b2b_org_lookup`   |
+| **Transport** | NATS core request/reply       |
+| **Queue group** | `lfx-v2-member-service`     |
+
+**Request:** `{"id": "<b2b_org uid or 15/18-char Account SFID>"}`
+
+**Response — success:** `{"id": "<canonical 18-char Account SFID>"}`
+
+**Response — not found:** `{"error": "b2b org not found"}`
+
+**Response — error:** `{"error": "<human-readable message>"}` (e.g. `id is required`, `b2b org lookup failed`)
+
+> **Note:** Since LFXV2-2049, `b2b_org.uid` is the 18-char Account SFID itself — there is no separate UUID translation step. The lookup RPC confirms existence and normalizes SFID form; it does not map CDP UUIDs or other non-SFID identifiers.
 
 ## CDC Consumer
 
