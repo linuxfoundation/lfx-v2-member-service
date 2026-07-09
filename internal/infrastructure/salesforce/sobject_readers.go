@@ -21,7 +21,10 @@ import (
 // sObject cache key prefix constants for the member-service-cache bucket.
 // Keys follow the pattern "{prefix}.{uid}" as required by the architecture.
 const (
-	sobjectKeyPrefixB2BOrg            = "b2b_org"
+	sobjectKeyPrefixB2BOrgLegacy      = "b2b_org"
+	sobjectKeyPrefixB2BOrg            = "b2b_org_v2"
+	sobjectKeyPrefixB2BOrgFlat        = "b2b_org_flat"
+	sobjectKeyPrefixB2BOrgParentBrief = "b2b_org_parent_brief"
 	sobjectKeyPrefixProjectMembership = "project_membership"
 	sobjectKeyPrefixKeyContact        = "key_contact"
 	sobjectKeyPrefixMembershipTier    = "membership_tier"
@@ -197,7 +200,9 @@ type AccountRecord struct {
 }
 
 // FetchAccount fetches a single Salesforce Account (B2BOrg) record by its UID.
-// The SFID is derived from the UID; the cache key is "b2b_org.{uid}".
+// The SFID is derived from the UID; the cache key is "b2b_org_flat.{sfid}",
+// distinct from FetchB2BOrg's "b2b_org_v2.{sfid}" since this fetch requests a
+// different, narrower field list (accountFields) for the same Account.
 //
 // Because the Account sObject has no natural project association in the returned
 // JSON (relationship fields require SOQL sub-selects), the returned AccountRecord
@@ -208,7 +213,7 @@ func (c *SObjectClient) FetchAccount(ctx context.Context, uid string) (*AccountR
 		return nil, err
 	}
 
-	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrg, sfid)
+	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, sfid)
 	result, err := c.FetchSObject(ctx, "Account", sfid, cacheKey, accountFields)
 	if err != nil {
 		return nil, err
@@ -237,7 +242,9 @@ func sobjectAccountToRecord(raw *sobjectAccount, uid string) *AccountRecord {
 // FetchB2BOrg fetches a single Salesforce Account (B2BOrg) record by its UID
 // using the full b2bOrgFields field list. The returned model.B2BOrg is fully
 // populated including industry, sector, domains, and status fields.
-// The cache key is "b2b_org.{uid}"; the FetchResult carries ETag and Last-Modified
+// The cache key is "b2b_org_v2.{sfid}"; the versioned prefix ensures a deploy
+// never trusts a legacy poisoned "b2b_org.{sfid}" entry written before the
+// field-list split in LFXV2-2654. The FetchResult carries ETag and Last-Modified
 // for use by callers that need to set response headers.
 func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2BOrg, *FetchResult, error) {
 	sfid, err := normalizeUID("Account", uid)
@@ -278,12 +285,16 @@ func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2B
 // fetchParentAccountDetail fetches a minimal set of fields (Id, Name, Logo_URL__c)
 // for the parent Account identified by parentSFID. Failures are non-fatal to the
 // caller; the parent detail is best-effort.
+//
+// Uses a distinct cache key prefix ("b2b_org_parent_brief") from FetchB2BOrg's
+// "b2b_org_v2.{sfid}" so that this narrow, 3-field lookup can never be read back as
+// satisfying a full B2BOrg fetch for the same Account (see LFXV2-2654).
 func (c *SObjectClient) fetchParentAccountDetail(ctx context.Context, parentSFID string) (*sobjectAccountParent, error) {
 	parentUID, err := sfuuid.Normalize18(parentSFID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid parent Account SFID %q: %w", parentSFID, err)
 	}
-	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrg, parentUID)
+	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, parentUID)
 	result, err := c.FetchSObject(ctx, "Account", parentSFID, cacheKey, "Id,Name,Logo_URL__c")
 	if err != nil {
 		return nil, err

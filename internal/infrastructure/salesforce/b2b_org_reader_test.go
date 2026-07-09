@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
@@ -408,4 +409,191 @@ func TestB2BOrgReader_GetB2BOrg_InvalidUID(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, org)
+}
+
+// ─── Cache key collision regression tests (LFXV2-2654) ────────────────────────
+//
+// These tests prove that fetchParentAccountDetail, FetchB2BOrg, and FetchAccount
+// no longer share a single sObject cache entry per Account SFID. Before the fix,
+// all three built their cache key as sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, sfid)
+// regardless of which (different) field list they requested, so whichever call
+// populated the entry first "won" and poisoned the others indefinitely.
+
+// TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg reproduces the
+// original bug scenario: an Account is first fetched narrowly as another
+// Account's parent, then fetched directly as a full B2BOrg. The full fetch must
+// issue a fresh HTTP request and return every field in b2bOrgFields, unaffected
+// by the earlier narrow fetch.
+func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
+	t.Parallel()
+
+	uid, err := sfuuid.Normalize18(canonicalAccountSFID)
+	require.NoError(t, err)
+
+	const narrowJSON = `{
+		"Id":"001B000000IqhSL",
+		"Name":"Linux Foundation",
+		"Logo_URL__c":"https://linuxfoundation.org/logo.png"
+	}`
+
+	callCount := 0
+	rt := &countingTransport{
+		callCount:  &callCount,
+		firstResp:  fakeResponse(http.StatusOK, narrowJSON, nil),
+		retryResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
+	}
+	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: newMemCache()}
+	reader := NewB2BOrgReader(client, nil)
+
+	// Step 1: narrow parent-detail fetch, as fetchParentAccountDetail performs
+	// when processing some other Account's ParentId. Populates
+	// "b2b_org_parent_brief.{uid}".
+	_, err = client.fetchParentAccountDetail(context.Background(), canonicalAccountSFID)
+	require.NoError(t, err)
+
+	// Step 2: full org fetch for the same Account. Must be a cache miss on
+	// "b2b_org_v2.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
+	org, err := reader.GetB2BOrg(context.Background(), uid)
+	require.NoError(t, err)
+	require.NotNil(t, org)
+
+	assert.Equal(t, 2, callCount, "full org fetch must issue a fresh HTTP request, not reuse the narrow cache entry")
+	assert.Equal(t, "Technology", org.Industry, "full fetch must return fields absent from the narrow parent-detail response")
+	require.NotNil(t, org.NumberOfEmployees)
+	assert.Equal(t, int64(200), *org.NumberOfEmployees)
+	assert.Equal(t, "Supporting open source ecosystems.", org.Description)
+}
+
+// TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief verifies the
+// reverse order: once a full org fetch has populated "b2b_org_v2.{uid}", a
+// later narrow parent-detail fetch for the same Account must not overwrite it.
+func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
+	t.Parallel()
+
+	uid, err := sfuuid.Normalize18(canonicalAccountSFID)
+	require.NoError(t, err)
+
+	const narrowJSON = `{
+		"Id":"001B000000IqhSL",
+		"Name":"Linux Foundation",
+		"Logo_URL__c":"https://linuxfoundation.org/logo.png"
+	}`
+
+	callCount := 0
+	rt := &countingTransport{
+		callCount:  &callCount,
+		firstResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		retryResp:  fakeResponse(http.StatusOK, narrowJSON, nil),
+		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
+	}
+	cache := newMemCache()
+	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
+	reader := NewB2BOrgReader(client, nil)
+
+	// Step 1: full org fetch populates "b2b_org_v2.{uid}".
+	org1, err := reader.GetB2BOrg(context.Background(), uid)
+	require.NoError(t, err)
+	require.NotNil(t, org1)
+
+	// Step 2: narrow parent-detail fetch for the same Account populates the
+	// distinct "b2b_org_parent_brief.{uid}" key.
+	_, err = client.fetchParentAccountDetail(context.Background(), canonicalAccountSFID)
+	require.NoError(t, err)
+
+	// The full org cache entry must be untouched by the narrow fetch.
+	stored, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.JSONEq(t, canonicalAccountJSON, string(stored.Body),
+		"full org cache entry must not be overwritten by a later narrow parent-detail fetch")
+}
+
+// TestSObjectClient_CacheKeyIsolation_FlatAccountThenFullOrg verifies that
+// FetchAccount's narrower accountFields fetch and FetchB2BOrg's full fetch do
+// not share a cache entry for the same Account SFID.
+func TestSObjectClient_CacheKeyIsolation_FlatAccountThenFullOrg(t *testing.T) {
+	t.Parallel()
+
+	uid, err := sfuuid.Normalize18(canonicalAccountSFID)
+	require.NoError(t, err)
+
+	const flatJSON = `{
+		"Id":"001B000000IqhSL",
+		"Name":"Linux Foundation",
+		"Logo_URL__c":"https://linuxfoundation.org/logo.png",
+		"Website":"https://linuxfoundation.org",
+		"CreatedDate":"2020-01-15T10:30:00.000+0000",
+		"LastModifiedDate":"2024-06-01T08:00:00.000+0000",
+		"SystemModstamp":"2024-06-01T08:00:00.000+0000"
+	}`
+
+	callCount := 0
+	rt := &countingTransport{
+		callCount:  &callCount,
+		firstResp:  fakeResponse(http.StatusOK, flatJSON, nil),
+		retryResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
+	}
+	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: newMemCache()}
+	reader := NewB2BOrgReader(client, nil)
+
+	// Step 1: FetchAccount populates "b2b_org_flat.{uid}".
+	account, err := client.FetchAccount(context.Background(), uid)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, "Linux Foundation", account.Name)
+
+	// Step 2: FetchB2BOrg for the same UID must not reuse FetchAccount's entry.
+	org, err := reader.GetB2BOrg(context.Background(), uid)
+	require.NoError(t, err)
+	require.NotNil(t, org)
+
+	assert.Equal(t, 2, callCount, "FetchB2BOrg must issue a fresh HTTP request, not reuse FetchAccount's cache entry")
+	assert.Equal(t, "Technology", org.Industry, "full fetch must return fields absent from FetchAccount's narrow response")
+}
+
+// TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored verifies
+// that a legacy under-shaped "b2b_org.{uid}" entry written before the cache-key
+// split is ignored after deploy. The current full-org fetch must read from the
+// versioned "b2b_org_v2.{uid}" key instead of trusting the legacy body.
+func TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored(t *testing.T) {
+	t.Parallel()
+
+	uid, err := sfuuid.Normalize18(canonicalAccountSFID)
+	require.NoError(t, err)
+
+	const narrowJSON = `{
+		"Id":"001B000000IqhSL",
+		"Name":"Linux Foundation",
+		"Logo_URL__c":"https://linuxfoundation.org/logo.png"
+	}`
+
+	cache := newMemCache()
+	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid), &nats.SObjectCacheEntry{
+		Body: json.RawMessage(narrowJSON),
+	}))
+
+	callCount := 0
+	rt := &countingTransport{
+		callCount:  &callCount,
+		firstResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		retryResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
+	}
+	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
+	reader := NewB2BOrgReader(client, nil)
+
+	org, err := reader.GetB2BOrg(context.Background(), uid)
+	require.NoError(t, err)
+	require.NotNil(t, org)
+
+	assert.Equal(t, 1, callCount, "FetchB2BOrg must ignore the legacy cache key and issue a fresh HTTP request")
+	assert.Equal(t, "Technology", org.Industry)
+	assert.Equal(t, "Supporting open source ecosystems.", org.Description)
+
+	current, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	assert.JSONEq(t, canonicalAccountJSON, string(current.Body))
 }

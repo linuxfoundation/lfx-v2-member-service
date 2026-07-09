@@ -5,6 +5,7 @@ package salesforce
 
 import (
 	"context"
+	"errors"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 )
@@ -12,9 +13,20 @@ import (
 // Ensure SObjectClient satisfies port.CacheInvalidator at compile time.
 var _ port.CacheInvalidator = (*SObjectClient)(nil)
 
-// InvalidateB2BOrg evicts the cached b2b_org record for the given v2 UID.
+// InvalidateB2BOrg evicts every cached B2BOrg-family entry for the given v2
+// UID: the legacy pre-fix full-org key (sobjectKeyPrefixB2BOrgLegacy), the
+// current full-org fetch (sobjectKeyPrefixB2BOrg), the flat-account fetch
+// (sobjectKeyPrefixB2BOrgFlat), and the parent-brief fetch
+// (sobjectKeyPrefixB2BOrgParentBrief). All four keys may exist across deploys,
+// so callers invalidating an Account must not be left with a stale entry under
+// any of them (see LFXV2-2654).
 func (c *SObjectClient) InvalidateB2BOrg(ctx context.Context, uid string) error {
-	return c.InvalidateCache(ctx, sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
+	return errors.Join(
+		c.InvalidateCache(ctx, sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid)),
+		c.InvalidateCache(ctx, sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid)),
+		c.InvalidateCache(ctx, sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid)),
+		c.InvalidateCache(ctx, sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid)),
+	)
 }
 
 // InvalidateProjectMembership evicts the cached project_membership record for

@@ -41,7 +41,7 @@ type SObjectCacheEntry struct {
 }
 
 // SObjectCache is a NATS KV-backed cache for Salesforce sObject records. Keys
-// follow the pattern "{sobject_type}.{uid}" (e.g. "b2b_org.{uid}",
+// follow the pattern "{sobject_type}.{uid}" (e.g. "b2b_org_v2.{uid}",
 // "project_membership.{uid}"). Values are JSON-encoded SObjectCacheEntry
 // envelopes carrying HTTP ETag / Last-Modified metadata alongside the raw
 // sObject body, enabling efficient conditional GET re-validation.
