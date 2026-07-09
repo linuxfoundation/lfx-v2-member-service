@@ -529,3 +529,10 @@ GET /query/resources?v=1&type=org_workspace_project&tags=project_uid:{projectUID
 
 ## NATS RPC Endpoints
 
+Inbound request/reply subjects handled by this service (see `README.md` and
+`references/nats-messaging.md` for full payload shapes):
+
+| Subject | Purpose |
+| --- | --- |
+| `lfx.member.project-id-map.lookup` | Resolve v2 project UID → Salesforce `Project__c.Id` |
+| `lfx.member.b2b_org_lookup` | Validate `b2b_org` id → canonical 18-char Account SFID |
