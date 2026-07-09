@@ -46,7 +46,10 @@ re-publishing.
 
 | Key pattern | Contents |
 | --- | --- |
-| `b2b_org.{uid}` | Salesforce Account sObject cache entry |
+| `b2b_org_v2.{uid}` | Salesforce Account sObject cache entry (full `FetchB2BOrg` field list) |
+| `b2b_org_flat.{uid}` | Salesforce Account sObject cache entry (narrow `FetchAccount` field list) |
+| `b2b_org_parent_brief.{uid}` | Salesforce Account sObject cache entry (3-field parent-detail lookup) |
+| `b2b_org.{uid}` | Legacy pre-LFXV2-2654 key; evicted only, never read after the versioned `b2b_org_v2` rollout |
 | `project_membership.{uid}` | Salesforce Asset sObject cache entry |
 | `key_contact.{uid}` | Salesforce Project_Role__c sObject cache entry |
 | `membership_tier.{uid}` | Salesforce Product2 sObject cache entry |
