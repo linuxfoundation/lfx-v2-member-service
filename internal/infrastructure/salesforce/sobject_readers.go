@@ -20,8 +20,28 @@ import (
 
 // sObject cache key prefix constants for the member-service-cache bucket.
 // Keys follow the pattern "{prefix}.{uid}" as required by the architecture.
+//
+// The prefix is part of the cache identity: the sObject cache stores the raw
+// Salesforce REST body and revalidates it with HTTP conditional GET (ETag /
+// If-Modified-Since), which only detects whether the *record* changed — not
+// whether the cached body contains the fields the current caller requested.
+// Two lookups of the same Account that request different field sets must
+// therefore use different prefixes, otherwise a lookup that fetched a narrower
+// field set can poison a later lookup that needs the full field set (the
+// conditional GET returns 304 and the incomplete body is served). See
+// sobjectKeyPrefixB2BOrgParent below and LFXV2-2654.
 const (
-	sobjectKeyPrefixB2BOrg            = "b2b_org"
+	// sobjectKeyPrefixB2BOrg keys the full B2BOrg profile fetch (b2bOrgFields).
+	sobjectKeyPrefixB2BOrg = "b2b_org"
+	// sobjectKeyPrefixB2BOrgParent keys the bare-minimum parent-Account lookup
+	// (Id, Name, Logo_URL__c only) performed while resolving a subsidiary's
+	// parent detail. It is deliberately separate from sobjectKeyPrefixB2BOrg so
+	// this narrow fetch can never be mistaken for a full profile fetch.
+	sobjectKeyPrefixB2BOrgParent = "b2b_org_parent"
+	// sobjectKeyPrefixAccount keys the partial Account view fetched by
+	// FetchAccount (accountFields). It is separate from sobjectKeyPrefixB2BOrg
+	// for the same field-set-collision reason.
+	sobjectKeyPrefixAccount           = "account"
 	sobjectKeyPrefixProjectMembership = "project_membership"
 	sobjectKeyPrefixKeyContact        = "key_contact"
 	sobjectKeyPrefixMembershipTier    = "membership_tier"
@@ -197,7 +217,12 @@ type AccountRecord struct {
 }
 
 // FetchAccount fetches a single Salesforce Account (B2BOrg) record by its UID.
-// The SFID is derived from the UID; the cache key is "b2b_org.{uid}".
+// The SFID is derived from the UID; the cache key is "account.{uid}".
+//
+// It requests only the narrow accountFields set, so it uses the dedicated
+// "account" cache prefix rather than "b2b_org" to avoid poisoning the full
+// B2BOrg profile slot with a partial body (see the prefix constant comments
+// and LFXV2-2654).
 //
 // Because the Account sObject has no natural project association in the returned
 // JSON (relationship fields require SOQL sub-selects), the returned AccountRecord
@@ -208,7 +233,7 @@ func (c *SObjectClient) FetchAccount(ctx context.Context, uid string) (*AccountR
 		return nil, err
 	}
 
-	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrg, sfid)
+	cacheKey := sobjectCacheKey(sobjectKeyPrefixAccount, sfid)
 	result, err := c.FetchSObject(ctx, "Account", sfid, cacheKey, accountFields)
 	if err != nil {
 		return nil, err
@@ -278,12 +303,21 @@ func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2B
 // fetchParentAccountDetail fetches a minimal set of fields (Id, Name, Logo_URL__c)
 // for the parent Account identified by parentSFID. Failures are non-fatal to the
 // caller; the parent detail is best-effort.
+//
+// This bare-minimum fetch is cached under the dedicated "b2b_org_parent" prefix,
+// NOT "b2b_org". A parent Account is frequently also a member company in its own
+// right (e.g. IBM is the parent of Red Hat). If both lookups shared the
+// "b2b_org.{uid}" slot, this three-field body could be served — via a 304 Not
+// Modified conditional-GET revalidation — in response to a later full B2BOrg
+// profile fetch, dropping description, employee count, industry, and membership
+// status. Keeping the two lookups in separate slots makes that impossible
+// (LFXV2-2654).
 func (c *SObjectClient) fetchParentAccountDetail(ctx context.Context, parentSFID string) (*sobjectAccountParent, error) {
 	parentUID, err := sfuuid.Normalize18(parentSFID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid parent Account SFID %q: %w", parentSFID, err)
 	}
-	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrg, parentUID)
+	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrgParent, parentUID)
 	result, err := c.FetchSObject(ctx, "Account", parentSFID, cacheKey, "Id,Name,Logo_URL__c")
 	if err != nil {
 		return nil, err

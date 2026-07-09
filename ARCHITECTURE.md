@@ -658,10 +658,18 @@ The cache stores one entry per v2 UID. Each entry is a JSON envelope:
 
 | Bucket | Key |
 |--------|-----|
-| `member-service-cache` | `b2b_org.{uid}` |
+| `member-service-cache` | `b2b_org.{uid}` (full B2BOrg profile) |
+| `member-service-cache` | `b2b_org_parent.{uid}` (bare-minimum parent-detail lookup) |
+| `member-service-cache` | `account.{uid}` (partial `FetchAccount` view) |
 | `member-service-cache` | `project_membership.{uid}` |
 | `member-service-cache` | `key_contact.{uid}` |
 | `member-service-cache` | `membership_tier.{uid}` |
+
+The cache prefix is part of the cache identity because sObject freshness is
+governed by HTTP conditional GET (which detects record changes, not field-set
+differences). Two lookups of the same Account requesting different field sets
+must use different prefixes so a narrow fetch cannot poison a full one via a
+`304 Not Modified` (LFXV2-2654).
 
 No lookup-index keys are stored. Collection access is entirely the Query Service's concern.
 

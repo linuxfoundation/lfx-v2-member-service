@@ -46,10 +46,24 @@ re-publishing.
 
 | Key pattern | Contents |
 | --- | --- |
-| `b2b_org.{uid}` | Salesforce Account sObject cache entry |
+| `b2b_org.{uid}` | Salesforce Account sObject cache entry (full B2BOrg profile) |
+| `b2b_org_parent.{uid}` | Salesforce Account sObject cache entry (bare-minimum `Id,Name,Logo_URL__c` parent-detail lookup) |
+| `account.{uid}` | Salesforce Account sObject cache entry (partial `accountFields` view via `FetchAccount`) |
 | `project_membership.{uid}` | Salesforce Asset sObject cache entry |
 | `key_contact.{uid}` | Salesforce Project_Role__c sObject cache entry |
 | `membership_tier.{uid}` | Salesforce Product2 sObject cache entry |
+
+The cache prefix is part of the cache identity. The sObject cache stores the raw
+Salesforce REST body and revalidates it with HTTP conditional GET (`ETag` /
+`If-Modified-Since`), which detects only whether the *record* changed — not
+whether the cached body contains the fields the current caller requested. Two
+lookups of the same Account that request different field sets must therefore use
+different prefixes; otherwise a narrow lookup can poison a later full lookup (the
+conditional GET returns `304 Not Modified` and the incomplete body is served).
+This is why the bare-minimum parent-detail fetch (`b2b_org_parent`) and the
+partial `FetchAccount` view (`account`) are kept in slots separate from the full
+`b2b_org` profile (see LFXV2-2654). `InvalidateB2BOrg` evicts both `b2b_org.{uid}`
+and `b2b_org_parent.{uid}` so a Salesforce change event keeps them coherent.
 
 ### `org-settings` bucket
 
