@@ -620,23 +620,27 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 
 	// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so the
 	// indexer doc carries the project_uid tag + parent_ref. On a transient
-	// resolver failure, skip the publish rather than overwriting an existing
-	// project_uid with an empty value — repaired by the next CDC event or
-	// /admin/reindex.
+	// resolver failure, skip the indexer/FGA publishes rather than overwriting
+	// an existing project_uid with an empty value — repaired by the next CDC
+	// event or /admin/reindex. The provisioning block below runs regardless so
+	// that a transient project-service outage cannot permanently miss the silent
+	// org-dashboard access grant (AddPrincipal is idempotent; /admin/reindex
+	// does not call it).
 	uid, ok := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID)
-	if !ok {
+	if ok {
+		kc.ProjectUID = uid
+		PublishKeyContactIndexer(ctx, o.publisher, kc, action)
+		PublishKeyContactFGA(ctx, o.publisher, kc)
+	} else {
 		slog.WarnContext(ctx, "cdc: skipping key_contact publish; project_uid unresolved",
 			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-		return
 	}
-	kc.ProjectUID = uid
-
-	PublishKeyContactIndexer(ctx, o.publisher, kc, action)
-	PublishKeyContactFGA(ctx, o.publisher, kc)
 
 	// Provision org-dashboard access silently for registered contacts.
 	// kc.Username is non-empty only when UsernameByEmail resolved a trusted
 	// LFID — unregistered contacts remain pending until they accept an explicit invite.
+	// Runs unconditionally (even when project_uid resolution failed above) so a
+	// transient project-service outage never blocks the access grant.
 	if kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
 		if _, provErr := o.orgSettings.AddPrincipal(ctx, B2BOrgSettingsAddPrincipal{
 			OrgUID:               kc.B2BOrgUID,

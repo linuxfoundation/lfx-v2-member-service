@@ -1459,6 +1459,39 @@ func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.
 	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
 }
 
+func TestCDCConsumer_ProjectRole_ResolverFailure_ProvisioningStillRuns(t *testing.T) {
+	// When project_uid resolution fails the indexer/FGA publishes are skipped,
+	// but the silent org-dashboard provisioning must still run so that a transient
+	// project-service outage cannot permanently miss the access grant. AddPrincipal
+	// is idempotent and /admin/reindex does not call it — CDC is the only path.
+	kc := &model.KeyContact{
+		UID: sfid("kc-prov"), MembershipUID: "pm-1", B2BOrgUID: "001000000000001AAA",
+		Email: "carol@example.com", Role: "Billing Contact",
+		ProjectSlug: "unknown-slug",
+	}
+	resolver := mock.NewMockProjectResolver() // empty → slug not found → resolver failure
+	spy := &spyOrgSettings{}
+
+	pub := &subjectCapturingPublisher{}
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCUserReader(&fakeUserReader{sub: "auth0|carol"}),
+		svc.WithCDCOrgSettings(spy),
+		svc.WithCDCProjectResolver(resolver),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	// Indexer/FGA publishes skipped (resolver failed).
+	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
+	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
+
+	// Provisioning block runs unconditionally — org-dashboard access must still be granted.
+	require.Len(t, spy.adds, 1, "AddPrincipal must be called even when project_uid resolution fails")
+	assert.True(t, spy.adds[0].SuppressNotification, "CDC provisioning must suppress notification")
+	assert.Equal(t, "001000000000001AAA", spy.adds[0].OrgUID)
+	assert.Equal(t, "carol@example.com", spy.adds[0].Email)
+}
+
 func TestCDCConsumer_Asset_Upsert_PreSetProjectUID_NotReResolved(t *testing.T) {
 	pm := &model.ProjectMembership{
 		UID: sfid("pm-preset"), B2BOrgUID: "org-preset",
