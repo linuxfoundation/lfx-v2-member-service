@@ -626,13 +626,12 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	// must proceed regardless so that a transient project-service outage cannot
 	// permanently miss the key-contact grant or dashboard access (AddPrincipal is
 	// idempotent; /admin/reindex does not call it).
-	uid, ok := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID)
-	if ok {
-		kc.ProjectUID = uid
-		PublishKeyContactIndexer(ctx, o.publisher, kc, action)
-	} else {
+	if uid, ok := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID); !ok {
 		slog.WarnContext(ctx, "cdc: skipping key_contact indexer publish; project_uid unresolved",
 			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+	} else {
+		kc.ProjectUID = uid
+		PublishKeyContactIndexer(ctx, o.publisher, kc, action)
 	}
 
 	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID;
