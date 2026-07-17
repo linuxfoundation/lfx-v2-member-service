@@ -519,8 +519,16 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	for _, pm := range memberships {
 		// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so
 		// the indexer doc carries the project_uid tag + parent_ref and the FGA
-		// message carries the project reference.
-		pm.ProjectUID = resolveProjectUID(ctx, o.resolver, pm.ProjectSlug, pm.ProjectUID)
+		// message carries the project reference. On a transient resolver failure,
+		// skip the publish rather than overwriting an existing project_uid with an
+		// empty value — repaired by the next CDC event or /admin/reindex.
+		uid, ok := resolveProjectUID(ctx, o.resolver, pm.ProjectSlug, pm.ProjectUID)
+		if !ok {
+			slog.WarnContext(ctx, "cdc: skipping project_membership publish; project_uid unresolved",
+				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+			continue
+		}
+		pm.ProjectUID = uid
 		PublishProjectMembershipIndexer(ctx, o.publisher, pm, action)
 		PublishProjectMembershipFGA(ctx, o.publisher, pm)
 	}
@@ -611,8 +619,17 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 
 	// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so the
-	// indexer doc carries the project_uid tag + parent_ref.
-	kc.ProjectUID = resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID)
+	// indexer doc carries the project_uid tag + parent_ref. On a transient
+	// resolver failure, skip the publish rather than overwriting an existing
+	// project_uid with an empty value — repaired by the next CDC event or
+	// /admin/reindex.
+	uid, ok := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID)
+	if !ok {
+		slog.WarnContext(ctx, "cdc: skipping key_contact publish; project_uid unresolved",
+			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+		return
+	}
+	kc.ProjectUID = uid
 
 	PublishKeyContactIndexer(ctx, o.publisher, kc, action)
 	PublishKeyContactFGA(ctx, o.publisher, kc)

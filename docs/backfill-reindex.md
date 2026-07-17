@@ -147,22 +147,22 @@ Each `Item` is fetched individually and republished with the same per-type publi
 
 `project_membership` and `key_contact` records carry a project **slug**, but the indexer's project-scoped tags/parent-refs key off the v2 project **UID**. The runner resolves it through a helper shared with the CDC consumer (`internal/service/project_uid.go`). The API read path (`salesforce.MemberReader`) resolves the same way via `resolver.UIDFromSlug` but does not go through this helper:
 
-```18:28:internal/service/project_uid.go
-func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) string {
+```24:34:internal/service/project_uid.go
+func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) (string, bool) {
 	if current != "" || slug == "" || resolver == nil {
-		return current
+		return current, true
 	}
 	uid, err := resolver.UIDFromSlug(ctx, slug)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to resolve project UID", "slug", slug, "error", err)
-		return ""
+		return "", false
 	}
-	return uid
+	return uid, true
 }
 ```
 
 - Applied to `project_membership` and `key_contact` in both `runType` and `runTargeted` before publishing.
-- Resolution failures are logged but non-fatal — the record still publishes, just without the `project_uid` tag/parent-ref.
+- On a **transient resolution failure** (`ok == false`) the runner **skips** the publish for that record (`publish_failed_for_backfill_repair=true`) rather than overwriting an existing `project_uid` with an empty value; re-run the backfill once project-service is reachable.
 - An already-populated `ProjectUID` is never re-resolved.
 
 See [`project_uid` Resolution Parity](./cdc-consumer.md#project_uid-resolution-parity) in the CDC doc for the same helper on the streaming path.
@@ -228,7 +228,7 @@ Avatar-backfill Job variables (read only when `RUN_MODE=avatar-backfill`):
 
 | Bucket | Use by the runner | Notes |
 |---|---|---|
-| `membership-cache` | Full-mode per-type lock (`backfill-lock/full/<type>`). | Held for the run; force-acquired if the embedded timestamp is older than 2h (`backfillLockStaleTTL`). |
+| `membership-cache` | (1) Full-mode per-type lock (`backfill-lock/full/<type>`). (2) Read/written by the injected `ProjectResolver` for `project-uid.<slug>` lookups while resolving `project_uid` before publishing `project_membership` / `key_contact`. | Lock held for the run; force-acquired if the embedded timestamp is older than 2h (`backfillLockStaleTTL`). Resolver entries use the standard 6 h stale / 23 h expire envelope. |
 | `org-settings` | `b2b_org_settings` reindex reads settings; avatar enrichment persists updated avatars back (`UpdateSettings`). | Authoritative (no soft-TTL). |
 
 ---

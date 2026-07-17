@@ -1358,15 +1358,6 @@ func (p *subjectCapturingPublisher) fgaMessages(t *testing.T) []fgatypes.Generic
 	return out
 }
 
-func hasProjectUIDTag(tags []string) bool {
-	for _, tg := range tags {
-		if strings.HasPrefix(tg, model.TagPrefixProjectUID) {
-			return true
-		}
-	}
-	return false
-}
-
 func TestCDCConsumer_Asset_Upsert_StampsResolvedProjectUID(t *testing.T) {
 	pm := &model.ProjectMembership{
 		UID: sfid("pm-res"), B2BOrgUID: "org-res",
@@ -1413,7 +1404,7 @@ func TestCDCConsumer_Asset_Upsert_StampsResolvedProjectUID(t *testing.T) {
 	assert.True(t, projectRef, "project_membership FGA must carry the resolved project reference")
 }
 
-func TestCDCConsumer_Asset_Upsert_ResolverFailure_StillPublishesWithoutProjectUID(t *testing.T) {
+func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
 	pm := &model.ProjectMembership{
 		UID: sfid("pm-nores"), B2BOrgUID: "org-nores", ProjectSlug: "unknown-slug",
 	}
@@ -1435,10 +1426,37 @@ func TestCDCConsumer_Asset_Upsert_ResolverFailure_StillPublishesWithoutProjectUI
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
 
-	assert.NotEmpty(t, pub.indexer, "indexer must still publish when resolution fails")
-	assert.NotEmpty(t, pub.access, "FGA must still publish when resolution fails")
-	assert.False(t, hasProjectUIDTag(pub.indexerTags(0)),
-		"no project_uid tag when resolution fails; got %v", pub.indexerTags(0))
+	// A transient resolver failure must skip the publish entirely rather than
+	// overwrite an existing project_uid with an empty value.
+	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
+	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
+}
+
+func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
+	kc := &model.KeyContact{
+		UID: sfid("kc-nores"), MembershipUID: "pm-1", B2BOrgUID: "001000000000001AAA",
+		ProjectSlug: "unknown-slug",
+	}
+	// Empty resolver → UIDFromSlug returns an error for the unseeded slug.
+	resolver := mock.NewMockProjectResolver()
+
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("kc-nores")}, ReplayID: []byte("pu5")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCProjectResolver(resolver),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
+	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
 }
 
 func TestCDCConsumer_Asset_Upsert_PreSetProjectUID_NotReResolved(t *testing.T) {

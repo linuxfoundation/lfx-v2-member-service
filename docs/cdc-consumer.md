@@ -178,25 +178,26 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 
 ## `project_uid` Resolution Parity
 
-Salesforce records carry a project **slug** and **SFID**, but the indexer's project-scoped search tags and parent references key off the v2 project **UID** (a UUID). The API read path and the `/admin/reindex` backfill resolve this UID from the slug; the CDC path does the same via a shared helper:
+Salesforce records carry a project **slug** and **SFID**, but the indexer's project-scoped search tags and parent references key off the v2 project **UID** (a UUID). The API read path (`salesforce.MemberReader`, via `resolver.UIDFromSlug`) and the `/admin/reindex` backfill resolve this UID from the slug; the CDC path uses a helper shared with the backfill runner:
 
-```18:28:internal/service/project_uid.go
-func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) string {
+```24:34:internal/service/project_uid.go
+func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) (string, bool) {
 	if current != "" || slug == "" || resolver == nil {
-		return current
+		return current, true
 	}
 	uid, err := resolver.UIDFromSlug(ctx, slug)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to resolve project UID", "slug", slug, "error", err)
-		return ""
+		return "", false
 	}
-	return uid
+	return uid, true
 }
 ```
 
 - Applied to `project_membership` (`handleAssetUpsertBatch`) and `key_contact` (`processKeyContact`) before publishing.
 - Injected via `WithCDCProjectResolver(ProjectResolverImpl(ctx))`.
-- Resolution failures are logged but non-fatal — the record still publishes, just without the `project_uid` tag/parent-ref (repairable via `/admin/reindex` once the project resolves).
+- On a **transient resolution failure** (`ok == false`) the consumer **skips** the publish for that record rather than publishing an empty `project_uid` — a full index update with an empty value would overwrite an existing `project_uid` tag/parent-ref and reconcile away the FGA `project` tuple. Skipped records (`publish_failed_for_backfill_repair=true`) are repaired by the next CDC event or `/admin/reindex`.
+- An already-populated `ProjectUID` is never re-resolved.
 - An already-populated `ProjectUID` is never re-resolved.
 
 This gives CDC-published `project_membership` and `key_contact` docs the same `project_uid` tag and `project:` reference as the API and backfill paths (LFXV2-2733).
@@ -269,7 +270,7 @@ The consumer is resilient by design — a single bad event never halts the strea
 The consumer runs as a **separate Deployment** (`charts/lfx-v2-member-service/templates/deployment-consumer.yaml`, gated by `consumer.enabled`):
 
 - **`replicas: 1` + `strategy: Recreate`** — guarantees at most one active consumer at any time. The replay cursor is a single unsharded value; a second consumer would double-process. No application-level lease is used.
-- **Liveness probe** hits `GET /livez` (always 200 while alive). A hung gRPC stream or an unexpectedly exited `Run` loop trips the probe and restarts the pod. `Run`'s goroutine `defer cancel()` ensures an unrecoverable stream failure unblocks the shutdown path so Kubernetes restarts the pod.
+- **Liveness probe** hits `GET /livez`, which **always returns 200 while the process is alive** (`cmd/member-api/main.go`) — it does not inspect stream state, so a hung gRPC stream does not trip it directly. Instead, `Run`'s goroutine `defer cancel()` makes an unrecoverable stream failure (or an exited `Run` loop) unblock the shutdown path and exit the process; Kubernetes then restarts the pod. `/livez` deliberately avoids returning 503 on context-cancel so the probe cannot restart the pod before the final replay cursor is committed.
 - **Graceful shutdown** — SIGTERM cancels the context; the consumer commits its final cursor within the graceful window before exiting.
 
 ---
@@ -294,15 +295,16 @@ Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `
 
 ## NATS Storage
 
-The CDC consumer touches three NATS KV buckets:
+The CDC consumer touches four NATS KV buckets:
 
 | Bucket | Use by the consumer | TTL |
 |---|---|---|
 | `pubsub-state` | Stores the replay cursor per channel (`pubsub-replay.<channel>`). Authoritative. | none |
 | `member-service-cache` | sObject cache — the consumer **evicts** entries here on each event (never writes). | no soft-TTL |
 | `membership-cache` | Read/written by the injected `ProjectResolver` while resolving `project_uid` for `Asset` / `Project_Role__c` upserts — it looks up and populates `project-uid.<slug>` via `Storage.GetProjectUID` / `PutProjectUID`. | 6 h stale / 23 h expire |
+| `org-settings` | Read/written for **registered** key contacts: `processKeyContact` calls `AddPrincipal` (with `SuppressNotification: true`) which reads and updates the authoritative org-settings KV. | none (authoritative) |
 
-> The batch record re-fetch path itself is uncached SOQL; the only `membership-cache` access is the `ProjectResolver`'s slug→UID cache.
+> The batch record re-fetch path itself is uncached SOQL; the `membership-cache` access is the `ProjectResolver`'s slug→UID cache, and `org-settings` is touched only when a key contact resolves to a known LFID.
 
 ---
 
