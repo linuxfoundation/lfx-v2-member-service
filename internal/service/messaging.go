@@ -178,11 +178,21 @@ func BuildB2BOrgFGAMessage(org *model.B2BOrg, globalOrgAdminTeamUID string, writ
 // ProjectMembership access-control update.
 func BuildProjectMembershipFGAMessage(pm *model.ProjectMembership) fgatypes.GenericFGAMessage {
 	refs := make(map[string][]string)
+	// key_contact tuples are owned by the key_contact write path, never by this
+	// message. When a parent ref is absent, exclude that relation too so the
+	// full-sync does not wipe an existing tuple — mirrors BuildB2BOrgFGAMessage's
+	// guard for "membership". This protects the project:{uid} auditor cascade
+	// against any caller that publishes a membership with an unresolved parent.
+	excludes := []string{"key_contact"}
 	if pm.B2BOrgUID != "" {
 		refs["b2b_org"] = []string{"b2b_org:" + pm.B2BOrgUID}
+	} else {
+		excludes = append(excludes, "b2b_org")
 	}
 	if pm.ProjectUID != "" {
 		refs["project"] = []string{"project:" + pm.ProjectUID}
+	} else {
+		excludes = append(excludes, "project")
 	}
 
 	return fgatypes.GenericFGAMessage{
@@ -191,7 +201,7 @@ func BuildProjectMembershipFGAMessage(pm *model.ProjectMembership) fgatypes.Gene
 		Data: fgatypes.GenericAccessData{
 			UID:              pm.UID,
 			References:       refs,
-			ExcludeRelations: []string{"key_contact"},
+			ExcludeRelations: excludes,
 		},
 	}
 }
