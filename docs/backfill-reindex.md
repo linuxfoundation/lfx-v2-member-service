@@ -131,8 +131,8 @@ Filtered and targeted modes take **no** lock.
 | Type | Per-record actions (when not dry-run) |
 |---|---|
 | `b2b_org` | Batched child-UID fetch for every org + its parent (`FetchChildUIDsByParentUIDs`, one query per page) → set `IsParent` → `PublishB2BOrgIndexer` (`updated`) + `PublishB2BOrgGlobalAdminFGA` + `PublishB2BOrgParentFGA` when `ParentUID` is set and children are cached. |
-| `project_membership` | resolve `project_uid` → `PublishProjectMembershipIndexer` (`updated`) + `PublishProjectMembershipFGA`. |
-| `key_contact` | resolve `project_uid` → `PublishKeyContactIndexer` (`updated`) + `PublishKeyContactFGA`. Logs a warning when `since` is set (the filter only checks `Project_Role__c.LastModifiedDate`; Contact/Asset field changes are not captured). |
+| `project_membership` | resolve `project_uid` → on success: `PublishProjectMembershipIndexer` (`updated`) + `PublishProjectMembershipFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only**. |
+| `key_contact` | resolve `project_uid` → on success: `PublishKeyContactIndexer` (`updated`) + `PublishKeyContactFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only** (when `Username` is set). Logs a warning when `since` is set (the filter only checks `Project_Role__c.LastModifiedDate`; Contact/Asset field changes are not captured). |
 | `b2b_org_settings` | List org UIDs (`ListSettingsOrgUIDs`) → `GetSettings` → (optionally enrich avatars) → `GetB2BOrg` → `PublishB2BOrgSettingsIndexer` (`updated`). Requires a `settingsReader`; avatar enrichment additionally requires a `userReader` + `settingsWriter`. Publishes the **indexer** doc only (no FGA message). |
 
 ### Targeted (`runTargeted`, per item)
@@ -147,14 +147,14 @@ Each `Item` is fetched individually and republished with the same per-type publi
 
 `project_membership` and `key_contact` records carry a project **slug**, but the indexer's project-scoped tags/parent-refs key off the v2 project **UID**. The runner resolves it through a helper shared with the CDC consumer (`internal/service/project_uid.go`). The API read path (`salesforce.MemberReader`) resolves the same way via `resolver.UIDFromSlug` but does not go through this helper:
 
-```24:34:internal/service/project_uid.go
+```25:35:internal/service/project_uid.go
 func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) (string, bool) {
 	if current != "" || slug == "" || resolver == nil {
 		return current, true
 	}
 	uid, err := resolver.UIDFromSlug(ctx, slug)
 	if err != nil {
-		slog.WarnContext(ctx, "failed to resolve project UID", "slug", slug, "error", err)
+		slog.ErrorContext(ctx, "failed to resolve project UID", "slug", slug, "error", err)
 		return "", false
 	}
 	return uid, true
@@ -162,7 +162,7 @@ func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug,
 ```
 
 - Applied to `project_membership` and `key_contact` in both `runType` and `runTargeted` before publishing.
-- On a **transient resolution failure** (`ok == false`) the runner **skips** the publish for that record (`publish_failed_for_backfill_repair=true`) rather than overwriting an existing `project_uid` with an empty value; re-run the backfill once project-service is reachable.
+- On a **transient resolution failure** (`ok == false`) the runner **skips only the indexer publish** (logged at **ERROR**, `publish_failed_for_backfill_repair=true`) and **still publishes OpenFGA**; re-run the backfill once project-service is reachable to repair the indexer doc.
 - An already-populated `ProjectUID` is never re-resolved.
 
 See [`project_uid` Resolution Parity](./cdc-consumer.md#project_uid-resolution-parity) in the CDC doc for the same helper on the streaming path.
@@ -197,6 +197,7 @@ The runner is resilient: a per-record fetch/publish failure is logged and the ru
 | Log key / line | Meaning | Recovery |
 |---|---|---|
 | `publish_failed_for_backfill_repair=true` | A fetch/persist/publish for one record failed; it may be missing/stale downstream. | Re-run the reindex for the affected type/record. |
+| `skipping … indexer publish; project_uid unresolved` | Resolver could not map slug→UID; indexer skipped, OpenFGA still published (ERROR). | Re-run once project-service is reachable to repair the indexer doc. |
 | `full reindex skipped — lock held` (`full_reindex_rejected_lock_held=true`) | Another pod holds the full-run lock for this type. | Wait for the running reindex, or retry later. |
 | `not_found=true` | A targeted/settings item did not resolve to a record. | Verify the UID; nothing published for it. |
 | `since filter on key_contact only checks Project_Role__c.LastModifiedDate` | The `since` window misses Contact/Asset-only field changes for key contacts. | Use a full `key_contact` reindex if joined-field changes must be captured. |

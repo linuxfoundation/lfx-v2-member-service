@@ -631,19 +631,19 @@ func TestBackfillRunner_ProjectMembership_FullMode_ResolverSuccess_StampsUID(t *
 		"indexer tags must carry the stamped project_uid; got %v", pub.indexerTags(0))
 }
 
-func TestBackfillRunner_ProjectMembership_FullMode_ResolverFailure_SkipsIndexerOnly(t *testing.T) {
+func TestBackfillRunner_ProjectMembership_FullMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
 	// A ProjectMembership with a slug that the resolver cannot map: the record
 	// must skip indexer publish so an existing project_uid tag is never overwritten.
 	pm := &model.ProjectMembership{UID: "pm-slug-2", ProjectSlug: "unknown-slug", B2BOrgUID: "org-2"}
-	resolver := mock.NewMockProjectResolver() // empty → lookup error
+	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
 	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
-	runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"project_membership"}})
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"project_membership"}}))
 
-	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the project_membership indexer publish")
-	require.NotEmpty(t, pub.accessMessages, "resolver failure must still publish project_membership FGA")
+	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "resolver failure must still publish OpenFGA")
 }
 
 func TestBackfillRunner_KeyContact_FullMode_ResolverSuccess_StampsUID(t *testing.T) {
@@ -661,53 +661,47 @@ func TestBackfillRunner_KeyContact_FullMode_ResolverSuccess_StampsUID(t *testing
 		"indexer tags must carry the stamped project_uid; got %v", pub.indexerTags(0))
 }
 
-func TestBackfillRunner_KeyContact_FullMode_ResolverFailure_SkipsIndexerOnly(t *testing.T) {
-	kc := &model.KeyContact{
-		UID: "kc-slug-2", ProjectSlug: "unknown-slug", MembershipUID: "pm-2",
-		B2BOrgUID: "org-2", Username: "auth0|kc-slug-2",
-	}
-	resolver := mock.NewMockProjectResolver() // empty → lookup error
+func TestBackfillRunner_KeyContact_FullMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-slug-2", ProjectSlug: "unknown-slug", MembershipUID: "pm-2", B2BOrgUID: "org-2", Username: "jdoe"}
+	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
 	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
-	runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"key_contact"}})
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"key_contact"}}))
 
-	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the key_contact indexer publish")
-	require.NotEmpty(t, pub.accessMessages, "resolver failure must still publish key_contact FGA")
+	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "resolver failure must still publish OpenFGA")
 }
 
-func TestBackfillRunner_ProjectMembership_TargetedMode_ResolverFailure_SkipsIndexerOnly(t *testing.T) {
+func TestBackfillRunner_ProjectMembership_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
 	pm := &model.ProjectMembership{UID: "pm-tgt-1", ProjectSlug: "unknown-slug", B2BOrgUID: "org-tgt-1"}
-	resolver := mock.NewMockProjectResolver() // empty → lookup error
+	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), &seededPMReaderForResolver{pm: pm}, nil, nil, pub, nil, "", resolver)
-	runner.Run(context.Background(), svc.BackfillRequest{
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r",
 		Items: []svc.ReindexItem{{Type: "project_membership", UID: pm.UID}},
-	})
+	}))
 
-	assert.Empty(t, pub.indexerMessages, "targeted resolver failure must skip the project_membership indexer publish")
-	require.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish project_membership FGA")
+	assert.Empty(t, pub.indexerMessages, "targeted resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish OpenFGA")
 }
 
-func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_SkipsIndexerOnly(t *testing.T) {
-	kc := &model.KeyContact{
-		UID: "kc-tgt-1", ProjectSlug: "unknown-slug", MembershipUID: "pm-1",
-		B2BOrgUID: "org-tgt-1", Username: "auth0|kc-tgt-1",
-	}
-	resolver := mock.NewMockProjectResolver() // empty → lookup error
+func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-tgt-1", ProjectSlug: "unknown-slug", MembershipUID: "pm-1", B2BOrgUID: "org-tgt-1", Username: "jdoe"}
+	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver)
-	runner.Run(context.Background(), svc.BackfillRequest{
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r",
 		Items: []svc.ReindexItem{{Type: "key_contact", UID: kc.UID}},
-	})
+	}))
 
-	assert.Empty(t, pub.indexerMessages, "targeted resolver failure must skip the key_contact indexer publish")
-	require.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish key_contact FGA")
+	assert.Empty(t, pub.indexerMessages, "targeted resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish OpenFGA")
 }
 
 // ── ValidateAndBuildRequest ──────────────────────────────────────────────────

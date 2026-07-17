@@ -1404,7 +1404,7 @@ func TestCDCConsumer_Asset_Upsert_StampsResolvedProjectUID(t *testing.T) {
 	assert.True(t, projectRef, "project_membership FGA must carry the resolved project reference")
 }
 
-func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsIndexerOnly(t *testing.T) {
+func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsIndexerPublishesFGAOnly(t *testing.T) {
 	pm := &model.ProjectMembership{
 		UID: sfid("pm-nores"), B2BOrgUID: "org-nores", ProjectSlug: "unknown-slug",
 	}
@@ -1426,25 +1426,28 @@ func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsIndexerOnly(t *testing.T)
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
 
-	// A transient resolver failure must skip the indexer publish rather than
-	// overwrite an existing project_uid with an empty value, but still publish
-	// FGA so non-project relations can converge.
-	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
-	require.NotEmpty(t, pub.access, "FGA publish must continue when project_uid resolution fails")
-	accessMsgs := pub.fgaMessages(t)
-	require.NotEmpty(t, accessMsgs)
-	data, ok := accessMsgs[0].Data.(fgatypes.GenericAccessData)
-	require.True(t, ok)
-	assert.Contains(t, data.ExcludeRelations, "project")
+	assert.Empty(t, pub.indexerMessages, "indexer publish must be skipped when project_uid resolution fails")
+	assert.NotEmpty(t, pub.access, "OpenFGA publish must still run when project_uid resolution fails")
+	var sawPM bool
+	for _, m := range pub.fgaMessages(t) {
+		if m.ObjectType != "project_membership" {
+			continue
+		}
+		sawPM = true
+		data, ok := m.Data.(fgatypes.GenericAccessData)
+		require.True(t, ok)
+		_, hasProjectRef := data.References["project"]
+		assert.False(t, hasProjectRef, "FGA must not carry a project ref when project_uid is unresolved")
+		assert.Contains(t, data.ExcludeRelations, "project")
+	}
+	assert.True(t, sawPM, "project_membership OpenFGA must publish on resolver failure")
 }
 
-func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
-	// Username is empty; FGA is a no-op because PublishKeyContactFGA guards on Username.
+func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsIndexerPublishesFGAOnly(t *testing.T) {
 	kc := &model.KeyContact{
 		UID: sfid("kc-nores"), MembershipUID: "pm-1", B2BOrgUID: "001000000000001AAA",
-		ProjectSlug: "unknown-slug",
+		ProjectSlug: "unknown-slug", Username: "jdoe",
 	}
-	// Empty resolver → UIDFromSlug returns an error for the unseeded slug.
 	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
@@ -1462,24 +1465,17 @@ func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
 
-	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
-	// FGA is empty because Username == "" (PublishKeyContactFGA guards on Username),
-	// not because the resolver failed — FGA proceeds regardless of ProjectUID resolution.
-	assert.Empty(t, pub.access, "FGA publish is a no-op when Username is empty")
+	assert.Empty(t, pub.indexerMessages, "indexer publish must be skipped when project_uid resolution fails")
+	assert.NotEmpty(t, pub.access, "key_contact OpenFGA member_put must still publish when project_uid resolution fails")
 }
 
-func TestCDCConsumer_ProjectRole_ResolverFailure_FGAAndProvisioningContinue(t *testing.T) {
-	// When project_uid resolution fails the indexer publish is skipped, but FGA
-	// member_put and org-dashboard provisioning must still run — they do not depend
-	// on ProjectUID. A transient project-service outage must not permanently miss
-	// the key-contact FGA grant or dashboard access (AddPrincipal is idempotent;
-	// /admin/reindex does not call it).
+func TestCDCConsumer_ProjectRole_ResolverFailure_OpenFGAOnlyNoProvisioning(t *testing.T) {
 	kc := &model.KeyContact{
 		UID: sfid("kc-prov"), MembershipUID: "pm-1", B2BOrgUID: "001000000000001AAA",
 		Email: "carol@example.com", Role: "Billing Contact",
 		ProjectSlug: "unknown-slug",
 	}
-	resolver := mock.NewMockProjectResolver() // empty → slug not found → resolver failure
+	resolver := mock.NewMockProjectResolver()
 	spy := &spyOrgSettings{}
 
 	pub := &subjectCapturingPublisher{}
@@ -1491,15 +1487,9 @@ func TestCDCConsumer_ProjectRole_ResolverFailure_FGAAndProvisioningContinue(t *t
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
 
-	// Indexer publish skipped (resolver failed).
-	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
-	// FGA member_put must still be published — it only needs Username + MembershipUID.
-	assert.NotEmpty(t, pub.access, "FGA member_put must be published even when project_uid resolution fails")
-	// Provisioning block runs unconditionally — org-dashboard access must still be granted.
-	require.Len(t, spy.adds, 1, "AddPrincipal must be called even when project_uid resolution fails")
-	assert.True(t, spy.adds[0].SuppressNotification, "CDC provisioning must suppress notification")
-	assert.Equal(t, "001000000000001AAA", spy.adds[0].OrgUID)
-	assert.Equal(t, "carol@example.com", spy.adds[0].Email)
+	assert.Empty(t, pub.indexerMessages, "indexer publish must be skipped when project_uid resolution fails")
+	assert.NotEmpty(t, pub.access, "OpenFGA member_put must publish when project_uid resolution fails")
+	assert.Empty(t, spy.adds, "org-dashboard provisioning must not run when project_uid is unresolved")
 }
 
 func TestCDCConsumer_Asset_Upsert_PreSetProjectUID_NotReResolved(t *testing.T) {

@@ -269,16 +269,15 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 				total++
 				if !req.DryRun {
 					uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
-					if !ok {
-						log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved",
+					if ok {
+						pm.ProjectUID = uid
+						PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
+						PublishProjectMembershipFGA(ctx, r.publisher, pm)
+					} else {
+						log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
 						PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
-						published++
-						continue
 					}
-					pm.ProjectUID = uid
-					PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
-					PublishProjectMembershipFGA(ctx, r.publisher, pm)
 					published++
 				}
 			}
@@ -295,15 +294,13 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 				total++
 				if !req.DryRun {
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
-					if !ok {
-						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved",
+					if ok {
+						kc.ProjectUID = uid
+						PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+					} else {
+						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-						PublishKeyContactFGA(ctx, r.publisher, kc)
-						published++
-						continue
 					}
-					kc.ProjectUID = uid
-					PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
 					PublishKeyContactFGA(ctx, r.publisher, kc)
 					published++
 				}
@@ -545,16 +542,15 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 			}
 			if !req.DryRun {
 				uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
-				if !ok {
-					log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved",
+				if ok {
+					pm.ProjectUID = uid
+					PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
+					PublishProjectMembershipFGA(ctx, r.publisher, pm)
+				} else {
+					log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
 						"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
-					published++
-					continue
 				}
-				pm.ProjectUID = uid
-				PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
-				PublishProjectMembershipFGA(ctx, r.publisher, pm)
 				published++
 			}
 
@@ -572,15 +568,13 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 			}
 			if !req.DryRun {
 				uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
-				if !ok {
-					log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved",
+				if ok {
+					kc.ProjectUID = uid
+					PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+				} else {
+					log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 						"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-					PublishKeyContactFGA(ctx, r.publisher, kc)
-					published++
-					continue
 				}
-				kc.ProjectUID = uid
-				PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
 				PublishKeyContactFGA(ctx, r.publisher, kc)
 				published++
 			}

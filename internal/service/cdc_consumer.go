@@ -518,22 +518,20 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 
 	for _, pm := range memberships {
 		// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so
-		// the indexer doc carries the project_uid tag + parent_ref and the FGA
-		// message carries the project reference. On a transient resolver failure,
-		// skip only the indexer publish rather than overwriting an existing
-		// project_uid with an empty value; still publish FGA with missing refs
-		// excluded so other relations reconcile safely — repaired by the next CDC
-		// event or /admin/reindex.
+		// the indexer doc carries the project_uid tag + parent_ref. On a transient
+		// resolver failure, skip only the indexer publish and still emit OpenFGA so
+		// b2b_org / auditor tuples converge without overwriting project_uid in the
+		// index — repaired by the next CDC event or /admin/reindex.
 		uid, ok := resolveProjectUID(ctx, o.resolver, pm.ProjectSlug, pm.ProjectUID)
-		if !ok {
-			slog.ErrorContext(ctx, "cdc: skipping project_membership indexer publish; project_uid unresolved",
+		if ok {
+			pm.ProjectUID = uid
+			PublishProjectMembershipIndexer(ctx, o.publisher, pm, action)
+			PublishProjectMembershipFGA(ctx, o.publisher, pm)
+		} else {
+			slog.ErrorContext(ctx, "cdc: skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
 			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
-			continue
 		}
-		pm.ProjectUID = uid
-		PublishProjectMembershipIndexer(ctx, o.publisher, pm, action)
-		PublishProjectMembershipFGA(ctx, o.publisher, pm)
 	}
 
 	slog.InfoContext(ctx, "cdc: asset batch published",
@@ -623,31 +621,24 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 
 	// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so the
 	// indexer doc carries the project_uid tag + parent_ref. On a transient
-	// resolver failure, skip only the indexer publish rather than overwriting an
-	// existing project_uid with an empty value — repaired by the next CDC event
-	// or /admin/reindex. FGA and org provisioning do not depend on ProjectUID and
-	// must proceed regardless so that a transient project-service outage cannot
-	// permanently miss the key-contact grant or dashboard access (AddPrincipal is
-	// idempotent; /admin/reindex does not call it).
-	if uid, ok := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID); !ok {
-		slog.ErrorContext(ctx, "cdc: skipping key_contact indexer publish; project_uid unresolved",
-			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-	} else {
+	// resolver failure, skip only the indexer publish and still emit OpenFGA —
+	// repaired by the next CDC event or /admin/reindex.
+	uid, projectUIDResolved := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID)
+	if projectUIDResolved {
 		kc.ProjectUID = uid
 		PublishKeyContactIndexer(ctx, o.publisher, kc, action)
+	} else {
+		slog.ErrorContext(ctx, "cdc: skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
+			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 	}
 
-	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID;
-	// it runs even when project_uid resolution failed so the FGA key-contact grant
-	// is never permanently blocked by a transient project-service outage.
+	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
 	PublishKeyContactFGA(ctx, o.publisher, kc)
 
-	// Provision org-dashboard access silently for registered contacts.
-	// kc.Username is non-empty only when UsernameByEmail resolved a trusted
-	// LFID — unregistered contacts remain pending until they accept an explicit invite.
-	// Runs unconditionally (even when project_uid resolution failed above) so a
-	// transient project-service outage never blocks the access grant.
-	if kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
+	// Provision org-dashboard access silently for registered contacts when the
+	// indexer path ran (project_uid resolved). kc.Username is non-empty only when
+	// UsernameByEmail resolved a trusted LFID — unregistered contacts remain pending.
+	if projectUIDResolved && kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
 		if _, provErr := o.orgSettings.AddPrincipal(ctx, B2BOrgSettingsAddPrincipal{
 			OrgUID:               kc.B2BOrgUID,
 			Email:                kc.Email,
