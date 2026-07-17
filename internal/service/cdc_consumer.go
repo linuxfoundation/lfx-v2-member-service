@@ -520,12 +520,15 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so
 		// the indexer doc carries the project_uid tag + parent_ref and the FGA
 		// message carries the project reference. On a transient resolver failure,
-		// skip the publish rather than overwriting an existing project_uid with an
-		// empty value — repaired by the next CDC event or /admin/reindex.
+		// skip only the indexer publish rather than overwriting an existing
+		// project_uid with an empty value; still publish FGA with missing refs
+		// excluded so other relations reconcile safely — repaired by the next CDC
+		// event or /admin/reindex.
 		uid, ok := resolveProjectUID(ctx, o.resolver, pm.ProjectSlug, pm.ProjectUID)
 		if !ok {
-			slog.WarnContext(ctx, "cdc: skipping project_membership publish; project_uid unresolved",
+			slog.ErrorContext(ctx, "cdc: skipping project_membership indexer publish; project_uid unresolved",
 				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
 			continue
 		}
 		pm.ProjectUID = uid
@@ -627,7 +630,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	// permanently miss the key-contact grant or dashboard access (AddPrincipal is
 	// idempotent; /admin/reindex does not call it).
 	if uid, ok := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID); !ok {
-		slog.WarnContext(ctx, "cdc: skipping key_contact indexer publish; project_uid unresolved",
+		slog.ErrorContext(ctx, "cdc: skipping key_contact indexer publish; project_uid unresolved",
 			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 	} else {
 		kc.ProjectUID = uid

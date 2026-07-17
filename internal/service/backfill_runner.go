@@ -270,8 +270,10 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 				if !req.DryRun {
 					uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
 					if !ok {
-						log.WarnContext(ctx, "skipping project_membership publish; project_uid unresolved",
+						log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved",
 							"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+						PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
+						published++
 						continue
 					}
 					pm.ProjectUID = uid
@@ -294,8 +296,10 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 				if !req.DryRun {
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					if !ok {
-						log.WarnContext(ctx, "skipping key_contact publish; project_uid unresolved",
+						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+						PublishKeyContactFGA(ctx, r.publisher, kc)
+						published++
 						continue
 					}
 					kc.ProjectUID = uid
@@ -542,8 +546,10 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 			if !req.DryRun {
 				uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
 				if !ok {
-					log.WarnContext(ctx, "skipping project_membership publish; project_uid unresolved",
+					log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved",
 						"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+					PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
+					published++
 					continue
 				}
 				pm.ProjectUID = uid
@@ -567,8 +573,10 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 			if !req.DryRun {
 				uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 				if !ok {
-					log.WarnContext(ctx, "skipping key_contact publish; project_uid unresolved",
+					log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved",
 						"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+					PublishKeyContactFGA(ctx, r.publisher, kc)
+					published++
 					continue
 				}
 				kc.ProjectUID = uid

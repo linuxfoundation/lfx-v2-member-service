@@ -387,8 +387,18 @@ func TestBuildProjectMembershipFGAMessage_MissingParents(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, data.References)
 	assert.Contains(t, data.ExcludeRelations, "key_contact")
-	// Absent parent refs must be excluded so full-sync does not wipe existing
-	// project:{uid} / b2b_org:{uid} tuples.
+	assert.NotContains(t, data.ExcludeRelations, "project")
+	assert.NotContains(t, data.ExcludeRelations, "b2b_org")
+}
+
+func TestBuildProjectMembershipFGAMessagePreserveMissingRefs_MissingParents(t *testing.T) {
+	pm := &model.ProjectMembership{UID: "pm-uid-sparse"}
+	msg := BuildProjectMembershipFGAMessagePreserveMissingRefs(pm)
+
+	data, ok := msg.Data.(fgatypes.GenericAccessData)
+	require.True(t, ok)
+	assert.Empty(t, data.References)
+	assert.Contains(t, data.ExcludeRelations, "key_contact")
 	assert.Contains(t, data.ExcludeRelations, "project")
 	assert.Contains(t, data.ExcludeRelations, "b2b_org")
 }

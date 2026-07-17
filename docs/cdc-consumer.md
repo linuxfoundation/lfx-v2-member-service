@@ -196,7 +196,9 @@ func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug,
 
 - Applied to `project_membership` (`handleAssetUpsertBatch`) and `key_contact` (`processKeyContact`) before publishing.
 - Injected via `WithCDCProjectResolver(ProjectResolverImpl(ctx))`.
-- On a **transient resolution failure** (`ok == false`) the consumer **skips** the publish for that record rather than publishing an empty `project_uid` — a full index update with an empty value would overwrite an existing `project_uid` tag/parent-ref and reconcile away the FGA `project` tuple. Skipped records (`publish_failed_for_backfill_repair=true`) are repaired by the next CDC event or `/admin/reindex`.
+- On a **transient resolution failure** (`ok == false`) the consumer **skips only the indexer publish** for that record and logs at error with `publish_failed_for_backfill_repair=true` (repair signal for `/admin/reindex`).
+  - `project_membership` (`Asset`): still publishes `update_access` with missing parent refs excluded, so unresolved parents are preserved while other relations (for example `b2b_org`) still reconcile.
+  - `key_contact` (`Project_Role__c`): still publishes key-contact FGA (`member_put` when `Username` exists) and still runs silent org-dashboard provisioning.
 - An already-populated `ProjectUID` is never re-resolved.
 
 This gives CDC-published `project_membership` and `key_contact` docs the same `project_uid` tag and `project:` reference as the API and backfill paths (LFXV2-2733).

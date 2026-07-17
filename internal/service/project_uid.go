@@ -15,12 +15,13 @@ import (
 // resolve (empty slug or nil resolver), or on a successful lookup. It returns
 // ("", false) only when the resolver returns an error — a transient failure.
 //
-// Publish-path callers (CDC consumer, backfill Runner) must skip publishing a
-// record when ok is false rather than publishing the empty UID: a full index
-// update with an empty project_uid would overwrite an existing project_uid tag /
-// parent_ref (and reconcile away the FGA project tuple), re-creating the
-// missing-project state whenever project-service is briefly unavailable. Skipped
-// records are repaired by the next CDC event or POST /admin/reindex.
+// Publish-path callers (CDC consumer, backfill Runner) must skip indexer
+// publishing when ok is false rather than publishing the empty UID: a full
+// index update with an empty project_uid would overwrite an existing
+// project_uid tag/parent_ref whenever project-service is briefly unavailable.
+// Callers may still publish FGA with missing refs preserved so non-project
+// relations can reconcile safely. Skipped index updates are repaired by the
+// next CDC event or POST /admin/reindex.
 func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) (string, bool) {
 	if current != "" || slug == "" || resolver == nil {
 		return current, true

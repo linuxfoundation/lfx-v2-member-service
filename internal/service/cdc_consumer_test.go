@@ -1404,7 +1404,7 @@ func TestCDCConsumer_Asset_Upsert_StampsResolvedProjectUID(t *testing.T) {
 	assert.True(t, projectRef, "project_membership FGA must carry the resolved project reference")
 }
 
-func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
+func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsIndexerOnly(t *testing.T) {
 	pm := &model.ProjectMembership{
 		UID: sfid("pm-nores"), B2BOrgUID: "org-nores", ProjectSlug: "unknown-slug",
 	}
@@ -1426,10 +1426,16 @@ func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
 
-	// A transient resolver failure must skip the publish entirely rather than
-	// overwrite an existing project_uid with an empty value.
+	// A transient resolver failure must skip the indexer publish rather than
+	// overwrite an existing project_uid with an empty value, but still publish
+	// FGA so non-project relations can converge.
 	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
-	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
+	require.NotEmpty(t, pub.access, "FGA publish must continue when project_uid resolution fails")
+	accessMsgs := pub.fgaMessages(t)
+	require.NotEmpty(t, accessMsgs)
+	data, ok := accessMsgs[0].Data.(fgatypes.GenericAccessData)
+	require.True(t, ok)
+	assert.Contains(t, data.ExcludeRelations, "project")
 }
 
 func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
