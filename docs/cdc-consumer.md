@@ -294,14 +294,15 @@ Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `
 
 ## NATS Storage
 
-The CDC consumer touches two NATS KV buckets:
+The CDC consumer touches three NATS KV buckets:
 
 | Bucket | Use by the consumer | TTL |
 |---|---|---|
 | `pubsub-state` | Stores the replay cursor per channel (`pubsub-replay.<channel>`). Authoritative. | none |
 | `member-service-cache` | sObject cache — the consumer **evicts** entries here on each event (never writes). | no soft-TTL |
+| `membership-cache` | Read/written by the injected `ProjectResolver` while resolving `project_uid` for `Asset` / `Project_Role__c` upserts — it looks up and populates `project-uid.<slug>` via `Storage.GetProjectUID` / `PutProjectUID`. | 6 h stale / 23 h expire |
 
-> The consumer does **not** read or write the `membership-cache` bucket; its re-fetch path is uncached SOQL.
+> The batch record re-fetch path itself is uncached SOQL; the only `membership-cache` access is the `ProjectResolver`'s slug→UID cache.
 
 ---
 

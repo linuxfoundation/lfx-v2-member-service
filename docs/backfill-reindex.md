@@ -145,7 +145,7 @@ Each `Item` is fetched individually and republished with the same per-type publi
 
 ## `project_uid` Resolution Parity
 
-`project_membership` and `key_contact` records carry a project **slug**, but the indexer's project-scoped tags/parent-refs key off the v2 project **UID**. The runner resolves it through the shared helper used by the CDC and API paths:
+`project_membership` and `key_contact` records carry a project **slug**, but the indexer's project-scoped tags/parent-refs key off the v2 project **UID**. The runner resolves it through a helper shared with the CDC consumer (`internal/service/project_uid.go`). The API read path (`salesforce.MemberReader`) resolves the same way via `resolver.UIDFromSlug` but does not go through this helper:
 
 ```18:28:internal/service/project_uid.go
 func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) string {
