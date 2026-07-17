@@ -1433,6 +1433,7 @@ func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
 }
 
 func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.T) {
+	// Username is empty; FGA is a no-op because PublishKeyContactFGA guards on Username.
 	kc := &model.KeyContact{
 		UID: sfid("kc-nores"), MembershipUID: "pm-1", B2BOrgUID: "001000000000001AAA",
 		ProjectSlug: "unknown-slug",
@@ -1456,14 +1457,17 @@ func TestCDCConsumer_ProjectRole_Upsert_ResolverFailure_SkipsPublish(t *testing.
 	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
 
 	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
-	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
+	// FGA is empty because Username == "" (PublishKeyContactFGA guards on Username),
+	// not because the resolver failed — FGA proceeds regardless of ProjectUID resolution.
+	assert.Empty(t, pub.access, "FGA publish is a no-op when Username is empty")
 }
 
-func TestCDCConsumer_ProjectRole_ResolverFailure_ProvisioningStillRuns(t *testing.T) {
-	// When project_uid resolution fails the indexer/FGA publishes are skipped,
-	// but the silent org-dashboard provisioning must still run so that a transient
-	// project-service outage cannot permanently miss the access grant. AddPrincipal
-	// is idempotent and /admin/reindex does not call it — CDC is the only path.
+func TestCDCConsumer_ProjectRole_ResolverFailure_FGAAndProvisioningContinue(t *testing.T) {
+	// When project_uid resolution fails the indexer publish is skipped, but FGA
+	// member_put and org-dashboard provisioning must still run — they do not depend
+	// on ProjectUID. A transient project-service outage must not permanently miss
+	// the key-contact FGA grant or dashboard access (AddPrincipal is idempotent;
+	// /admin/reindex does not call it).
 	kc := &model.KeyContact{
 		UID: sfid("kc-prov"), MembershipUID: "pm-1", B2BOrgUID: "001000000000001AAA",
 		Email: "carol@example.com", Role: "Billing Contact",
@@ -1481,10 +1485,10 @@ func TestCDCConsumer_ProjectRole_ResolverFailure_ProvisioningStillRuns(t *testin
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
 
-	// Indexer/FGA publishes skipped (resolver failed).
+	// Indexer publish skipped (resolver failed).
 	assert.Empty(t, pub.indexer, "indexer publish must be skipped when project_uid resolution fails")
-	assert.Empty(t, pub.access, "FGA publish must be skipped when project_uid resolution fails")
-
+	// FGA member_put must still be published — it only needs Username + MembershipUID.
+	assert.NotEmpty(t, pub.access, "FGA member_put must be published even when project_uid resolution fails")
 	// Provisioning block runs unconditionally — org-dashboard access must still be granted.
 	require.Len(t, spy.adds, 1, "AddPrincipal must be called even when project_uid resolution fails")
 	assert.True(t, spy.adds[0].SuppressNotification, "CDC provisioning must suppress notification")
