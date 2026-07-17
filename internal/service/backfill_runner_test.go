@@ -598,6 +598,112 @@ func TestBackfillRunner_B2BOrgs_IsParentAndFGATuplesFromBatch(t *testing.T) {
 		"FGA parent tuple Access calls must be emitted for child orgs")
 }
 
+// ── project_uid resolver (backfill runner) ────────────────────────────────────
+
+// seededPMReaderForResolver returns a fixed ProjectMembership for any UID.
+type seededPMReaderForResolver struct{ pm *model.ProjectMembership }
+
+func (r *seededPMReaderForResolver) AssembleProjectMembership(_ context.Context, _ string) (*model.ProjectMembership, time.Time, error) {
+	return r.pm, time.Now(), nil
+}
+
+// seededKCReaderForResolver returns a fixed KeyContact for any UID.
+type seededKCReaderForResolver struct{ kc *model.KeyContact }
+
+func (r *seededKCReaderForResolver) AssembleKeyContact(_ context.Context, _ string) (*model.KeyContact, time.Time, error) {
+	return r.kc, time.Now(), nil
+}
+
+func TestBackfillRunner_ProjectMembership_FullMode_ResolverSuccess_StampsUID(t *testing.T) {
+	// A ProjectMembership with a slug but no UID: the resolver stamps the UID and
+	// the indexer message must carry the project_uid tag.
+	pm := &model.ProjectMembership{UID: "pm-slug-1", ProjectSlug: "my-project", B2BOrgUID: "org-1"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid-pm", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"project_membership"}})
+
+	require.NotEmpty(t, pub.indexerMessages, "resolver success must publish the project_membership")
+	assert.Contains(t, pub.indexerTags(0), "project_uid:resolved-uid-pm",
+		"indexer tags must carry the stamped project_uid; got %v", pub.indexerTags(0))
+}
+
+func TestBackfillRunner_ProjectMembership_FullMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
+	// A ProjectMembership with a slug that the resolver cannot map: the record
+	// must skip indexer publish so an existing project_uid tag is never overwritten.
+	pm := &model.ProjectMembership{UID: "pm-slug-2", ProjectSlug: "unknown-slug", B2BOrgUID: "org-2"}
+	resolver := mock.NewMockProjectResolver()
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"project_membership"}}))
+
+	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "resolver failure must still publish OpenFGA")
+}
+
+func TestBackfillRunner_KeyContact_FullMode_ResolverSuccess_StampsUID(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-slug-1", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid-kc", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"key_contact"}})
+
+	require.NotEmpty(t, pub.indexerMessages, "resolver success must publish the key_contact")
+	assert.Contains(t, pub.indexerTags(0), "project_uid:resolved-uid-kc",
+		"indexer tags must carry the stamped project_uid; got %v", pub.indexerTags(0))
+}
+
+func TestBackfillRunner_KeyContact_FullMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-slug-2", ProjectSlug: "unknown-slug", MembershipUID: "pm-2", B2BOrgUID: "org-2", Username: "jdoe"}
+	resolver := mock.NewMockProjectResolver()
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"key_contact"}}))
+
+	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "resolver failure must still publish OpenFGA")
+}
+
+func TestBackfillRunner_ProjectMembership_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
+	pm := &model.ProjectMembership{UID: "pm-tgt-1", ProjectSlug: "unknown-slug", B2BOrgUID: "org-tgt-1"}
+	resolver := mock.NewMockProjectResolver()
+
+	pub := &subjectCapturingPublisher{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), &seededPMReaderForResolver{pm: pm}, nil, nil, pub, nil, "", resolver)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
+		RunID: "r",
+		Items: []svc.ReindexItem{{Type: "project_membership", UID: pm.UID}},
+	}))
+
+	assert.Empty(t, pub.indexerMessages, "targeted resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish OpenFGA")
+}
+
+func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-tgt-1", ProjectSlug: "unknown-slug", MembershipUID: "pm-1", B2BOrgUID: "org-tgt-1", Username: "jdoe"}
+	resolver := mock.NewMockProjectResolver()
+
+	pub := &subjectCapturingPublisher{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
+		RunID: "r",
+		Items: []svc.ReindexItem{{Type: "key_contact", UID: kc.UID}},
+	}))
+
+	assert.Empty(t, pub.indexerMessages, "targeted resolver failure must skip the indexer publish")
+	assert.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish OpenFGA")
+}
+
 // ── ValidateAndBuildRequest ──────────────────────────────────────────────────
 
 func TestValidateAndBuildRequest_Since_ZonelessTimestamp_ReturnsValidationError(t *testing.T) {

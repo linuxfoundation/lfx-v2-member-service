@@ -300,7 +300,7 @@ func (o *orgSettingsWriterOrchestrator) AddPrincipal(ctx context.Context, in B2B
 		// Resend-in-place: the only live match is a pending entry for the same role.
 		// Instead of Conflict, re-send the invite and refresh the existing entry.
 		if existing != nil {
-			if resent, ok := o.tryResendInPlace(ctx, in.OrgUID, in.InvitedAs, email, matches, updated, now); ok {
+			if resent, ok := o.tryResendInPlace(ctx, in.OrgUID, in.InvitedAs, email, matches, updated, now, in.SuppressNotification); ok {
 				// No bounds check needed: resend updates an existing entry in-place and never appends.
 				return o.persistAndPublish(ctx, in.OrgUID, existing, resent, revision, now,
 					in.InvitedAs == model.B2BOrgRoleWriter, in.InvitedAs == model.B2BOrgRoleAuditor)
@@ -737,16 +737,23 @@ func fgaUsernames(input []model.B2BOrgUser, active []string) []string {
 }
 
 // tryResendInPlace checks whether the only live match is a pending entry for the
-// same role. If so it re-sends the invite and updates that entry in-place (refreshing
-// InvitedAt, UpdatedAt, InviteUUID) without changing any other field. Returns (updated,
-// true) on the resend path; (nil, false) otherwise so the caller falls through to the
-// normal conflict / cleanup path.
+// same role. If so it updates that entry in-place (refreshing InvitedAt, UpdatedAt)
+// without changing any other field, and returns (updated, true). Returns (nil, false)
+// otherwise so the caller falls through to the normal conflict / cleanup path.
+//
+// Two modes:
+//   - Normal (suppressNotification == false): a fresh invite is sent and InviteUUID
+//     is refreshed.
+//   - Suppressed (suppressNotification == true): no email is sent and the existing
+//     InviteUUID is preserved — used by CDC passive sync / silent key-contact
+//     provisioning where emails must never be generated.
 func (o *orgSettingsWriterOrchestrator) tryResendInPlace(
 	ctx context.Context,
 	orgUID, invitedAs, email string,
 	matches []model.B2BOrgUser,
 	updated *model.B2BOrgSettings,
 	now time.Time,
+	suppressNotification bool,
 ) (*model.B2BOrgSettings, bool) {
 	// Collect live (non-revoked, non-expired) matches.
 	var live []model.B2BOrgUser
@@ -760,8 +767,14 @@ func (o *orgSettingsWriterOrchestrator) tryResendInPlace(
 	if len(live) != 1 || live[0].EffectiveStatus() != model.InviteStatusPending || live[0].InvitedAs != invitedAs {
 		return nil, false
 	}
-	// Re-send best-effort (errors are logged and ignored).
-	inviteUID := o.sendOrgInvite(ctx, orgUID, email, live[0].Name, invitedAs)
+	// Re-send best-effort (errors are logged and ignored) unless notification is
+	// suppressed (CDC passive sync / silent key-contact provisioning must never
+	// email). When suppressed, preserve the existing invite UID and only refresh
+	// the entry's timestamps in place.
+	inviteUID := live[0].InviteUUID
+	if !suppressNotification {
+		inviteUID = o.sendOrgInvite(ctx, orgUID, email, live[0].Name, invitedAs)
+	}
 	// Update in-place: only the list that holds the match needs refreshing.
 	if invitedAs == model.B2BOrgRoleWriter {
 		updated.Writers = refreshPendingEntry(updated.Writers, email, inviteUID, now)

@@ -52,20 +52,19 @@ const defaultQuotaSkipThreshold = 0.95
 //  4. Present records are published via indexer + FGA fan-out messages.
 //  5. On DELETE: publishes a delete indexer event; no re-fetch.
 type CDCConsumer struct {
-	subscriber              port.CDCSubscriber
-	memberReader            port.MemberReader
-	projectMembershipReader port.ProjectMembershipReader
-	b2bOrgReader            port.B2BOrgReader
-	membershipBatch         port.MembershipBatchReader
-	keyContactBatch         port.KeyContactBatchReader
-	accountBatch            port.AccountBatchReader
-	cacheInvalidator        port.CacheInvalidator
-	publisher               port.MemberPublisher
-	quotaGauge              port.SalesforceQuotaGauge
-	quotaSkipThreshold      float64
-	globalOrgAdminTeamUID   string
-	userReader              port.UserReader
-	orgSettings             OrgSettingsPrincipalWriter
+	subscriber            port.CDCSubscriber
+	resolver              port.ProjectResolver
+	b2bOrgReader          port.B2BOrgReader
+	membershipBatch       port.MembershipBatchReader
+	keyContactBatch       port.KeyContactBatchReader
+	accountBatch          port.AccountBatchReader
+	cacheInvalidator      port.CacheInvalidator
+	publisher             port.MemberPublisher
+	quotaGauge            port.SalesforceQuotaGauge
+	quotaSkipThreshold    float64
+	globalOrgAdminTeamUID string
+	userReader            port.UserReader
+	orgSettings           OrgSettingsPrincipalWriter
 }
 
 // CDCConsumerOption configures a CDCConsumer.
@@ -75,12 +74,12 @@ func WithCDCSubscriber(s port.CDCSubscriber) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.subscriber = s }
 }
 
-func WithCDCMemberReader(r port.MemberReader) CDCConsumerOption {
-	return func(o *CDCConsumer) { o.memberReader = r }
-}
-
-func WithCDCProjectMembershipReader(r port.ProjectMembershipReader) CDCConsumerOption {
-	return func(o *CDCConsumer) { o.projectMembershipReader = r }
+// WithCDCProjectResolver injects the resolver used to populate ProjectUID from a
+// record's project slug before publishing, giving CDC re-publishes parity with
+// the backfill and HTTP read paths. When nil (e.g. mock mode), ProjectUID is
+// left unchanged.
+func WithCDCProjectResolver(r port.ProjectResolver) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.resolver = r }
 }
 
 func WithCDCB2BOrgReader(r port.B2BOrgReader) CDCConsumerOption {
@@ -379,9 +378,18 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountDelete)
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
-	uids := make([]string, len(orgs))
-	for i, org := range orgs {
-		uids[i] = org.UID
+	// Include each org's ParentUID so we also have the parent's full child list for the
+	// hierarchy tuple emitted below.
+	uidSet := make(map[string]struct{}, len(orgs))
+	for _, org := range orgs {
+		uidSet[org.UID] = struct{}{}
+		if org.ParentUID != "" {
+			uidSet[org.ParentUID] = struct{}{}
+		}
+	}
+	uids := make([]string, 0, len(uidSet))
+	for uid := range uidSet {
+		uids = append(uids, uid)
 	}
 	childMap, childMapErr := o.b2bOrgReader.FetchChildUIDsByParentUIDs(ctx, uids)
 	if childMapErr != nil {
@@ -398,6 +406,15 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	// CDC always passes globalOrgAdminTeamUID (not create-only like the writer).
 	for _, org := range orgs {
 		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID)
+		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
+		// CDC-created child org gets its parent + child-list tuples even when no
+		// reparent was detected. publishB2BOrgUpsertEvents only emits reparenting
+		// messages on a parent *change* (nil on a cold-cache create); this closes
+		// that gap. Both are idempotent update_access upserts, so a genuine
+		// reparent double-emitting the new parent tuple is safe.
+		if org.ParentUID != "" {
+			PublishB2BOrgParentFGA(ctx, o.publisher, org, childMap[org.ParentUID])
+		}
 	}
 
 	slog.InfoContext(ctx, "cdc: account batch published",
@@ -500,8 +517,21 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	}
 
 	for _, pm := range memberships {
-		PublishProjectMembershipIndexer(ctx, o.publisher, pm, action)
-		PublishProjectMembershipFGA(ctx, o.publisher, pm)
+		// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so
+		// the indexer doc carries the project_uid tag + parent_ref. On a transient
+		// resolver failure, skip only the indexer publish and still emit OpenFGA so
+		// b2b_org / auditor tuples converge without overwriting project_uid in the
+		// index — repaired by the next CDC event or /admin/reindex.
+		uid, ok := resolveProjectUID(ctx, o.resolver, pm.ProjectSlug, pm.ProjectUID)
+		if ok {
+			pm.ProjectUID = uid
+			PublishProjectMembershipIndexer(ctx, o.publisher, pm, action)
+			PublishProjectMembershipFGA(ctx, o.publisher, pm)
+		} else {
+			slog.ErrorContext(ctx, "cdc: skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
+				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
+		}
 	}
 
 	slog.InfoContext(ctx, "cdc: asset batch published",
@@ -589,13 +619,26 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 		}
 	}
 
-	PublishKeyContactIndexer(ctx, o.publisher, kc, action)
+	// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so the
+	// indexer doc carries the project_uid tag + parent_ref. On a transient
+	// resolver failure, skip only the indexer publish and still emit OpenFGA —
+	// repaired by the next CDC event or /admin/reindex.
+	uid, projectUIDResolved := resolveProjectUID(ctx, o.resolver, kc.ProjectSlug, kc.ProjectUID)
+	if projectUIDResolved {
+		kc.ProjectUID = uid
+		PublishKeyContactIndexer(ctx, o.publisher, kc, action)
+	} else {
+		slog.ErrorContext(ctx, "cdc: skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
+			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+	}
+
+	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
 	PublishKeyContactFGA(ctx, o.publisher, kc)
 
-	// Provision org-dashboard access silently for registered contacts.
-	// kc.Username is non-empty only when UsernameByEmail resolved a trusted
-	// LFID — unregistered contacts remain pending until they accept an explicit invite.
-	if kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
+	// Provision org-dashboard access silently for registered contacts when the
+	// indexer path ran (project_uid resolved). kc.Username is non-empty only when
+	// UsernameByEmail resolved a trusted LFID — unregistered contacts remain pending.
+	if projectUIDResolved && kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
 		if _, provErr := o.orgSettings.AddPrincipal(ctx, B2BOrgSettingsAddPrincipal{
 			OrgUID:               kc.B2BOrgUID,
 			Email:                kc.Email,

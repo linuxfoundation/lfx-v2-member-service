@@ -268,9 +268,16 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, pm := range pms {
 				total++
 				if !req.DryRun {
-					pm.ProjectUID = r.resolveProjectUID(ctx, pm.ProjectSlug, pm.ProjectUID)
-					PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
-					PublishProjectMembershipFGA(ctx, r.publisher, pm)
+					uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
+					if ok {
+						pm.ProjectUID = uid
+						PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
+						PublishProjectMembershipFGA(ctx, r.publisher, pm)
+					} else {
+						log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
+							"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+						PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
+					}
 					published++
 				}
 			}
@@ -286,8 +293,14 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
-					kc.ProjectUID = r.resolveProjectUID(ctx, kc.ProjectSlug, kc.ProjectUID)
-					PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
+					if ok {
+						kc.ProjectUID = uid
+						PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+					} else {
+						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
+							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+					}
 					PublishKeyContactFGA(ctx, r.publisher, kc)
 					published++
 				}
@@ -378,21 +391,6 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 	default:
 		return fmt.Errorf("unhandled backfill type: %q", sfType)
 	}
-}
-
-// resolveProjectUID resolves the project UID from its slug via the resolver,
-// logging a warning on failure. Returns the resolved UID, or current if it is
-// already set, the slug is empty, or the resolver is nil.
-func (r *Runner) resolveProjectUID(ctx context.Context, slug, current string) string {
-	if current != "" || slug == "" || r.resolver == nil {
-		return current
-	}
-	uid, err := r.resolver.UIDFromSlug(ctx, slug)
-	if err != nil {
-		slog.WarnContext(ctx, "backfill: failed to resolve project UID", "slug", slug, "error", err)
-		return ""
-	}
-	return uid
 }
 
 // enrichSettingsAvatars refreshes each accepted writer/auditor avatar in `settings` (in place) from
@@ -543,9 +541,16 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 				continue
 			}
 			if !req.DryRun {
-				pm.ProjectUID = r.resolveProjectUID(ctx, pm.ProjectSlug, pm.ProjectUID)
-				PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
-				PublishProjectMembershipFGA(ctx, r.publisher, pm)
+				uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
+				if ok {
+					pm.ProjectUID = uid
+					PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
+					PublishProjectMembershipFGA(ctx, r.publisher, pm)
+				} else {
+					log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
+						"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+					PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
+				}
 				published++
 			}
 
@@ -562,8 +567,14 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 				continue
 			}
 			if !req.DryRun {
-				kc.ProjectUID = r.resolveProjectUID(ctx, kc.ProjectSlug, kc.ProjectUID)
-				PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+				uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
+				if ok {
+					kc.ProjectUID = uid
+					PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+				} else {
+					log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
+						"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+				}
 				PublishKeyContactFGA(ctx, r.publisher, kc)
 				published++
 			}

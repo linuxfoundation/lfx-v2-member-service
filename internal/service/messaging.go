@@ -174,15 +174,20 @@ func BuildB2BOrgFGAMessage(org *model.B2BOrg, globalOrgAdminTeamUID string, writ
 	}
 }
 
-// BuildProjectMembershipFGAMessage constructs a GenericFGAMessage for a
+// buildProjectMembershipFGAMessage constructs a GenericFGAMessage for a
 // ProjectMembership access-control update.
-func BuildProjectMembershipFGAMessage(pm *model.ProjectMembership) fgatypes.GenericFGAMessage {
+func buildProjectMembershipFGAMessage(pm *model.ProjectMembership, preserveMissingRefs bool) fgatypes.GenericFGAMessage {
 	refs := make(map[string][]string)
+	excludes := []string{"key_contact"}
 	if pm.B2BOrgUID != "" {
 		refs["b2b_org"] = []string{"b2b_org:" + pm.B2BOrgUID}
+	} else if preserveMissingRefs {
+		excludes = append(excludes, "b2b_org")
 	}
 	if pm.ProjectUID != "" {
 		refs["project"] = []string{"project:" + pm.ProjectUID}
+	} else if preserveMissingRefs {
+		excludes = append(excludes, "project")
 	}
 
 	return fgatypes.GenericFGAMessage{
@@ -191,9 +196,23 @@ func BuildProjectMembershipFGAMessage(pm *model.ProjectMembership) fgatypes.Gene
 		Data: fgatypes.GenericAccessData{
 			UID:              pm.UID,
 			References:       refs,
-			ExcludeRelations: []string{"key_contact"},
+			ExcludeRelations: excludes,
 		},
 	}
+}
+
+// BuildProjectMembershipFGAMessage constructs the authoritative project_membership
+// full-sync message for update_access.
+func BuildProjectMembershipFGAMessage(pm *model.ProjectMembership) fgatypes.GenericFGAMessage {
+	return buildProjectMembershipFGAMessage(pm, false)
+}
+
+// BuildProjectMembershipFGAMessagePreserveMissingRefs constructs an
+// update_access message that preserves missing parent refs instead of clearing
+// them. Used when ProjectUID resolution failed transiently and callers still
+// need to reconcile other relations without wiping existing tuples.
+func BuildProjectMembershipFGAMessagePreserveMissingRefs(pm *model.ProjectMembership) fgatypes.GenericFGAMessage {
+	return buildProjectMembershipFGAMessage(pm, true)
 }
 
 // BuildProjectMembershipIndexingConfig constructs an IndexingConfig for a
@@ -586,6 +605,22 @@ func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishProjectMembershipFGA(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership) {
 	msg := BuildProjectMembershipFGAMessage(pm)
+	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg, false); pubErr != nil {
+		slog.WarnContext(ctx, "project membership fga publish failed",
+			"uid", pm.UID,
+			"error", pubErr,
+			"publish_failed_for_backfill_repair", true)
+	} else {
+		slog.DebugContext(ctx, "project membership FGA published",
+			"uid", pm.UID, "subject", constants.FGASyncUpdateAccessSubject)
+	}
+}
+
+// PublishProjectMembershipFGAPreservingMissingRefs emits a project_membership
+// update_access message that excludes missing b2b_org/project relations so
+// transiently unresolved parents are preserved.
+func PublishProjectMembershipFGAPreservingMissingRefs(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership) {
+	msg := BuildProjectMembershipFGAMessagePreserveMissingRefs(pm)
 	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg, false); pubErr != nil {
 		slog.WarnContext(ctx, "project membership fga publish failed",
 			"uid", pm.UID,
