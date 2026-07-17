@@ -600,6 +600,44 @@ func TestOrgSettingsWriter_AddPrincipal_PendingResendInPlace(t *testing.T) {
 	require.Len(t, sender.calls, 1, "invite must be re-sent")
 }
 
+func TestOrgSettingsWriter_AddPrincipal_PendingResendInPlace_SuppressNotification(t *testing.T) {
+	// When SuppressNotification is set (CDC passive sync / silent key-contact
+	// provisioning), a resend-in-place must NOT send an invite but must still
+	// refresh the pending entry in place, preserving the existing InviteUUID.
+	now := time.Now().UTC().Add(-time.Hour)
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(testOrgUID, &model.B2BOrgSettings{
+		UID: testOrgUID,
+		Writers: []model.B2BOrgUser{{
+			Email:        "grace@example.com",
+			InvitedAs:    "writer",
+			InviteStatus: model.InviteStatusPending,
+			InviteUUID:   "old-uuid",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}},
+	}, 1)
+
+	sender := &stubInviteSender{result: port.InviteResult{InviteUID: "should-not-be-used"}}
+	userReader := userReaderFunc(func(_ context.Context, _ string) (string, error) { return "", nil })
+
+	writer := newOrgSettingsWriterWithNotifier(store, &seedB2BOrgReader{org: &model.B2BOrg{UID: testOrgUID}},
+		mock.NewMockMemberPublisher(), userReader, sender, nil)
+
+	result, err := writer.AddPrincipal(context.Background(), svc.B2BOrgSettingsAddPrincipal{
+		OrgUID: testOrgUID, Email: "grace@example.com", InvitedAs: "writer",
+		SuppressNotification: true,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, result.Writers, 1, "must not create a duplicate entry")
+	w := result.Writers[0]
+	assert.Empty(t, sender.calls, "no invite may be sent when notification is suppressed")
+	assert.Equal(t, "old-uuid", w.InviteUUID, "existing InviteUUID must be preserved when suppressed")
+	assert.Equal(t, model.InviteStatusPending, w.EffectiveStatus(), "entry stays pending")
+	assert.True(t, w.UpdatedAt.After(now), "entry must still be refreshed in place (UpdatedAt bumped)")
+}
+
 func TestOrgSettingsWriter_AddPrincipal_PendingDifferentRole_ReturnsConflict(t *testing.T) {
 	// An existing pending entry for the same email but a different role must return Conflict.
 	store := mock.NewMockB2BOrgSettings()

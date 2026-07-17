@@ -820,13 +820,10 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 
 	consumer := usecaseSvc.NewCDCConsumer(
 		usecaseSvc.WithCDCSubscriber(pubsubClient),
-		usecaseSvc.WithCDCMemberReader(MemberReaderImpl(ctx)),
-		// ProjectMembershipReaderImpl uses the sObject REST path (Asset + Account +
-		// Product2 + Project__c) so that, after cache invalidation, the re-fetch
-		// bypasses the membership-cache TTL and reads the changed record directly
-		// from Salesforce. Using MemberReaderImpl here would read through the
-		// stale membership-cache and publish pre-CDC data.
-		usecaseSvc.WithCDCProjectMembershipReader(ProjectMembershipReaderImpl(ctx)),
+		// ProjectResolver populates ProjectUID from the record's slug before
+		// publishing, giving CDC re-publishes parity with the backfill and HTTP
+		// read paths (indexer project_uid tag + parent_ref, FGA project ref).
+		usecaseSvc.WithCDCProjectResolver(ProjectResolverImpl(ctx)),
 		usecaseSvc.WithCDCB2BOrgReader(B2BOrgReaderImpl(ctx)),
 		// Batch SOQL readers — replace the per-record sObject fan-out with a
 		// single IN-clause query per CDC event (~4–6× fewer REST calls).

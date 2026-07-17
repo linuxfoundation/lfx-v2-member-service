@@ -268,7 +268,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, pm := range pms {
 				total++
 				if !req.DryRun {
-					pm.ProjectUID = r.resolveProjectUID(ctx, pm.ProjectSlug, pm.ProjectUID)
+					pm.ProjectUID = resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
 					PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
 					PublishProjectMembershipFGA(ctx, r.publisher, pm)
 					published++
@@ -286,7 +286,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
-					kc.ProjectUID = r.resolveProjectUID(ctx, kc.ProjectSlug, kc.ProjectUID)
+					kc.ProjectUID = resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
 					PublishKeyContactFGA(ctx, r.publisher, kc)
 					published++
@@ -378,21 +378,6 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 	default:
 		return fmt.Errorf("unhandled backfill type: %q", sfType)
 	}
-}
-
-// resolveProjectUID resolves the project UID from its slug via the resolver,
-// logging a warning on failure. Returns the resolved UID, or current if it is
-// already set, the slug is empty, or the resolver is nil.
-func (r *Runner) resolveProjectUID(ctx context.Context, slug, current string) string {
-	if current != "" || slug == "" || r.resolver == nil {
-		return current
-	}
-	uid, err := r.resolver.UIDFromSlug(ctx, slug)
-	if err != nil {
-		slog.WarnContext(ctx, "backfill: failed to resolve project UID", "slug", slug, "error", err)
-		return ""
-	}
-	return uid
 }
 
 // enrichSettingsAvatars refreshes each accepted writer/auditor avatar in `settings` (in place) from
@@ -543,7 +528,7 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 				continue
 			}
 			if !req.DryRun {
-				pm.ProjectUID = r.resolveProjectUID(ctx, pm.ProjectSlug, pm.ProjectUID)
+				pm.ProjectUID = resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
 				PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
 				PublishProjectMembershipFGA(ctx, r.publisher, pm)
 				published++
@@ -562,7 +547,7 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 				continue
 			}
 			if !req.DryRun {
-				kc.ProjectUID = r.resolveProjectUID(ctx, kc.ProjectSlug, kc.ProjectUID)
+				kc.ProjectUID = resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 				PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
 				PublishKeyContactFGA(ctx, r.publisher, kc)
 				published++
