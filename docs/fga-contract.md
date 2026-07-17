@@ -79,7 +79,7 @@ Sets the parent object references. `key_contact` is always excluded from this me
 | `b2b_org` | `"b2b_org:{B2BOrgUID}"` | When `B2BOrgUID` is non-empty |
 | `project` | `"project:{ProjectUID}"` | When `ProjectUID` is non-empty |
 
-> `ExcludeRelations: ["key_contact"]` — the fga-sync service will not touch the `key_contact` tuples for this membership.
+> **`ExcludeRelations`** — always contains `"key_contact"`. Additionally, when `B2BOrgUID` is empty `"b2b_org"` is appended, and when `ProjectUID` is empty `"project"` is appended. Absent-ref exclusions guard against a full-sync accidentally wiping an existing tuple when a parent reference is temporarily unresolved (e.g. on a transient project-service RPC failure during CDC or backfill publish). The fga-sync service will not touch any excluded relation for this object.
 
 ### 2. Key contact relation (`member_put` / `member_remove`)
 

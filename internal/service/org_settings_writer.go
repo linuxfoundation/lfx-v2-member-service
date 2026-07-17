@@ -737,10 +737,16 @@ func fgaUsernames(input []model.B2BOrgUser, active []string) []string {
 }
 
 // tryResendInPlace checks whether the only live match is a pending entry for the
-// same role. If so it re-sends the invite and updates that entry in-place (refreshing
-// InvitedAt, UpdatedAt, InviteUUID) without changing any other field. Returns (updated,
-// true) on the resend path; (nil, false) otherwise so the caller falls through to the
-// normal conflict / cleanup path.
+// same role. If so it updates that entry in-place (refreshing InvitedAt, UpdatedAt)
+// without changing any other field, and returns (updated, true). Returns (nil, false)
+// otherwise so the caller falls through to the normal conflict / cleanup path.
+//
+// Two modes:
+//   - Normal (suppressNotification == false): a fresh invite is sent and InviteUUID
+//     is refreshed.
+//   - Suppressed (suppressNotification == true): no email is sent and the existing
+//     InviteUUID is preserved — used by CDC passive sync / silent key-contact
+//     provisioning where emails must never be generated.
 func (o *orgSettingsWriterOrchestrator) tryResendInPlace(
 	ctx context.Context,
 	orgUID, invitedAs, email string,

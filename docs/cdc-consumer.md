@@ -198,7 +198,6 @@ func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug,
 - Injected via `WithCDCProjectResolver(ProjectResolverImpl(ctx))`.
 - On a **transient resolution failure** (`ok == false`) the consumer **skips** the publish for that record rather than publishing an empty `project_uid` — a full index update with an empty value would overwrite an existing `project_uid` tag/parent-ref and reconcile away the FGA `project` tuple. Skipped records (`publish_failed_for_backfill_repair=true`) are repaired by the next CDC event or `/admin/reindex`.
 - An already-populated `ProjectUID` is never re-resolved.
-- An already-populated `ProjectUID` is never re-resolved.
 
 This gives CDC-published `project_membership` and `key_contact` docs the same `project_uid` tag and `project:` reference as the API and backfill paths (LFXV2-2733).
 
