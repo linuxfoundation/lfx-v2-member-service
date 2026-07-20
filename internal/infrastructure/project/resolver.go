@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
@@ -20,13 +21,66 @@ import (
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
+type slugLookupRPC interface {
+	GetSlug(ctx context.Context, projectUID string) (string, error)
+	SlugToUID(ctx context.Context, slug string) (string, error)
+}
+
+type projectSlugRepo interface {
+	FetchSFIDBySlug(ctx context.Context, slug string) (string, error)
+}
+
+type projectEnricher interface {
+	fetchProjectByID(ctx context.Context, sfid string) (*projectMeta, error)
+	fetchProjectsByIDs(ctx context.Context, sfids []string) (map[string]projectMeta, error)
+}
+
+type projectMeta struct {
+	name string
+	slug *string
+}
+
+type projectMappingCache interface {
+	GetProjectSFID(ctx context.Context, projectUID string) (nats.CacheResult[string], error)
+	PutProjectSFID(ctx context.Context, projectUID, sfid string) error
+	GetProjectUID(ctx context.Context, slug string) (nats.CacheResult[string], error)
+	PutProjectUID(ctx context.Context, slug, uid string) error
+}
+
 // Resolver implements port.ProjectResolver by chaining NATS RPC calls to the
 // project-service with SOQL queries to Salesforce B2B, backed by a NATS KV
 // cache for both directions of the mapping.
 type Resolver struct {
-	rpc   *nats.ProjectRPC
-	repo  *salesforce.ProjectRepo
-	cache *nats.Storage
+	rpc      slugLookupRPC
+	slugRepo projectSlugRepo
+	enricher projectEnricher
+	cache    projectMappingCache
+}
+
+type sfProjectEnricher struct {
+	repo *salesforce.ProjectRepo
+}
+
+func (a sfProjectEnricher) fetchProjectByID(ctx context.Context, sfid string) (*projectMeta, error) {
+	proj, err := a.repo.FetchProjectByID(ctx, sfid)
+	if err != nil || proj == nil {
+		return nil, err
+	}
+	return &projectMeta{name: proj.Name, slug: proj.Slug}, nil
+}
+
+func (a sfProjectEnricher) fetchProjectsByIDs(ctx context.Context, sfids []string) (map[string]projectMeta, error) {
+	projects, err := a.repo.FetchProjectsByIDs(ctx, sfids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]projectMeta, len(projects))
+	for _, p := range projects {
+		if p != nil {
+			out[p.ID] = projectMeta{name: p.Name, slug: p.Slug}
+		}
+	}
+	return out, nil
 }
 
 // Ensure Resolver satisfies the port at compile time.
@@ -39,9 +93,10 @@ func NewProjectResolver(
 	cache *nats.Storage,
 ) *Resolver {
 	return &Resolver{
-		rpc:   rpc,
-		repo:  repo,
-		cache: cache,
+		rpc:      rpc,
+		slugRepo: repo,
+		enricher: sfProjectEnricher{repo: repo},
+		cache:    cache,
 	}
 }
 
@@ -82,8 +137,10 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 		return "", errs.NewNotFound("project not found", fmt.Errorf("uid: %s", projectUID))
 	}
 
-	// Step 3: also cache the slug → UID mapping as a side effect.
-	if putErr := r.cache.PutProjectUID(ctx, slug, projectUID); putErr != nil {
+	// Step 3: also cache the slug → UID mapping as a side effect. The cache key
+	// is normalized to match UIDFromSlug's lookup key; the unnormalized slug is
+	// still used below for the Salesforce Slug__c query.
+	if putErr := r.cache.PutProjectUID(ctx, normalizeProjectSlug(slug), projectUID); putErr != nil {
 		slog.WarnContext(ctx, "failed to cache project UID by slug",
 			"slug", slug,
 			"project_uid", projectUID,
@@ -92,7 +149,7 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 	}
 
 	// Step 4: query Salesforce for the Project__c.Id by Slug__c.
-	sfid, err := r.repo.FetchSFIDBySlug(ctx, slug)
+	sfid, err := r.slugRepo.FetchSFIDBySlug(ctx, slug)
 	if err != nil {
 		return "", fmt.Errorf("resolving Salesforce SFID for project slug %q: %w", slug, err)
 	}
@@ -115,6 +172,13 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 	return sfid, nil
 }
 
+// normalizeProjectSlug lowercases a slug for v2 project-service lookup. V2 API
+// slugs are lowercase-only; Salesforce Project__c.Slug__c may use mixed case
+// (e.g. ToIP vs toip).
+func normalizeProjectSlug(slug string) string {
+	return strings.ToLower(strings.TrimSpace(slug))
+}
+
 // UIDFromSlug resolves a project slug to a v2 project UID.
 //
 // Resolution chain:
@@ -124,6 +188,11 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 //
 // Returns a NotFound error if the slug is not known to the project-service.
 func (r *Resolver) UIDFromSlug(ctx context.Context, slug string) (string, error) {
+	slug = normalizeProjectSlug(slug)
+	if slug == "" {
+		return "", errs.NewNotFound("project not found", fmt.Errorf("empty slug"))
+	}
+
 	// Step 1: check KV cache.
 	result, err := r.cache.GetProjectUID(ctx, slug)
 	if err != nil {
@@ -201,21 +270,21 @@ func (r *Resolver) ResolveProject(ctx context.Context, idOrSlug string) (model.P
 		return model.ProjectInfo{}, errs.NewValidation(fmt.Sprintf("unknown project %q: not found in Salesforce", idOrSlug))
 	}
 
-	proj, err := r.repo.FetchProjectByID(ctx, sfid)
+	meta, err := r.enricher.fetchProjectByID(ctx, sfid)
 	if err != nil {
 		return model.ProjectInfo{}, fmt.Errorf("enriching project %q: %w", sfid, err)
 	}
-	if proj == nil {
+	if meta == nil {
 		return model.ProjectInfo{}, errs.NewValidation(fmt.Sprintf("unknown project %q: not found in Salesforce", idOrSlug))
 	}
 
 	info := model.ProjectInfo{
 		UID:  projectUID,
 		SFID: sfid,
-		Name: proj.Name,
+		Name: meta.name,
 	}
-	if proj.Slug != nil {
-		info.Slug = *proj.Slug
+	if meta.slug != nil {
+		info.Slug = *meta.slug
 	}
 	return info, nil
 }
@@ -282,7 +351,7 @@ func (r *Resolver) ResolveProjectsBatch(ctx context.Context, idsOrSlugs []string
 	}
 
 	// Step 2: batch SOQL fetch for name+slug.
-	projects, batchErr := r.repo.FetchProjectsByIDs(ctx, sfids)
+	byID, batchErr := r.enricher.fetchProjectsByIDs(ctx, sfids)
 	if batchErr != nil {
 		// Mark all not-yet-failed items as failed.
 		for i := range idsOrSlugs {
@@ -291,19 +360,6 @@ func (r *Resolver) ResolveProjectsBatch(ctx context.Context, idsOrSlugs []string
 			}
 		}
 		return infos, errsOut
-	}
-
-	// Build sfid → enrichment lookup using a local struct to avoid naming the
-	// unexported salesforce.soqlProject type while still accessing its fields.
-	type projEnrichment struct {
-		name string
-		slug *string
-	}
-	byID := make(map[string]projEnrichment, len(projects))
-	for _, p := range projects {
-		if p != nil {
-			byID[p.ID] = projEnrichment{name: p.Name, slug: p.Slug}
-		}
 	}
 
 	// Step 3: assemble per-item results.

@@ -5,6 +5,8 @@ package mock
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
@@ -198,14 +200,21 @@ func NewMockProjectResolver() *MockProjectResolver {
 	return r
 }
 
+// normalizeMockProjectSlug mirrors project.normalizeProjectSlug so mock lookup
+// keys stay aligned with production resolver behavior.
+func normalizeMockProjectSlug(slug string) string {
+	return strings.ToLower(strings.TrimSpace(slug))
+}
+
 // SeedProject adds or replaces a project in the lookup table, keyed by both
-// UID and slug so both lookup paths succeed.
+// UID and slug so both lookup paths succeed. The slug key is normalized to
+// match UIDFromSlug's and defaultResolve's lookup key.
 func (r *MockProjectResolver) SeedProject(p model.ProjectInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seed[p.UID] = p
 	if p.Slug != "" {
-		r.seed[p.Slug] = p
+		r.seed[normalizeMockProjectSlug(p.Slug)] = p
 	}
 }
 
@@ -213,6 +222,10 @@ func (r *MockProjectResolver) defaultResolve(_ context.Context, idOrSlug string)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if p, ok := r.seed[idOrSlug]; ok {
+		return p, nil
+	}
+	normalized := normalizeMockProjectSlug(idOrSlug)
+	if p, ok := r.seed[normalized]; ok {
 		return p, nil
 	}
 	return model.ProjectInfo{}, errors.NewValidation("unknown project: " + idOrSlug)
@@ -238,7 +251,13 @@ func (r *MockProjectResolver) SFIDFromUID(_ context.Context, uid string) (string
 }
 
 // UIDFromSlug implements port.ProjectResolver.
+// Slugs are lowercased before lookup to mirror project.Resolver (v2 slugs are
+// lowercase-only; Salesforce Slug__c may use mixed case e.g. ToIP).
 func (r *MockProjectResolver) UIDFromSlug(_ context.Context, slug string) (string, error) {
+	slug = normalizeMockProjectSlug(slug)
+	if slug == "" {
+		return "", errors.NewNotFound("project not found", fmt.Errorf("empty slug"))
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if p, ok := r.seed[slug]; ok {

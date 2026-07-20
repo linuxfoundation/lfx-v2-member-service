@@ -1404,6 +1404,34 @@ func TestCDCConsumer_Asset_Upsert_StampsResolvedProjectUID(t *testing.T) {
 	assert.True(t, projectRef, "project_membership FGA must carry the resolved project reference")
 }
 
+func TestCDCConsumer_Asset_Upsert_MixedCaseProjectSlug_StampsResolvedProjectUID(t *testing.T) {
+	pm := &model.ProjectMembership{
+		UID: sfid("pm-toip"), B2BOrgUID: "org-toip",
+		ProjectSlug: "ToIP", ProjectSFID: "a0p-toip",
+	}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "proj-uuid-toip", Slug: "toip"})
+
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-toip")}, ReplayID: []byte("toip1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCProjectResolver(resolver),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.indexerMessages)
+	assert.True(t, slices.Contains(pub.indexerTags(0), "project_uid:proj-uuid-toip"),
+		"mixed-case slug must resolve; got tags %v", pub.indexerTags(0))
+}
+
 func TestCDCConsumer_Asset_Upsert_ResolverFailure_SkipsIndexerPublishesFGAOnly(t *testing.T) {
 	pm := &model.ProjectMembership{
 		UID: sfid("pm-nores"), B2BOrgUID: "org-nores", ProjectSlug: "unknown-slug",
