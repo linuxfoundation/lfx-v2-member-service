@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
@@ -82,8 +83,10 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 		return "", errs.NewNotFound("project not found", fmt.Errorf("uid: %s", projectUID))
 	}
 
-	// Step 3: also cache the slug → UID mapping as a side effect.
-	if putErr := r.cache.PutProjectUID(ctx, slug, projectUID); putErr != nil {
+	// Step 3: also cache the slug → UID mapping as a side effect. The cache key
+	// is normalized to match UIDFromSlug's lookup key; the unnormalized slug is
+	// still used below for the Salesforce Slug__c query.
+	if putErr := r.cache.PutProjectUID(ctx, normalizeProjectSlug(slug), projectUID); putErr != nil {
 		slog.WarnContext(ctx, "failed to cache project UID by slug",
 			"slug", slug,
 			"project_uid", projectUID,
@@ -115,6 +118,13 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 	return sfid, nil
 }
 
+// normalizeProjectSlug lowercases a slug for v2 project-service lookup. V2 API
+// slugs are lowercase-only; Salesforce Project__c.Slug__c may use mixed case
+// (e.g. ToIP vs toip).
+func normalizeProjectSlug(slug string) string {
+	return strings.ToLower(strings.TrimSpace(slug))
+}
+
 // UIDFromSlug resolves a project slug to a v2 project UID.
 //
 // Resolution chain:
@@ -124,6 +134,11 @@ func (r *Resolver) SFIDFromUID(ctx context.Context, projectUID string) (string, 
 //
 // Returns a NotFound error if the slug is not known to the project-service.
 func (r *Resolver) UIDFromSlug(ctx context.Context, slug string) (string, error) {
+	slug = normalizeProjectSlug(slug)
+	if slug == "" {
+		return "", errs.NewNotFound("project not found", fmt.Errorf("empty slug"))
+	}
+
 	// Step 1: check KV cache.
 	result, err := r.cache.GetProjectUID(ctx, slug)
 	if err != nil {

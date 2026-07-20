@@ -631,6 +631,22 @@ func TestBackfillRunner_ProjectMembership_FullMode_ResolverSuccess_StampsUID(t *
 		"indexer tags must carry the stamped project_uid; got %v", pub.indexerTags(0))
 }
 
+func TestBackfillRunner_ProjectMembership_MixedCaseSlug_ResolverSuccess_StampsUID(t *testing.T) {
+	// Salesforce Slug__c may be mixed case (ToIP); v2 project-service stores lowercase (toip).
+	pm := &model.ProjectMembership{UID: "pm-toip-1", ProjectSlug: "ToIP", B2BOrgUID: "org-1"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid-toip", Slug: "toip"})
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Types: []string{"project_membership"}})
+
+	require.NotEmpty(t, pub.indexerMessages, "mixed-case slug must resolve and publish the project_membership")
+	assert.Contains(t, pub.indexerTags(0), "project_uid:resolved-uid-toip",
+		"indexer tags must carry the stamped project_uid; got %v", pub.indexerTags(0))
+}
+
 func TestBackfillRunner_ProjectMembership_FullMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
 	// A ProjectMembership with a slug that the resolver cannot map: the record
 	// must skip indexer publish so an existing project_uid tag is never overwritten.
