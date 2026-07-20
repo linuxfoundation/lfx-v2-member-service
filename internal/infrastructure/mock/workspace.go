@@ -200,6 +200,12 @@ func NewMockProjectResolver() *MockProjectResolver {
 	return r
 }
 
+// normalizeMockProjectSlug mirrors project.normalizeProjectSlug so mock lookup
+// keys stay aligned with production resolver behavior.
+func normalizeMockProjectSlug(slug string) string {
+	return strings.ToLower(strings.TrimSpace(slug))
+}
+
 // SeedProject adds or replaces a project in the lookup table, keyed by both
 // UID and slug so both lookup paths succeed. The slug key is normalized to
 // match UIDFromSlug's and defaultResolve's lookup key.
@@ -208,7 +214,7 @@ func (r *MockProjectResolver) SeedProject(p model.ProjectInfo) {
 	defer r.mu.Unlock()
 	r.seed[p.UID] = p
 	if p.Slug != "" {
-		r.seed[strings.ToLower(strings.TrimSpace(p.Slug))] = p
+		r.seed[normalizeMockProjectSlug(p.Slug)] = p
 	}
 }
 
@@ -218,7 +224,7 @@ func (r *MockProjectResolver) defaultResolve(_ context.Context, idOrSlug string)
 	if p, ok := r.seed[idOrSlug]; ok {
 		return p, nil
 	}
-	normalized := strings.ToLower(strings.TrimSpace(idOrSlug))
+	normalized := normalizeMockProjectSlug(idOrSlug)
 	if p, ok := r.seed[normalized]; ok {
 		return p, nil
 	}
@@ -248,7 +254,7 @@ func (r *MockProjectResolver) SFIDFromUID(_ context.Context, uid string) (string
 // Slugs are lowercased before lookup to mirror project.Resolver (v2 slugs are
 // lowercase-only; Salesforce Slug__c may use mixed case e.g. ToIP).
 func (r *MockProjectResolver) UIDFromSlug(_ context.Context, slug string) (string, error) {
-	slug = strings.ToLower(strings.TrimSpace(slug))
+	slug = normalizeMockProjectSlug(slug)
 	if slug == "" {
 		return "", errors.NewNotFound("project not found", fmt.Errorf("empty slug"))
 	}
