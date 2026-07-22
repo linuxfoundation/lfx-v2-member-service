@@ -69,7 +69,12 @@ func validateTarget(reindexType, sfid string) error {
 	if err := validateReindexType(reindexType); err != nil {
 		return err
 	}
-	if len(sfid) != 18 || !sfuuid.IsSFID(sfid) {
+	// IsSFID only validates the base-62 alphabet; it does not verify that an
+	// 18-char input's suffix is the correct case-encoding checksum for its
+	// first 15 characters. Recompute and compare to catch a mismatched or
+	// arbitrary suffix.
+	canonical, err := sfuuid.Normalize18(sfid)
+	if err != nil || canonical != sfid {
 		return errs.NewValidation(fmt.Sprintf("cdc-repair: sfid %q is not a canonical 18-character SFID", sfid))
 	}
 	return nil

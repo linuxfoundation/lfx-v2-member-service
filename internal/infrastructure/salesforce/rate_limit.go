@@ -73,13 +73,18 @@ var (
 // successful parse, whether triggered by normal traffic or an active refresh.
 func recordQuotaObservation(current, limit int64) {
 	quotaObsMu.Lock()
+	defer quotaObsMu.Unlock()
+
 	now := time.Now()
 	quotaObsCurrent = current
 	quotaObsLimit = limit
 	quotaObsAt = now
 	quotaObsGen++
-	quotaObsMu.Unlock()
 
+	// Mirror inside the same critical section: unlocking first lets two
+	// concurrent writers interleave and have an older sample's expvar writes
+	// land after a newer sample's, leaving the mirrors stale relative to the
+	// coherent snapshot above.
 	SforceAPIUsageCurrent.Set(current)
 	SforceAPIUsageLimit.Set(limit)
 	SforceAPIUsageObservedAt.Set(now.UnixNano())

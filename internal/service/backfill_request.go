@@ -94,6 +94,9 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 	// Validate items (UID-only; the type is the top-level type).
 	items := make([]string, len(p.Items))
 	for i, item := range p.Items {
+		if item == nil {
+			return BackfillRequest{}, pkgerrors.NewValidation("items must not contain a null entry")
+		}
 		if !sfuuid.IsSFID(item.UID) {
 			return BackfillRequest{}, pkgerrors.NewValidation(
 				fmt.Sprintf("invalid Salesforce ID %q for type %q", item.UID, p.Type))
