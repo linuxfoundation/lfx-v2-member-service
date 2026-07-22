@@ -131,14 +131,26 @@ func (s *CDCRepairStore) ListPending(ctx context.Context, reindexType string, li
 		}
 		return nil, errs.NewUnexpected("cdc-repair: failed to list pending keys", err)
 	}
-	// Drain the lister channel fully (calling Stop mid-range can leak the
-	// underlying consumer); collect only up to limit keys.
+	// Stop as soon as limit keys are collected rather than draining the full
+	// filtered stream (draining the whole backlog on every call makes repeated
+	// drains quadratic in backlog size). The underlying watcher's message
+	// callback can be mid-send on the (buffered) updates channel when Stop is
+	// called, so a background goroutine keeps draining after Stop to unblock
+	// it and let the consumer tear down cleanly instead of leaking.
 	keys := make([]string, 0, limit)
 	for key := range lister.Keys() {
-		if len(keys) < limit {
-			keys = append(keys, key)
+		keys = append(keys, key)
+		if len(keys) >= limit {
+			break
 		}
 	}
+	if stopErr := lister.Stop(); stopErr != nil {
+		slog.WarnContext(ctx, "cdc-repair: failed to stop key lister", "type", reindexType, "error", stopErr)
+	}
+	go func() {
+		for range lister.Keys() {
+		}
+	}()
 
 	markers := make([]port.RepairMarker, 0, len(keys))
 	for _, key := range keys {

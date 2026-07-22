@@ -244,7 +244,7 @@ The usage gauge is normally updated **passively** — every Salesforce REST resp
 `quotaExceeded` breaks the spiral with an **active** refresh:
 
 1. `shouldAttemptQuotaRefresh` decides whether the current reading is stale — older than `CDC_QUOTA_REFRESH_STALE_AFTER` (Go duration; default `5m`), or never observed — **and** no refresh has been attempted within that same window (a per-consumer `refreshMu`-guarded timestamp throttles retries so a Salesforce outage doesn't turn every skip decision into its own `/limits` call).
-2. If so, `quotaGauge.Refresh(ctx)` issues a `GET /limits` call and re-parses the response body into a fresh `port.QuotaSnapshot` (independent of the passive header path, but written back into the same gauge so both sources stay coherent).
+2. If so, `quotaGauge.Refresh(ctx)` issues a `GET /limits` call through the same `rateLimitTransport` that parses the passive `Sforce-Limit-Info` header — the `/limits` JSON response body itself is discarded; the refresh exists only to provoke a fresh header on the response.
 3. A successful refresh replaces the reading used for the skip decision in the same call — so a quota that has actually recovered lets the batch proceed immediately, with no extra CDC event needed. A failed refresh logs a warning and falls back to evaluating the last known (stale) reading, and — if nothing has ever been observed — fails open.
 
 Set `CDC_QUOTA_REFRESH_STALE_AFTER=0` to disable the active refresh entirely and rely only on the passive header updates (the pre-fix behaviour).
