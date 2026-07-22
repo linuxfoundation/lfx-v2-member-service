@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -40,6 +42,57 @@ var SforceAPIUsageLimit = func() *expvar.Int {
 	v.Set(-1)
 	return v
 }()
+
+// SforceAPIUsageObservedAt is the Unix-nanosecond timestamp of the most-recent
+// successful Sforce-Limit-Info header parse. Initialised to 0 ("never
+// observed"). Exposed for observability alongside the coherent observation
+// snapshot read via loadQuotaObservation.
+var SforceAPIUsageObservedAt = expvar.NewInt("sfdc_api_usage_observed_at_unixnano")
+
+// SforceAPIUsageGeneration is a monotonically increasing counter incremented on
+// every successful Sforce-Limit-Info header parse (passive traffic or an active
+// /limits refresh). It lets a caller prove that a refresh produced a new sample
+// without relying on wall-clock comparison. Initialised to 0 ("never observed").
+var SforceAPIUsageGeneration = expvar.NewInt("sfdc_api_usage_generation")
+
+// quotaObservation holds a coherent snapshot of the most-recently observed
+// Salesforce API usage. All four fields are updated together under quotaObsMu so
+// a reader never sees a torn (current, limit, observedAt, generation) tuple.
+var (
+	quotaObsMu      sync.Mutex
+	quotaObsCurrent int64 = -1
+	quotaObsLimit   int64 = -1
+	quotaObsAt      time.Time
+	quotaObsGen     uint64
+)
+
+// recordQuotaObservation atomically records a successful usage-header parse:
+// it advances the coherent observation snapshot (current, limit, observedAt,
+// generation) and mirrors the values into the exported expvars for
+// observability. Called at the single passive write point in RoundTrip on every
+// successful parse, whether triggered by normal traffic or an active refresh.
+func recordQuotaObservation(current, limit int64) {
+	quotaObsMu.Lock()
+	now := time.Now()
+	quotaObsCurrent = current
+	quotaObsLimit = limit
+	quotaObsAt = now
+	quotaObsGen++
+	quotaObsMu.Unlock()
+
+	SforceAPIUsageCurrent.Set(current)
+	SforceAPIUsageLimit.Set(limit)
+	SforceAPIUsageObservedAt.Set(now.UnixNano())
+	SforceAPIUsageGeneration.Add(1)
+}
+
+// loadQuotaObservation returns the coherent most-recent observation. A
+// generation of 0 means no valid usage header has ever been parsed.
+func loadQuotaObservation() (current, limit int64, observedAt time.Time, generation uint64) {
+	quotaObsMu.Lock()
+	defer quotaObsMu.Unlock()
+	return quotaObsCurrent, quotaObsLimit, quotaObsAt, quotaObsGen
+}
 
 // rateLimitTransport is an http.RoundTripper that wraps an inner transport,
 // inspects every Salesforce response for the Sforce-Limit-Info header, and
@@ -75,8 +128,7 @@ func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error
 				"header", header,
 			)
 		} else {
-			SforceAPIUsageCurrent.Set(current)
-			SforceAPIUsageLimit.Set(limit)
+			recordQuotaObservation(current, limit)
 		}
 	}
 

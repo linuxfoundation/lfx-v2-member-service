@@ -760,12 +760,15 @@ endpoint.
 
 ```json
 {
-  "types": ["b2b_org", "project_membership", "key_contact"]
+  "type": "project_membership"
 }
 ```
 
-- **`types`**: one or more of `b2b_org`, `project_membership`, `key_contact`,
-  `membership_tier`. If omitted, all types are reindexed.
+- **`type`**: required, exactly one of `b2b_org`, `project_membership`, `key_contact`,
+  `b2b_org_settings` (there is no all-types shortcut). `items` (targeted UIDs of that one type)
+  or `cdc_repair` (drain the CDC quota-repair queue for that type) may be layered on top — see
+  [Backfill / Reindex](./docs/backfill-reindex.md) for the full request model and the
+  quota-repair drain.
 
 ### Denormalization contract
 
@@ -1135,9 +1138,11 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 > **Status:** Implemented. `internal/service/backfill_runner.go` runs SOQL paged queries per
 > requested type and re-publishes Indexer and FGA Sync messages. `POST /admin/reindex` is gated by
 > the global org-admin team check, runs asynchronously, and returns `202 Accepted` with a `run_id`
-> for log correlation. The payload supports `types` (default `b2b_org`, `project_membership`,
-> `key_contact`, `b2b_org_settings`), `since` (RFC 3339 incremental), `items` (targeted, max 100),
-> and `dry_run`.
+> for log correlation. The payload requires a single `type` (one of `b2b_org`,
+> `project_membership`, `key_contact`, `b2b_org_settings` — no all-types shortcut), and layers on
+> `since` (RFC 3339 incremental), `items` (targeted UIDs of that type, max 100), `cdc_repair`
+> (drain the CDC quota-repair queue for that type — see [Backfill / Reindex](./docs/backfill-reindex.md)),
+> or `dry_run`.
 
 - The `BackfillRunner` runs SOQL paged queries for each requested type and publishes Indexer and
   FGA Sync messages for every record.

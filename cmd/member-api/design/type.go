@@ -562,34 +562,41 @@ var OrgUserRoleBody = dsl.Type("org-user-role-body", func() {
 	dsl.Required("invited_as")
 })
 
-// AdminReindexItem identifies a single entity to reindex in targeted mode.
+// AdminReindexItem identifies a single entity to reindex in targeted mode. The
+// entity type is carried by the request's top-level `type`, so items are
+// UID-only and every item in a request shares that one type.
 var AdminReindexItem = dsl.Type("admin-reindex-item", func() {
-	dsl.Description("A single entity to reindex (targeted mode)")
-	dsl.Attribute("type", dsl.String, "Entity type: b2b_org, project_membership, key_contact, or b2b_org_settings", func() {
-		dsl.Example("b2b_org")
-	})
+	dsl.Description("A single entity UID to reindex (targeted mode); its type is the request's top-level type")
 	dsl.Attribute("uid", dsl.String, "Entity UID (Salesforce ID)", func() {
 		dsl.Example("001B000000IqhSLIAZ")
 	})
-	dsl.Required("type", "uid")
+	dsl.Required("uid")
 })
 
 // AdminReindexPayload is the DSL type for the reindex admin action request.
+//
+// BREAKING: every request carries a single required top-level `type`. There is
+// no all-types shortcut and no per-item type; a targeted request applies its one
+// `type` to every UID in `items`.
 var AdminReindexPayload = dsl.Type("admin-reindex-payload", func() {
 	dsl.Description("Request payload for triggering a reindex operation")
-	dsl.Attribute("types", dsl.ArrayOf(dsl.String), "Entity types to reindex (optional; default = all in-scope: b2b_org, project_membership, key_contact, b2b_org_settings). Mutually exclusive with items.", func() {
-		dsl.Example([]string{"b2b_org", "project_membership"})
+	dsl.Attribute("type", dsl.String, "Entity type to reindex (required): b2b_org, project_membership, key_contact, or b2b_org_settings. Applies to full, since, and every targeted item. cdc_repair supports only b2b_org, project_membership, key_contact.", func() {
+		dsl.Example("b2b_org")
 	})
-	dsl.Attribute("since", dsl.String, "ISO 8601 / RFC 3339 timestamp with explicit zone; only records with LastModifiedDate >= since are reindexed. Mutually exclusive with items. Handler normalises to UTC. For key_contact (high-volume), prefer a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set instead of the full ~300k records.", func() {
+	dsl.Attribute("since", dsl.String, "ISO 8601 / RFC 3339 timestamp with explicit zone; only records with LastModifiedDate >= since are reindexed. Mutually exclusive with items and cdc_repair. Handler normalises to UTC. For key_contact (high-volume), prefer a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set instead of the full ~300k records.", func() {
 		dsl.Format(dsl.FormatDateTime)
 		dsl.Example("2026-05-20T00:00:00Z")
 	})
-	dsl.Attribute("items", dsl.ArrayOf(AdminReindexItem), "Targeted list of entities to reindex (surgical mode). Mutually exclusive with types and since. Max 100 items.", func() {
+	dsl.Attribute("items", dsl.ArrayOf(AdminReindexItem), "Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.", func() {
 		dsl.MaxLength(100)
+	})
+	dsl.Attribute("cdc_repair", dsl.Boolean, "When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since and items.", func() {
+		dsl.Default(false)
 	})
 	dsl.Attribute("dry_run", dsl.Boolean, "When true, walk SOQL/live-path but skip publishing. Final log includes would_publish_count.", func() {
 		dsl.Default(false)
 	})
+	dsl.Required("type")
 })
 
 // AdminReindexResult is the DSL type for the reindex admin action result.
@@ -598,6 +605,9 @@ var AdminReindexResult = dsl.Type("admin-reindex-result", func() {
 	dsl.Attribute("run_id", dsl.String, "Correlation ID for the reindex run (for log lookups)", func() {
 		dsl.Format(dsl.FormatUUID)
 		dsl.Example("4c46585f-9f01-8bda-a0a5-f0c8eeef7fff")
+	})
+	dsl.Attribute("selected_count", dsl.Int, "For cdc_repair runs: number of pending repair markers selected for this run (0 for other modes).", func() {
+		dsl.Example(42)
 	})
 	dsl.Required("run_id")
 })

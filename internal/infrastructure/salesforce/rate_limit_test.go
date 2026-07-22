@@ -122,6 +122,7 @@ func TestRateLimitTransport_UpdatesExpvars(t *testing.T) {
 func TestRateLimitTransport_NoHeader(t *testing.T) {
 	SforceAPIUsageCurrent.Set(-1)
 	SforceAPIUsageLimit.Set(-1)
+	_, _, _, genBefore := loadQuotaObservation()
 
 	transport := NewRateLimitTransport(&headerInjectingTransport{})
 
@@ -135,11 +136,16 @@ func TestRateLimitTransport_NoHeader(t *testing.T) {
 	// Values should remain at their initial sentinel — no header means no update.
 	assert.Equal(t, int64(-1), SforceAPIUsageCurrent.Value())
 	assert.Equal(t, int64(-1), SforceAPIUsageLimit.Value())
+
+	// No header means no observation — the coherent generation must not advance.
+	_, _, _, genAfter := loadQuotaObservation()
+	assert.Equal(t, genBefore, genAfter, "missing header must not advance the observation generation")
 }
 
 func TestRateLimitTransport_MalformedHeader(t *testing.T) {
 	SforceAPIUsageCurrent.Set(7)
 	SforceAPIUsageLimit.Set(777)
+	_, _, _, genBefore := loadQuotaObservation()
 
 	transport := NewRateLimitTransport(&headerInjectingTransport{
 		header: sforceLimitInfoHeader,
@@ -156,6 +162,50 @@ func TestRateLimitTransport_MalformedHeader(t *testing.T) {
 	// Malformed header: existing values must not be overwritten.
 	assert.Equal(t, int64(7), SforceAPIUsageCurrent.Value())
 	assert.Equal(t, int64(777), SforceAPIUsageLimit.Value())
+
+	// Malformed header means no valid parse — the coherent generation must not advance.
+	_, _, _, genAfter := loadQuotaObservation()
+	assert.Equal(t, genBefore, genAfter, "malformed header must not advance the observation generation")
+}
+
+func TestRecordQuotaObservation_AdvancesGenerationAndTimestamp(t *testing.T) {
+	_, _, atBefore, genBefore := loadQuotaObservation()
+
+	recordQuotaObservation(321, 20000)
+
+	current, limit, at, gen := loadQuotaObservation()
+	assert.Equal(t, int64(321), current)
+	assert.Equal(t, int64(20000), limit)
+	assert.Equal(t, genBefore+1, gen, "generation must advance by exactly 1 per successful observation")
+	assert.True(t, at.After(atBefore) || at.Equal(atBefore), "observed-at must not move backwards")
+	assert.False(t, at.IsZero(), "observed-at must be set on a successful observation")
+
+	// The exported expvars must mirror the coherent snapshot.
+	assert.Equal(t, int64(321), SforceAPIUsageCurrent.Value())
+	assert.Equal(t, int64(20000), SforceAPIUsageLimit.Value())
+	assert.Equal(t, at.UnixNano(), SforceAPIUsageObservedAt.Value())
+	assert.Equal(t, int64(gen), SforceAPIUsageGeneration.Value()) //nolint:gosec // gen is a small monotonic counter
+}
+
+func TestRateLimitTransport_ValidHeader_AdvancesGeneration(t *testing.T) {
+	_, _, _, genBefore := loadQuotaObservation()
+
+	transport := NewRateLimitTransport(&headerInjectingTransport{
+		header: sforceLimitInfoHeader,
+		value:  "api-usage=500/15000",
+	})
+
+	req, err := newTestRequest()
+	require.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	current, limit, _, genAfter := loadQuotaObservation()
+	assert.Equal(t, int64(500), current)
+	assert.Equal(t, int64(15000), limit)
+	assert.Greater(t, genAfter, genBefore, "a valid header parse must advance the observation generation")
 }
 
 // ── test helpers ─────────────────────────────────────────────────────────────

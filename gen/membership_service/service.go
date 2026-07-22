@@ -169,10 +169,9 @@ type AddB2bOrgWorkspaceProjectResult struct {
 	LastModified *string
 }
 
-// A single entity to reindex (targeted mode)
+// A single entity UID to reindex (targeted mode); its type is the request's
+// top-level type
 type AdminReindexItem struct {
-	// Entity type: b2b_org, project_membership, key_contact, or b2b_org_settings
-	Type string
 	// Entity UID (Salesforce ID)
 	UID string
 }
@@ -184,19 +183,23 @@ type AdminReindexPayload struct {
 	BearerToken *string
 	// Version of the API
 	Version *string
-	// Entity types to reindex (optional; default = all in-scope: b2b_org,
-	// project_membership, key_contact, b2b_org_settings). Mutually exclusive with
-	// items.
-	Types []string
+	// Entity type to reindex (required): b2b_org, project_membership, key_contact,
+	// or b2b_org_settings. Applies to full, since, and every targeted item.
+	// cdc_repair supports only b2b_org, project_membership, key_contact.
+	Type string
 	// ISO 8601 / RFC 3339 timestamp with explicit zone; only records with
-	// LastModifiedDate >= since are reindexed. Mutually exclusive with items.
-	// Handler normalises to UTC. For key_contact (high-volume), prefer a ~2-year
-	// window (e.g. 2024-06-01T00:00:00Z) to sync only the active set instead of
-	// the full ~300k records.
+	// LastModifiedDate >= since are reindexed. Mutually exclusive with items and
+	// cdc_repair. Handler normalises to UTC. For key_contact (high-volume), prefer
+	// a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set
+	// instead of the full ~300k records.
 	Since *string
-	// Targeted list of entities to reindex (surgical mode). Mutually exclusive
-	// with types and since. Max 100 items.
+	// Targeted list of entity UIDs to reindex (surgical mode), all of the
+	// top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
 	Items []*AdminReindexItem
+	// When true, drain the CDC quota-repair queue for the given type (one of
+	// b2b_org, project_membership, key_contact). Mutually exclusive with since and
+	// items.
+	CdcRepair bool
 	// When true, walk SOQL/live-path but skip publishing. Final log includes
 	// would_publish_count.
 	DryRun bool
@@ -207,6 +210,9 @@ type AdminReindexPayload struct {
 type AdminReindexResult struct {
 	// Correlation ID for the reindex run (for log lookups)
 	RunID string
+	// For cdc_repair runs: number of pending repair markers selected for this run
+	// (0 for other modes).
+	SelectedCount *int
 }
 
 // A B2B organization

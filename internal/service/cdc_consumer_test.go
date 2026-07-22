@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
@@ -1210,6 +1211,420 @@ func TestCDCConsumer_QuotaGuard_DeleteBypassesQuota(t *testing.T) {
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
 
 	assert.NotEmpty(t, pub.indexer, "DELETE must always publish regardless of quota state")
+}
+
+// ── Quota stale-refresh matrix tests ──────────────────────────────────────────
+
+func TestCDCConsumer_QuotaRefresh_Fresh_NoActiveRefresh(t *testing.T) {
+	// Reading is within the staleness window — the guard must decide from the
+	// existing snapshot without issuing an active refresh.
+	t.Setenv("CDC_QUOTA_REFRESH_STALE_AFTER", "1h")
+	pm := &model.ProjectMembership{UID: sfid("pm-refresh-fresh")}
+	pub := &subjectCapturingPublisher{}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()} // fresh, ≥ threshold
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-refresh-fresh")}, ReplayID: []byte("qr1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(gauge),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 0, gauge.RefreshCalls, "a fresh reading must not trigger an active refresh")
+	assert.Empty(t, pub.indexer, "fresh reading above threshold must still skip")
+}
+
+func TestCDCConsumer_QuotaRefresh_StaleAndRecovered_Proceeds(t *testing.T) {
+	// Reading is stale; the active refresh reports usage back below threshold —
+	// the guard must refresh-then-proceed (no skip, no repair-queue write).
+	t.Setenv("CDC_QUOTA_REFRESH_STALE_AFTER", "200ms")
+	pm := &model.ProjectMembership{UID: sfid("pm-refresh-recovered")}
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	gauge := &mock.MockSalesforceQuotaGauge{
+		Current: 96, Limit: 100, ObservedAt: time.Now().Add(-time.Second), // stale, currently ≥ threshold
+		RefreshFn: func(_ context.Context) (port.QuotaSnapshot, error) {
+			return port.QuotaSnapshot{Current: 10, Limit: 100, ObservedAt: time.Now(), Generation: 2}, nil
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-refresh-recovered")}, ReplayID: []byte("qr2")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(gauge),
+		svc.WithCDCRepairStore(repairStore),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, gauge.RefreshCalls, "a stale reading must trigger exactly one active refresh")
+	assert.NotEmpty(t, pub.indexer, "recovered quota after refresh must proceed and publish")
+	assert.Empty(t, repairStore.Puts, "a proceeded event must not write a repair marker")
+}
+
+func TestCDCConsumer_QuotaRefresh_StaleAndExhausted_Skips(t *testing.T) {
+	// Reading is stale; the active refresh confirms quota is still exhausted —
+	// the guard must refresh-then-skip and queue a repair marker.
+	t.Setenv("CDC_QUOTA_REFRESH_STALE_AFTER", "200ms")
+	pm := &model.ProjectMembership{UID: sfid("pm-refresh-exhausted")}
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	gauge := &mock.MockSalesforceQuotaGauge{
+		Current: 96, Limit: 100, ObservedAt: time.Now().Add(-time.Second), // stale
+		RefreshFn: func(_ context.Context) (port.QuotaSnapshot, error) {
+			return port.QuotaSnapshot{Current: 98, Limit: 100, ObservedAt: time.Now(), Generation: 2}, nil // still exhausted
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-refresh-exhausted")}, ReplayID: []byte("qr3")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(gauge),
+		svc.WithCDCRepairStore(repairStore),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, gauge.RefreshCalls, "a stale reading must trigger exactly one active refresh")
+	assert.Empty(t, pub.indexer, "confirmed-exhausted quota after refresh must skip")
+	require.Len(t, repairStore.Puts, 1, "a skipped upsert must queue exactly one repair marker")
+	assert.Equal(t, "project_membership", repairStore.Puts[0].Type)
+}
+
+func TestCDCConsumer_QuotaRefresh_RequestError_FallsBackToLastReading(t *testing.T) {
+	// Reading is stale; the active refresh request itself fails — the guard must
+	// evaluate the last known (stale but valid) reading rather than fail open.
+	t.Setenv("CDC_QUOTA_REFRESH_STALE_AFTER", "200ms")
+	pm := &model.ProjectMembership{UID: sfid("pm-refresh-err")}
+	pub := &subjectCapturingPublisher{}
+	gauge := &mock.MockSalesforceQuotaGauge{
+		Current: 97, Limit: 100, ObservedAt: time.Now().Add(-time.Second), // stale, ≥ threshold
+		RefreshErr: errors.New("salesforce: quota refresh request failed"),
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-refresh-err")}, ReplayID: []byte("qr4")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(gauge),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, gauge.RefreshCalls, "a stale reading must still attempt exactly one active refresh")
+	assert.Empty(t, pub.indexer, "a failed refresh must fall back to the last (exhausted) reading and skip")
+}
+
+func TestCDCConsumer_QuotaRefresh_NeverObserved_FailsOpenAfterFailedRefresh(t *testing.T) {
+	// No valid reading has ever been observed, and the active refresh attempt
+	// also fails — the guard must fail open (never block on an unreadable gauge).
+	t.Setenv("CDC_QUOTA_REFRESH_STALE_AFTER", "200ms")
+	pm := &model.ProjectMembership{UID: sfid("pm-refresh-never")}
+	pub := &subjectCapturingPublisher{}
+	gauge := &mock.MockSalesforceQuotaGauge{
+		Current: 0, Limit: 0, // never observed (Limit ≤ 0 ⇒ Observed() == false)
+		RefreshErr: errors.New("salesforce: no route to host"),
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-refresh-never")}, ReplayID: []byte("qr5")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(gauge),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, gauge.RefreshCalls)
+	assert.NotEmpty(t, pub.indexer, "never-observed + failed refresh must fail open and publish")
+}
+
+func TestCDCConsumer_QuotaRefresh_FailedAttempt_ThrottledToOncePerWindow(t *testing.T) {
+	// Two events in the same window, both against a stale+failing gauge: the
+	// second call must not re-attempt the refresh (throttled to once/window).
+	t.Setenv("CDC_QUOTA_REFRESH_STALE_AFTER", "1h") // window long enough to span both events
+	pm1 := &model.ProjectMembership{UID: sfid("pm-throttle-1")}
+	pm2 := &model.ProjectMembership{UID: sfid("pm-throttle-2")}
+	pub := &subjectCapturingPublisher{}
+	gauge := &mock.MockSalesforceQuotaGauge{
+		Current: 96, Limit: 100, ObservedAt: time.Now().Add(-time.Hour), // stale, ≥ threshold
+		RefreshErr: errors.New("salesforce: rate limited"),
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-throttle-1")}, ReplayID: []byte("qr6a")},
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-throttle-2")}, ReplayID: []byte("qr6b")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm1, pm2}}),
+		svc.WithCDCQuotaGauge(gauge),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, gauge.RefreshCalls, "the second event within the same window must not re-attempt a failed refresh")
+	assert.Empty(t, pub.indexer, "both events must skip: first via failed-refresh fallback, second via throttled stale reading")
+}
+
+// ── Skip mapping / repair-queue write tests ───────────────────────────────────
+
+func TestCDCConsumer_RepairMapping_AllThreeEntitiesMapCorrectly(t *testing.T) {
+	tests := []struct {
+		entity   string
+		wantType string
+		wireOpt  func(uid string) svc.CDCConsumerOption
+		channel  string
+	}{
+		{
+			entity:   "Account",
+			wantType: "b2b_org",
+			channel:  "/data/AccountChangeEvent",
+			wireOpt: func(uid string) svc.CDCConsumerOption {
+				return svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{{UID: uid}}})
+			},
+		},
+		{
+			entity:   "Asset",
+			wantType: "project_membership",
+			channel:  "/data/AssetChangeEvent",
+			wireOpt: func(uid string) svc.CDCConsumerOption {
+				return svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{{UID: uid}}})
+			},
+		},
+		{
+			entity:   "Project_Role__c",
+			wantType: "key_contact",
+			channel:  "/data/ProjectRoleChangeEvent",
+			wireOpt: func(uid string) svc.CDCConsumerOption {
+				return svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{{UID: uid}}})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.entity, func(t *testing.T) {
+			id := sfid("repair-map-" + tt.entity)
+			pub := &subjectCapturingPublisher{}
+			repairStore := &mock.MockCDCRepairStore{}
+
+			consumer := newTestCDCConsumer(
+				&fakeCDCSubscriber{events: []model.CDCEvent{
+					{Entity: tt.entity, ChangeType: model.CDCChangeUpdate, RecordIDs: []string{id}, ReplayID: []byte("map-" + tt.entity)},
+				}},
+				&fakeB2BOrgReader{},
+				&mock.MockCacheInvalidator{},
+				pub,
+				"",
+				tt.wireOpt(id),
+				svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()}),
+				svc.WithCDCRepairStore(repairStore),
+			)
+
+			require.NoError(t, consumer.Run(context.Background(), tt.channel, &fakeReplayStore{}))
+
+			require.Len(t, repairStore.Puts, 1)
+			assert.Equal(t, tt.wantType, repairStore.Puts[0].Type)
+			assert.Equal(t, id, repairStore.Puts[0].SFID)
+		})
+	}
+}
+
+func TestCDCConsumer_RepairMapping_PartialKVFailure_LogsOnlyFailedIDs(t *testing.T) {
+	// Two IDs skipped in the same batch; the repair store fails to write the
+	// first and succeeds on the second. The successful marker must remain (no
+	// rollback) and the cursor must still advance.
+	id1 := sfid("repair-fail-1")
+	id2 := sfid("repair-fail-2")
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()}
+
+	// Wrap repairStore with a decorator that fails only the first PutPending
+	// call, so the batch of two IDs exercises a partial (not total) failure.
+	failingStore := &failFirstPutRepairStore{inner: repairStore}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{id1, id2}, ReplayID: []byte("pf1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{}),
+		svc.WithCDCQuotaGauge(gauge),
+		svc.WithCDCRepairStore(failingStore),
+	)
+
+	replay := &fakeReplayStore{}
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", replay))
+
+	require.Len(t, repairStore.Puts, 1, "only the successful marker write must be recorded by the inner store")
+	assert.Equal(t, id2, repairStore.Puts[0].SFID, "the second ID's marker must be written despite the first failing")
+	assert.NotEmpty(t, replay.saved, "the replay cursor must still advance despite a partial repair-queue write failure")
+}
+
+// failFirstPutRepairStore wraps a port.CDCRepairStore and fails only the first
+// PutPending call, delegating all others (including the first ID) to inner.
+type failFirstPutRepairStore struct {
+	inner     port.CDCRepairStore
+	putCalled bool
+}
+
+func (s *failFirstPutRepairStore) PutPending(ctx context.Context, reindexType, sfid string) error {
+	if !s.putCalled {
+		s.putCalled = true
+		return errors.New("kv write failed")
+	}
+	return s.inner.PutPending(ctx, reindexType, sfid)
+}
+
+func (s *failFirstPutRepairStore) ListPending(ctx context.Context, reindexType string, limit int) ([]port.RepairMarker, error) {
+	return s.inner.ListPending(ctx, reindexType, limit)
+}
+
+func (s *failFirstPutRepairStore) DeletePending(ctx context.Context, reindexType, sfid string, revision uint64) error {
+	return s.inner.DeletePending(ctx, reindexType, sfid, revision)
+}
+
+func TestCDCConsumer_RepairMapping_NoRepairStore_StillAdvancesCursor(t *testing.T) {
+	// When repairStore is nil (mock mode / not configured), a skip must still
+	// advance the cursor — the repair queue is a best-effort backstop, not a
+	// correctness dependency.
+	pm := &model.ProjectMembership{UID: sfid("pm-no-repair-store")}
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-no-repair-store")}, ReplayID: []byte("nr1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()}),
+		// no WithCDCRepairStore
+	)
+
+	replay := &fakeReplayStore{}
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", replay))
+
+	assert.Empty(t, pub.indexer, "quota exceeded must still skip even without a repair store")
+	assert.NotEmpty(t, replay.saved, "cursor must advance even when the repair store is not configured")
+}
+
+func TestCDCConsumer_RepairMapping_UnmappableEntity_NotQueued(t *testing.T) {
+	// An entity with no reindexTypeForCDCEntity mapping must not attempt a
+	// repair-queue write (there would be no valid reindex_type to key it by).
+	// handle() dispatches only the three known entities, so this is exercised
+	// indirectly by confirming an unmapped entity produces no repair Puts even
+	// when everything else (quota, repair store) is wired.
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "SomeUnhandledEntity__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("unmapped-1")}, ReplayID: []byte("um1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()}),
+		svc.WithCDCRepairStore(repairStore),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/UnhandledChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, repairStore.Puts, "an entity outside the handled dispatch set must never reach the repair queue")
+}
+
+func TestCDCConsumer_RepairMapping_MalformedID_NotQueued(t *testing.T) {
+	// A record ID that cannot be normalized to an 18-char SFID is dropped by
+	// partitionRecordIDs before the quota check ever runs, so it must never
+	// reach the repair queue.
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{"not-a-valid-sfid"}, ReplayID: []byte("mid1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{}),
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()}),
+		svc.WithCDCRepairStore(repairStore),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, repairStore.Puts, "a malformed record ID must never be queued for repair")
+}
+
+func TestCDCConsumer_RepairMapping_15CharID_NormalizesTo18BeforeQueuing(t *testing.T) {
+	// A raw 15-char case-sensitive SFID must be normalized to its canonical
+	// 18-char form before it is written to the repair queue — the drain path
+	// (and every other KV key in this bucket) keys exclusively on 18-char IDs.
+	id18 := sfid("norm-15-to-18")
+	raw15 := id18[:15]
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{raw15}, ReplayID: []byte("norm1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{}),
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()}),
+		svc.WithCDCRepairStore(repairStore),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	require.Len(t, repairStore.Puts, 1)
+	assert.Equal(t, id18, repairStore.Puts[0].SFID, "the queued marker must use the canonical 18-char SFID, not the raw 15-char input")
+	assert.Len(t, repairStore.Puts[0].SFID, 18)
 }
 
 // ── Absent-from-SOQL → delete convergence tests ───────────────────────────────

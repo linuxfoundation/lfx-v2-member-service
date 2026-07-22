@@ -350,6 +350,22 @@ func (s *membershipServicesrvc) AdminReindex(ctx context.Context, p *memberships
 		slog.WarnContext(ctx, "backfill runner not initialised — reindex skipped", "run_id", runID)
 		return &membershipservice.AdminReindexResult{RunID: runID}, nil
 	}
+
+	// cdc_repair does its quota gate and page selection synchronously so the 202
+	// can carry selected_count and the caller sees ServiceUnavailable when the
+	// quota is unreadable or at/above the admin threshold.
+	if req.CDCRepair {
+		markers, prepErr := s.backfillRunner.PrepareRepair(ctx, req)
+		if prepErr != nil {
+			return nil, wrapError(ctx, prepErr)
+		}
+		selected := len(markers)
+		// Fire-and-forget drain; concurrent drains are safe (idempotent reindex
+		// + revision-conditional delete). No distributed lock.
+		go s.backfillRunner.RunRepair(context.WithoutCancel(ctx), req, markers)
+		return &membershipservice.AdminReindexResult{RunID: runID, SelectedCount: &selected}, nil
+	}
+
 	// Fire-and-forget: the backfill runs independently of the HTTP request lifetime.
 	// context.WithoutCancel prevents HTTP cancellation from killing a running page, but
 	// the goroutine is not registered on the server's shutdown WaitGroup — a SIGTERM
@@ -357,7 +373,7 @@ func (s *membershipServicesrvc) AdminReindex(ctx context.Context, p *memberships
 	// logged). Accepted trade-off: /admin/reindex is a manual recovery tool and the
 	// backfill can be re-triggered; graceful-shutdown integration is tracked as a
 	// follow-up.
-	go s.backfillRunner.Run(context.WithoutCancel(ctx), req)
+	go func() { _ = s.backfillRunner.Run(context.WithoutCancel(ctx), req) }()
 
 	return &membershipservice.AdminReindexResult{RunID: runID}, nil
 }

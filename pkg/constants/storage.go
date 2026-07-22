@@ -43,4 +43,16 @@ const (
 	// workspace project associations. One key per workspace;
 	// key format: "org_workspace_projects.{workspaceUID}". No MaxAge TTL.
 	KVBucketNameWorkspaceProjects = "org_workspace_projects"
+
+	// KVBucketNameCDCRepair is the name of the KV bucket holding the durable
+	// CDC quota-repair queue. When the CDC consumer skips an upsert because the
+	// Salesforce API quota is exhausted, it records the affected record as a
+	// pending marker keyed "pending.{reindex_type}.{sfid}" so the record can be
+	// repaired later via POST /admin/reindex {cdc_repair:true}. No MaxAge TTL —
+	// a pending marker must never be silently evicted before it is drained; a
+	// marker is written once on skip and not touched again until repaired, so
+	// nothing resets an entry's clock. History is 1 (a pending set — old marker
+	// revisions are never needed). No distributed lock: concurrent drains are
+	// made safe by idempotent targeted reindex plus revision-conditional delete.
+	KVBucketNameCDCRepair = "cdc-repair"
 )

@@ -44,10 +44,23 @@ const (
 // allBackfillTypes is the canonical ordered list of types the backfill supports.
 var allBackfillTypes = []string{entityTypeB2BOrg, entityTypeProjectMembership, entityTypeKeyContact, entityTypeB2BOrgSettings}
 
+// defaultAdminReindexQuotaThreshold is the fraction of the daily Salesforce REST
+// API quota at/above which a cdc_repair drain refuses to start (and stops
+// mid-page). Configurable via ADMIN_REINDEX_QUOTA_THRESHOLD. Default: 0.80 —
+// deliberately below the consumer's 0.95 skip threshold so a drain never
+// competes with live traffic for the last slice of quota.
+const defaultAdminReindexQuotaThreshold = 0.80
+
+// repairPageCap bounds how many pending markers a single cdc_repair run selects
+// and drains. Operators re-run until selected_count is zero.
+const repairPageCap = 100
+
 // Runner orchestrates a reindex run. It is safe to call Run concurrently
 // from multiple goroutines (each run is independent). Full-mode runs acquire a
 // per-type NATS KV lock so the same type is not reindexed simultaneously across
-// pods.
+// pods. cdc_repair drains take no distributed lock — concurrent drains are safe
+// because targeted reindex publishes only idempotent projections and the
+// revision-conditional marker delete is the sole race guard.
 type Runner struct {
 	iter                  BackfillIterator
 	b2bReader             port.B2BOrgReader
@@ -60,6 +73,11 @@ type Runner struct {
 	natsClient            *natspkg.NATSClient
 	globalOrgAdminTeamUID string
 	resolver              port.ProjectResolver
+
+	// cdc_repair collaborators (optional; only the repair path uses them).
+	repairStore          port.CDCRepairStore
+	quotaGauge           port.SalesforceQuotaGauge
+	repairQuotaThreshold float64
 }
 
 // RunnerOption configures optional Runner collaborators. The avatar-enrichment path (the
@@ -75,6 +93,27 @@ func WithSettingsWriter(w port.B2BOrgSettingsWriter) RunnerOption {
 // WithUserReader wires the auth-service reader used to resolve avatar pictures.
 func WithUserReader(u port.UserReader) RunnerOption {
 	return func(r *Runner) { r.userReader = u }
+}
+
+// WithRepairStore wires the durable CDC quota-repair queue drained by cdc_repair
+// runs.
+func WithRepairStore(s port.CDCRepairStore) RunnerOption {
+	return func(r *Runner) { r.repairStore = s }
+}
+
+// WithQuotaGauge wires the Salesforce quota gauge used to gate cdc_repair drains.
+func WithQuotaGauge(g port.SalesforceQuotaGauge) RunnerOption {
+	return func(r *Runner) { r.quotaGauge = g }
+}
+
+// WithRepairQuotaThreshold overrides the cdc_repair quota gate threshold
+// (fraction 0–1). Values outside (0,1] are ignored.
+func WithRepairQuotaThreshold(threshold float64) RunnerOption {
+	return func(r *Runner) {
+		if threshold > 0 && threshold <= 1 {
+			r.repairQuotaThreshold = threshold
+		}
+	}
 }
 
 // NewRunner constructs a Runner.
@@ -100,6 +139,7 @@ func NewRunner(
 		natsClient:            natsClient,
 		globalOrgAdminTeamUID: globalOrgAdminTeamUID,
 		resolver:              resolver,
+		repairQuotaThreshold:  defaultAdminReindexQuotaThreshold,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -118,10 +158,14 @@ const (
 	modeTargeted runMode = "targeted"
 	modeFiltered runMode = "filtered"
 	modeFull     runMode = "full"
+	modeRepair   runMode = "repair"
 )
 
 // ClassifyMode returns the run mode for the given request.
 func ClassifyMode(req BackfillRequest) runMode {
+	if req.CDCRepair {
+		return modeRepair
+	}
 	if len(req.Items) > 0 {
 		return modeTargeted
 	}
@@ -129,13 +173,6 @@ func ClassifyMode(req BackfillRequest) runMode {
 		return modeFiltered
 	}
 	return modeFull
-}
-
-func effectiveTypes(requested []string) []string {
-	if len(requested) == 0 {
-		return allBackfillTypes
-	}
-	return requested
 }
 
 // Run executes the backfill. The async /admin/reindex path calls it in a goroutine and ignores the
@@ -149,57 +186,49 @@ func (r *Runner) Run(ctx context.Context, req BackfillRequest) error {
 		"mode", string(mode),
 		"dry_run", req.DryRun,
 	)
-	log.InfoContext(ctx, "backfill started")
+	log.InfoContext(ctx, "backfill started", "type", req.Type)
 	defer log.InfoContext(ctx, "backfill complete")
 
-	if mode == modeTargeted {
+	switch mode {
+	case modeTargeted:
 		r.runTargeted(ctx, log, req)
 		return nil
+	case modeRepair:
+		// Repair is driven by the handler via PrepareRepair + RunRepair so the
+		// quota gate and selected_count are computed synchronously. Run should
+		// not be used for repair; guard against misuse.
+		log.ErrorContext(ctx, "repair mode must be run via PrepareRepair/RunRepair, not Run")
+		return fmt.Errorf("repair mode is not supported through Run")
 	}
 
+	// full / filtered: exactly one type per request (BREAKING: no all-types).
+	t := req.Type
 	if mode == modeFull {
-		log.WarnContext(ctx, "full reindex started", "full_reindex_started", true)
+		log.WarnContext(ctx, "full reindex started", "type", t, "full_reindex_started", true)
 	}
 
-	succeeded := make([]string, 0, len(allBackfillTypes))
-	var failed, skipped []string
-
-	for _, t := range effectiveTypes(req.Types) {
-		var err error
-		if mode == modeFull && r.natsClient != nil {
-			release, lockErr := natspkg.AcquireFullRunLock(ctx, r.natsClient, req.RunID, t)
-			if lockErr != nil {
-				log.WarnContext(ctx, "full reindex skipped — lock held",
-					"type", t,
-					"full_reindex_rejected_lock_held", true,
-					"error", lockErr)
-				skipped = append(skipped, t)
-				continue
-			}
-			err = r.runType(ctx, log, req, t)
-			release()
-		} else {
-			err = r.runType(ctx, log, req, t)
-		}
-
-		if err != nil {
-			log.ErrorContext(ctx, "backfill type failed",
+	var err error
+	if mode == modeFull && r.natsClient != nil {
+		release, lockErr := natspkg.AcquireFullRunLock(ctx, r.natsClient, req.RunID, t)
+		if lockErr != nil {
+			log.WarnContext(ctx, "full reindex skipped — lock held",
 				"type", t,
-				"error", err)
-			failed = append(failed, t)
-		} else {
-			succeeded = append(succeeded, t)
+				"full_reindex_rejected_lock_held", true,
+				"error", lockErr)
+			return nil
 		}
+		err = r.runType(ctx, log, req, t)
+		release()
+	} else {
+		err = r.runType(ctx, log, req, t)
 	}
 
-	log.InfoContext(ctx, "backfill summary",
-		"succeeded", succeeded,
-		"failed", failed,
-		"skipped_locked", skipped)
-
-	if len(failed) > 0 {
-		return fmt.Errorf("backfill completed with failed type(s): %v", failed)
+	if err != nil {
+		log.ErrorContext(ctx, "backfill type failed", "type", t, "error", err)
+		return fmt.Errorf("backfill failed for type %q: %w", t, err)
 	}
+
+	log.InfoContext(ctx, "backfill summary", "type", t)
 	return nil
 }
 
@@ -468,167 +497,301 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req BackfillRequest) {
-	var notFound, published int
-	// childUIDsCache memoises FetchChildUIDsByParentUID within this request so
-	// sibling orgs sharing the same parent don't each trigger a separate SOQL call.
-	childUIDsCache := map[string][]string{}
-	fetchChildUIDs := func(uid string) ([]string, error) {
-		if v, ok := childUIDsCache[uid]; ok {
+// reindexOutcome is the result of reindexing a single entity, shared by the
+// targeted path and the cdc_repair drain.
+type reindexOutcome int
+
+const (
+	// outcomeIssued means every required publish helper call was invoked (or, in
+	// dry-run, the record was fetched and would have been published).
+	outcomeIssued reindexOutcome = iota
+	// outcomeNotFound means the record no longer exists (delete already handled
+	// elsewhere; a repair marker for it can be safely removed).
+	outcomeNotFound
+	// outcomeRetry means a fetch, dependency-resolution, persistence, or partial
+	// projection failure occurred; a repair marker must be retained.
+	outcomeRetry
+)
+
+// newChildUIDsFetcher returns a per-run memoised child-UID fetcher so sibling
+// orgs sharing a parent don't each trigger a separate SOQL call.
+func (r *Runner) newChildUIDsFetcher(ctx context.Context) func(uid string) ([]string, error) {
+	cache := map[string][]string{}
+	return func(uid string) ([]string, error) {
+		if v, ok := cache[uid]; ok {
 			return v, nil
 		}
 		uids, err := r.b2bReader.FetchChildUIDsByParentUID(ctx, uid)
 		if err == nil {
-			childUIDsCache[uid] = uids
+			cache[uid] = uids
 		}
 		return uids, err
 	}
+}
 
-	for _, item := range req.Items {
-		if item.Type == entityTypeB2BOrgSettings && r.settingsReader == nil {
-			log.ErrorContext(ctx, "b2b_org_settings targeted backfill requires settingsReader — wiring error",
-				"uid", item.UID, "publish_failed_for_backfill_repair", true)
-			continue
+// reindexItem reindexes a single (sfType, uid) and returns the outcome. It is
+// the shared per-item projection used by targeted reindex and cdc_repair. All
+// publish helpers are idempotent, so a repeated call is safe. A dependency
+// failure (child lookup, unresolved project UID, settings persist) is classified
+// as retry so a repair marker is retained rather than deleted.
+func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string, fetchChildUIDs func(string) ([]string, error)) reindexOutcome {
+	switch sfType {
+	case entityTypeB2BOrg:
+		org, err := r.b2bReader.GetB2BOrg(ctx, uid)
+		if err != nil {
+			return logItemFetchOutcome(ctx, log, sfType, uid, err)
 		}
-		switch item.Type {
-		case entityTypeB2BOrg:
-			org, err := r.b2bReader.GetB2BOrg(ctx, item.UID)
+		// Resolve all dependencies before publishing so we never leave a partial
+		// projection (indexer without the matching parent FGA tuple).
+		childUIDs, childErr := fetchChildUIDs(org.UID)
+		if childErr != nil {
+			log.WarnContext(ctx, "failed to fetch child UIDs — retaining for retry",
+				"type", sfType, "uid", org.UID, "error", childErr, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		var parentChildren []string
+		if org.ParentUID != "" {
+			parentChildren, err = fetchChildUIDs(org.ParentUID)
 			if err != nil {
-				if errs.IsNotFound(err) {
-					log.WarnContext(ctx, "targeted item not found", "type", item.Type, "uid", item.UID, "not_found", true)
-					notFound++
-				} else {
-					log.WarnContext(ctx, "targeted item fetch error", "type", item.Type, "uid", item.UID, "error", err,
-						"publish_failed_for_backfill_repair", true)
-				}
-				continue
+				log.WarnContext(ctx, "failed to fetch parent children — retaining for retry",
+					"type", sfType, "uid", org.UID, "parent_uid", org.ParentUID, "error", err, "publish_failed_for_backfill_repair", true)
+				return outcomeRetry
 			}
-			if !req.DryRun {
-				// Fetch direct children for the indexer document.
-				childUIDs, childErr := fetchChildUIDs(org.UID)
-				if childErr != nil {
-					log.WarnContext(ctx, "failed to fetch child UIDs for indexer",
-						"uid", org.UID, "error", childErr,
-						"publish_failed_for_backfill_repair", true)
-				} else {
-					org.IsParent = len(childUIDs) > 0
-				}
-				PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
-				PublishB2BOrgGlobalAdminFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID)
-				if org.ParentUID != "" {
-					children, childErr := fetchChildUIDs(org.ParentUID)
-					if childErr != nil {
-						log.WarnContext(ctx, "failed to fetch parent children for FGA backfill",
-							"uid", org.UID, "parent_uid", org.ParentUID, "error", childErr,
-							"publish_failed_for_backfill_repair", true)
-					} else {
-						PublishB2BOrgParentFGA(ctx, r.publisher, org, children)
-					}
-				}
-				published++
-			}
+		}
+		if req.DryRun {
+			return outcomeIssued
+		}
+		org.IsParent = len(childUIDs) > 0
+		PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
+		PublishB2BOrgGlobalAdminFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID)
+		if org.ParentUID != "" {
+			PublishB2BOrgParentFGA(ctx, r.publisher, org, parentChildren)
+		}
+		return outcomeIssued
 
-		case entityTypeProjectMembership:
-			pm, _, err := r.pmReader.AssembleProjectMembership(ctx, item.UID)
-			if err != nil {
-				if errs.IsNotFound(err) {
-					log.WarnContext(ctx, "targeted item not found", "type", item.Type, "uid", item.UID, "not_found", true)
-					notFound++
-				} else {
-					log.WarnContext(ctx, "targeted item fetch error", "type", item.Type, "uid", item.UID, "error", err,
-						"publish_failed_for_backfill_repair", true)
-				}
-				continue
-			}
-			if !req.DryRun {
-				uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
-				if ok {
-					pm.ProjectUID = uid
-					PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
-					PublishProjectMembershipFGA(ctx, r.publisher, pm)
-				} else {
-					log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
-						"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
-					PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
-				}
-				published++
-			}
+	case entityTypeProjectMembership:
+		pm, _, err := r.pmReader.AssembleProjectMembership(ctx, uid)
+		if err != nil {
+			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+		}
+		if req.DryRun {
+			return outcomeIssued
+		}
+		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
+		if !ok {
+			// Unresolved project UID is a partial projection — publish FGA
+			// (preserving refs) but retain the marker for a later drain.
+			log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
+				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+			PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
+			return outcomeRetry
+		}
+		pm.ProjectUID = resolvedUID
+		PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
+		PublishProjectMembershipFGA(ctx, r.publisher, pm)
+		return outcomeIssued
 
-		case entityTypeKeyContact:
-			kc, _, err := r.kcReader.AssembleKeyContact(ctx, item.UID)
-			if err != nil {
-				if errs.IsNotFound(err) {
-					log.WarnContext(ctx, "targeted item not found", "type", item.Type, "uid", item.UID, "not_found", true)
-					notFound++
-				} else {
-					log.WarnContext(ctx, "targeted item fetch error", "type", item.Type, "uid", item.UID, "error", err,
-						"publish_failed_for_backfill_repair", true)
-				}
-				continue
-			}
-			if !req.DryRun {
-				uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
-				if ok {
-					kc.ProjectUID = uid
-					PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-				} else {
-					log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
-						"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-				}
-				PublishKeyContactFGA(ctx, r.publisher, kc)
-				published++
-			}
+	case entityTypeKeyContact:
+		kc, _, err := r.kcReader.AssembleKeyContact(ctx, uid)
+		if err != nil {
+			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+		}
+		if req.DryRun {
+			return outcomeIssued
+		}
+		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
+		if ok {
+			kc.ProjectUID = resolvedUID
+			PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+		} else {
+			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
+				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+		}
+		PublishKeyContactFGA(ctx, r.publisher, kc)
+		if !ok {
+			return outcomeRetry
+		}
+		return outcomeIssued
 
-		case entityTypeB2BOrgSettings:
-			org, orgErr := r.b2bReader.GetB2BOrg(ctx, item.UID)
-			if orgErr != nil {
-				if errs.IsNotFound(orgErr) {
-					log.WarnContext(ctx, "targeted item not found", "type", item.Type, "uid", item.UID, "not_found", true)
-					notFound++
+	case entityTypeB2BOrgSettings:
+		if r.settingsReader == nil {
+			log.ErrorContext(ctx, "b2b_org_settings reindex requires settingsReader — wiring error",
+				"uid", uid, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		org, orgErr := r.b2bReader.GetB2BOrg(ctx, uid)
+		if orgErr != nil {
+			return logItemFetchOutcome(ctx, log, sfType, uid, orgErr)
+		}
+		settings, revision, settingsErr := r.settingsReader.GetSettings(ctx, uid)
+		if settingsErr != nil {
+			log.WarnContext(ctx, "targeted item fetch error", "type", sfType, "uid", uid, "error", settingsErr,
+				"publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		if settings == nil {
+			log.WarnContext(ctx, "targeted item not found", "type", sfType, "uid", uid, "not_found", true)
+			return outcomeNotFound
+		}
+		if req.EnrichAvatars && r.userReader != nil {
+			r.enrichSettingsAvatars(ctx, log, req, uid, settings)
+		}
+		if req.DryRun {
+			return outcomeIssued
+		}
+		if req.EnrichAvatars && r.settingsWriter != nil {
+			if wErr := r.settingsWriter.UpdateSettings(ctx, settings, revision); wErr != nil {
+				if errs.IsConflict(wErr) {
+					log.InfoContext(ctx, "settings changed concurrently; skipping (will retry next run)", "uid", uid)
 				} else {
-					log.WarnContext(ctx, "targeted item fetch error", "type", item.Type, "uid", item.UID, "error", orgErr,
+					log.WarnContext(ctx, "failed to persist enriched avatars (targeted)", "uid", uid, "error", wErr,
 						"publish_failed_for_backfill_repair", true)
 				}
-				continue
+				return outcomeRetry
 			}
-			settings, revision, settingsErr := r.settingsReader.GetSettings(ctx, item.UID)
-			if settingsErr != nil {
-				log.WarnContext(ctx, "targeted item fetch error", "type", item.Type, "uid", item.UID, "error", settingsErr,
-					"publish_failed_for_backfill_repair", true)
-				continue
-			}
-			if settings == nil {
-				log.WarnContext(ctx, "targeted item not found", "type", item.Type, "uid", item.UID, "not_found", true)
-				notFound++
-				continue
-			}
-			if req.EnrichAvatars && r.userReader != nil {
-				r.enrichSettingsAvatars(ctx, log, req, item.UID, settings)
-			}
-			if !req.DryRun {
-				if req.EnrichAvatars && r.settingsWriter != nil {
-					if wErr := r.settingsWriter.UpdateSettings(ctx, settings, revision); wErr != nil {
-						// Skip publish on any persist failure (parity with full mode) so the indexer
-						// only ever sees avatars that were actually persisted — a benign revision
-						// conflict must not project the unpersisted enriched values.
-						if errs.IsConflict(wErr) {
-							log.InfoContext(ctx, "settings changed concurrently; skipping (will retry next run)", "uid", item.UID)
-						} else {
-							log.WarnContext(ctx, "failed to persist enriched avatars (targeted)", "uid", item.UID, "error", wErr,
-								"publish_failed_for_backfill_repair", true)
-						}
-						continue
-					}
-				}
-				PublishB2BOrgSettingsIndexer(ctx, r.publisher, org, settings, indexerConstants.ActionUpdated)
-				published++
-			}
+		}
+		PublishB2BOrgSettingsIndexer(ctx, r.publisher, org, settings, indexerConstants.ActionUpdated)
+		return outcomeIssued
+
+	default:
+		log.ErrorContext(ctx, "unhandled reindex type", "type", sfType, "uid", uid)
+		return outcomeRetry
+	}
+}
+
+// logItemFetchOutcome logs a per-item fetch error and maps it to an outcome:
+// NotFound → outcomeNotFound; any other error → outcomeRetry.
+func logItemFetchOutcome(ctx context.Context, log *slog.Logger, sfType, uid string, err error) reindexOutcome {
+	if errs.IsNotFound(err) {
+		log.WarnContext(ctx, "targeted item not found", "type", sfType, "uid", uid, "not_found", true)
+		return outcomeNotFound
+	}
+	log.WarnContext(ctx, "targeted item fetch error", "type", sfType, "uid", uid, "error", err,
+		"publish_failed_for_backfill_repair", true)
+	return outcomeRetry
+}
+
+func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req BackfillRequest) {
+	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
+	var notFound, published int
+	for _, uid := range req.Items {
+		switch r.reindexItem(ctx, log, req, req.Type, uid, fetchChildUIDs) {
+		case outcomeIssued:
+			published++
+		case outcomeNotFound:
+			notFound++
+		case outcomeRetry:
+			// Already logged in reindexItem.
 		}
 	}
 
 	log.InfoContext(ctx, "targeted backfill complete",
+		"type", req.Type,
 		"total_items", len(req.Items),
 		"published", published,
 		"not_found", notFound,
 		"would_publish_count", len(req.Items)-notFound)
+}
+
+// PrepareRepair synchronously gates and selects a cdc_repair page. It refreshes
+// the quota reading (falling back to the last valid observation if the active
+// refresh fails), returns ServiceUnavailable when the quota is unreadable or
+// at/above the admin threshold, and otherwise returns up to repairPageCap
+// pending markers for req.Type. There is no distributed lock — concurrent drains
+// are safe by design. The caller passes the returned markers to RunRepair.
+func (r *Runner) PrepareRepair(ctx context.Context, req BackfillRequest) ([]port.RepairMarker, error) {
+	if r.repairStore == nil {
+		return nil, errs.NewServiceUnavailable("cdc_repair queue is not configured")
+	}
+	if r.quotaGauge == nil {
+		return nil, errs.NewServiceUnavailable("cdc_repair quota gauge is not configured")
+	}
+
+	snap, err := r.quotaGauge.Refresh(ctx)
+	if err != nil {
+		// Fall back to the last valid observation; only refuse when nothing has
+		// ever been observed (truly unreadable).
+		snap = r.quotaGauge.Snapshot()
+		if !snap.Observed() {
+			return nil, errs.NewServiceUnavailable("salesforce quota is currently unreadable; retry shortly")
+		}
+	}
+	if snap.Ratio() >= r.repairQuotaThreshold {
+		return nil, errs.NewServiceUnavailable(fmt.Sprintf(
+			"salesforce quota at/above admin threshold (%.1f%% >= %.1f%%); retry after quota resets",
+			snap.Ratio()*100, r.repairQuotaThreshold*100))
+	}
+
+	markers, listErr := r.repairStore.ListPending(ctx, req.Type, repairPageCap)
+	if listErr != nil {
+		return nil, listErr
+	}
+	return markers, nil
+}
+
+// RunRepair drains a selected page of repair markers. For each marker it
+// reindexes the record, and on outcomeIssued/outcomeNotFound revision-conditionally
+// deletes the marker (the sole race guard); outcomeRetry markers are retained and
+// logged for the next drain. Before each item it re-reads the passive gauge and
+// stops at the admin threshold without another /limits call. Intended to be
+// called in a goroutine with context.WithoutCancel so it outlives the request.
+func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []port.RepairMarker) {
+	log := slog.With("run_id", req.RunID, "component", "backfill", "mode", string(modeRepair), "type", req.Type)
+	log.InfoContext(ctx, "repair drain started", "selected", len(markers))
+
+	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
+	var issued, notFound, retryRetained, stoppedEarly int
+	for i, m := range markers {
+		if r.repairMidPageQuotaExceeded() {
+			stoppedEarly = len(markers) - i
+			log.WarnContext(ctx, "repair drain stopping mid-page — quota threshold reached",
+				"processed", i, "remaining", stoppedEarly, "publish_failed_for_backfill_repair", true)
+			break
+		}
+
+		outcome := r.reindexItem(ctx, log, req, m.Type, m.SFID, fetchChildUIDs)
+		if outcome == outcomeRetry {
+			// Retain the marker (fetch/dependency/partial-projection failure).
+			retryRetained++
+			log.WarnContext(ctx, "repair item retained for next drain", "type", m.Type, "uid", m.SFID)
+			continue
+		}
+
+		// issued or not_found → revision-conditionally delete the marker (the
+		// sole race guard). A conflict means the consumer re-skipped or another
+		// drain acted; retain the newer marker for the next drain.
+		if delErr := r.repairStore.DeletePending(ctx, m.Type, m.SFID, m.Revision); delErr != nil {
+			retryRetained++
+			log.WarnContext(ctx, "repair marker retained — conditional delete failed",
+				"type", m.Type, "uid", m.SFID, "error", delErr)
+			continue
+		}
+		if outcome == outcomeNotFound {
+			notFound++
+		} else {
+			issued++
+		}
+	}
+
+	log.InfoContext(ctx, "repair drain complete",
+		"selected", len(markers),
+		"issued", issued,
+		"not_found", notFound,
+		"retry_retained", retryRetained,
+		"stopped_early", stoppedEarly)
+}
+
+// repairMidPageQuotaExceeded reports whether the passive quota reading has
+// reached the admin threshold. It does not issue a /limits call — the drain was
+// already gated at start; this only stops a long page if live traffic pushes
+// usage up mid-drain.
+func (r *Runner) repairMidPageQuotaExceeded() bool {
+	if r.quotaGauge == nil {
+		return false
+	}
+	snap := r.quotaGauge.Snapshot()
+	if !snap.Observed() {
+		return false
+	}
+	return snap.Ratio() >= r.repairQuotaThreshold
 }

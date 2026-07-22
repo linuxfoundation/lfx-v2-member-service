@@ -2,12 +2,13 @@
 
 This document is the authoritative reference for the **backfill runner** — the code that re-reads entities from Salesforce (and, for settings, the `org-settings` KV) and re-publishes them to the indexer and fga-sync services on demand, as a recovery/repair tool.
 
-One `service.Runner` (`internal/service/backfill_runner.go`) backs two entry points:
+One `service.Runner` (`internal/service/backfill_runner.go`) backs three entry points:
 
-- **`POST /admin/reindex`** — an async HTTP admin action that reindexes a full, since-filtered, or targeted set of entities.
+- **`POST /admin/reindex`** — an async HTTP admin action that reindexes a full, since-filtered, or targeted set of entities for one type.
+- **`POST /admin/reindex {cdc_repair:true}`** — drains the durable CDC quota-repair queue for one type (records the CDC consumer skipped while the Salesforce API quota was exhausted). See [CDC Quota-Repair Drain](#cdc-quota-repair-drain).
 - **`RUN_MODE=avatar-backfill`** — a one-off Kubernetes Job that re-enriches `b2b_org_settings` avatars and republishes them.
 
-Both hand a `BackfillRequest` to the same `Runner.Run`, so they share the run-id, dry-run, and full-run-lock control plane.
+The first two hand a `BackfillRequest` to `Runner.Run` (full/filtered/targeted) or the dedicated `Runner.PrepareRepair` + `Runner.RunRepair` pair (`cdc_repair`); the avatar Job also uses `Runner.Run`. All three share the run-id and dry-run control plane; only full mode additionally takes the per-type full-run lock (`cdc_repair` takes no lock — see [CDC Quota-Repair Drain](#cdc-quota-repair-drain)).
 
 **Update this document in the same PR as any change to the backfill runner, the `/admin/reindex` payload/validation, or the avatar-backfill Job.**
 
@@ -15,7 +16,7 @@ For the downstream message payloads the runner produces, see:
 
 - [FGA Contract](./fga-contract.md) — the fga-sync messages (`update_access`, `member_put`).
 - [Indexer Contract](./indexer-contract.md) — the OpenSearch indexer messages (`created`/`updated`).
-- [CDC Consumer](./cdc-consumer.md) — the near-real-time sync path; `/admin/reindex` is its backstop.
+- [CDC Consumer](./cdc-consumer.md) — the near-real-time sync path; `/admin/reindex` is its backstop, and the quota guard's stale-refresh + write-on-skip behaviour is documented there. `cdc_repair` drains the queue it writes.
 
 ---
 
@@ -26,6 +27,7 @@ For the downstream message payloads the runner produces, see:
 - [Run Modes](#run-modes)
 - [HTTP Endpoint](#http-endpoint)
 - [Full-Run Lock](#full-run-lock)
+- [CDC Quota-Repair Drain](#cdc-quota-repair-drain)
 - [Per-Type Handling](#per-type-handling)
 - [`project_uid` Resolution Parity](#project_uid-resolution-parity)
 - [Avatar Enrichment (`avatar-backfill`)](#avatar-enrichment-avatar-backfill)
@@ -50,20 +52,19 @@ The runner is constructed by `BackfillRunnerImpl` (`cmd/member-api/service/provi
 
 ## Request Model
 
-`BackfillRequest` (`internal/service/backfill_request.go`) is the validated, normalised input for a single run:
+`BackfillRequest` (`internal/service/backfill_request.go`) is the validated, normalised input for a single run. **Every request has exactly one `Type` — there is no all-types shortcut** (this is a breaking change from the earlier `Types []string` array; see [Per-Type Handling](#per-type-handling) for why the migration was worth it).
 
 | Field | Meaning |
 |---|---|
 | `RunID` | Correlation ID stamped on every log line for the run. Set to a fresh UUID by the HTTP handler and the avatar Job. |
-| `Types` | Entity types to reindex; empty = all in-scope. Used in full/filtered modes. |
-| `Since` | `nil` = full reindex; otherwise only records with `LastModifiedDate >= Since`. |
-| `Items` | Targeted list of `{Type, UID}` for surgical reindex. Mutually exclusive with `Types`/`Since`. |
+| `Type` | Required: the single entity type for this run. |
+| `Since` | `nil` = full reindex; otherwise only records with `LastModifiedDate >= Since`. Mutually exclusive with `Items`/`CDCRepair`. |
+| `Items` | Targeted UIDs, all of `Type`, for surgical reindex (up to 100). Mutually exclusive with `Since`/`CDCRepair`. |
+| `CDCRepair` | Drain the CDC quota-repair queue for `Type` instead of reading from Salesforce paged/targeted. Mutually exclusive with `Since`/`Items`. Only `b2b_org`, `project_membership`, `key_contact` are supported (no CDC skip path exists for `b2b_org_settings`). See [CDC Quota-Repair Drain](#cdc-quota-repair-drain). |
 | `DryRun` | Walk the read path but skip publishing. |
 | `EnrichAvatars` / `AvatarMissingOnly` / `AvatarSleep` | Avatar-backfill Job only; **not** exposed on the HTTP payload. |
 
 In-scope types (`allBackfillTypes`): `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings`.
-
-`ReindexItem` is `{Type, UID}` for targeted mode.
 
 ---
 
@@ -73,11 +74,12 @@ In-scope types (`allBackfillTypes`): `b2b_org`, `project_membership`, `key_conta
 
 | Mode | Condition | Iteration source |
 |---|---|---|
-| `targeted` | `len(Items) > 0` | the explicit `Items` list (`runTargeted`) |
-| `filtered` | `Since != nil` | paged SOQL `Iter*` with the `since` filter (`runType`) |
-| `full` | otherwise | paged SOQL `Iter*` over all records (`runType`) |
+| `repair` | `CDCRepair == true` | pending markers from the `cdc-repair` NATS KV bucket for `Type` (`PrepareRepair` + `RunRepair`) — see [CDC Quota-Repair Drain](#cdc-quota-repair-drain) |
+| `targeted` | `len(Items) > 0` | the explicit `Items` list, all of `Type` (`runTargeted`) |
+| `filtered` | `Since != nil` | paged SOQL `Iter*` for `Type` with the `since` filter (`runType`) |
+| `full` | otherwise | paged SOQL `Iter*` for `Type` over all records (`runType`) |
 
-`filtered` and `full` iterate `effectiveTypes(req.Types)` — the requested types, or all in-scope types when `Types` is empty. Only **full** mode acquires the per-type NATS lock and logs `full_reindex_started=true`.
+`filtered` and `full` iterate exactly `req.Type` — every run reindexes one type; call the endpoint once per type to reindex several. Only **full** mode acquires the per-type NATS lock and logs `full_reindex_started=true`. `repair` mode is dispatched by the HTTP handler directly to `PrepareRepair`/`RunRepair`, not through `Runner.Run` (`Run` returns an error if called with `CDCRepair` set — a defensive guard against misuse).
 
 ---
 
@@ -91,23 +93,24 @@ In-scope types (`allBackfillTypes`): `b2b_org`, `project_membership`, `key_conta
 
 | Field | Notes |
 |---|---|
-| `types` | Optional array; default = all in-scope. Mutually exclusive with `items`. |
-| `since` | RFC 3339 with explicit zone; normalised to UTC. Mutually exclusive with `items`. |
-| `items` | Targeted `{type, uid}` list; **max 100** (`MaxLength(100)`). Mutually exclusive with `types`/`since`. |
-| `dry_run` | Default `false`. |
+| `type` | **Required**; exactly one of `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings` — no all-types shortcut. |
+| `since` | RFC 3339 with explicit zone; normalised to UTC. Mutually exclusive with `items`/`cdc_repair`. |
+| `items` | Targeted UIDs of `type`, as `[{"uid": "..."}, ...]`; **max 100** (`MaxLength(100)`). Mutually exclusive with `since`/`cdc_repair`. |
+| `cdc_repair` | Drain the CDC quota-repair queue for `type` instead of a Salesforce read. Mutually exclusive with `since`/`items`; only `b2b_org`, `project_membership`, `key_contact` support it. See [CDC Quota-Repair Drain](#cdc-quota-repair-drain). |
+| `dry_run` | Default `false`. Not applicable to `cdc_repair` (there is no dry-run drain in this release). |
 
 **Validation** (`ValidateAndBuildRequest`):
 
-- Unknown types are rejected; `membership_tier` is rejected with a specific message (not currently supported).
-- `items` is mutually exclusive with `types`/`since`.
-- Each item's `type` must be valid and its `uid` must be a Salesforce ID (`sfuuid.IsSFID`).
+- `type` must be one of the four in-scope types; unknown types are rejected, and `membership_tier` is rejected with a specific message (not currently supported).
+- `items` is mutually exclusive with `since` and `cdc_repair`.
+- Each item's `uid` must be a Salesforce ID (`sfuuid.IsSFID`); the type is the top-level `type` for every item (there is no per-item type — mixed-type item batches are structurally impossible).
+- `cdc_repair` is mutually exclusive with `since`/`items`, and only `b2b_org`, `project_membership`, `key_contact` are accepted for it (`b2b_org_settings` is rejected — no CDC skip path exists for it).
 - `since` must parse as RFC 3339; it is converted to UTC.
 
-**Response:** HTTP `202 Accepted` with `{ "run_id": "<uuid>" }`. The handler generates the `run_id`, logs the accepted request, then runs the backfill in a goroutine on `context.WithoutCancel(ctx)` so it outlives the HTTP request.
+**Response:** HTTP `202 Accepted`.
 
-- The goroutine's return value is **ignored** — `/admin/reindex` is fire-and-forget; track progress by grepping logs for `run_id=<uuid>`.
-- A pod restart during a large run interrupts it mid-flight (partial index, no error logged); re-trigger to repair.
-- If the runner is not initialised, the handler logs a warning and still returns the `run_id`.
+- **Full/filtered/targeted:** `{ "run_id": "<uuid>" }`. The handler generates the `run_id`, logs the accepted request, then runs the backfill in a goroutine on `context.WithoutCancel(ctx)` so it outlives the HTTP request. The goroutine's return value is **ignored** — fire-and-forget; track progress by grepping logs for `run_id=<uuid>`. A pod restart during a large run interrupts it mid-flight (partial index, no error logged); re-trigger to repair. If the runner is not initialised, the handler logs a warning and still returns the `run_id`.
+- **`cdc_repair`:** `{ "run_id": "<uuid>", "selected_count": <n> }`. `PrepareRepair` runs **synchronously** in the request (quota gate + page selection), so `selected_count` reflects the exact number of markers handed to the async drain. A quota-unreadable or at/above-threshold gate returns HTTP `503` instead of `202` — see [CDC Quota-Repair Drain](#cdc-quota-repair-drain).
 
 ---
 
@@ -120,7 +123,61 @@ In **full** mode (only), each type is guarded by a cluster-wide NATS KV lock so 
 - A held lock older than `backfillLockStaleTTL` (2h) — or a malformed value — is treated as stale and force-acquired (delete + re-create).
 - The returned `release` deletes the key on a fresh `context.Background()` (5s timeout), so it still runs if the caller's context has expired.
 
-Filtered and targeted modes take **no** lock.
+Filtered and targeted modes take **no** lock. `cdc_repair` also takes **no** lock — see below.
+
+---
+
+## CDC Quota-Repair Drain
+
+The CDC consumer's quota guard (`internal/service/cdc_consumer.go`, documented in [CDC Consumer — Quota Guard](./cdc-consumer.md#quota-guard)) writes a durable pending marker to the `cdc-repair` NATS KV bucket for every record it skips while the Salesforce API quota is exhausted. `cdc_repair:true` on `/admin/reindex` drains that queue for one type.
+
+### Marker schema
+
+`internal/infrastructure/nats/cdc_repair.go`, `cdc-repair` bucket (no TTL, `history: 1` — see [NATS Storage](#nats-storage)):
+
+- **Key:** `pending.{reindex_type}.{sfid}` — `reindex_type` is one of `b2b_org`, `project_membership`, `key_contact`; `sfid` is the canonical 18-character Salesforce ID. One key per `(type, record)` pair; a later skip for the same record overwrites the same key (`PutPending` is a plain `kv.Put`, not append-only).
+- **Value:** `{"skipped_at": "<RFC 3339 timestamp>"}` — deliberately minimal. There is no retry count, last-error field, or original-entity field in the marker; the type and SFID live in the key, and per-item failure detail is in the drain's structured logs (`repair item retained for next drain`), not the marker itself. A malformed value is still retained and acted on (`SkippedAt` left zero) rather than treated as absent.
+- **Read/list is targeted-only:** both the consumer's writer and the drain's `ListPending` operate through a type-filtered key stream (`pending.{type}.>`); neither ever enumerates the full bucket, so queue depth/age across all types is not observable from a single call (there is no depth counter or `>48h` staleness alert in this release — deferred as non-essential to the fix).
+
+### Why there is no distributed lock
+
+Every other write path that could race across the API's 3 replicas takes a NATS KV lock (see [Full-Run Lock](#full-run-lock)). `cdc_repair` deliberately does not, because the concurrency analysis comes out safe without one:
+
+- `reindexItem` (the function `RunRepair` shares with `runTargeted`) only republishes **idempotent** projections — indexer docs and FGA tuples keyed by entity UID. Two replicas draining the same type concurrently would double-publish, which is a no-op downstream.
+- The only shared mutable state is the marker itself, and `DeletePending` is **revision-conditional**: the loser of a concurrent delete gets a `Conflict` and simply retains the marker for the next drain (`RunRepair` logs it as `retry_retained`, no data is lost).
+- A distributed lock across 3 replicas needs a lease/TTL to survive a pod crash mid-drain (the async goroutine outlives the HTTP request that acquired it); building and testing that lease correctly is real complexity bought only to save a handful of duplicate Salesforce reads on the rare occasion two operators trigger a drain at once. The quota gate and the 100-item page cap already bound how much duplicate work is possible.
+
+So: **idempotent reindex + revision-conditional delete is the sole race guard.** Concurrent `cdc_repair` runs for the same type are safe by design, not by mutual exclusion.
+
+### Two-phase drain
+
+1. **`PrepareRepair` (synchronous, in the HTTP request):**
+   - Requires both a repair store and a quota gauge to be wired (`WithRepairStore`, `WithQuotaGauge` in `cmd/member-api/service/providers.go`, Salesforce mode only) — returns `503` ("not configured") otherwise.
+   - Issues an active quota refresh (falls back to the last valid observation if the refresh request fails); returns `503` if the quota has never been observed (truly unreadable).
+   - Returns `503` if `current/limit >= ADMIN_REINDEX_QUOTA_THRESHOLD` (default `0.80` — see [Threshold asymmetry](#threshold-asymmetry) below).
+   - Otherwise lists up to 100 pending markers for `Type` from the `cdc-repair` bucket (`ListPending`) and returns them as `selected_count`.
+2. **`RunRepair` (asynchronous goroutine, `context.WithoutCancel`):**
+   - For each marker: calls `reindexItem`, then on `issued`/`not_found` revision-conditionally deletes the marker; on `retry` (a fetch, dependency-resolution, persistence, or partial-projection failure) the marker is retained and logged (`repair item retained for next drain`) for the next run.
+   - Before each item, re-reads the **passive** gauge (no additional `/limits` call) and stops mid-page if usage has crossed the threshold since the page was selected (`stopped_early` in the summary log) — this catches live traffic pushing usage up while a page is draining.
+
+### Threshold asymmetry
+
+The consumer's `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`) and the drain's `ADMIN_REINDEX_QUOTA_THRESHOLD` (default `0.80`) are deliberately different values. Between 0.80 and 0.95, the consumer is processing normally (below its skip threshold) while `cdc_repair` refuses to start (at/above its own, lower threshold). This is intentional headroom so a drain never competes with live CDC traffic for the last slice of daily quota — but it means an operator can observe "consumer healthy, repair queue not draining" in that band; that is expected, not a bug.
+
+### Operator workflow / runbook
+
+1. **Confirm there is something to drain.** The bucket is never enumerated across all types by the service itself (see [Marker schema](#marker-schema)), so inspect it directly against the running NATS server (e.g. via `kubectl exec` into a pod with `nats` CLI access, or `nats context select` against the cluster):
+   ```bash
+   # List pending markers for one type (keys only, cheap):
+   nats kv ls cdc-repair --keys | grep '^pending.project_membership\.'
+
+   # Inspect one marker's value (skipped_at) and revision:
+   nats kv get cdc-repair 'pending.project_membership.001XXXXXXXXXXXXAAA' --raw
+   ```
+2. **Drain a page.** `POST /admin/reindex {"type": "<type>", "cdc_repair": true}` for each affected type (`b2b_org`, `project_membership`, `key_contact`). A `503` response means the quota gate refused the run — wait for quota headroom (see [Threshold asymmetry](#threshold-asymmetry)) and retry.
+3. **Re-run until drained.** Each call selects up to 100 markers, so a backlog larger than that needs multiple calls; repeat step 2 until the response's `selected_count` is `0`. There is no `dry_run` or `has_more` signal for `cdc_repair` in this release (deferred as non-essential to the fix — see the change proposal), so `selected_count` is the only progress signal.
+4. **Remediate persistent failures.** Markers that keep coming back are logged each drain as `repair item retained for next drain` (carries `type`/`uid`/`error`). A record retried across several drains without ever clearing usually means a dependency is down (e.g. the project-service NATS RPC the `project_uid` resolver depends on) rather than a transient blip — fix the underlying cause, then re-run the drain; the drain itself cannot resolve a persistent dependency failure.
+5. **Confirm convergence.** After `selected_count` reaches `0` for a type, re-run `nats kv ls` for that type's prefix to confirm no markers remain (a marker can reappear if the consumer skips the same record again before you finish draining — that is expected, not a bug).
 
 ---
 
@@ -137,7 +194,7 @@ Filtered and targeted modes take **no** lock.
 
 ### Targeted (`runTargeted`, per item)
 
-Each `Item` is fetched individually and republished with the same per-type publish calls as above (`GetB2BOrg`, `AssembleProjectMembership`, `AssembleKeyContact`, `GetB2BOrg`+`GetSettings`). Child-UID lookups are memoised within the request so siblings sharing a parent don't each issue a SOQL call. A missing record is counted as `not_found` and skipped. The final log line reports `total_items`, `published`, `not_found`, and `would_publish_count`.
+Each UID in `Items` is fetched individually via the shared `reindexItem` helper (the same one `RunRepair` uses for `cdc_repair` — see [CDC Quota-Repair Drain](#cdc-quota-repair-drain)) and republished with the same per-type publish calls as the full/filtered path (`GetB2BOrg`, `AssembleProjectMembership`, `AssembleKeyContact`, `GetB2BOrg`+`GetSettings`) — all four in-scope types, including `b2b_org_settings`, support targeted mode (only `cdc_repair` restricts to the three CDC-backed types). Child-UID lookups are memoised within the request so siblings sharing a parent don't each issue a SOQL call. `outcomeNotFound` is counted as `not_found` and skipped; `outcomeRetry` is logged inside `reindexItem` and otherwise ignored by the loop (targeted mode does not retain/retry a marker — that persistence is exclusive to `cdc_repair`). The final log line reports `total_items`, `published`, `not_found`, and `would_publish_count`.
 
 `PublishKeyContactFGA` emits its `member_put` grant only when the assembled record has a non-empty `Username` (`internal/service/messaging.go`); the backfill publishes the record's FGA state as assembled from Salesforce and does not itself perform an email→LFID lookup.
 
@@ -202,16 +259,23 @@ The runner is resilient: a per-record fetch/publish failure is logged and the ru
 | `not_found=true` | A targeted/settings item did not resolve to a record. | Verify the UID; nothing published for it. |
 | `since filter on key_contact only checks Project_Role__c.LastModifiedDate` | The `since` window misses Contact/Asset-only field changes for key contacts. | Use a full `key_contact` reindex if joined-field changes must be captured. |
 | `avatar enrichment lookup failed` | An auth-service lookup failed (avatar Job). | Tolerated up to the failure limit; a systemic outage fails the Job (non-zero exit). |
+| `repair item retained for next drain` | A `cdc_repair` item hit a fetch/dependency/persistence/partial-projection failure; its marker was kept. | Inspect the log line's `error` field; re-run `cdc_repair` for the type once the underlying cause (e.g. project-service outage) is fixed. |
+| `repair marker retained — conditional delete failed` | The revision-conditional `DeletePending` lost a race (another drain or a fresh consumer skip updated the marker first). | Harmless — the newer marker is picked up by the next drain. |
+| `repair drain stopping mid-page — quota threshold reached` (`publish_failed_for_backfill_repair=true`) | Live traffic pushed passive usage to/above `ADMIN_REINDEX_QUOTA_THRESHOLD` while a page was draining. | Re-run `cdc_repair` for the type once quota headroom returns; unprocessed markers in the page remain pending. |
 
 **Run-level result:** in full/filtered mode, `Run` returns an error listing any `failed` types. The HTTP path ignores this (fire-and-forget); the avatar Job uses it for its exit code. The summary log line reports `succeeded`, `failed`, and `skipped_locked`.
 
-> **Operational note — `key_contact` is high-volume (~300k records in prod).** Reindex only the active window with a `since` ~2 years back (e.g. `{"types":["key_contact"],"since":"2024-06-01T00:00:00Z"}`) rather than a full `key_contact` reindex, which takes hours and is likely to be interrupted by pod eviction.
+> **Operational note — `key_contact` is high-volume (~300k records in prod).** Reindex only the active window with a `since` ~2 years back (e.g. `{"type":"key_contact","since":"2024-06-01T00:00:00Z"}`) rather than a full `key_contact` reindex, which takes hours and is likely to be interrupted by pod eviction.
 
 ---
 
 ## Configuration
 
-The HTTP endpoint takes no dedicated environment variables beyond the shared service/Salesforce/NATS config (see [README](../README.md) / [CLAUDE.md](../CLAUDE.md)).
+| Variable | Description | Default |
+|---|---|---|
+| `ADMIN_REINDEX_QUOTA_THRESHOLD` | Fraction of the daily Salesforce REST quota (`current/limit`) at/above which `PrepareRepair` refuses a `cdc_repair` drain and `RunRepair` stops mid-page. | `0.80` |
+
+The full/filtered/targeted paths take no dedicated environment variables beyond the shared service/Salesforce/NATS config (see [README](../README.md) / [CLAUDE.md](../CLAUDE.md)). The corresponding consumer-side variable (`CDC_QUOTA_REFRESH_STALE_AFTER`, `CDC_QUOTA_SKIP_THRESHOLD`) that governs what gets written into the queue this endpoint drains is documented in [CDC Consumer — Configuration](./cdc-consumer.md#configuration).
 
 Avatar-backfill Job variables (read only when `RUN_MODE=avatar-backfill`):
 
@@ -231,6 +295,7 @@ Avatar-backfill Job variables (read only when `RUN_MODE=avatar-backfill`):
 |---|---|---|
 | `membership-cache` | (1) Full-mode per-type lock (`backfill-lock/full/<type>`). (2) Read/written by the injected `ProjectResolver` for `project-uid.<slug>` lookups while resolving `project_uid` before publishing `project_membership` / `key_contact`. | Lock held for the run; force-acquired if the embedded timestamp is older than 2h (`backfillLockStaleTTL`). Resolver entries use the standard 6 h stale / 23 h expire envelope. |
 | `org-settings` | `b2b_org_settings` reindex reads settings; avatar enrichment persists updated avatars back (`UpdateSettings`). | Authoritative (no soft-TTL). |
+| `cdc-repair` | `cdc_repair` mode lists (`ListPending`) and revision-conditionally deletes (`DeletePending`) pending markers written by the CDC consumer. **Not written by the runner** — see [CDC Consumer — NATS Storage](./cdc-consumer.md) for the write side. | Authoritative (no TTL, `history: 1`); no distributed lock guards concurrent drains (see [CDC Quota-Repair Drain](#cdc-quota-repair-drain)). |
 
 ---
 

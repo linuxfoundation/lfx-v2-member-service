@@ -236,6 +236,23 @@ func NewClient(ctx context.Context, config Config) (*NATSClient, error) {
 		"bucket", constants.KVBucketNameWorkspaceProjects,
 	)
 
+	// cdc-repair: durable CDC quota-repair queue. No MaxAge TTL (a pending
+	// marker must survive until drained) and history 1 (a pending set — old
+	// revisions are never needed). Both defaults are provided by KeyValueStore
+	// (no TTL branch) and jetstream.KeyValueConfig (History defaults to 1).
+	// Initialised in both consumer and API modes: the consumer writes markers
+	// on skip; the API lists/deletes them during a cdc_repair drain.
+	if err := client.KeyValueStore(ctx, constants.KVBucketNameCDCRepair); err != nil {
+		slog.ErrorContext(ctx, "failed to initialize cdc-repair key-value store",
+			"error", err,
+			"bucket", constants.KVBucketNameCDCRepair,
+		)
+		return nil, errors.NewServiceUnavailable("failed to initialize cdc-repair key-value store", err)
+	}
+	slog.InfoContext(ctx, "NATS key-value store initialized",
+		"bucket", constants.KVBucketNameCDCRepair,
+	)
+
 	slog.InfoContext(ctx, "NATS client created successfully",
 		"connected_url", conn.ConnectedUrl(),
 		"status", conn.Status(),

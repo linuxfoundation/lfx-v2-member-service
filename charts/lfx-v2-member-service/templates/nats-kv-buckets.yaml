@@ -155,3 +155,27 @@ spec:
   # consumer resumes from where it left off after a restart or pod eviction.
   # Losing this entry forces a full replay from the earliest retained event.
 {{- end }}
+---
+{{- if .Values.nats.kv_bucket_cdc_repair.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.kv_bucket_cdc_repair.name }}
+  namespace: lfx
+  {{- if .Values.nats.kv_bucket_cdc_repair.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+spec:
+  bucket: {{ .Values.nats.kv_bucket_cdc_repair.name }}
+  replicas: {{ .Values.nats.kv_bucket_cdc_repair.replicas }}
+  history: {{ .Values.nats.kv_bucket_cdc_repair.history }}
+  storage: {{ .Values.nats.kv_bucket_cdc_repair.storage }}
+  maxValueSize: {{ .Values.nats.kv_bucket_cdc_repair.maxValueSize }}
+  maxBytes: {{ .Values.nats.kv_bucket_cdc_repair.maxBytes }}
+  compression: {{ .Values.nats.kv_bucket_cdc_repair.compression }}
+  # IMPORTANT: no ttl — a pending repair marker must never be silently evicted
+  # before it is drained via POST /admin/reindex {cdc_repair:true}.
+{{- end }}

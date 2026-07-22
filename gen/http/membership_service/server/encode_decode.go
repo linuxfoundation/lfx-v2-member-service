@@ -3540,8 +3540,7 @@ func unmarshalAdminReindexItemRequestBodyToMembershipserviceAdminReindexItem(v *
 		return nil
 	}
 	res := &membershipservice.AdminReindexItem{
-		Type: *v.Type,
-		UID:  *v.UID,
+		UID: *v.UID,
 	}
 
 	return res

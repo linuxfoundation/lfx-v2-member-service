@@ -32,18 +32,14 @@ paths:
                         schema:
                             $ref: '#/components/schemas/AdminReindexPayload'
                         example:
-                            dry_run: false
+                            cdc_repair: true
+                            dry_run: true
                             items:
-                                - type: b2b_org
-                                  uid: 001B000000IqhSLIAZ
-                                - type: b2b_org
-                                  uid: 001B000000IqhSLIAZ
-                                - type: b2b_org
-                                  uid: 001B000000IqhSLIAZ
+                                - uid: 001B000000IqhSLIAZ
+                                - uid: 001B000000IqhSLIAZ
+                                - uid: 001B000000IqhSLIAZ
                             since: "2026-05-20T00:00:00Z"
-                            types:
-                                - b2b_org
-                                - project_membership
+                            type: b2b_org
             responses:
                 "202":
                     description: Accepted response.
@@ -53,6 +49,7 @@ paths:
                                 $ref: '#/components/schemas/AdminReindexResult'
                             example:
                                 run_id: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
+                                selected_count: 42
                 "400":
                     description: 'BadRequest: Bad request'
                     content:
@@ -545,12 +542,6 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                 "400":
                     description: 'BadRequest: Bad request'
                     content:
@@ -691,12 +682,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -857,12 +842,6 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                 "400":
                     description: 'BadRequest: Bad request'
                     content:
@@ -987,12 +966,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1160,12 +1133,6 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                 "400":
                     description: 'BadRequest: Bad request'
                     content:
@@ -1276,6 +1243,13 @@ paths:
                                 created_by: alice
                                 name: My Workspace
                                 projects:
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
                                       project_name: Kubernetes
@@ -1508,6 +1482,13 @@ paths:
                                       project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -1632,6 +1613,13 @@ paths:
                                 created_by: alice
                                 name: My Workspace
                                 projects:
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
                                       project_name: Kubernetes
@@ -1785,6 +1773,13 @@ paths:
                                       project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -1913,8 +1908,6 @@ paths:
                                       project_slug: ""
                                     - error: project_slug is required
                                       project_slug: ""
-                                    - error: project_slug is required
-                                      project_slug: ""
                                 succeeded:
                                     - kubernetes
                                 workspace:
@@ -1922,6 +1915,13 @@ paths:
                                     created_by: alice
                                     name: My Workspace
                                     projects:
+                                        - created_at: "2026-01-01T00:00:00Z"
+                                          created_by: alice
+                                          project_name: Kubernetes
+                                          project_slug: kubernetes
+                                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                          updated_at: "2026-01-01T00:00:00Z"
+                                          updated_by: alice
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
                                           project_name: Kubernetes
@@ -2018,7 +2018,7 @@ paths:
                             last_name: Doe
                             primary_contact: false
                             role: Technical Contact
-                            send_invite: true
+                            send_invite: false
                             status: Active
                             title: CTO
             responses:
@@ -2612,24 +2612,23 @@ components:
         AdminReindexItem:
             type: object
             properties:
-                type:
-                    type: string
-                    description: 'Entity type: b2b_org, project_membership, key_contact, or b2b_org_settings'
-                    example: b2b_org
                 uid:
                     type: string
                     description: Entity UID (Salesforce ID)
                     example: 001B000000IqhSLIAZ
-            description: A single entity to reindex (targeted mode)
+            description: A single entity UID to reindex (targeted mode); its type is the request's top-level type
             example:
-                type: b2b_org
                 uid: 001B000000IqhSLIAZ
             required:
-                - type
                 - uid
         AdminReindexPayload:
             type: object
             properties:
+                cdc_repair:
+                    type: boolean
+                    description: When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since and items.
+                    default: false
+                    example: false
                 dry_run:
                     type: boolean
                     description: When true, walk SOQL/live-path but skip publishing. Final log includes would_publish_count.
@@ -2639,43 +2638,33 @@ components:
                     type: array
                     items:
                         $ref: '#/components/schemas/AdminReindexItem'
-                    description: Targeted list of entities to reindex (surgical mode). Mutually exclusive with types and since. Max 100 items.
+                    description: Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
                     example:
-                        - type: b2b_org
-                          uid: 001B000000IqhSLIAZ
-                        - type: b2b_org
-                          uid: 001B000000IqhSLIAZ
-                        - type: b2b_org
-                          uid: 001B000000IqhSLIAZ
+                        - uid: 001B000000IqhSLIAZ
+                        - uid: 001B000000IqhSLIAZ
+                        - uid: 001B000000IqhSLIAZ
                     maxItems: 100
                 since:
                     type: string
-                    description: ISO 8601 / RFC 3339 timestamp with explicit zone; only records with LastModifiedDate >= since are reindexed. Mutually exclusive with items. Handler normalises to UTC. For key_contact (high-volume), prefer a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set instead of the full ~300k records.
+                    description: ISO 8601 / RFC 3339 timestamp with explicit zone; only records with LastModifiedDate >= since are reindexed. Mutually exclusive with items and cdc_repair. Handler normalises to UTC. For key_contact (high-volume), prefer a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set instead of the full ~300k records.
                     example: "2026-05-20T00:00:00Z"
                     format: date-time
-                types:
-                    type: array
-                    items:
-                        type: string
-                        example: Quas alias autem.
-                    description: 'Entity types to reindex (optional; default = all in-scope: b2b_org, project_membership, key_contact, b2b_org_settings). Mutually exclusive with items.'
-                    example:
-                        - b2b_org
-                        - project_membership
+                type:
+                    type: string
+                    description: 'Entity type to reindex (required): b2b_org, project_membership, key_contact, or b2b_org_settings. Applies to full, since, and every targeted item. cdc_repair supports only b2b_org, project_membership, key_contact.'
+                    example: b2b_org
             description: Request payload for triggering a reindex operation
             example:
+                cdc_repair: false
                 dry_run: false
                 items:
-                    - type: b2b_org
-                      uid: 001B000000IqhSLIAZ
-                    - type: b2b_org
-                      uid: 001B000000IqhSLIAZ
-                    - type: b2b_org
-                      uid: 001B000000IqhSLIAZ
+                    - uid: 001B000000IqhSLIAZ
+                    - uid: 001B000000IqhSLIAZ
+                    - uid: 001B000000IqhSLIAZ
                 since: "2026-05-20T00:00:00Z"
-                types:
-                    - b2b_org
-                    - project_membership
+                type: b2b_org
+            required:
+                - type
         AdminReindexResult:
             type: object
             properties:
@@ -2684,9 +2673,15 @@ components:
                     description: Correlation ID for the reindex run (for log lookups)
                     example: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                     format: uuid
+                selected_count:
+                    type: integer
+                    description: 'For cdc_repair runs: number of pending repair markers selected for this run (0 for other modes).'
+                    example: 42
+                    format: int64
             description: Result of a reindex operation
             example:
                 run_id: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
+                selected_count: 42
             required:
                 - run_id
         B2bOrgCreateBody:
@@ -2723,7 +2718,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Possimus amet qui placeat libero.
+                        example: Amet qui placeat libero dolorem sunt qui.
                     description: Additional domains; each item is a bare host with the same normalization as primary_domain
                     example:
                         - example.org
@@ -2876,12 +2871,6 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
             description: 'Access-control settings for a b2b_org: writers and auditors'
             example:
                 auditors:
@@ -2918,18 +2907,6 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
         B2bOrgSettingsUpdateBody:
             type: object
             properties:
@@ -2939,6 +2916,18 @@ components:
                         $ref: '#/components/schemas/OrgUser'
                     description: Complete replacement list for org auditors. Nil = leave unchanged; [] = remove all.
                     example:
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
@@ -3089,7 +3078,7 @@ components:
                 fault:
                     type: boolean
                     description: Is the error a server-side fault?
-                    example: false
+                    example: true
                 id:
                     type: string
                     description: ID is a unique identifier for this particular occurrence of the problem.
@@ -3105,7 +3094,7 @@ components:
                 temporary:
                     type: boolean
                     description: Is the error temporary?
-                    example: false
+                    example: true
                 timeout:
                     type: boolean
                     description: Is the error a timeout?
@@ -3229,7 +3218,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: true
+                    example: false
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -3247,7 +3236,7 @@ components:
                 email: john.doe@example.com
                 primary_contact: false
                 role: Technical Contact
-                send_invite: true
+                send_invite: false
                 status: Active
                 title: CTO
         ListMetadata:
@@ -3728,12 +3717,30 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                 writers:
                     type: array
                     items:
                         $ref: '#/components/schemas/OrgUser'
                     description: Complete replacement list for org writers. Nil = leave unchanged; [] = remove all.
                     example:
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
@@ -3785,12 +3792,6 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
         UpdateKeyContactRequestBody:
             type: object
             properties:
@@ -3825,7 +3826,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: false
+                    example: true
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -3880,8 +3881,6 @@ components:
                           project_slug: ""
                         - error: project_slug is required
                           project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
                 last_modified:
                     type: string
                     description: Last-Modified header value (HTTP date format)
@@ -3890,7 +3889,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Veritatis laudantium quo.
+                        example: Laudantium quo magni explicabo repellendus.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -3904,6 +3903,10 @@ components:
                       project_slug: ""
                     - error: project_slug is required
                       project_slug: ""
+                    - error: project_slug is required
+                      project_slug: ""
+                    - error: project_slug is required
+                      project_slug: ""
                 last_modified: Wed, 21 Oct 2025 07:28:00 GMT
                 succeeded:
                     - kubernetes
@@ -3912,6 +3915,20 @@ components:
                     created_by: alice
                     name: My Workspace
                     projects:
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes
@@ -3950,7 +3967,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Reiciendis delectus.
+                        example: Molestiae cupiditate rerum sed commodi nesciunt.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -3964,6 +3981,8 @@ components:
                       project_slug: ""
                     - error: project_slug is required
                       project_slug: ""
+                    - error: project_slug is required
+                      project_slug: ""
                 succeeded:
                     - kubernetes
                 workspace:
@@ -3971,6 +3990,13 @@ components:
                     created_by: alice
                     name: My Workspace
                     projects:
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes
@@ -4105,6 +4131,8 @@ components:
                           project_slug: kubernetes
                         - project_name: Kubernetes
                           project_slug: kubernetes
+                        - project_name: Kubernetes
+                          project_slug: kubernetes
                     minItems: 1
                     maxItems: 100
             description: Request body for adding multiple projects to a workspace in one operation
@@ -4154,13 +4182,6 @@ components:
                           project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                           updated_at: "2026-01-01T00:00:00Z"
                           updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
                 uid:
                     type: string
                     description: Workspace UID
@@ -4181,6 +4202,13 @@ components:
                 created_by: alice
                 name: My Workspace
                 projects:
+                    - created_at: "2026-01-01T00:00:00Z"
+                      created_by: alice
+                      project_name: Kubernetes
+                      project_slug: kubernetes
+                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                      updated_at: "2026-01-01T00:00:00Z"
+                      updated_by: alice
                     - created_at: "2026-01-01T00:00:00Z"
                       created_by: alice
                       project_name: Kubernetes
