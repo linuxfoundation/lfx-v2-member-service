@@ -606,7 +606,7 @@ var AdminReindexResult = dsl.Type("admin-reindex-result", func() {
 		dsl.Format(dsl.FormatUUID)
 		dsl.Example("4c46585f-9f01-8bda-a0a5-f0c8eeef7fff")
 	})
-	dsl.Attribute("selected_count", dsl.Int, "For cdc_repair runs: number of pending repair markers selected for this run (0 for other modes).", func() {
+	dsl.Attribute("selected_count", dsl.Int, "For cdc_repair runs: number of pending repair markers selected for this run. Omitted (not present in the response body) for other modes.", func() {
 		dsl.Example(42)
 	})
 	dsl.Required("run_id")

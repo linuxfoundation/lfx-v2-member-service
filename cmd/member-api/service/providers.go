@@ -867,7 +867,7 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// Quota guard — skips upsert fetches when the shared daily REST API
 		// quota approaches exhaustion; /admin/reindex repairs skipped records.
 		usecaseSvc.WithCDCQuotaGauge(salesforce.NewAPIUsageGauge(salesforce.NewLimitsRefreshFunc(sfClient))),
-		// Durable repair queue — records records skipped by the quota guard so
+		// Durable repair queue — records the records skipped by the quota guard so
 		// they can be repaired via POST /admin/reindex {cdc_repair:true}.
 		usecaseSvc.WithCDCRepairStore(nats.NewCDCRepairStore(natsClient)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),

@@ -42,10 +42,6 @@ func (s QuotaSnapshot) Ratio() float64 {
 // rateLimitTransport on every HTTP response; values of -1 indicate the signal
 // has not yet been observed (e.g. no response received yet).
 type SalesforceQuotaGauge interface {
-	// APIUsage returns the most-recently observed (current, limit) API call
-	// counts. Returns (-1, -1) when no response has been received yet.
-	APIUsage() (current, limit int64)
-
 	// Snapshot returns the coherent most-recent observation, including its
 	// observation time and generation. Generation 0 means never observed.
 	Snapshot() QuotaSnapshot

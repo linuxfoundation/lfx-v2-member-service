@@ -243,8 +243,8 @@ type UpdateKeyContactResponseBody ProjectKeyContactResponseResponseBody
 type AdminReindexResponseBody struct {
 	// Correlation ID for the reindex run (for log lookups)
 	RunID *string `form:"run_id,omitempty" json:"run_id,omitempty" xml:"run_id,omitempty"`
-	// For cdc_repair runs: number of pending repair markers selected for this run
-	// (0 for other modes).
+	// For cdc_repair runs: number of pending repair markers selected for this run.
+	// Omitted (not present in the response body) for other modes.
 	SelectedCount *int `form:"selected_count,omitempty" json:"selected_count,omitempty" xml:"selected_count,omitempty"`
 }
 

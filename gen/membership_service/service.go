@@ -210,8 +210,8 @@ type AdminReindexPayload struct {
 type AdminReindexResult struct {
 	// Correlation ID for the reindex run (for log lookups)
 	RunID string
-	// For cdc_repair runs: number of pending repair markers selected for this run
-	// (0 for other modes).
+	// For cdc_repair runs: number of pending repair markers selected for this run.
+	// Omitted (not present in the response body) for other modes.
 	SelectedCount *int
 }
 

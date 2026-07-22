@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
 
 // repairPendingPrefix is the key namespace for pending repair markers.
@@ -25,9 +27,9 @@ const repairPendingPrefix = "pending."
 // repairReindexTypes is the fixed set of reindex targets the CDC quota guard can
 // produce. Both the writer (consumer) and the drain (API) validate against it.
 var repairReindexTypes = map[string]struct{}{
-	"b2b_org":            {},
-	"project_membership": {},
-	"key_contact":        {},
+	constants.ReindexTypeB2BOrg:            {},
+	constants.ReindexTypeProjectMembership: {},
+	constants.ReindexTypeKeyContact:        {},
 }
 
 // repairMarkerValue is the minimal pending-marker payload. Only skipped_at is
@@ -54,12 +56,20 @@ func NewCDCRepairStore(client *NATSClient) *CDCRepairStore {
 // Ensure CDCRepairStore satisfies the port at compile time.
 var _ port.CDCRepairStore = (*CDCRepairStore)(nil)
 
-// validateTarget checks the reindex type and canonical 18-character SFID.
-func validateTarget(reindexType, sfid string) error {
+// validateReindexType checks reindexType against the fixed repair target set.
+func validateReindexType(reindexType string) error {
 	if _, ok := repairReindexTypes[reindexType]; !ok {
 		return errs.NewValidation(fmt.Sprintf("cdc-repair: unsupported reindex type %q", reindexType))
 	}
-	if len(sfid) != 18 {
+	return nil
+}
+
+// validateTarget checks the reindex type and canonical 18-character SFID.
+func validateTarget(reindexType, sfid string) error {
+	if err := validateReindexType(reindexType); err != nil {
+		return err
+	}
+	if len(sfid) != 18 || !sfuuid.IsSFID(sfid) {
 		return errs.NewValidation(fmt.Sprintf("cdc-repair: sfid %q is not a canonical 18-character SFID", sfid))
 	}
 	return nil
@@ -102,8 +112,8 @@ func (s *CDCRepairStore) PutPending(ctx context.Context, reindexType, sfid strin
 // revisions. It consumes a bounded, type-filtered key stream and stops early —
 // it never enumerates the full bucket. Ordering is not promised.
 func (s *CDCRepairStore) ListPending(ctx context.Context, reindexType string, limit int) ([]port.RepairMarker, error) {
-	if _, ok := repairReindexTypes[reindexType]; !ok {
-		return nil, errs.NewValidation(fmt.Sprintf("cdc-repair: unsupported reindex type %q", reindexType))
+	if err := validateReindexType(reindexType); err != nil {
+		return nil, err
 	}
 	if limit <= 0 {
 		return nil, nil
@@ -148,7 +158,10 @@ func (s *CDCRepairStore) ListPending(ctx context.Context, reindexType string, li
 		var val repairMarkerValue
 		// A malformed value is retained (not treated as NotFound); SkippedAt is
 		// left zero so the caller can still act on the marker.
-		_ = json.Unmarshal(entry.Value(), &val)
+		if unmarshalErr := json.Unmarshal(entry.Value(), &val); unmarshalErr != nil {
+			slog.WarnContext(ctx, "cdc-repair: malformed marker value; retaining with zero skipped_at",
+				"type", reindexType, "uid", sfid, "error", unmarshalErr)
+		}
 		markers = append(markers, port.RepairMarker{
 			Type:      reindexType,
 			SFID:      sfid,

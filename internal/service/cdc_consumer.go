@@ -375,11 +375,11 @@ func (o *CDCConsumer) shouldAttemptQuotaRefresh(snap port.QuotaSnapshot) bool {
 func reindexTypeForCDCEntity(entity string) (string, bool) {
 	switch entity {
 	case "Account":
-		return "b2b_org", true
+		return entityTypeB2BOrg, true
 	case "Asset":
-		return "project_membership", true
+		return entityTypeProjectMembership, true
 	case "Project_Role__c":
-		return "key_contact", true
+		return entityTypeKeyContact, true
 	default:
 		return "", false
 	}

@@ -53,13 +53,6 @@ func NewLimitsRefreshFunc(client *sf.Salesforce) func(ctx context.Context) error
 // Ensure APIUsageGauge satisfies the port at compile time.
 var _ port.SalesforceQuotaGauge = (*APIUsageGauge)(nil)
 
-// APIUsage returns the most-recently observed Salesforce API usage counters.
-// Returns (-1, -1) when no response has been received yet.
-func (g *APIUsageGauge) APIUsage() (current, limit int64) {
-	c, l, _, _ := loadQuotaObservation()
-	return c, l
-}
-
 // Snapshot returns the coherent most-recent observation.
 func (g *APIUsageGauge) Snapshot() port.QuotaSnapshot {
 	c, l, at, gen := loadQuotaObservation()

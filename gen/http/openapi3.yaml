@@ -2675,7 +2675,7 @@ components:
                     format: uuid
                 selected_count:
                     type: integer
-                    description: 'For cdc_repair runs: number of pending repair markers selected for this run (0 for other modes).'
+                    description: 'For cdc_repair runs: number of pending repair markers selected for this run. Omitted (not present in the response body) for other modes.'
                     example: 42
                     format: int64
             description: Result of a reindex operation

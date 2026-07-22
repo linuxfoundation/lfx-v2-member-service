@@ -76,6 +76,14 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 			return BackfillRequest{}, pkgerrors.NewValidation(
 				"cdc_repair is mutually exclusive with since and items")
 		}
+		if p.DryRun {
+			// reindexItem returns outcomeIssued for a dry-run without publishing,
+			// and RunRepair conditionally deletes the marker on outcomeIssued —
+			// so dry_run+cdc_repair would delete real pending markers with no
+			// republish. Reject rather than silently drop repair state.
+			return BackfillRequest{}, pkgerrors.NewValidation(
+				"cdc_repair does not support dry_run")
+		}
 	}
 
 	// Mutual exclusivity: items vs since.

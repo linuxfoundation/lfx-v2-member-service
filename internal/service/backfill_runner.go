@@ -15,6 +15,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	natspkg "github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
 )
@@ -35,10 +36,10 @@ type KeyContactSObjectReader interface {
 }
 
 const (
-	entityTypeB2BOrg            = "b2b_org"
-	entityTypeProjectMembership = "project_membership"
-	entityTypeKeyContact        = "key_contact"
-	entityTypeB2BOrgSettings    = "b2b_org_settings"
+	entityTypeB2BOrg            = constants.ReindexTypeB2BOrg
+	entityTypeProjectMembership = constants.ReindexTypeProjectMembership
+	entityTypeKeyContact        = constants.ReindexTypeKeyContact
+	entityTypeB2BOrgSettings    = constants.ReindexTypeB2BOrgSettings
 )
 
 // allBackfillTypes is the canonical ordered list of types the backfill supports.
@@ -600,17 +601,15 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			return outcomeIssued
 		}
 		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
-		if ok {
-			kc.ProjectUID = resolvedUID
-			PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-		} else {
+		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-		}
-		PublishKeyContactFGA(ctx, r.publisher, kc)
-		if !ok {
+			PublishKeyContactFGA(ctx, r.publisher, kc)
 			return outcomeRetry
 		}
+		kc.ProjectUID = resolvedUID
+		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+		PublishKeyContactFGA(ctx, r.publisher, kc)
 		return outcomeIssued
 
 	case entityTypeB2BOrgSettings:

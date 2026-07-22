@@ -110,10 +110,6 @@ type MockSalesforceQuotaGauge struct {
 	RefreshCalls int
 }
 
-func (g *MockSalesforceQuotaGauge) APIUsage() (current, limit int64) {
-	return g.Current, g.Limit
-}
-
 func (g *MockSalesforceQuotaGauge) Snapshot() port.QuotaSnapshot {
 	gen := g.Gen
 	if gen == 0 && g.Limit > 0 {

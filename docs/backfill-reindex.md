@@ -97,7 +97,7 @@ In-scope types (`allBackfillTypes`): `b2b_org`, `project_membership`, `key_conta
 | `since` | RFC 3339 with explicit zone; normalised to UTC. Mutually exclusive with `items`/`cdc_repair`. |
 | `items` | Targeted UIDs of `type`, as `[{"uid": "..."}, ...]`; **max 100** (`MaxLength(100)`). Mutually exclusive with `since`/`cdc_repair`. |
 | `cdc_repair` | Drain the CDC quota-repair queue for `type` instead of a Salesforce read. Mutually exclusive with `since`/`items`; only `b2b_org`, `project_membership`, `key_contact` support it. See [CDC Quota-Repair Drain](#cdc-quota-repair-drain). |
-| `dry_run` | Default `false`. Not applicable to `cdc_repair` (there is no dry-run drain in this release). |
+| `dry_run` | Default `false`. Rejected (`400`) together with `cdc_repair` — there is no dry-run drain in this release, and the underlying reindex path would otherwise delete real pending markers without republishing them. |
 
 **Validation** (`ValidateAndBuildRequest`):
 

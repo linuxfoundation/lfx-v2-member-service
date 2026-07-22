@@ -87,6 +87,15 @@ func TestAdminReindex_Validation(t *testing.T) {
 			wantErrMsg: "cdc_repair supports only",
 		},
 		{
+			// Regression: reindexItem returns outcomeIssued for a dry-run
+			// without publishing, and RunRepair conditionally deletes the
+			// marker on outcomeIssued — so dry_run+cdc_repair must be rejected
+			// rather than silently deleting real pending markers.
+			name:       "cdc_repair + dry_run rejected",
+			payload:    &membershipservice.AdminReindexPayload{Type: "b2b_org", CdcRepair: true, DryRun: true},
+			wantErrMsg: "cdc_repair does not support dry_run",
+		},
+		{
 			name:       "invalid since rejected",
 			payload:    &membershipservice.AdminReindexPayload{Type: "b2b_org", Since: &invalidSince},
 			wantErrMsg: "RFC 3339",
