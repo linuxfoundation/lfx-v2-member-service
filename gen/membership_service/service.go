@@ -193,8 +193,15 @@ type AdminReindexPayload struct {
 	// a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set
 	// instead of the full ~300k records.
 	Since *string
+	// ISO 8601 / RFC 3339 timestamp with explicit zone; upper bound (inclusive) so
+	// only records with LastModifiedDate <= until are reindexed. Requires since;
+	// together they define a bounded [since, until] window sized to fit available
+	// Salesforce quota. Mutually exclusive with items and cdc_repair. Handler
+	// normalises to UTC.
+	Until *string
 	// Targeted list of entity UIDs to reindex (surgical mode), all of the
-	// top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
+	// top-level type. Mutually exclusive with since, until, and cdc_repair. Max
+	// 100 items.
 	Items []*AdminReindexItem
 	// When true, drain the CDC quota-repair queue for the given type (one of
 	// b2b_org, project_membership, key_contact). Mutually exclusive with since and

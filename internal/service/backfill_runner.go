@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,11 +22,13 @@ import (
 )
 
 // BackfillIterator provides paged SOQL iterators for full and since-filtered
-// backfill modes. Each method calls fn once per page of converted records.
+// backfill modes. Each method calls fn once per page of converted records. The
+// optional since/until bounds apply an inclusive LastModifiedDate window
+// (>= since AND <= until); either may be nil for an open bound.
 type BackfillIterator interface {
-	IterB2BOrgs(ctx context.Context, since *time.Time, fn func([]*model.B2BOrg) error) error
-	IterProjectMemberships(ctx context.Context, since *time.Time, fn func([]*model.ProjectMembership) error) error
-	IterKeyContacts(ctx context.Context, since *time.Time, fn func([]*model.KeyContact) error) error
+	IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error
+	IterProjectMemberships(ctx context.Context, since, until *time.Time, fn func([]*model.ProjectMembership) error) error
+	IterKeyContacts(ctx context.Context, since, until *time.Time, fn func([]*model.KeyContact) error) error
 }
 
 // KeyContactSObjectReader fetches a single KeyContact by UID via the live sObject path.
@@ -45,6 +48,16 @@ const (
 // allBackfillTypes is the canonical ordered list of types the backfill supports.
 var allBackfillTypes = []string{entityTypeB2BOrg, entityTypeProjectMembership, entityTypeKeyContact, entityTypeB2BOrgSettings}
 
+// validBackfillTypes is the set form of allBackfillTypes, precomputed once for
+// membership lookups in ValidateAndBuildRequest.
+var validBackfillTypes = func() map[string]bool {
+	m := make(map[string]bool, len(allBackfillTypes))
+	for _, t := range allBackfillTypes {
+		m[t] = true
+	}
+	return m
+}()
+
 // defaultAdminReindexQuotaThreshold is the fraction of the daily Salesforce REST
 // API quota at/above which a cdc_repair drain refuses to start (and stops
 // mid-page). Configurable via ADMIN_REINDEX_QUOTA_THRESHOLD. Default: 0.80 —
@@ -55,6 +68,18 @@ const defaultAdminReindexQuotaThreshold = 0.80
 // repairPageCap bounds how many pending markers a single cdc_repair run selects
 // and drains. Operators re-run until selected_count is zero.
 const repairPageCap = 100
+
+// settingsQuotaCheckInterval is how often the b2b_org_settings flat loop (which
+// has no SOQL pages) re-checks the passive quota gauge so a long key list still
+// stops mid-run.
+const settingsQuotaCheckInterval = 100
+
+// errQuotaStop is returned from a full/filtered page callback (or the settings
+// flat loop) when the passive quota gauge reaches the admin threshold. runType
+// propagates it and Run treats it as a clean stop (stopped_early), not a
+// failure. The operator re-runs the request (optionally a tighter since/until
+// window) once quota recovers — reindex is idempotent, so there is no watermark.
+var errQuotaStop = errors.New("salesforce quota threshold reached; backfill stopped")
 
 // Runner orchestrates a reindex run. It is safe to call Run concurrently
 // from multiple goroutines (each run is independent). Full-mode runs acquire a
@@ -79,6 +104,13 @@ type Runner struct {
 	repairStore          port.CDCRepairStore
 	quotaGauge           port.SalesforceQuotaGauge
 	repairQuotaThreshold float64
+
+	// Batch readers for targeted (items) reindex of the two prod volume drivers.
+	// When wired, runTargeted fetches project_membership / key_contact in one
+	// SOQL batch instead of per-item Assemble*. When nil, targeted falls back to
+	// the per-item reindexItem path (preserving pre-batch behavior).
+	membershipBatch port.MembershipBatchReader
+	keyContactBatch port.KeyContactBatchReader
 }
 
 // RunnerOption configures optional Runner collaborators. The avatar-enrichment path (the
@@ -105,6 +137,18 @@ func WithRepairStore(s port.CDCRepairStore) RunnerOption {
 // WithQuotaGauge wires the Salesforce quota gauge used to gate cdc_repair drains.
 func WithQuotaGauge(g port.SalesforceQuotaGauge) RunnerOption {
 	return func(r *Runner) { r.quotaGauge = g }
+}
+
+// WithMembershipBatchReader wires the batch SOQL reader used to fetch
+// project_membership records in targeted (items) reindex.
+func WithMembershipBatchReader(b port.MembershipBatchReader) RunnerOption {
+	return func(r *Runner) { r.membershipBatch = b }
+}
+
+// WithKeyContactBatchReader wires the batch SOQL reader used to fetch
+// key_contact records in targeted (items) reindex.
+func WithKeyContactBatchReader(b port.KeyContactBatchReader) RunnerOption {
+	return func(r *Runner) { r.keyContactBatch = b }
 }
 
 // WithRepairQuotaThreshold overrides the cdc_repair quota gate threshold
@@ -224,6 +268,14 @@ func (r *Runner) Run(ctx context.Context, req BackfillRequest) error {
 		err = r.runType(ctx, log, req, t)
 	}
 
+	if errors.Is(err, errQuotaStop) {
+		// Clean stop: the quota guard tripped at start or between pages. Greppable
+		// via stopped_early=true. Return the error so the avatar-backfill Job exits
+		// non-zero and reschedules; the fire-and-forget HTTP path ignores it.
+		log.WarnContext(ctx, "backfill stopped early — salesforce quota threshold reached",
+			"type", t, "stopped_early", true, "publish_failed_for_backfill_repair", true)
+		return err
+	}
 	if err != nil {
 		log.ErrorContext(ctx, "backfill type failed", "type", t, "error", err)
 		return fmt.Errorf("backfill failed for type %q: %w", t, err)
@@ -234,6 +286,15 @@ func (r *Runner) Run(ctx context.Context, req BackfillRequest) error {
 }
 
 func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType string) error {
+	// Start gate covers the direct-Run path (e.g. the avatar-backfill Job), which
+	// bypasses the handler's synchronous gate. Fails open when no gauge is wired.
+	if gateErr := r.checkQuotaGate(ctx); gateErr != nil {
+		log.WarnContext(ctx, "backfill refused at start — salesforce quota threshold reached",
+			"type", sfType, "error", gateErr, "stopped_early", true,
+			"publish_failed_for_backfill_repair", true)
+		return errQuotaStop
+	}
+
 	var total, published int
 
 	logPage := func(pageLen int) {
@@ -244,7 +305,10 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 
 	switch sfType {
 	case entityTypeB2BOrg:
-		return r.iter.IterB2BOrgs(ctx, req.Since, func(orgs []*model.B2BOrg) error {
+		return r.iter.IterB2BOrgs(ctx, req.Since, req.Until, func(orgs []*model.B2BOrg) error {
+			if r.midRunQuotaExceeded() {
+				return errQuotaStop
+			}
 			// Pre-fetch children for every unique org and parent in this page so we
 			// issue one SOQL query per unique UID rather than per org.
 			orgChildrenCache := map[string][]string{}
@@ -294,7 +358,10 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			return nil
 		})
 	case entityTypeProjectMembership:
-		return r.iter.IterProjectMemberships(ctx, req.Since, func(pms []*model.ProjectMembership) error {
+		return r.iter.IterProjectMemberships(ctx, req.Since, req.Until, func(pms []*model.ProjectMembership) error {
+			if r.midRunQuotaExceeded() {
+				return errQuotaStop
+			}
 			for _, pm := range pms {
 				total++
 				if !req.DryRun {
@@ -315,11 +382,14 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			return nil
 		})
 	case entityTypeKeyContact:
-		if req.Since != nil {
-			log.WarnContext(ctx, "since filter on key_contact only checks Project_Role__c.LastModifiedDate; Contact/Asset field changes are not captured",
+		if req.Since != nil || req.Until != nil {
+			log.WarnContext(ctx, "since/until filter on key_contact only checks Project_Role__c.LastModifiedDate; Contact/Asset field changes are not captured",
 				"since_filter_misses_joined_fields", true)
 		}
-		return r.iter.IterKeyContacts(ctx, req.Since, func(kcs []*model.KeyContact) error {
+		return r.iter.IterKeyContacts(ctx, req.Since, req.Until, func(kcs []*model.KeyContact) error {
+			if r.midRunQuotaExceeded() {
+				return errQuotaStop
+			}
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
@@ -350,7 +420,12 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			return fmt.Errorf("listing org-settings keys: %w", listErr)
 		}
 		var avatarFailures int
-		for _, uid := range orgUIDs {
+		for i, uid := range orgUIDs {
+			// Flat loop (no pages): check the passive gauge every N iterations so a
+			// long key list still stops mid-run before exhausting quota.
+			if i > 0 && i%settingsQuotaCheckInterval == 0 && r.midRunQuotaExceeded() {
+				return errQuotaStop
+			}
 			total++
 			// Non-enrich dry-run keeps the original "count only, no reads" behavior.
 			if req.DryRun && !req.EnrichAvatars {
@@ -671,6 +746,23 @@ func logItemFetchOutcome(ctx context.Context, log *slog.Logger, sfType, uid stri
 }
 
 func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req BackfillRequest) {
+	// PM and KC are the prod volume drivers: when a batch reader is wired, fetch
+	// the whole page in one SOQL query instead of per-item Assemble* (~3–5 SF
+	// calls/item → ~1 batch). b2b_org stays per-item (see D2), and either type
+	// falls back to per-item when its batch reader is unwired (e.g. mock mode).
+	switch req.Type {
+	case entityTypeProjectMembership:
+		if r.membershipBatch != nil {
+			r.runTargetedMemberships(ctx, log, req)
+			return
+		}
+	case entityTypeKeyContact:
+		if r.keyContactBatch != nil {
+			r.runTargetedKeyContacts(ctx, log, req)
+			return
+		}
+	}
+
 	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
 	var notFound, published int
 	for _, uid := range req.Items {
@@ -692,6 +784,106 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 		"would_publish_count", len(req.Items)-notFound)
 }
 
+// runTargetedMemberships is the batched project_membership arm of targeted
+// reindex: one SOQL batch fetch → per record resolveProjectUID + publish. A
+// requested SFID absent from the result (soft-deleted or no longer membership-
+// eligible) is classified not-found and skipped; a record present in SOQL but
+// unconvertible is counted as conversion_error (neither published nor deleted),
+// mirroring the CDC batch path. Deliberately no cache-invalidation or
+// absent-as-delete convergence (that is LFXV2-2808).
+func (r *Runner) runTargetedMemberships(ctx context.Context, log *slog.Logger, req BackfillRequest) {
+	memberships, convErrSFIDs, err := r.membershipBatch.FetchMembershipsBySFIDs(ctx, req.Items)
+	if err != nil {
+		log.ErrorContext(ctx, "targeted batch fetch failed — retry when Salesforce recovers",
+			"type", req.Type, "count", len(req.Items), "error", err,
+			"publish_failed_for_backfill_repair", true)
+		return
+	}
+
+	var published int
+	for _, pm := range memberships {
+		if req.DryRun {
+			published++
+			continue
+		}
+		uid, ok := resolveProjectUID(ctx, r.resolver, pm.ProjectSlug, pm.ProjectUID)
+		if ok {
+			pm.ProjectUID = uid
+			PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
+			PublishProjectMembershipFGA(ctx, r.publisher, pm)
+		} else {
+			log.ErrorContext(ctx, "skipping project_membership indexer publish; project_uid unresolved — publishing OpenFGA only",
+				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
+			PublishProjectMembershipFGAPreservingMissingRefs(ctx, r.publisher, pm)
+		}
+		published++
+	}
+
+	returned := makeReturnedSet(memberships, func(pm *model.ProjectMembership) string { return pm.UID }, convErrSFIDs)
+	notFound := countAbsent(req.Items, returned)
+	logTargetedBatchComplete(ctx, log, req, published, notFound, len(convErrSFIDs))
+}
+
+// runTargetedKeyContacts is the batched key_contact arm of targeted reindex.
+// See runTargetedMemberships for the not-found / conversion-error semantics.
+func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, req BackfillRequest) {
+	contacts, convErrSFIDs, err := r.keyContactBatch.FetchKeyContactsBySFIDs(ctx, req.Items)
+	if err != nil {
+		log.ErrorContext(ctx, "targeted batch fetch failed — retry when Salesforce recovers",
+			"type", req.Type, "count", len(req.Items), "error", err,
+			"publish_failed_for_backfill_repair", true)
+		return
+	}
+
+	var published int
+	for _, kc := range contacts {
+		if req.DryRun {
+			published++
+			continue
+		}
+		uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
+		if ok {
+			kc.ProjectUID = uid
+			PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+		} else {
+			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
+				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
+		}
+		PublishKeyContactFGA(ctx, r.publisher, kc)
+		published++
+	}
+
+	returned := makeReturnedSet(contacts, func(kc *model.KeyContact) string { return kc.UID }, convErrSFIDs)
+	notFound := countAbsent(req.Items, returned)
+	logTargetedBatchComplete(ctx, log, req, published, notFound, len(convErrSFIDs))
+}
+
+// countAbsent counts requested SFIDs not present in the returned set (which
+// already includes conversion-error SFIDs marked seen, so they are not
+// double-counted as not-found).
+func countAbsent(requested []string, returned map[string]struct{}) int {
+	var absent int
+	for _, sfid := range requested {
+		if _, ok := returned[sfid]; !ok {
+			absent++
+		}
+	}
+	return absent
+}
+
+// logTargetedBatchComplete emits the batched targeted summary with a distinct
+// conversion_error bucket so published + not_found + conversion_error reconciles
+// against total_items.
+func logTargetedBatchComplete(ctx context.Context, log *slog.Logger, req BackfillRequest, published, notFound, conversionErrors int) {
+	log.InfoContext(ctx, "targeted backfill complete",
+		"type", req.Type,
+		"total_items", len(req.Items),
+		"published", published,
+		"not_found", notFound,
+		"conversion_error", conversionErrors,
+		"would_publish_count", published)
+}
+
 // PrepareRepair synchronously gates and selects a cdc_repair page. It refreshes
 // the quota reading (falling back to the last valid observation if the active
 // refresh fails), returns ServiceUnavailable when the quota is unreadable or
@@ -703,22 +895,14 @@ func (r *Runner) PrepareRepair(ctx context.Context, req BackfillRequest) ([]port
 		return nil, errs.NewServiceUnavailable("cdc_repair queue is not configured")
 	}
 	if r.quotaGauge == nil {
+		// Repair fails CLOSED on a missing gauge (unlike the backfill guard, which
+		// fails open): a drain deletes durable markers, so it must never run blind.
 		return nil, errs.NewServiceUnavailable("cdc_repair quota gauge is not configured")
 	}
 
-	snap, err := r.quotaGauge.Refresh(ctx)
-	if err != nil {
-		// Fall back to the last valid observation; only refuse when nothing has
-		// ever been observed (truly unreadable).
-		snap = r.quotaGauge.Snapshot()
-		if !snap.Observed() {
-			return nil, errs.NewServiceUnavailable("salesforce quota is currently unreadable; retry shortly")
-		}
-	}
-	if snap.Ratio() >= r.repairQuotaThreshold {
-		return nil, errs.NewServiceUnavailable(fmt.Sprintf(
-			"salesforce quota at/above admin threshold (%.1f%% >= %.1f%%); retry after quota resets",
-			snap.Ratio()*100, r.repairQuotaThreshold*100))
+	// Shared refresh→fallback→threshold core (also used by the backfill guard).
+	if gateErr := r.checkQuotaGate(ctx); gateErr != nil {
+		return nil, gateErr
 	}
 
 	markers, listErr := r.repairStore.ListPending(ctx, req.Type, repairPageCap)
@@ -741,7 +925,7 @@ func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []p
 	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
 	var issued, notFound, retryRetained, stoppedEarly int
 	for i, m := range markers {
-		if r.repairMidPageQuotaExceeded() {
+		if r.midRunQuotaExceeded() {
 			stoppedEarly = len(markers) - i
 			log.WarnContext(ctx, "repair drain stopping mid-page — quota threshold reached",
 				"processed", i, "remaining", stoppedEarly, "publish_failed_for_backfill_repair", true)
@@ -780,11 +964,13 @@ func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []p
 		"stopped_early", stoppedEarly)
 }
 
-// repairMidPageQuotaExceeded reports whether the passive quota reading has
-// reached the admin threshold. It does not issue a /limits call — the drain was
-// already gated at start; this only stops a long page if live traffic pushes
-// usage up mid-drain.
-func (r *Runner) repairMidPageQuotaExceeded() bool {
+// midRunQuotaExceeded reports whether the passive quota reading has reached the
+// admin threshold. It does not issue a /limits call — the run was already gated
+// at start; this only stops a long run if live traffic pushes usage up mid-run.
+// Shared by the cdc_repair drain (per item) and the backfill guard (per page /
+// every N settings iterations). Fails open (returns false) when the gauge is
+// nil or has never observed a reading.
+func (r *Runner) midRunQuotaExceeded() bool {
 	if r.quotaGauge == nil {
 		return false
 	}
@@ -793,4 +979,49 @@ func (r *Runner) repairMidPageQuotaExceeded() bool {
 		return false
 	}
 	return snap.Ratio() >= r.repairQuotaThreshold
+}
+
+// checkQuotaGate is the shared refresh→fallback→threshold core reused by the
+// cdc_repair gate (PrepareRepair) and the full/filtered backfill start gate. It
+// issues one active /limits refresh, falls back to the last valid Snapshot when
+// the refresh fails, and returns ServiceUnavailable when the quota is truly
+// unreadable or at/above the admin threshold.
+//
+// It fails OPEN on a nil gauge (returns nil) so the backfill guard preserves the
+// pre-guard ungated behavior when no gauge is wired. PrepareRepair guards nil
+// separately (fail-closed) before calling this, so repair never reaches the
+// fail-open path.
+func (r *Runner) checkQuotaGate(ctx context.Context) error {
+	if r.quotaGauge == nil {
+		return nil
+	}
+	snap, err := r.quotaGauge.Refresh(ctx)
+	if err != nil {
+		// Fall back to the last valid observation; only refuse when nothing has
+		// ever been observed (truly unreadable).
+		snap = r.quotaGauge.Snapshot()
+		if !snap.Observed() {
+			return errs.NewServiceUnavailable("salesforce quota is currently unreadable; retry shortly")
+		}
+	}
+	if snap.Ratio() >= r.repairQuotaThreshold {
+		return errs.NewServiceUnavailable(fmt.Sprintf(
+			"salesforce quota at/above admin threshold (%.1f%% >= %.1f%%); retry after quota resets",
+			snap.Ratio()*100, r.repairQuotaThreshold*100))
+	}
+	return nil
+}
+
+// GateBackfillStart is the handler-facing synchronous quota gate for the
+// full/filtered backfill paths. Targeted (items) and repair modes are exempt —
+// targeted is bounded (≤100 items, ~1 SOQL batch) and is the operator's surgical
+// incident tool that must stay available under quota pressure; repair has its own
+// gate via PrepareRepair. Returns ServiceUnavailable (→ HTTP 503) when at/above
+// threshold so the operator gets immediate feedback before the async run starts.
+func (r *Runner) GateBackfillStart(ctx context.Context, req BackfillRequest) error {
+	switch ClassifyMode(req) {
+	case modeTargeted, modeRepair:
+		return nil
+	}
+	return r.checkQuotaGate(ctx)
 }

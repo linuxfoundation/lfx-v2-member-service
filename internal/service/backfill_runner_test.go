@@ -152,21 +152,25 @@ func (p *countingPublisher) Indexer(_ context.Context, _ string, _ any, _ bool) 
 
 func (p *countingPublisher) Access(_ context.Context, _ string, _ any, _ bool) error { return nil }
 
-// capturingSinceIterator captures the since parameter passed to IterB2BOrgs.
+// capturingSinceIterator captures the since/until parameters passed to IterB2BOrgs.
 type capturingSinceIterator struct {
 	capturedSince **time.Time
+	capturedUntil **time.Time
 }
 
-func (c *capturingSinceIterator) IterB2BOrgs(_ context.Context, since *time.Time, _ func([]*model.B2BOrg) error) error {
+func (c *capturingSinceIterator) IterB2BOrgs(_ context.Context, since, until *time.Time, _ func([]*model.B2BOrg) error) error {
 	*c.capturedSince = since
+	if c.capturedUntil != nil {
+		*c.capturedUntil = until
+	}
 	return nil
 }
 
-func (c *capturingSinceIterator) IterProjectMemberships(_ context.Context, _ *time.Time, _ func([]*model.ProjectMembership) error) error {
+func (c *capturingSinceIterator) IterProjectMemberships(_ context.Context, _, _ *time.Time, _ func([]*model.ProjectMembership) error) error {
 	return nil
 }
 
-func (c *capturingSinceIterator) IterKeyContacts(_ context.Context, _ *time.Time, _ func([]*model.KeyContact) error) error {
+func (c *capturingSinceIterator) IterKeyContacts(_ context.Context, _, _ *time.Time, _ func([]*model.KeyContact) error) error {
 	return nil
 }
 

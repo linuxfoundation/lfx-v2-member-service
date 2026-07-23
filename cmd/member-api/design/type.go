@@ -587,7 +587,11 @@ var AdminReindexPayload = dsl.Type("admin-reindex-payload", func() {
 		dsl.Format(dsl.FormatDateTime)
 		dsl.Example("2026-05-20T00:00:00Z")
 	})
-	dsl.Attribute("items", dsl.ArrayOf(AdminReindexItem), "Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.", func() {
+	dsl.Attribute("until", dsl.String, "ISO 8601 / RFC 3339 timestamp with explicit zone; upper bound (inclusive) so only records with LastModifiedDate <= until are reindexed. Requires since; together they define a bounded [since, until] window sized to fit available Salesforce quota. Mutually exclusive with items and cdc_repair. Handler normalises to UTC.", func() {
+		dsl.Format(dsl.FormatDateTime)
+		dsl.Example("2026-06-20T00:00:00Z")
+	})
+	dsl.Attribute("items", dsl.ArrayOf(AdminReindexItem), "Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since, until, and cdc_repair. Max 100 items.", func() {
 		dsl.MaxLength(100)
 	})
 	dsl.Attribute("cdc_repair", dsl.Boolean, "When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since and items.", func() {

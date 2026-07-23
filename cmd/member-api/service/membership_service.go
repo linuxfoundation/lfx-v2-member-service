@@ -366,6 +366,13 @@ func (s *membershipServicesrvc) AdminReindex(ctx context.Context, p *memberships
 		return &membershipservice.AdminReindexResult{RunID: runID, SelectedCount: &selected}, nil
 	}
 
+	// Synchronous quota gate for full/filtered runs (targeted is exempt — bounded
+	// surgical tool). Returns 503 before launching the async run so the operator
+	// gets immediate feedback instead of discovering a refused run in the logs.
+	if gateErr := s.backfillRunner.GateBackfillStart(ctx, req); gateErr != nil {
+		return nil, wrapError(ctx, gateErr)
+	}
+
 	// Fire-and-forget: the backfill runs independently of the HTTP request lifetime.
 	// context.WithoutCancel prevents HTTP cancellation from killing a running page, but
 	// the goroutine is not registered on the server's shutdown WaitGroup — a SIGTERM
@@ -373,7 +380,7 @@ func (s *membershipServicesrvc) AdminReindex(ctx context.Context, p *memberships
 	// logged). Accepted trade-off: /admin/reindex is a manual recovery tool and the
 	// backfill can be re-triggered; graceful-shutdown integration is tracked as a
 	// follow-up.
-	go func() { _ = s.backfillRunner.Run(context.WithoutCancel(ctx), req) }()
+	go s.backfillRunner.Run(context.WithoutCancel(ctx), req) //nolint:errcheck // fire-and-forget; error is intentionally discarded (see comment above)
 
 	return &membershipservice.AdminReindexResult{RunID: runID}, nil
 }

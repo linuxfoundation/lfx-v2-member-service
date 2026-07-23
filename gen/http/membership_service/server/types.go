@@ -144,8 +144,15 @@ type AdminReindexRequestBody struct {
 	// a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set
 	// instead of the full ~300k records.
 	Since *string `form:"since,omitempty" json:"since,omitempty" xml:"since,omitempty"`
+	// ISO 8601 / RFC 3339 timestamp with explicit zone; upper bound (inclusive) so
+	// only records with LastModifiedDate <= until are reindexed. Requires since;
+	// together they define a bounded [since, until] window sized to fit available
+	// Salesforce quota. Mutually exclusive with items and cdc_repair. Handler
+	// normalises to UTC.
+	Until *string `form:"until,omitempty" json:"until,omitempty" xml:"until,omitempty"`
 	// Targeted list of entity UIDs to reindex (surgical mode), all of the
-	// top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
+	// top-level type. Mutually exclusive with since, until, and cdc_repair. Max
+	// 100 items.
 	Items []*AdminReindexItemRequestBody `form:"items,omitempty" json:"items,omitempty" xml:"items,omitempty"`
 	// When true, drain the CDC quota-repair queue for the given type (one of
 	// b2b_org, project_membership, key_contact). Mutually exclusive with since and
@@ -5349,6 +5356,7 @@ func NewAdminReindexPayload(body *AdminReindexRequestBody, version *string, bear
 	v := &membershipservice.AdminReindexPayload{
 		Type:  *body.Type,
 		Since: body.Since,
+		Until: body.Until,
 	}
 	if body.CdcRepair != nil {
 		v.CdcRepair = *body.CdcRepair
@@ -5602,6 +5610,9 @@ func ValidateAdminReindexRequestBody(body *AdminReindexRequestBody) (err error) 
 	}
 	if body.Since != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.since", *body.Since, goa.FormatDateTime))
+	}
+	if body.Until != nil {
+		err = goa.MergeErrors(err, goa.ValidateFormat("body.until", *body.Until, goa.FormatDateTime))
 	}
 	if len(body.Items) > 100 {
 		err = goa.MergeErrors(err, goa.InvalidLengthError("body.items", body.Items, len(body.Items), 100, false))

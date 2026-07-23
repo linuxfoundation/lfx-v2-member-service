@@ -21,6 +21,7 @@ type BackfillRequest struct {
 	RunID     string
 	Type      string     // required: the single entity type for this run
 	Since     *time.Time // nil = full reindex
+	Until     *time.Time // optional inclusive upper bound; requires Since
 	Items     []string   // targeted UIDs, all of Type
 	CDCRepair bool       // drain the CDC quota-repair queue for Type
 	DryRun    bool
@@ -50,17 +51,12 @@ func AvatarBackfillRequest(runID string, dryRun, missingOnly bool, sleep time.Du
 
 // ValidateAndBuildRequest validates the payload and returns a BackfillRequest.
 func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (BackfillRequest, error) {
-	validTypes := map[string]bool{}
-	for _, t := range allBackfillTypes {
-		validTypes[t] = true
-	}
-
 	// Validate the single required top-level type.
 	if p.Type == "membership_tier" {
 		return BackfillRequest{}, pkgerrors.NewValidation(
 			"membership_tier is not currently supported")
 	}
-	if !validTypes[p.Type] {
+	if !validBackfillTypes[p.Type] {
 		return BackfillRequest{}, pkgerrors.NewValidation(
 			fmt.Sprintf("unknown type %q; supported types: b2b_org, project_membership, key_contact, b2b_org_settings", p.Type))
 	}
@@ -72,9 +68,9 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 			return BackfillRequest{}, pkgerrors.NewValidation(
 				"cdc_repair supports only b2b_org, project_membership, key_contact")
 		}
-		if p.Since != nil || len(p.Items) > 0 {
+		if p.Since != nil || p.Until != nil || len(p.Items) > 0 {
 			return BackfillRequest{}, pkgerrors.NewValidation(
-				"cdc_repair is mutually exclusive with since and items")
+				"cdc_repair is mutually exclusive with since, until, and items")
 		}
 		if p.DryRun {
 			// reindexItem returns outcomeIssued for a dry-run without publishing,
@@ -86,9 +82,16 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		}
 	}
 
-	// Mutual exclusivity: items vs since.
-	if len(p.Items) > 0 && p.Since != nil {
-		return BackfillRequest{}, pkgerrors.NewValidation("items mode is mutually exclusive with since")
+	// Mutual exclusivity: items vs since/until.
+	if len(p.Items) > 0 && (p.Since != nil || p.Until != nil) {
+		return BackfillRequest{}, pkgerrors.NewValidation("items mode is mutually exclusive with since and until")
+	}
+
+	// until requires since (a bounded window always has a floor); since alone
+	// stays valid. This also keeps ClassifyMode unchanged: since != nil routes to
+	// filtered, so a until-only request never wrongly takes the full-run lock.
+	if p.Until != nil && p.Since == nil {
+		return BackfillRequest{}, pkgerrors.NewValidation("until requires since")
 	}
 
 	// Validate items (UID-only; the type is the top-level type).
@@ -116,9 +119,28 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		since = &utc
 	}
 
+	// Validate and normalise until (inclusive upper bound).
+	var until *time.Time
+	if p.Until != nil {
+		t, parseErr := time.Parse(time.RFC3339, *p.Until)
+		if parseErr != nil {
+			return BackfillRequest{}, pkgerrors.NewValidation(
+				fmt.Sprintf("until must be a valid RFC 3339 timestamp with an explicit zone offset (e.g. 2026-05-20T00:00:00Z): %v", parseErr))
+		}
+		utc := t.UTC()
+		until = &utc
+	}
+
+	// Reject an inverted window so it returns 400 rather than silently matching
+	// zero records.
+	if since != nil && until != nil && since.After(*until) {
+		return BackfillRequest{}, pkgerrors.NewValidation("since must not be after until")
+	}
+
 	return BackfillRequest{
 		Type:      p.Type,
 		Since:     since,
+		Until:     until,
 		Items:     items,
 		CDCRepair: p.CdcRepair,
 		DryRun:    p.DryRun,

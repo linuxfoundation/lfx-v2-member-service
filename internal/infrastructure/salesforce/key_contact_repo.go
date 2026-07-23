@@ -379,7 +379,7 @@ func convertSOQLToKeyContact(role soqlProjectRole, emailMap map[string]string) (
 // optional LastModifiedDate filter when since is provided. Calls fn for each
 // page of converted records, performing per-page email batch lookups.
 // Conversion errors are logged and skipped.
-func (r *KeyContactRepo) IterKeyContacts(ctx context.Context, since *time.Time, fn func([]*model.KeyContact) error) error {
+func (r *KeyContactRepo) IterKeyContacts(ctx context.Context, since, until *time.Time, fn func([]*model.KeyContact) error) error {
 	const baseSOQL = `
 SELECT
     Id, Asset__c, Contact__c, Role__c, Status__c,
@@ -394,10 +394,7 @@ SELECT
 FROM Project_Role__c
 WHERE IsDeleted = false`
 
-	query := baseSOQL
-	if since != nil {
-		query += "\n    AND LastModifiedDate >= " + soqlDateTime(*since)
-	}
+	query := baseSOQL + lastModifiedWindowClause(since, until)
 
 	// Drive the paging loop directly so each page's email batch lookup and
 	// conversion happen before fn is called — no intermediate copy needed.
