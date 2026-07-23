@@ -20,7 +20,7 @@ type MockBackfillIterator struct {
 	KcErr       error
 }
 
-func (m *MockBackfillIterator) IterB2BOrgs(_ context.Context, _ *time.Time, fn func([]*model.B2BOrg) error) error {
+func (m *MockBackfillIterator) IterB2BOrgs(_ context.Context, _, _ *time.Time, fn func([]*model.B2BOrg) error) error {
 	for _, page := range m.B2BOrgs {
 		if err := fn(page); err != nil {
 			return err
@@ -29,7 +29,7 @@ func (m *MockBackfillIterator) IterB2BOrgs(_ context.Context, _ *time.Time, fn f
 	return m.B2BErr
 }
 
-func (m *MockBackfillIterator) IterProjectMemberships(_ context.Context, _ *time.Time, fn func([]*model.ProjectMembership) error) error {
+func (m *MockBackfillIterator) IterProjectMemberships(_ context.Context, _, _ *time.Time, fn func([]*model.ProjectMembership) error) error {
 	for _, page := range m.Memberships {
 		if err := fn(page); err != nil {
 			return err
@@ -38,7 +38,7 @@ func (m *MockBackfillIterator) IterProjectMemberships(_ context.Context, _ *time
 	return m.PmErr
 }
 
-func (m *MockBackfillIterator) IterKeyContacts(_ context.Context, _ *time.Time, fn func([]*model.KeyContact) error) error {
+func (m *MockBackfillIterator) IterKeyContacts(_ context.Context, _, _ *time.Time, fn func([]*model.KeyContact) error) error {
 	for _, page := range m.KeyContacts {
 		if err := fn(page); err != nil {
 			return err

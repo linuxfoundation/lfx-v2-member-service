@@ -21,6 +21,7 @@ type BackfillRequest struct {
 	RunID     string
 	Type      string     // required: the single entity type for this run
 	Since     *time.Time // nil = full reindex
+	Until     *time.Time // optional inclusive upper bound; requires Since
 	Items     []string   // targeted UIDs, all of Type
 	CDCRepair bool       // drain the CDC quota-repair queue for Type
 	DryRun    bool
@@ -50,17 +51,12 @@ func AvatarBackfillRequest(runID string, dryRun, missingOnly bool, sleep time.Du
 
 // ValidateAndBuildRequest validates the payload and returns a BackfillRequest.
 func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (BackfillRequest, error) {
-	validTypes := map[string]bool{}
-	for _, t := range allBackfillTypes {
-		validTypes[t] = true
-	}
-
 	// Validate the single required top-level type.
 	if p.Type == "membership_tier" {
 		return BackfillRequest{}, pkgerrors.NewValidation(
 			"membership_tier is not currently supported")
 	}
-	if !validTypes[p.Type] {
+	if !validBackfillTypes[p.Type] {
 		return BackfillRequest{}, pkgerrors.NewValidation(
 			fmt.Sprintf("unknown type %q; supported types: b2b_org, project_membership, key_contact, b2b_org_settings", p.Type))
 	}
@@ -72,9 +68,9 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 			return BackfillRequest{}, pkgerrors.NewValidation(
 				"cdc_repair supports only b2b_org, project_membership, key_contact")
 		}
-		if p.Since != nil || len(p.Items) > 0 {
+		if p.Since != nil || p.Until != nil || len(p.Items) > 0 {
 			return BackfillRequest{}, pkgerrors.NewValidation(
-				"cdc_repair is mutually exclusive with since and items")
+				"cdc_repair is mutually exclusive with since, until, and items")
 		}
 		if p.DryRun {
 			// reindexItem returns outcomeIssued for a dry-run without publishing,
@@ -86,22 +82,52 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		}
 	}
 
-	// Mutual exclusivity: items vs since.
-	if len(p.Items) > 0 && p.Since != nil {
-		return BackfillRequest{}, pkgerrors.NewValidation("items mode is mutually exclusive with since")
+	// Mutual exclusivity: items vs since/until.
+	if len(p.Items) > 0 && (p.Since != nil || p.Until != nil) {
+		return BackfillRequest{}, pkgerrors.NewValidation("items mode is mutually exclusive with since and until")
 	}
 
-	// Validate items (UID-only; the type is the top-level type).
-	items := make([]string, len(p.Items))
-	for i, item := range p.Items {
+	// until requires since (a bounded window always has a floor); since alone
+	// stays valid. This also keeps ClassifyMode unchanged: since != nil routes to
+	// filtered, so a until-only request never wrongly takes the full-run lock.
+	if p.Until != nil && p.Since == nil {
+		return BackfillRequest{}, pkgerrors.NewValidation("until requires since")
+	}
+
+	// An explicit empty items array (as opposed to an omitted items field, which
+	// decodes to nil) must be rejected rather than silently falling through
+	// ClassifyMode's len(req.Items) > 0 check into a full reindex. Goa's generated
+	// MinLength(1) validation can't express this distinction (it has no nil guard
+	// for optional fields, so it would also reject a legitimate omitted-items
+	// request), so it is enforced here instead.
+	if p.Items != nil && len(p.Items) == 0 {
+		return BackfillRequest{}, pkgerrors.NewValidation("items must not be an empty array; omit items for a full/filtered reindex")
+	}
+
+	// Validate, normalise, and de-duplicate items (UID-only; the type is the
+	// top-level type). Normalize18 both validates and canonicalises to 18-char,
+	// matching the UIDs the batch readers return — so countAbsent reconciles a
+	// 15-char request against an 18-char result instead of misreporting a published
+	// record as not_found. De-duplication (including 15/18-char forms of the same
+	// ID, which collapse after normalisation) keeps published + not_found +
+	// conversion_error reconciling against len(Items), since Salesforce returns each
+	// matching record only once.
+	seen := make(map[string]struct{}, len(p.Items))
+	items := make([]string, 0, len(p.Items))
+	for _, item := range p.Items {
 		if item == nil {
 			return BackfillRequest{}, pkgerrors.NewValidation("items must not contain a null entry")
 		}
-		if !sfuuid.IsSFID(item.UID) {
+		uid, normErr := sfuuid.Normalize18(item.UID)
+		if normErr != nil {
 			return BackfillRequest{}, pkgerrors.NewValidation(
 				fmt.Sprintf("invalid Salesforce ID %q for type %q", item.UID, p.Type))
 		}
-		items[i] = item.UID
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		items = append(items, uid)
 	}
 
 	// Validate and normalise since.
@@ -116,9 +142,28 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		since = &utc
 	}
 
+	// Validate and normalise until (inclusive upper bound).
+	var until *time.Time
+	if p.Until != nil {
+		t, parseErr := time.Parse(time.RFC3339, *p.Until)
+		if parseErr != nil {
+			return BackfillRequest{}, pkgerrors.NewValidation(
+				fmt.Sprintf("until must be a valid RFC 3339 timestamp with an explicit zone offset (e.g. 2026-05-20T00:00:00Z): %v", parseErr))
+		}
+		utc := t.UTC()
+		until = &utc
+	}
+
+	// Reject an inverted window so it returns 400 rather than silently matching
+	// zero records.
+	if since != nil && until != nil && since.After(*until) {
+		return BackfillRequest{}, pkgerrors.NewValidation("since must not be after until")
+	}
+
 	return BackfillRequest{
 		Type:      p.Type,
 		Since:     since,
+		Until:     until,
 		Items:     items,
 		CDCRepair: p.CdcRepair,
 		DryRun:    p.DryRun,

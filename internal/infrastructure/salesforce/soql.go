@@ -80,3 +80,18 @@ func buildSOQLInClause(values []string) string {
 func soqlDateTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
+
+// lastModifiedWindowClause returns the SOQL predicate fragment(s) that bound
+// LastModifiedDate to the inclusive [since, until] window. Either bound may be
+// nil for an open end. The returned string is prefixed with "\n    AND " for
+// each present bound so it can be appended directly to a WHERE clause.
+func lastModifiedWindowClause(since, until *time.Time) string {
+	var clause string
+	if since != nil {
+		clause += "\n    AND LastModifiedDate >= " + soqlDateTime(*since)
+	}
+	if until != nil {
+		clause += "\n    AND LastModifiedDate <= " + soqlDateTime(*until)
+	}
+	return clause
+}

@@ -144,12 +144,20 @@ type AdminReindexRequestBody struct {
 	// a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set
 	// instead of the full ~300k records.
 	Since *string `form:"since,omitempty" json:"since,omitempty" xml:"since,omitempty"`
+	// ISO 8601 / RFC 3339 timestamp with explicit zone; upper bound (inclusive) so
+	// only records with LastModifiedDate <= until are reindexed. Requires since;
+	// together they define a bounded [since, until] window sized to fit available
+	// Salesforce quota. Mutually exclusive with items and cdc_repair. Handler
+	// normalises to UTC.
+	Until *string `form:"until,omitempty" json:"until,omitempty" xml:"until,omitempty"`
 	// Targeted list of entity UIDs to reindex (surgical mode), all of the
-	// top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
+	// top-level type. Mutually exclusive with since, until, and cdc_repair. Max
+	// 100 items; when present, must be non-empty (an explicit empty array is
+	// rejected rather than silently falling through to a full reindex).
 	Items []*AdminReindexItemRequestBody `form:"items,omitempty" json:"items,omitempty" xml:"items,omitempty"`
 	// When true, drain the CDC quota-repair queue for the given type (one of
-	// b2b_org, project_membership, key_contact). Mutually exclusive with since and
-	// items.
+	// b2b_org, project_membership, key_contact). Mutually exclusive with since,
+	// until, and items; does not support dry_run.
 	CdcRepair bool `form:"cdc_repair" json:"cdc_repair" xml:"cdc_repair"`
 	// When true, walk SOQL/live-path but skip publishing. Final log includes
 	// would_publish_count.
@@ -2940,6 +2948,7 @@ func NewAdminReindexRequestBody(p *membershipservice.AdminReindexPayload) *Admin
 	body := &AdminReindexRequestBody{
 		Type:      p.Type,
 		Since:     p.Since,
+		Until:     p.Until,
 		CdcRepair: p.CdcRepair,
 		DryRun:    p.DryRun,
 	}

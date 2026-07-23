@@ -459,11 +459,8 @@ func convertSOQLToProjectMembership(asset soqlAsset) (*model.ProjectMembership, 
 // IterProjectMemberships iterates over all memberships from Salesforce, applying
 // an optional LastModifiedDate filter when since is provided. Calls fn for each
 // page of converted records. Conversion errors are logged and skipped.
-func (r *MembershipRepo) IterProjectMemberships(ctx context.Context, since *time.Time, fn func([]*model.ProjectMembership) error) error {
-	query := membershipSOQL
-	if since != nil {
-		query += "\n    AND LastModifiedDate >= " + soqlDateTime(*since)
-	}
+func (r *MembershipRepo) IterProjectMemberships(ctx context.Context, since, until *time.Time, fn func([]*model.ProjectMembership) error) error {
+	query := membershipSOQL + lastModifiedWindowClause(since, until)
 	return IterPages(ctx, r.client, query, convertSOQLToProjectMembership, fn)
 }
 

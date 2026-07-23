@@ -516,6 +516,9 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		opts = append(opts,
 			usecaseSvc.WithRepairStore(nats.NewCDCRepairStore(nc)),
 			usecaseSvc.WithQuotaGauge(salesforce.NewAPIUsageGauge(salesforce.NewLimitsRefreshFunc(sfClient))),
+			// Batch readers for targeted (items) reindex of the prod volume drivers.
+			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
+			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
 		)
 	}
 	if threshold, ok := adminReindexQuotaThresholdFromEnv(); ok {

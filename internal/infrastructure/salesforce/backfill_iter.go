@@ -31,14 +31,14 @@ func NewBackfillIterator(
 	}
 }
 
-func (s *salesforceBackfillIterator) IterB2BOrgs(ctx context.Context, since *time.Time, fn func([]*model.B2BOrg) error) error {
-	return s.accounts.IterB2BOrgs(ctx, since, fn)
+func (s *salesforceBackfillIterator) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
+	return s.accounts.IterB2BOrgs(ctx, since, until, fn)
 }
 
-func (s *salesforceBackfillIterator) IterProjectMemberships(ctx context.Context, since *time.Time, fn func([]*model.ProjectMembership) error) error {
-	return s.memberships.IterProjectMemberships(ctx, since, fn)
+func (s *salesforceBackfillIterator) IterProjectMemberships(ctx context.Context, since, until *time.Time, fn func([]*model.ProjectMembership) error) error {
+	return s.memberships.IterProjectMemberships(ctx, since, until, fn)
 }
 
-func (s *salesforceBackfillIterator) IterKeyContacts(ctx context.Context, since *time.Time, fn func([]*model.KeyContact) error) error {
-	return s.keyContacts.IterKeyContacts(ctx, since, fn)
+func (s *salesforceBackfillIterator) IterKeyContacts(ctx context.Context, since, until *time.Time, fn func([]*model.KeyContact) error) error {
+	return s.keyContacts.IterKeyContacts(ctx, since, until, fn)
 }

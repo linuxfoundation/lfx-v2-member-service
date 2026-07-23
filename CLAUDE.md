@@ -190,7 +190,9 @@ FGA is published before the indexer so access tuples land before the doc is sear
 |--------|------------------|--------------------------------------------------------------------------|--------------------------------------------|
 | POST   | `/admin/reindex` | Trigger a full or incremental reindex of cached entities into OpenSearch | `member` on `team:{globalOrgAdminTeamUID}` |
 
-Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or `{ "run_id": "<uuid>", "selected_count": <n> }` for `cdc_repair` runs. The `run_id` is for log correlation only — search slog for `run_id=<uuid>` to track progress. Requires a single `type` (one of `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings` — no all-types shortcut), and layers on one of `since` (RFC 3339 with explicit zone for incremental), `items` (array of `{uid}` objects, all of `type`, max 100, for targeted surgical reindex), or `cdc_repair` (bool; drains the CDC quota-repair queue for `type` — see [Quota-Repair Drain](./docs/backfill-reindex.md#cdc-quota-repair-drain), `b2b_org_settings` unsupported); plus `dry_run` (count only, no publish; not applicable to `cdc_repair`).
+Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or `{ "run_id": "<uuid>", "selected_count": <n> }` for `cdc_repair` runs. The `run_id` is for log correlation only — search slog for `run_id=<uuid>` to track progress. Requires a single `type` (one of `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings` — no all-types shortcut), and layers on one of `since` (RFC 3339 with explicit zone for incremental), `until` (RFC 3339 inclusive upper bound; **requires `since`**, rejects `since > until`; together they define a bounded `[since, until]` window sized to fit quota), `items` (array of `{uid}` objects, all of `type`, max 100, for targeted surgical reindex), or `cdc_repair` (bool; drains the CDC quota-repair queue for `type` — see [Quota-Repair Drain](./docs/backfill-reindex.md#cdc-quota-repair-drain), `b2b_org_settings` unsupported); plus `dry_run` (count only, no publish; not applicable to `cdc_repair`).
+
+> **Batching + quota guard (LFXV2-2787).** Targeted (`items`) `project_membership` / `key_contact` reindex batch-fetches via the CDC batch ports (~1 SOQL batch vs ~3–5 SF calls/item); `b2b_org` stays per-item. The **full/filtered** paths are quota-gated (`ADMIN_REINDEX_QUOTA_THRESHOLD`, default `0.80`): a synchronous handler gate returns HTTP `503` at/above threshold, and a mid-run passive check stops the run (`stopped_early=true`). **Targeted is exempt** (bounded surgical tool). Stop-and-rerun converges only for bounded runs — window large reindexes via `since`/`until`. See [docs/backfill-reindex.md](./docs/backfill-reindex.md#quota-guard--windowed-reindex).
 
 > **Operational note — `key_contact` is high-volume (~300k records in prod).** Reindex only the active window by passing a `since` ~2 years back (e.g. `{"type":"key_contact","since":"2024-06-01T00:00:00Z"}`) rather than a full key_contact reindex. A full pass takes hours and is likely to be interrupted by pod eviction. The `key_contact` `since` filter checks `Project_Role__c.LastModifiedDate` only (Contact/Asset field changes are not captured).
 
@@ -209,17 +211,6 @@ Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or 
 > **Internal filtering:** SOQL-level membership filtering (`MembershipFilters` in `internal/domain/model/list_params.go`, e.g. tier UID / product) is applied internally on the Salesforce read path. It is not exposed as an HTTP `filter` query parameter on the current resource-rooted surface.
 
 ## Development Workflow
-
-### Prerequisites
-
-```bash
-# Install Go 1.24+
-# Install Goa framework
-go install goa.design/goa/v3/cmd/goa@latest
-
-# Install linting tools
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-```
 
 ### Common Development Tasks
 
@@ -301,22 +292,12 @@ When the work is done and no more code commits are planned:
 3. Roll fixes into a `fix(review): ...` commit.
 4. Push. Repeat until clean.
 
-## Code Generation (Goa Framework)
+## Adding New Endpoints (Goa is design-first)
 
-The service uses Goa v3 for API code generation. This is **critical** to understand:
-
-1. **Design First**: API is defined in `cmd/member-api/design/` files
-2. **Generated Code**: Running `make apigen` generates to `gen/`:
-   - HTTP server/client code
-   - Service interfaces
-   - OpenAPI specifications
-   - Type definitions
-3. **Implementation**: You implement the generated interfaces in `cmd/member-api/service/membership_service.go`
-
-### Adding New Endpoints
+API is defined in `cmd/member-api/design/` (`membership.go` for endpoints, `type.go` for types). `gen/` is generated — do not edit by hand.
 
 1. Update `cmd/member-api/design/membership.go` with new method
-2. Run `make apigen` to regenerate code
+2. Run `make apigen` to regenerate `gen/`
 3. Implement the new method in `cmd/member-api/service/membership_service.go`
 4. Add tests for the new endpoint
 5. Update Heimdall ruleset in `charts/lfx-v2-member-service/templates/ruleset.yaml`
@@ -489,12 +470,7 @@ JWT authentication is implemented via `internal/infrastructure/auth/`:
 
 When `JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL` is set, the service skips JWT validation entirely and uses that value as the authenticated principal. **Only use for local development.**
 
-### How Authentication Works
-
-1. Heimdall intercepts requests and validates the OIDC token.
-2. Heimdall creates a signed JWT with `principal` claim and forwards to this service.
-3. This service validates the Heimdall JWT in `JWTAuth()` (the Goa security handler).
-4. The principal is stored in context as `constants.PrincipalContextID`.
+Heimdall validates the OIDC token and forwards a signed JWT (`principal` claim); `JWTAuth()` (the Goa security handler) validates that JWT and stores the principal in context as `constants.PrincipalContextID`.
 
 ## Authorization (OpenFGA)
 
@@ -551,27 +527,6 @@ When `openfga.enabled` is false (local dev), every rule falls back to `allow_all
 - Each function has exactly ONE corresponding test function with multiple cases
 - Unit tests alongside implementation with `*_test.go` suffix
 
-### Example Test Structure
-
-```go
-func TestEndpoint(t *testing.T) {
-    tests := []struct {
-        name       string
-        payload    *membershipservice.Payload
-        setupMocks func(*auth.MockJWTAuth)
-        wantErr    bool
-    }{
-        // Test cases
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            // Test logic
-        })
-    }
-}
-```
-
 ## Environment Variables
 
 ### Service Configuration
@@ -592,7 +547,7 @@ func TestEndpoint(t *testing.T) {
 | `RUN_MODE`                               | `consumer` (CDC consumer) / `avatar-backfill` (one-off Job); omit for API | `""` (API mode)           | No       |
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
-| `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which a `POST /admin/reindex {cdc_repair:true}` drain refuses to start (and an in-flight drain stops mid-page) | `0.80` | No |
+| `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which the backfill quota guard refuses/stops a run: the `cdc_repair` drain (refuses to start / stops mid-page) **and** the full/filtered reindex paths (synchronous HTTP `503` + mid-run stop). Targeted (`items`) is exempt. | `0.80` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
 
@@ -640,79 +595,6 @@ Credentials are injected from a pre-existing Kubernetes Secret (see Helm chart `
 - **JWT bearer**: `SF_USERNAME` + `SF_CONSUMER_RSA_PEM`
 - **Username/password**: `SF_USERNAME` + `SF_PASSWORD` + `SF_CLIENT_SECRET`
 - **Client-credentials**: `SF_CLIENT_SECRET` (without `SF_USERNAME`)
-
-## Local Development Setup
-
-### Option A: Full Platform Setup
-
-For integration testing with the complete LFX stack:
-
-- Install lfx-platform Helm chart (includes NATS, Heimdall, OpenFGA, Authelia, Traefik).
-- Use `make helm-install` to deploy the service chart.
-- Full authentication and authorization enabled.
-
-### Option B: Minimal Setup
-
-For rapid development:
-
-```bash
-# Run NATS locally
-docker run -d -p 4222:4222 nats:latest -js
-
-# Create the cache bucket
-nats kv add membership-cache --history=1 --storage=file --ttl=24h
-
-# Run service with mock auth and Salesforce credentials
-export NATS_URL=nats://localhost:4222
-export JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL=test-user
-export SF_INSTANCE_URL=https://linuxfoundation.my.salesforce.com
-export SF_CLIENT_ID=<client-id>
-export SF_CLIENT_SECRET=<client-secret>
-make run
-```
-
-**Security Note**: `JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL` bypasses all authentication and authorization — only for local development.
-
-## Kubernetes Deployment
-
-```bash
-# Install Helm chart
-helm install lfx-v2-member-service ./charts/lfx-v2-member-service/ -n lfx
-
-# Update deployment
-helm upgrade lfx-v2-member-service ./charts/lfx-v2-member-service/ -n lfx
-
-# View generated manifests
-helm template lfx-v2-member-service ./charts/lfx-v2-member-service/ -n lfx
-```
-
-### Helm Configuration
-
-- Salesforce credentials are read from a pre-existing Kubernetes Secret. Create the secret out-of-band (e.g., via ESO, Sealed Secrets, or `kubectl`) before deploying. Configure the secret name and key mappings in `values.yaml` under `salesforce.secrets`.
-- The `membership-cache` NATS KV bucket is created automatically via `nats-kv-buckets.yaml`.
-- Heimdall middleware handles JWT validation.
-- HTTPRoute for Gateway API routing.
-- OpenFGA can be disabled for local development (allows all requests).
-
-## Docker Build
-
-```bash
-# Build from repository root
-docker build -t lfx-v2-member-service:latest .
-
-# The Dockerfile uses:
-# - Chainguard Go image for building
-# - Chainguard static image for runtime (distroless)
-# - Multi-stage build for minimal image size
-```
-
-## CI/CD Pipeline
-
-GitHub Actions workflows:
-
-- **mega-linter.yml**: Comprehensive linting (Go, YAML, Docker, etc.)
-- **member-api-build.yml**: Build and test on PRs
-- **license-header-check.yml**: Ensure proper licensing
 
 ## Common Pitfalls and Solutions
 
@@ -764,11 +646,3 @@ Domain errors are mapped to HTTP status codes in `cmd/member-api/service/error.g
 - `ErrNotFound` → 404
 - `ErrInternal` → 500
 - `ErrServiceUnavailable` → 503
-
-## Resources
-
-- [Goa Framework Docs](https://goa.design/docs/)
-- [NATS JetStream Docs](https://docs.nats.io/jetstream)
-- [OpenFGA Docs](https://openfga.dev/docs)
-- [Clean Architecture](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html)
-- [go-salesforce library](https://github.com/k-capehart/go-salesforce)

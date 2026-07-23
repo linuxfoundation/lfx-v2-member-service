@@ -328,11 +328,8 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 // IterB2BOrgs iterates over B2B orgs (Accounts) from Salesforce, applying an
 // optional LastModifiedDate filter when since is provided. Calls fn for each
 // page of converted records. Conversion errors are logged and skipped.
-func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since *time.Time, fn func([]*model.B2BOrg) error) error {
-	query := accountsSOQLBase
-	if since != nil {
-		query += "\n    AND LastModifiedDate >= " + soqlDateTime(*since)
-	}
+func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
+	query := accountsSOQLBase + lastModifiedWindowClause(since, until)
 	return IterPages[soqlAccount, *model.B2BOrg](ctx, r.client, query, func(acc soqlAccount) (*model.B2BOrg, error) {
 		return convertSOQLToB2BOrg(ctx, acc)
 	}, fn)

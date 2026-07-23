@@ -2528,7 +2528,7 @@ definitions:
         properties:
             cdc_repair:
                 type: boolean
-                description: When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since and items.
+                description: When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since, until, and items; does not support dry_run.
                 default: false
                 example: false
             dry_run:
@@ -2540,7 +2540,7 @@ definitions:
                 type: array
                 items:
                     $ref: '#/definitions/AdminReindexItem'
-                description: Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
+                description: Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since, until, and cdc_repair. Max 100 items; when present, must be non-empty (an explicit empty array is rejected rather than silently falling through to a full reindex).
                 example:
                     - uid: 001B000000IqhSLIAZ
                     - uid: 001B000000IqhSLIAZ
@@ -2555,6 +2555,11 @@ definitions:
                 type: string
                 description: 'Entity type to reindex (required): b2b_org, project_membership, key_contact, or b2b_org_settings. Applies to full, since, and every targeted item. cdc_repair supports only b2b_org, project_membership, key_contact.'
                 example: b2b_org
+            until:
+                type: string
+                description: ISO 8601 / RFC 3339 timestamp with explicit zone; upper bound (inclusive) so only records with LastModifiedDate <= until are reindexed. Requires since; together they define a bounded [since, until] window sized to fit available Salesforce quota. Mutually exclusive with items and cdc_repair. Handler normalises to UTC.
+                example: "2026-06-20T00:00:00Z"
+                format: date-time
         example:
             cdc_repair: true
             dry_run: true
@@ -2564,6 +2569,7 @@ definitions:
                 - uid: 001B000000IqhSLIAZ
             since: "2026-05-20T00:00:00Z"
             type: b2b_org
+            until: "2026-06-20T00:00:00Z"
         required:
             - type
     MembershipServiceAdminReindexResponseBody:

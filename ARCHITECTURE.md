@@ -765,10 +765,17 @@ endpoint.
 ```
 
 - **`type`**: required, exactly one of `b2b_org`, `project_membership`, `key_contact`,
-  `b2b_org_settings` (there is no all-types shortcut). `items` (targeted UIDs of that one type)
-  or `cdc_repair` (drain the CDC quota-repair queue for that type) may be layered on top — see
-  [Backfill / Reindex](./docs/backfill-reindex.md) for the full request model and the
-  quota-repair drain.
+  `b2b_org_settings` (there is no all-types shortcut). One of `since` (incremental floor),
+  `since`+`until` (a bounded inclusive `[since, until]` window; `until` requires `since`),
+  `items` (targeted UIDs of that one type), or `cdc_repair` (drain the CDC quota-repair queue
+  for that type) may be layered on top — see [Backfill / Reindex](./docs/backfill-reindex.md)
+  for the full request model, batching, and the quota guard.
+
+> **Quota guard.** The full/filtered paths are gated on `ADMIN_REINDEX_QUOTA_THRESHOLD`
+> (default `0.80`): a synchronous handler check returns HTTP `503` at/above threshold and a
+> mid-run passive check stops the run. **Targeted (`items`) is exempt** (bounded). Targeted
+> `project_membership`/`key_contact` batch-fetch in one SOQL query; `b2b_org` stays per-item.
+> Large reindexes that trip the guard must be windowed via `since`/`until`.
 
 ### Denormalization contract
 
