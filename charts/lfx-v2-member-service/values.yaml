@@ -48,6 +48,10 @@ app:
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.
   lfxSelfServeBaseURL: ""
+  # adminReindexQuotaThreshold is the Salesforce API usage ratio (0,1] at or
+  # above which POST /admin/reindex {cdc_repair:true} refuses to start a drain
+  # (ServiceUnavailable). Leave empty to use the in-code default (0.80).
+  adminReindexQuotaThreshold: ""
   # extraEnv is a list of additional environment variables to set in the container.
   # Supports both simple key-value pairs and Kubernetes field references.
   extraEnv: []
@@ -254,6 +258,25 @@ nats:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
+  # kv_bucket_cdc_repair is the configuration for the cdc-repair KV bucket.
+  # Holds durable pending markers for CDC upserts skipped due to Salesforce API
+  # quota exhaustion, keyed "pending.{reindex_type}.{sfid}", drained via
+  # POST /admin/reindex {cdc_repair:true}. No MaxAge TTL — a pending marker must
+  # never be silently evicted before it is drained. History is 1 (a pending set —
+  # old marker revisions are never needed, only the current revision for
+  # conditional deletes). Pattern mirrors kv_bucket_pubsub_state (another
+  # authoritative-state bucket with no TTL).
+  kv_bucket_cdc_repair:
+    creation: true
+    keep: true
+    name: cdc-repair
+    replicas: 1
+    history: 1
+    storage: file
+    maxValueSize: 10485760 # 10MB
+    maxBytes: 1073741824 # 1GB
+    compression: true
+
 # consumer is the configuration for the CDC consumer Deployment.
 # The consumer runs as a separate single-replica Deployment (RUN_MODE=consumer)
 # using the same container image as the API. Kubernetes is the single-active
@@ -282,6 +305,12 @@ consumer:
   # Set explicitly per environment in ArgoCD values rather than relying on
   # this default so that a future default change does not silently affect prod.
   cdcChannel: "/data/ChangeEvents"
+  # quotaRefreshStaleAfter is how old the Salesforce quota observation may be
+  # before the quota guard actively issues a /limits GET to refresh it (Go
+  # duration string, e.g. "5m"). Leave empty to use the in-code default (5m);
+  # a non-positive value disables active refresh (falls back to the passive
+  # per-response header reading).
+  quotaRefreshStaleAfter: ""
   # orgID is the 18-character Salesforce Org ID injected as the "tenantid"
   # gRPC metadata header for Pub/Sub API authentication. This is a public
   # tenant identifier, not a credential — set it in plain text per environment

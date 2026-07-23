@@ -23,7 +23,7 @@ The same binary also runs as a **CDC consumer** (`RUN_MODE=consumer`) that subsc
 - **Language**: Go 1.24+
 - **API Framework**: Goa v3 (code generation framework)
 - **Messaging**: NATS with JetStream for KV caching and RPC
-- **Storage**: Six NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `org-workspaces`, `org_workspace_projects`
+- **Storage**: Seven NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `cdc-repair`, `org-workspaces`, `org_workspace_projects`
 - **Primary data source**: Salesforce REST API (SOQL queries via `github.com/k-capehart/go-salesforce/v3`)
 - **CDC**: Salesforce Pub/Sub gRPC API + Apache Avro decoding (`github.com/linkedin/goavro/v2`)
 - **Authentication**: JWT with Heimdall middleware
@@ -190,9 +190,9 @@ FGA is published before the indexer so access tuples land before the doc is sear
 |--------|------------------|--------------------------------------------------------------------------|--------------------------------------------|
 | POST   | `/admin/reindex` | Trigger a full or incremental reindex of cached entities into OpenSearch | `member` on `team:{globalOrgAdminTeamUID}` |
 
-Returns HTTP 202 with `{ "run_id": "<uuid>" }`. The `run_id` is for log correlation only — search slog for `run_id=<uuid>` to track progress. Supports `types` (subset of `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings`; empty = all), `since` (RFC 3339 with explicit zone for incremental), `items` (array of `{type, uid}` objects, max 100, for targeted surgical reindex), and `dry_run` (count only, no publish).
+Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or `{ "run_id": "<uuid>", "selected_count": <n> }` for `cdc_repair` runs. The `run_id` is for log correlation only — search slog for `run_id=<uuid>` to track progress. Requires a single `type` (one of `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings` — no all-types shortcut), and layers on one of `since` (RFC 3339 with explicit zone for incremental), `items` (array of `{uid}` objects, all of `type`, max 100, for targeted surgical reindex), or `cdc_repair` (bool; drains the CDC quota-repair queue for `type` — see [Quota-Repair Drain](./docs/backfill-reindex.md#cdc-quota-repair-drain), `b2b_org_settings` unsupported); plus `dry_run` (count only, no publish; not applicable to `cdc_repair`).
 
-> **Operational note — `key_contact` is high-volume (~300k records in prod).** Reindex only the active window by passing a `since` ~2 years back (e.g. `{"types":["key_contact"],"since":"2024-06-01T00:00:00Z"}`) rather than a full key_contact reindex. A full pass takes hours and is likely to be interrupted by pod eviction. The `key_contact` `since` filter checks `Project_Role__c.LastModifiedDate` only (Contact/Asset field changes are not captured).
+> **Operational note — `key_contact` is high-volume (~300k records in prod).** Reindex only the active window by passing a `since` ~2 years back (e.g. `{"type":"key_contact","since":"2024-06-01T00:00:00Z"}`) rather than a full key_contact reindex. A full pass takes hours and is likely to be interrupted by pod eviction. The `key_contact` `since` filter checks `Project_Role__c.LastModifiedDate` only (Contact/Asset field changes are not captured).
 
 ### Utility
 
@@ -323,11 +323,15 @@ The service uses Goa v3 for API code generation. This is **critical** to underst
 
 ## NATS Storage
 
-The service uses four NATS KV buckets.
+The service uses five NATS KV buckets.
 
 ### `pubsub-state` Bucket
 
 Stores the Salesforce Pub/Sub replay cursor (opaque `[]byte`) per CDC channel. **Authoritative state** — no MaxAge TTL. Key pattern: `pubsub-replay.<channel>` with slashes replaced by underscores (e.g. `pubsub-replay._data_ChangeEvents`).
+
+### `cdc-repair` Bucket
+
+Stores durable pending markers for records the CDC consumer's quota guard skipped while the Salesforce API quota was near-exhausted. **Authoritative state** — no MaxAge TTL, `history: 1`. Key pattern: `pending.{reindex_type}.{sfid}` → `{"skipped_at": "<RFC 3339>"}`. Written by the consumer (`recordSkippedForRepair`); listed and revision-conditionally deleted by `POST /admin/reindex {cdc_repair:true}` (no distributed lock — idempotent reindex + revision-conditional delete is the sole race guard). See [docs/backfill-reindex.md](./docs/backfill-reindex.md#cdc-quota-repair-drain) and [docs/cdc-consumer.md](./docs/cdc-consumer.md#quota-guard).
 
 ### `org-settings` Bucket
 
@@ -588,12 +592,13 @@ func TestEndpoint(t *testing.T) {
 | `RUN_MODE`                               | `consumer` (CDC consumer) / `avatar-backfill` (one-off Job); omit for API | `""` (API mode)           | No       |
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
+| `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which a `POST /admin/reindex {cdc_repair:true}` drain refuses to start (and an in-flight drain stops mid-page) | `0.80` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
 
 A one-off Kubernetes Job that re-enriches `b2b_org_settings` writer/auditor avatars from the
 auth-service and republishes the indexer doc. It is **not** a separate backfill framework: it builds
-a full-mode, avatar-enriching `BackfillRequest` (`Types=["b2b_org_settings"]`, `EnrichAvatars=true`)
+a full-mode, avatar-enriching `BackfillRequest` (`Type="b2b_org_settings"`, `EnrichAvatars=true`)
 and hands it to the same `Runner` that backs `POST /admin/reindex` — so it reuses the run-id, dry-run,
 and full-run lock control plane. Idempotent (an org with no avatar drift is skipped, so it doubles as
 the recurring refresh) and tolerant of a bounded number of transient auth-service lookup failures
@@ -612,6 +617,7 @@ before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end witho
 | `SF_PUBSUB_ENDPOINT`  | Salesforce Pub/Sub gRPC endpoint                                            | — (fatal if empty)                   | Yes      |
 | `SF_ORG_ID`           | Salesforce 18-char Org ID injected as `tenantid` gRPC metadata header      | — (fatal if empty)                   | Yes      |
 | `SF_CDC_CHANNEL`      | CDC channel to subscribe to                                                 | `/data/ChangeEvents`                 | No       |
+| `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the quota guard issues an active `/limits` refresh. `0` disables active refresh. | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the platform org-admin team (same as API mode)            | `_null`                              | No       |
 
 ### Salesforce Credentials

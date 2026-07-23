@@ -4198,8 +4198,7 @@ func marshalMembershipserviceAdminReindexItemToAdminReindexItemRequestBody(v *me
 		return nil
 	}
 	res := &AdminReindexItemRequestBody{
-		Type: v.Type,
-		UID:  v.UID,
+		UID: v.UID,
 	}
 
 	return res
@@ -4213,8 +4212,7 @@ func marshalAdminReindexItemRequestBodyToMembershipserviceAdminReindexItem(v *Ad
 		return nil
 	}
 	res := &membershipservice.AdminReindexItem{
-		Type: v.Type,
-		UID:  v.UID,
+		UID: v.UID,
 	}
 
 	return res

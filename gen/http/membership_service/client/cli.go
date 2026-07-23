@@ -573,7 +573,7 @@ func BuildCreateKeyContactPayload(membershipServiceCreateKeyContactBody string, 
 	{
 		err = json.Unmarshal([]byte(membershipServiceCreateKeyContactBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"first_name\": \"John\",\n      \"last_name\": \"Doe\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": true,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"first_name\": \"John\",\n      \"last_name\": \"Doe\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": false,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }'")
 		}
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.email", body.Email, goa.FormatEmail))
 		if !(body.Role == "Representative/Voting Contact" || body.Role == "Authorized Signatory" || body.Role == "Billing Contact" || body.Role == "Marketing Contact" || body.Role == "Technical Contact" || body.Role == "Legal Contact" || body.Role == "Event Sponsorship Contact" || body.Role == "PO Contact" || body.Role == "PR Contact") {
@@ -771,7 +771,16 @@ func BuildAdminReindexPayload(membershipServiceAdminReindexBody string, membersh
 	{
 		err = json.Unmarshal([]byte(membershipServiceAdminReindexBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"dry_run\": false,\n      \"items\": [\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"type\": \"b2b_org\",\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"types\": [\n         \"b2b_org\",\n         \"project_membership\"\n      ]\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"cdc_repair\": true,\n      \"dry_run\": true,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\"\n   }'")
+		}
+		if body.Since != nil {
+			err = goa.MergeErrors(err, goa.ValidateFormat("body.since", *body.Since, goa.FormatDateTime))
+		}
+		if len(body.Items) > 100 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.items", body.Items, len(body.Items), 100, false))
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 	var version *string
@@ -793,14 +802,10 @@ func BuildAdminReindexPayload(membershipServiceAdminReindexBody string, membersh
 		}
 	}
 	v := &membershipservice.AdminReindexPayload{
-		Since:  body.Since,
-		DryRun: body.DryRun,
-	}
-	if body.Types != nil {
-		v.Types = make([]string, len(body.Types))
-		for i, val := range body.Types {
-			v.Types[i] = val
-		}
+		Type:      body.Type,
+		Since:     body.Since,
+		CdcRepair: body.CdcRepair,
+		DryRun:    body.DryRun,
 	}
 	if body.Items != nil {
 		v.Items = make([]*membershipservice.AdminReindexItem, len(body.Items))
@@ -810,6 +815,12 @@ func BuildAdminReindexPayload(membershipServiceAdminReindexBody string, membersh
 				continue
 			}
 			v.Items[i] = marshalAdminReindexItemRequestBodyToMembershipserviceAdminReindexItem(val)
+		}
+	}
+	{
+		var zero bool
+		if v.CdcRepair == zero {
+			v.CdcRepair = false
 		}
 	}
 	{

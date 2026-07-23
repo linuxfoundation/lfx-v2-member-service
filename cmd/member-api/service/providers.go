@@ -503,6 +503,25 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
 	}
 
+	opts := []usecaseSvc.RunnerOption{
+		// Avatar enrichment collaborators (b2b_org_settings + EnrichAvatars path / avatar-backfill Job).
+		usecaseSvc.WithSettingsWriter(B2BOrgSettingsWriterImpl(ctx)),
+		usecaseSvc.WithUserReader(UserReaderImpl(ctx)),
+	}
+
+	// cdc_repair drain collaborators — only wired in Salesforce mode where the
+	// NATS cdc-repair bucket and a real quota gauge exist. In mock mode the
+	// repair path returns ServiceUnavailable ("not configured").
+	if repoSource == "salesforce" {
+		opts = append(opts,
+			usecaseSvc.WithRepairStore(nats.NewCDCRepairStore(nc)),
+			usecaseSvc.WithQuotaGauge(salesforce.NewAPIUsageGauge(salesforce.NewLimitsRefreshFunc(sfClient))),
+		)
+	}
+	if threshold, ok := adminReindexQuotaThresholdFromEnv(); ok {
+		opts = append(opts, usecaseSvc.WithRepairQuotaThreshold(threshold))
+	}
+
 	return usecaseSvc.NewRunner(
 		BackfillIteratorImpl(ctx),
 		B2BOrgReaderImpl(ctx),
@@ -513,10 +532,25 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		nc,
 		GlobalOrgAdminTeamUID(),
 		ProjectResolverImpl(ctx),
-		// Avatar enrichment collaborators (b2b_org_settings + EnrichAvatars path / avatar-backfill Job).
-		usecaseSvc.WithSettingsWriter(B2BOrgSettingsWriterImpl(ctx)),
-		usecaseSvc.WithUserReader(UserReaderImpl(ctx)),
+		opts...,
 	)
+}
+
+// adminReindexQuotaThresholdFromEnv parses ADMIN_REINDEX_QUOTA_THRESHOLD (a
+// fraction in (0,1]). Returns ok=false when unset or invalid so the Runner keeps
+// its default (0.80).
+func adminReindexQuotaThresholdFromEnv() (float64, bool) {
+	raw := os.Getenv("ADMIN_REINDEX_QUOTA_THRESHOLD")
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v <= 0 || v > 1 {
+		slog.Warn("ignoring invalid ADMIN_REINDEX_QUOTA_THRESHOLD; using default",
+			"value", raw, "default", 0.80)
+		return 0, false
+	}
+	return v, true
 }
 
 // JWTAuthImpl constructs the domain.Authenticator from environment variables.
@@ -832,7 +866,10 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		usecaseSvc.WithCDCAccountBatchReader(cdcAccountRepo),
 		// Quota guard — skips upsert fetches when the shared daily REST API
 		// quota approaches exhaustion; /admin/reindex repairs skipped records.
-		usecaseSvc.WithCDCQuotaGauge(salesforce.NewAPIUsageGauge()),
+		usecaseSvc.WithCDCQuotaGauge(salesforce.NewAPIUsageGauge(salesforce.NewLimitsRefreshFunc(sfClient))),
+		// Durable repair queue — records the records skipped by the quota guard so
+		// they can be repaired via POST /admin/reindex {cdc_repair:true}.
+		usecaseSvc.WithCDCRepairStore(nats.NewCDCRepairStore(natsClient)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),

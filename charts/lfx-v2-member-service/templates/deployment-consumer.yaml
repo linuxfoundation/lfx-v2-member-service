@@ -48,6 +48,11 @@ spec:
               value: {{ .Values.consumer.cdcChannel | quote }}
             - name: SF_ORG_ID
               value: {{ .Values.consumer.orgID | quote }}
+            {{- $quotaRefreshStaleAfter := .Values.consumer.quotaRefreshStaleAfter | toString | trim }}
+            {{- if ne $quotaRefreshStaleAfter "" }}
+            - name: CDC_QUOTA_REFRESH_STALE_AFTER
+              value: {{ $quotaRefreshStaleAfter | quote }}
+            {{- end }}
             - name: SF_INSTANCE_URL
               valueFrom:
                 secretKeyRef:

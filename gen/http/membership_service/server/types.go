@@ -134,19 +134,23 @@ type UpdateKeyContactRequestBody struct {
 // AdminReindexRequestBody is the type of the "membership-service" service
 // "admin-reindex" endpoint HTTP request body.
 type AdminReindexRequestBody struct {
-	// Entity types to reindex (optional; default = all in-scope: b2b_org,
-	// project_membership, key_contact, b2b_org_settings). Mutually exclusive with
-	// items.
-	Types []string `form:"types,omitempty" json:"types,omitempty" xml:"types,omitempty"`
+	// Entity type to reindex (required): b2b_org, project_membership, key_contact,
+	// or b2b_org_settings. Applies to full, since, and every targeted item.
+	// cdc_repair supports only b2b_org, project_membership, key_contact.
+	Type *string `form:"type,omitempty" json:"type,omitempty" xml:"type,omitempty"`
 	// ISO 8601 / RFC 3339 timestamp with explicit zone; only records with
-	// LastModifiedDate >= since are reindexed. Mutually exclusive with items.
-	// Handler normalises to UTC. For key_contact (high-volume), prefer a ~2-year
-	// window (e.g. 2024-06-01T00:00:00Z) to sync only the active set instead of
-	// the full ~300k records.
+	// LastModifiedDate >= since are reindexed. Mutually exclusive with items and
+	// cdc_repair. Handler normalises to UTC. For key_contact (high-volume), prefer
+	// a ~2-year window (e.g. 2024-06-01T00:00:00Z) to sync only the active set
+	// instead of the full ~300k records.
 	Since *string `form:"since,omitempty" json:"since,omitempty" xml:"since,omitempty"`
-	// Targeted list of entities to reindex (surgical mode). Mutually exclusive
-	// with types and since. Max 100 items.
+	// Targeted list of entity UIDs to reindex (surgical mode), all of the
+	// top-level type. Mutually exclusive with since and cdc_repair. Max 100 items.
 	Items []*AdminReindexItemRequestBody `form:"items,omitempty" json:"items,omitempty" xml:"items,omitempty"`
+	// When true, drain the CDC quota-repair queue for the given type (one of
+	// b2b_org, project_membership, key_contact). Mutually exclusive with since and
+	// items.
+	CdcRepair *bool `form:"cdc_repair,omitempty" json:"cdc_repair,omitempty" xml:"cdc_repair,omitempty"`
 	// When true, walk SOQL/live-path but skip publishing. Final log includes
 	// would_publish_count.
 	DryRun *bool `form:"dry_run,omitempty" json:"dry_run,omitempty" xml:"dry_run,omitempty"`
@@ -239,6 +243,9 @@ type UpdateKeyContactResponseBody ProjectKeyContactResponseResponseBody
 type AdminReindexResponseBody struct {
 	// Correlation ID for the reindex run (for log lookups)
 	RunID string `form:"run_id" json:"run_id" xml:"run_id"`
+	// For cdc_repair runs: number of pending repair markers selected for this run.
+	// Omitted (not present in the response body) for other modes.
+	SelectedCount *int `form:"selected_count,omitempty" json:"selected_count,omitempty" xml:"selected_count,omitempty"`
 }
 
 // CreateB2bOrgWorkspaceResponseBody is the type of the "membership-service"
@@ -2791,8 +2798,6 @@ type OrgUserRequestBody struct {
 
 // AdminReindexItemRequestBody is used to define fields on request body types.
 type AdminReindexItemRequestBody struct {
-	// Entity type: b2b_org, project_membership, key_contact, or b2b_org_settings
-	Type *string `form:"type,omitempty" json:"type,omitempty" xml:"type,omitempty"`
 	// Entity UID (Salesforce ID)
 	UID *string `form:"uid,omitempty" json:"uid,omitempty" xml:"uid,omitempty"`
 }
@@ -3179,7 +3184,8 @@ func NewUpdateKeyContactResponseBody(res *membershipservice.UpdateKeyContactResu
 // the "admin-reindex" endpoint of the "membership-service" service.
 func NewAdminReindexResponseBody(res *membershipservice.AdminReindexResult) *AdminReindexResponseBody {
 	body := &AdminReindexResponseBody{
-		RunID: res.RunID,
+		RunID:         res.RunID,
+		SelectedCount: res.SelectedCount,
 	}
 	return body
 }
@@ -5341,16 +5347,14 @@ func NewDeleteKeyContactPayload(membershipUID string, uid string, version *strin
 // endpoint payload.
 func NewAdminReindexPayload(body *AdminReindexRequestBody, version *string, bearerToken *string) *membershipservice.AdminReindexPayload {
 	v := &membershipservice.AdminReindexPayload{
+		Type:  *body.Type,
 		Since: body.Since,
+	}
+	if body.CdcRepair != nil {
+		v.CdcRepair = *body.CdcRepair
 	}
 	if body.DryRun != nil {
 		v.DryRun = *body.DryRun
-	}
-	if body.Types != nil {
-		v.Types = make([]string, len(body.Types))
-		for i, val := range body.Types {
-			v.Types[i] = val
-		}
 	}
 	if body.Items != nil {
 		v.Items = make([]*membershipservice.AdminReindexItem, len(body.Items))
@@ -5361,6 +5365,9 @@ func NewAdminReindexPayload(body *AdminReindexRequestBody, version *string, bear
 			}
 			v.Items[i] = unmarshalAdminReindexItemRequestBodyToMembershipserviceAdminReindexItem(val)
 		}
+	}
+	if body.CdcRepair == nil {
+		v.CdcRepair = false
 	}
 	if body.DryRun == nil {
 		v.DryRun = false
@@ -5590,6 +5597,9 @@ func ValidateUpdateKeyContactRequestBody(body *UpdateKeyContactRequestBody) (err
 // ValidateAdminReindexRequestBody runs the validations defined on
 // Admin-ReindexRequestBody
 func ValidateAdminReindexRequestBody(body *AdminReindexRequestBody) (err error) {
+	if body.Type == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("type", "body"))
+	}
 	if body.Since != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.since", *body.Since, goa.FormatDateTime))
 	}
@@ -5718,9 +5728,6 @@ func ValidateOrgUserRequestBody(body *OrgUserRequestBody) (err error) {
 // ValidateAdminReindexItemRequestBody runs the validations defined on
 // admin-reindex-itemRequestBody
 func ValidateAdminReindexItemRequestBody(body *AdminReindexItemRequestBody) (err error) {
-	if body.Type == nil {
-		err = goa.MergeErrors(err, goa.MissingFieldError("type", "body"))
-	}
 	if body.UID == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("uid", "body"))
 	}

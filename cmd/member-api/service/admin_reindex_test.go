@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	"github.com/stretchr/testify/assert"
@@ -21,7 +22,7 @@ func TestAdminReindex_AcceptsFullReindexAndReturnsRunID(t *testing.T) {
 	runner := newTestBackfillRunner(nil)
 	svc := newTestSvc(withBackfillRunner(runner))
 
-	result, err := svc.AdminReindex(context.Background(), &membershipservice.AdminReindexPayload{})
+	result, err := svc.AdminReindex(context.Background(), &membershipservice.AdminReindexPayload{Type: "b2b_org"})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -41,57 +42,84 @@ func TestAdminReindex_Validation(t *testing.T) {
 	}{
 		{
 			name:       "unknown type rejected",
-			payload:    &membershipservice.AdminReindexPayload{Types: []string{"foobar"}},
+			payload:    &membershipservice.AdminReindexPayload{Type: "foobar"},
+			wantErrMsg: "unknown type",
+		},
+		{
+			name:       "empty type rejected (required singular type)",
+			payload:    &membershipservice.AdminReindexPayload{Type: ""},
 			wantErrMsg: "unknown type",
 		},
 		{
 			name:       "membership_tier rejected with helpful message",
-			payload:    &membershipservice.AdminReindexPayload{Types: []string{"membership_tier"}},
+			payload:    &membershipservice.AdminReindexPayload{Type: "membership_tier"},
 			wantErrMsg: "membership_tier is not currently supported",
 		},
 		{
-			name: "items + types mutually exclusive",
+			name: "cdc_repair + items mutually exclusive",
 			payload: &membershipservice.AdminReindexPayload{
-				Types: []string{"b2b_org"},
-				Items: []*membershipservice.AdminReindexItem{{Type: "b2b_org", UID: "00000000-0000-0000-0000-000000000001"}},
+				Type:      "b2b_org",
+				CdcRepair: true,
+				Items:     []*membershipservice.AdminReindexItem{{UID: "00000000-0000-0000-0000-000000000001"}},
 			},
 			wantErrMsg: "mutually exclusive",
 		},
 		{
 			name: "items + since mutually exclusive",
 			payload: &membershipservice.AdminReindexPayload{
+				Type:  "b2b_org",
 				Since: &since,
-				Items: []*membershipservice.AdminReindexItem{{Type: "b2b_org", UID: "00000000-0000-0000-0000-000000000001"}},
+				Items: []*membershipservice.AdminReindexItem{{UID: "00000000-0000-0000-0000-000000000001"}},
 			},
 			wantErrMsg: "mutually exclusive",
 		},
 		{
 			name: "item with invalid Salesforce ID rejected",
 			payload: &membershipservice.AdminReindexPayload{
-				Items: []*membershipservice.AdminReindexItem{{Type: "b2b_org", UID: "not-a-sfid"}},
+				Type:  "b2b_org",
+				Items: []*membershipservice.AdminReindexItem{{UID: "not-a-sfid"}},
 			},
 			wantErrMsg: "invalid Salesforce ID",
 		},
 		{
-			name: "item with unknown type rejected",
-			payload: &membershipservice.AdminReindexPayload{
-				Items: []*membershipservice.AdminReindexItem{{Type: "membership_tier", UID: "00000000-0000-0000-0000-000000000001"}},
-			},
-			wantErrMsg: "membership_tier is not currently supported in items mode",
+			name:       "cdc_repair on b2b_org_settings rejected",
+			payload:    &membershipservice.AdminReindexPayload{Type: "b2b_org_settings", CdcRepair: true},
+			wantErrMsg: "cdc_repair supports only",
+		},
+		{
+			// Regression: reindexItem returns outcomeIssued for a dry-run
+			// without publishing, and RunRepair conditionally deletes the
+			// marker on outcomeIssued — so dry_run+cdc_repair must be rejected
+			// rather than silently deleting real pending markers.
+			name:       "cdc_repair + dry_run rejected",
+			payload:    &membershipservice.AdminReindexPayload{Type: "b2b_org", CdcRepair: true, DryRun: true},
+			wantErrMsg: "cdc_repair does not support dry_run",
 		},
 		{
 			name:       "invalid since rejected",
-			payload:    &membershipservice.AdminReindexPayload{Since: &invalidSince},
+			payload:    &membershipservice.AdminReindexPayload{Type: "b2b_org", Since: &invalidSince},
 			wantErrMsg: "RFC 3339",
 		},
 		{
 			name:       "naive since (no zone) rejected",
-			payload:    &membershipservice.AdminReindexPayload{Since: &naiveSince},
+			payload:    &membershipservice.AdminReindexPayload{Type: "b2b_org", Since: &naiveSince},
 			wantErrMsg: "RFC 3339",
 		},
 		{
 			name:    "since with non-UTC offset accepted (normalised to UTC)",
-			payload: &membershipservice.AdminReindexPayload{Since: &offsetSince},
+			payload: &membershipservice.AdminReindexPayload{Type: "b2b_org", Since: &offsetSince},
+			// no error
+		},
+		{
+			name: "multiple same-type targeted UIDs accepted",
+			payload: &membershipservice.AdminReindexPayload{
+				Type: "b2b_org",
+				Items: []*membershipservice.AdminReindexItem{
+					{UID: "001000000000001AAA"},
+					{UID: "001000000000002AAA"},
+					{UID: "001000000000003AAA"},
+				},
+			},
 			// no error
 		},
 	}
@@ -108,6 +136,31 @@ func TestAdminReindex_Validation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestAdminReindex_CdcRepair_SupportedTypesAccepted(t *testing.T) {
+	// Each of the three CDC-backed types must be accepted for cdc_repair when
+	// the repair store + quota gauge are wired and quota is below threshold;
+	// selected_count must reflect the number of pending markers returned.
+	for _, tt := range []string{"b2b_org", "project_membership", "key_contact"} {
+		t.Run(tt, func(t *testing.T) {
+			repairStore := &mock.MockCDCRepairStore{
+				Pending: map[string][]port.RepairMarker{
+					tt: {{Type: tt, SFID: "001000000000001AAA", Revision: 1}},
+				},
+			}
+			gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+			runner := usecaseSvc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), mock.NewMockKeyContactSObjectReader(), mock.NewMockB2BOrgSettings(), mock.NewMockMemberPublisher(), nil, "",
+				nil, usecaseSvc.WithRepairStore(repairStore), usecaseSvc.WithQuotaGauge(gauge))
+			svc := newTestSvc(withBackfillRunner(runner))
+
+			result, err := svc.AdminReindex(context.Background(), &membershipservice.AdminReindexPayload{Type: tt, CdcRepair: true})
+
+			require.NoError(t, err)
+			require.NotNil(t, result.SelectedCount)
+			assert.Equal(t, 1, *result.SelectedCount)
 		})
 	}
 }

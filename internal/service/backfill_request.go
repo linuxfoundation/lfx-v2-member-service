@@ -13,12 +13,17 @@ import (
 )
 
 // BackfillRequest carries the validated, normalised parameters for a single run.
+//
+// Every request has exactly one Type (BREAKING: there is no all-types shortcut).
+// Targeted requests carry Items (UIDs of that one Type). CDCRepair drains the
+// quota-repair queue for that Type.
 type BackfillRequest struct {
-	RunID  string
-	Types  []string   // empty = all in-scope (full/since modes)
-	Since  *time.Time // nil = full reindex
-	Items  []ReindexItem
-	DryRun bool
+	RunID     string
+	Type      string     // required: the single entity type for this run
+	Since     *time.Time // nil = full reindex
+	Items     []string   // targeted UIDs, all of Type
+	CDCRepair bool       // drain the CDC quota-repair queue for Type
+	DryRun    bool
 
 	// EnrichAvatars re-enriches b2b_org_settings writer/auditor avatars from the auth-service before
 	// republishing. Set by the avatar-backfill Job; not exposed on the HTTP /admin/reindex payload.
@@ -29,19 +34,13 @@ type BackfillRequest struct {
 	AvatarSleep time.Duration
 }
 
-// ReindexItem identifies a single entity in targeted (items) mode.
-type ReindexItem struct {
-	Type string
-	UID  string
-}
-
 // AvatarBackfillRequest builds a full-mode b2b_org_settings request with avatar enrichment enabled —
 // the request the avatar-backfill Job hands to Runner.Run. It reuses the Runner's control plane
 // (run_id, dry-run, full-run lock) rather than a separate backfill path.
 func AvatarBackfillRequest(runID string, dryRun, missingOnly bool, sleep time.Duration) BackfillRequest {
 	return BackfillRequest{
 		RunID:             runID,
-		Types:             []string{entityTypeB2BOrgSettings},
+		Type:              entityTypeB2BOrgSettings,
 		DryRun:            dryRun,
 		EnrichAvatars:     true,
 		AvatarMissingOnly: missingOnly,
@@ -51,47 +50,61 @@ func AvatarBackfillRequest(runID string, dryRun, missingOnly bool, sleep time.Du
 
 // ValidateAndBuildRequest validates the payload and returns a BackfillRequest.
 func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (BackfillRequest, error) {
-	validTypes := map[string]bool{
-		entityTypeB2BOrg:            true,
-		entityTypeProjectMembership: true,
-		entityTypeKeyContact:        true,
-		entityTypeB2BOrgSettings:    true,
+	validTypes := map[string]bool{}
+	for _, t := range allBackfillTypes {
+		validTypes[t] = true
 	}
 
-	// Validate types
-	for _, t := range p.Types {
-		if t == "membership_tier" {
+	// Validate the single required top-level type.
+	if p.Type == "membership_tier" {
+		return BackfillRequest{}, pkgerrors.NewValidation(
+			"membership_tier is not currently supported")
+	}
+	if !validTypes[p.Type] {
+		return BackfillRequest{}, pkgerrors.NewValidation(
+			fmt.Sprintf("unknown type %q; supported types: b2b_org, project_membership, key_contact, b2b_org_settings", p.Type))
+	}
+
+	// cdc_repair drains the queue for one CDC-backed type; b2b_org_settings has
+	// no CDC skip path, and since/items make no sense for a queue drain.
+	if p.CdcRepair {
+		if p.Type == entityTypeB2BOrgSettings {
 			return BackfillRequest{}, pkgerrors.NewValidation(
-				"membership_tier is not currently supported; remove it from types or omit types to reindex all supported types")
+				"cdc_repair supports only b2b_org, project_membership, key_contact")
 		}
-		if !validTypes[t] {
+		if p.Since != nil || len(p.Items) > 0 {
 			return BackfillRequest{}, pkgerrors.NewValidation(
-				fmt.Sprintf("unknown type %q; supported types: b2b_org, project_membership, key_contact, b2b_org_settings", t))
+				"cdc_repair is mutually exclusive with since and items")
+		}
+		if p.DryRun {
+			// reindexItem returns outcomeIssued for a dry-run without publishing,
+			// and RunRepair conditionally deletes the marker on outcomeIssued —
+			// so dry_run+cdc_repair would delete real pending markers with no
+			// republish. Reject rather than silently drop repair state.
+			return BackfillRequest{}, pkgerrors.NewValidation(
+				"cdc_repair does not support dry_run")
 		}
 	}
 
-	// Mutual exclusivity: items vs types/since
-	if len(p.Items) > 0 && (len(p.Types) > 0 || p.Since != nil) {
-		return BackfillRequest{}, pkgerrors.NewValidation("items mode is mutually exclusive with types and since")
+	// Mutual exclusivity: items vs since.
+	if len(p.Items) > 0 && p.Since != nil {
+		return BackfillRequest{}, pkgerrors.NewValidation("items mode is mutually exclusive with since")
 	}
 
-	// Validate items
-	for _, item := range p.Items {
-		if item.Type == "membership_tier" {
-			return BackfillRequest{}, pkgerrors.NewValidation(
-				"membership_tier is not currently supported in items mode")
-		}
-		if !validTypes[item.Type] {
-			return BackfillRequest{}, pkgerrors.NewValidation(
-				fmt.Sprintf("unknown item type %q; supported types: b2b_org, project_membership, key_contact, b2b_org_settings", item.Type))
+	// Validate items (UID-only; the type is the top-level type).
+	items := make([]string, len(p.Items))
+	for i, item := range p.Items {
+		if item == nil {
+			return BackfillRequest{}, pkgerrors.NewValidation("items must not contain a null entry")
 		}
 		if !sfuuid.IsSFID(item.UID) {
 			return BackfillRequest{}, pkgerrors.NewValidation(
-				fmt.Sprintf("invalid Salesforce ID %q for item type %q", item.UID, item.Type))
+				fmt.Sprintf("invalid Salesforce ID %q for type %q", item.UID, p.Type))
 		}
+		items[i] = item.UID
 	}
 
-	// Validate and normalise since
+	// Validate and normalise since.
 	var since *time.Time
 	if p.Since != nil {
 		t, parseErr := time.Parse(time.RFC3339, *p.Since)
@@ -103,16 +116,11 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		since = &utc
 	}
 
-	// Convert items
-	items := make([]ReindexItem, len(p.Items))
-	for i, item := range p.Items {
-		items[i] = ReindexItem{Type: item.Type, UID: item.UID}
-	}
-
 	return BackfillRequest{
-		Types:  p.Types,
-		Since:  since,
-		Items:  items,
-		DryRun: p.DryRun,
+		Type:      p.Type,
+		Since:     since,
+		Items:     items,
+		CDCRepair: p.CdcRepair,
+		DryRun:    p.DryRun,
 	}, nil
 }

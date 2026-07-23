@@ -235,7 +235,33 @@ See the [FGA Contract](./fga-contract.md#b2b-org) for the exact `parent`/`child`
 
 ### Quota guard
 
-Before each upsert re-fetch, `quotaExceeded` checks the Salesforce REST API usage gauge. When usage ≥ `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`), the batch is **skipped** (logged with `publish_failed_for_backfill_repair=true`) to preserve remaining quota for user-facing reads. Fail-open: disabled when the gauge is nil or the limit has not yet been observed. Set the threshold to `1` to disable, `0` to always skip.
+Before each upsert re-fetch, `quotaExceeded` (`internal/service/cdc_consumer.go`) checks the Salesforce REST API usage gauge. When usage ≥ `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`), the batch is **skipped** (logged with `publish_failed_for_backfill_repair=true`) to preserve remaining quota for user-facing reads and durably queued for later repair (see [Write-on-skip repair queue](#write-on-skip-repair-queue) below). Fail-open: disabled when the gauge is nil or the limit has not yet been observed. Set the threshold to `1` to disable, `0` to always skip.
+
+#### Stale-refresh (breaking the quota death spiral)
+
+The usage gauge is normally updated **passively** — every Salesforce REST response carries a `Sforce-Limit-Info` header that the transport parses into the gauge. That is a problem during a skip loop: once the guard starts skipping the SOQL re-fetch, no Salesforce call happens, so the passive gauge stops updating — the consumer can be stuck skipping on a reading from hours ago even after the daily quota has actually reset ("quota death spiral").
+
+`quotaExceeded` breaks the spiral with an **active** refresh:
+
+1. `shouldAttemptQuotaRefresh` decides whether the current reading is stale — older than `CDC_QUOTA_REFRESH_STALE_AFTER` (Go duration; default `5m`), or never observed — **and** no refresh has been attempted within that same window (a per-consumer `refreshMu`-guarded timestamp throttles retries so a Salesforce outage doesn't turn every skip decision into its own `/limits` call).
+2. If so, `quotaGauge.Refresh(ctx)` issues a `GET /limits` call through the same `rateLimitTransport` that parses the passive `Sforce-Limit-Info` header — the `/limits` JSON response body itself is discarded; the refresh exists only to provoke a fresh header on the response.
+3. A successful refresh replaces the reading used for the skip decision in the same call — so a quota that has actually recovered lets the batch proceed immediately, with no extra CDC event needed. A failed refresh logs a warning and falls back to evaluating the last known (stale) reading, and — if nothing has ever been observed — fails open.
+
+Set `CDC_QUOTA_REFRESH_STALE_AFTER=0` to disable the active refresh entirely and rely only on the passive header updates (the pre-fix behaviour).
+
+> **Assumption pending live-org verification.** The refresh relies on `GET /limits` itself responding (with a still-parseable `Sforce-Limit-Info` header) while `DailyApiRequests` is exhausted, rather than being rejected outright. Salesforce documents this header on every non-`/services/data/vXX.X/` (Versions) REST response, so `/limits` is expected to behave the same as any other endpoint — but this has **not yet been empirically confirmed against the target org** (doing so means deliberately exhausting the daily quota, which is disruptive in a shared org). If `/limits` ever returns an error or an unparseable response near exhaustion, the refresh attempt fails closed: `shouldAttemptQuotaRefresh`'s throttle still applies (one attempt per `CDC_QUOTA_REFRESH_STALE_AFTER` window), the guard falls back to the last valid reading, and — if nothing has ever been observed — fails open. No behavior change is needed to handle that case; only this note should be updated once verified.
+
+#### Write-on-skip repair queue
+
+Every record in a skipped upsert batch is durably recorded so `/admin/reindex {cdc_repair:true}` can repair it later (`recordSkippedForRepair`):
+
+- The entity is mapped 1:1 to its reindex type (`reindexTypeForCDCEntity`): `Account`→`b2b_org`, `Asset`→`project_membership`, `Project_Role__c`→`key_contact`. An unmappable entity (none exist today — the map covers every entity this consumer dispatches) logs an ERROR and queues nothing.
+- IDs are already canonical 18-char SFIDs at this point (`partitionRecordIDs` normalises before the quota check runs), so each queued marker is keyed by the same form the consumer and the drain both use.
+- `repairStore.PutPending(ctx, reindexType, id)` is called once per ID (not batched) — see [CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain) for the store/bucket and the drain side.
+- **The replay cursor still advances regardless of a queue-write failure.** If `PutPending` fails for some IDs, the exact failed IDs are logged at ERROR (chunked, `repairLogIDChunk` per line) as the manual recovery backstop — the consumer does not retry the write or block the stream on it. This is a deliberate trade-off: durability of the *repair queue* is best-effort so the CDC stream itself never stalls; the log line is the fallback for the rare write failure.
+- No repair store configured (`WithCDCRepairStore` not wired) → `recordSkippedForRepair` is a no-op; the skip is still logged (just without a queued marker).
+
+> **Repair-queue playbook.** When you see `cdc: Salesforce API quota threshold reached` in the consumer logs: (1) confirm quota headroom has actually returned (`api_usage_current`/`api_usage_limit` in the log line, or the org's Salesforce quota dashboard); (2) drain the queue per skipped type with `POST /admin/reindex {"type":"<b2b_org|project_membership|key_contact>","cdc_repair":true}`; (3) re-run the same call — each call selects at most 100 markers — until the response's `selected_count` is `0`. Full mechanics (the quota gate, why there is no distributed lock, and per-item retry semantics) are in [Backfill / Reindex — CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain).
 
 ### Absent-from-SOQL → delete convergence
 
@@ -263,6 +289,10 @@ The consumer is resilient by design — a single bad event never halts the strea
 | `cdc: GAP event received` | Salesforce could not deliver granular events. | Handled as upsert; cross-check `/admin/reindex` if needed. |
 | `cdc: skipping record with non-normalizable SFID` | A malformed record ID was dropped. | Investigate the source event; reindex if the record is legitimate. |
 | `cdc: <reader> not wired` | A batch reader dependency is missing (misconfiguration). | Fix wiring; `/admin/reindex` to repair the gap. |
+| `cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair` | Usage ≥ `CDC_QUOTA_SKIP_THRESHOLD` even after an active refresh attempt; the batch's records were queued to `cdc-repair`. | `POST /admin/reindex {"type":"<type>","cdc_repair":true}` once quota headroom returns — see [CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain). |
+| `cdc: quota refresh failed; evaluating last known reading` | The active `/limits` refresh request itself failed (network/auth); the guard fell back to the last known reading. | Transient; if persistent, check Salesforce connectivity/credentials. |
+| `cdc: no repair target mapping for entity — skipped records not queued` | A skipped entity has no `reindexTypeForCDCEntity` mapping (should not occur — every dispatched entity is mapped). | Investigate; treat as a bug if seen. |
+| `cdc: repair-queue write failed for skipped records — recover from these IDs` | `PutPending` failed for some skipped IDs; the cursor advanced anyway (durability of the queue is best-effort). | Manually re-drive the listed `failed_ids` via a targeted `/admin/reindex` for the logged `reindex_type` once the KV write path is healthy. |
 
 ---
 
@@ -286,6 +316,7 @@ Consumer-mode environment variables (read only when `RUN_MODE=consumer`):
 | `SF_ORG_ID` | 18-char Salesforce Org ID, sent as the `tenantid` gRPC metadata header | — (fatal if empty) | Yes |
 | `SF_CDC_CHANNEL` | CDC channel/topic to subscribe to | `/data/ChangeEvents` | No |
 | `CDC_QUOTA_SKIP_THRESHOLD` | Fraction of daily Salesforce REST quota (0–1) at which upsert re-fetches are skipped | `0.95` | No |
+| `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the guard issues an active `/limits` refresh (also the refresh-attempt throttle window). `0` disables active refresh (passive header updates only). | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the platform org-admin team | `_null` | No |
 
 Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `SF_USERNAME`, `SF_PASSWORD`, `SF_SECURITY_TOKEN`, `SF_CONSUMER_RSA_PEM`) and NATS settings are shared with API mode — see the main [README](../README.md) / [CLAUDE.md](../CLAUDE.md).
@@ -296,7 +327,7 @@ Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `
 
 ## NATS Storage
 
-The CDC consumer touches four NATS KV buckets:
+The CDC consumer touches five NATS KV buckets:
 
 | Bucket | Use by the consumer | TTL |
 |---|---|---|
@@ -304,6 +335,7 @@ The CDC consumer touches four NATS KV buckets:
 | `member-service-cache` | sObject cache — the consumer **evicts** entries here on each event (never writes). | no soft-TTL |
 | `membership-cache` | Read/written by the injected `ProjectResolver` while resolving `project_uid` for `Asset` / `Project_Role__c` upserts — it looks up and populates `project-uid.<slug>` via `Storage.GetProjectUID` / `PutProjectUID`. | 6 h stale / 23 h expire |
 | `org-settings` | Read/written when a **registered** key contact upsert succeeds `project_uid` resolution: `processKeyContact` calls `AddPrincipal` (`SuppressNotification: true`), which reads and updates the authoritative org-settings KV. Not touched on resolver failure. | none (authoritative) |
+| `cdc-repair` | The consumer **writes** one pending marker per skipped record when the quota guard skips an upsert batch (`recordSkippedForRepair` → `PutPending`). **Never read or deleted here** — `/admin/reindex {cdc_repair:true}` (a different process, the API) lists and revision-conditionally deletes markers on drain. See [CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain). | none (authoritative), `history: 1` |
 
 > The batch record re-fetch path itself is uncached SOQL; the `membership-cache` access is the `ProjectResolver`'s slug→UID cache, and `org-settings` is touched only when `project_uid` resolution succeeds and the key contact has a known LFID (org-dashboard provisioning).
 

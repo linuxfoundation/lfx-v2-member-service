@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -37,6 +38,20 @@ var cdcTracer = otel.Tracer("github.com/linuxfoundation/lfx-v2-member-service/in
 // CDC_QUOTA_SKIP_THRESHOLD (float, 0–1). Default: 0.95.
 const defaultQuotaSkipThreshold = 0.95
 
+// defaultQuotaRefreshStaleAfter is how old the quota observation may be before
+// the guard actively refreshes it (one lightweight /limits GET) rather than
+// skipping on a possibly-frozen reading. This breaks the "quota death spiral":
+// during a skip loop the consumer makes no Salesforce calls, so the passively
+// updated gauge never refreshes on its own. Configurable via
+// CDC_QUOTA_REFRESH_STALE_AFTER (Go duration). Default: 5m. Set to 0 to disable
+// active refresh.
+const defaultQuotaRefreshStaleAfter = 5 * time.Minute
+
+// repairLogIDChunk caps how many skipped IDs are emitted per ERROR log entry
+// when a repair-queue write fails, so a large batch does not produce one giant
+// log line.
+const repairLogIDChunk = 100
+
 // CDCConsumer consumes normalized CDCEvents from a CDCSubscriber and dispatches
 // each one to the appropriate handler. It is the single active consumer in
 // consumer mode (enforced at the Kubernetes level via replicas:1 + Recreate —
@@ -52,19 +67,26 @@ const defaultQuotaSkipThreshold = 0.95
 //  4. Present records are published via indexer + FGA fan-out messages.
 //  5. On DELETE: publishes a delete indexer event; no re-fetch.
 type CDCConsumer struct {
-	subscriber            port.CDCSubscriber
-	resolver              port.ProjectResolver
-	b2bOrgReader          port.B2BOrgReader
-	membershipBatch       port.MembershipBatchReader
-	keyContactBatch       port.KeyContactBatchReader
-	accountBatch          port.AccountBatchReader
-	cacheInvalidator      port.CacheInvalidator
-	publisher             port.MemberPublisher
-	quotaGauge            port.SalesforceQuotaGauge
-	quotaSkipThreshold    float64
-	globalOrgAdminTeamUID string
-	userReader            port.UserReader
-	orgSettings           OrgSettingsPrincipalWriter
+	subscriber             port.CDCSubscriber
+	resolver               port.ProjectResolver
+	b2bOrgReader           port.B2BOrgReader
+	membershipBatch        port.MembershipBatchReader
+	keyContactBatch        port.KeyContactBatchReader
+	accountBatch           port.AccountBatchReader
+	cacheInvalidator       port.CacheInvalidator
+	publisher              port.MemberPublisher
+	quotaGauge             port.SalesforceQuotaGauge
+	quotaSkipThreshold     float64
+	quotaRefreshStaleAfter time.Duration
+	repairStore            port.CDCRepairStore
+	globalOrgAdminTeamUID  string
+	userReader             port.UserReader
+	orgSettings            OrgSettingsPrincipalWriter
+
+	// refreshMu guards lastRefreshAttemptAt so failed/attempted refreshes are
+	// throttled to at most once per staleness window even under concurrent calls.
+	refreshMu            sync.Mutex
+	lastRefreshAttemptAt time.Time
 }
 
 // CDCConsumerOption configures a CDCConsumer.
@@ -112,6 +134,14 @@ func WithCDCQuotaGauge(g port.SalesforceQuotaGauge) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.quotaGauge = g }
 }
 
+// WithCDCRepairStore injects the durable repair queue. When set, every upsert
+// skipped by the quota guard records a pending marker so the record can be
+// repaired later via POST /admin/reindex {cdc_repair:true}. When nil, skips are
+// only logged (no durable queue).
+func WithCDCRepairStore(s port.CDCRepairStore) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.repairStore = s }
+}
+
 func WithCDCGlobalOrgAdminTeamUID(uid string) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.globalOrgAdminTeamUID = uid }
 }
@@ -137,7 +167,17 @@ func NewCDCConsumer(opts ...CDCConsumerOption) *CDCConsumer {
 		}
 	}
 
-	o := &CDCConsumer{quotaSkipThreshold: threshold}
+	// CDC_QUOTA_REFRESH_STALE_AFTER (Go duration): how old the quota observation
+	// may be before the guard actively refreshes it. A non-positive value
+	// disables active refresh (the guard falls back to the passive reading).
+	staleAfter := defaultQuotaRefreshStaleAfter
+	if raw := os.Getenv("CDC_QUOTA_REFRESH_STALE_AFTER"); raw != "" {
+		if v, err := time.ParseDuration(raw); err == nil {
+			staleAfter = v
+		}
+	}
+
+	o := &CDCConsumer{quotaSkipThreshold: threshold, quotaRefreshStaleAfter: staleAfter}
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -253,8 +293,13 @@ func isDelete(ct model.CDCChangeType) bool {
 }
 
 // quotaExceeded reports whether the Salesforce REST API quota has been consumed
-// beyond the configured threshold. When quotaGauge is nil or the limit has not
-// yet been observed (limit ≤ 0), this returns false (fail-open).
+// beyond the configured threshold, refreshing a stale reading first so a skip
+// loop cannot freeze the gauge (the "quota death spiral"). When it decides to
+// skip, it also records each affected record to the durable repair queue.
+//
+// When quotaGauge is nil, the threshold is ≥ 1, or no valid reading has ever
+// been observed (even after an attempted refresh), this returns false
+// (fail-open).
 func (o *CDCConsumer) quotaExceeded(ctx context.Context, entity string, ids []string) bool {
 	if o.quotaGauge == nil {
 		return false
@@ -263,24 +308,121 @@ func (o *CDCConsumer) quotaExceeded(ctx context.Context, entity string, ids []st
 		// Threshold of 1 means "never skip" — guard disabled regardless of usage.
 		return false
 	}
-	current, limit := o.quotaGauge.APIUsage()
-	if limit <= 0 {
-		// Not yet observed — fail open.
+
+	snap := o.quotaGauge.Snapshot()
+
+	// Break the spiral: if the reading is stale (or never observed) and we have
+	// not already attempted a refresh within the window, actively refresh so the
+	// passive transport records a fresh observation before we decide to skip.
+	if o.shouldAttemptQuotaRefresh(snap) {
+		refreshed, err := o.quotaGauge.Refresh(ctx)
+		if err != nil {
+			slog.WarnContext(ctx, "cdc: quota refresh failed; evaluating last known reading",
+				"entity", entity, "error", err)
+		} else {
+			snap = refreshed
+		}
+	}
+
+	if !snap.Observed() {
+		// Never observed a valid reading (and refresh, if any, did not produce
+		// one) — fail open.
 		return false
 	}
-	ratio := float64(current) / float64(limit)
-	if ratio >= o.quotaSkipThreshold {
-		slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair",
+
+	if snap.Ratio() < o.quotaSkipThreshold {
+		return false
+	}
+
+	slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair",
+		"entity", entity,
+		"record_count", len(ids),
+		"api_usage_current", snap.Current,
+		"api_usage_limit", snap.Limit,
+		"threshold", o.quotaSkipThreshold,
+		"publish_failed_for_backfill_repair", true,
+	)
+	o.recordSkippedForRepair(ctx, entity, ids)
+	return true
+}
+
+// shouldAttemptQuotaRefresh reports whether the guard should issue an active
+// /limits refresh now: the reading must be stale (older than the window, or
+// never observed) and no refresh may have been attempted within the window.
+// It records the attempt time before returning true so failed refreshes are
+// throttled to at most once per window (avoiding a spiral on /limits calls).
+func (o *CDCConsumer) shouldAttemptQuotaRefresh(snap port.QuotaSnapshot) bool {
+	if o.quotaRefreshStaleAfter <= 0 {
+		return false // active refresh disabled
+	}
+	now := time.Now()
+	stale := !snap.Observed() || now.Sub(snap.ObservedAt) >= o.quotaRefreshStaleAfter
+	if !stale {
+		return false
+	}
+
+	o.refreshMu.Lock()
+	defer o.refreshMu.Unlock()
+	if !o.lastRefreshAttemptAt.IsZero() && now.Sub(o.lastRefreshAttemptAt) < o.quotaRefreshStaleAfter {
+		return false // already attempted within the window
+	}
+	o.lastRefreshAttemptAt = now
+	return true
+}
+
+// reindexTypeForCDCEntity maps a CDC entity name to its primary reindex target
+// type. The mapping is fixed and 1:1.
+func reindexTypeForCDCEntity(entity string) (string, bool) {
+	switch entity {
+	case "Account":
+		return entityTypeB2BOrg, true
+	case "Asset":
+		return entityTypeProjectMembership, true
+	case "Project_Role__c":
+		return entityTypeKeyContact, true
+	default:
+		return "", false
+	}
+}
+
+// recordSkippedForRepair writes one pending repair marker per skipped record so
+// it can be repaired later. ids are already canonical 18-character SFIDs
+// (partitionRecordIDs normalizes before the quota check). Each marker is written
+// once; on any failure the exact failed IDs are logged at ERROR (chunked) as the
+// recovery backstop. The caller still advances the replay cursor regardless.
+func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string, ids []string) {
+	if o.repairStore == nil || len(ids) == 0 {
+		return
+	}
+	reindexType, ok := reindexTypeForCDCEntity(entity)
+	if !ok {
+		slog.ErrorContext(ctx, "cdc: no repair target mapping for entity — skipped records not queued",
+			"entity", entity, "record_count", len(ids))
+		return
+	}
+
+	var failed []string
+	for _, id := range ids {
+		if err := o.repairStore.PutPending(ctx, reindexType, id); err != nil {
+			failed = append(failed, id)
+		}
+	}
+	if len(failed) == 0 {
+		return
+	}
+	for start := 0; start < len(failed); start += repairLogIDChunk {
+		end := start + repairLogIDChunk
+		if end > len(failed) {
+			end = len(failed)
+		}
+		slog.ErrorContext(ctx, "cdc: repair-queue write failed for skipped records — recover from these IDs",
 			"entity", entity,
-			"record_count", len(ids),
-			"api_usage_current", current,
-			"api_usage_limit", limit,
-			"threshold", o.quotaSkipThreshold,
+			"reindex_type", reindexType,
+			"failed_ids", failed[start:end],
+			"failed_count", len(failed),
 			"publish_failed_for_backfill_repair", true,
 		)
-		return true
 	}
-	return false
 }
 
 // partitionRecordIDs normalizes each raw CDC record ID to its canonical 18-char

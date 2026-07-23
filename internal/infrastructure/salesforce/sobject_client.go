@@ -222,9 +222,13 @@ func (c *SObjectClient) doGet(ctx context.Context, rawURL string, cached *nats.S
 // path by issuing a DoRequest call that the library will retry with refreshed
 // credentials on INVALID_SESSION_ID. The /limits endpoint is used because it is
 // lightweight, read-only, and is the same endpoint called during sf.Init.
+//
+// DoRequest already prefixes the uri with "/services/data/{apiVersion}"
+// internally (github.com/k-capehart/go-salesforce/v3 requests.go), so the uri
+// passed here must be relative — passing the full "/services/data/.../limits"
+// path would double the prefix and 404.
 func (c *SObjectClient) refreshSession() error {
-	uri := fmt.Sprintf("/services/data/%s/limits", c.sf.GetAPIVersion())
-	_, err := c.sf.DoRequest(http.MethodGet, uri, nil)
+	_, err := c.sf.DoRequest(http.MethodGet, "/limits", nil)
 	if err != nil {
 		return err
 	}
