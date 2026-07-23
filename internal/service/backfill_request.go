@@ -94,6 +94,16 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		return BackfillRequest{}, pkgerrors.NewValidation("until requires since")
 	}
 
+	// An explicit empty items array (as opposed to an omitted items field, which
+	// decodes to nil) must be rejected rather than silently falling through
+	// ClassifyMode's len(req.Items) > 0 check into a full reindex. Goa's generated
+	// MinLength(1) validation can't express this distinction (it has no nil guard
+	// for optional fields, so it would also reject a legitimate omitted-items
+	// request), so it is enforced here instead.
+	if p.Items != nil && len(p.Items) == 0 {
+		return BackfillRequest{}, pkgerrors.NewValidation("items must not be an empty array; omit items for a full/filtered reindex")
+	}
+
 	// Validate, normalise, and de-duplicate items (UID-only; the type is the
 	// top-level type). Normalize18 both validates and canonicalises to 18-char,
 	// matching the UIDs the batch readers return — so countAbsent reconciles a

@@ -248,6 +248,30 @@ func TestValidateAndBuildRequest_Items_NormalisedTo18Char(t *testing.T) {
 	assert.Equal(t, "001000000000001AAA", req.Items[0])
 }
 
+// Regression: an explicit empty items array must be rejected rather than
+// silently falling through ClassifyMode's len(req.Items) > 0 check into a full
+// reindex (a real hazard for a high-volume type like key_contact).
+func TestValidateAndBuildRequest_EmptyItemsArray_ReturnsValidationError(t *testing.T) {
+	_, err := svc.ValidateAndBuildRequest(&membershipservice.AdminReindexPayload{
+		Type:  "key_contact",
+		Items: []*membershipservice.AdminReindexItem{},
+	})
+	require.Error(t, err)
+	var valErr pkgerrors.Validation
+	assert.ErrorAs(t, err, &valErr)
+}
+
+// Regression guard: omitted items (nil, the common full/filtered request shape)
+// must remain valid and classify as modeFull — only an explicit empty array is
+// rejected, not the absence of the field.
+func TestValidateAndBuildRequest_OmittedItems_ClassifiesAsFull(t *testing.T) {
+	req, err := svc.ValidateAndBuildRequest(&membershipservice.AdminReindexPayload{
+		Type: "b2b_org",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, req.Items)
+}
+
 // Regression: duplicate item UIDs — including the 15- and 18-char forms of the
 // same ID — collapse to one after normalisation, so countAbsent reconciles
 // against len(Items) instead of counting a duplicate as absent.

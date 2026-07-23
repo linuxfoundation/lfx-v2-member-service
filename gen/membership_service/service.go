@@ -201,7 +201,8 @@ type AdminReindexPayload struct {
 	Until *string
 	// Targeted list of entity UIDs to reindex (surgical mode), all of the
 	// top-level type. Mutually exclusive with since, until, and cdc_repair. Max
-	// 100 items.
+	// 100 items; when present, must be non-empty (an explicit empty array is
+	// rejected rather than silently falling through to a full reindex).
 	Items []*AdminReindexItem
 	// When true, drain the CDC quota-repair queue for the given type (one of
 	// b2b_org, project_membership, key_contact). Mutually exclusive with since,

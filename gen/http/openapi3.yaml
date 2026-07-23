@@ -2639,7 +2639,7 @@ components:
                     type: array
                     items:
                         $ref: '#/components/schemas/AdminReindexItem'
-                    description: Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since, until, and cdc_repair. Max 100 items.
+                    description: Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since, until, and cdc_repair. Max 100 items; when present, must be non-empty (an explicit empty array is rejected rather than silently falling through to a full reindex).
                     example:
                         - uid: 001B000000IqhSLIAZ
                         - uid: 001B000000IqhSLIAZ
