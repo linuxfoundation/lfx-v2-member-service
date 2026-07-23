@@ -594,7 +594,7 @@ var AdminReindexPayload = dsl.Type("admin-reindex-payload", func() {
 	dsl.Attribute("items", dsl.ArrayOf(AdminReindexItem), "Targeted list of entity UIDs to reindex (surgical mode), all of the top-level type. Mutually exclusive with since, until, and cdc_repair. Max 100 items.", func() {
 		dsl.MaxLength(100)
 	})
-	dsl.Attribute("cdc_repair", dsl.Boolean, "When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since and items.", func() {
+	dsl.Attribute("cdc_repair", dsl.Boolean, "When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since, until, and items; does not support dry_run.", func() {
 		dsl.Default(false)
 	})
 	dsl.Attribute("dry_run", dsl.Boolean, "When true, walk SOQL/live-path but skip publishing. Final log includes would_publish_count.", func() {

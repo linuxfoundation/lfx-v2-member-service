@@ -233,3 +233,33 @@ func TestValidateAndBuildRequest_ValidWindow_NormalisesUTC(t *testing.T) {
 	require.NotNil(t, req.Until)
 	assert.Equal(t, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), *req.Until)
 }
+
+// Regression: a 15-char targeted SFID must be canonicalised to its 18-char form
+// so the batched targeted path's countAbsent reconciles the request against the
+// 18-char UIDs the batch readers return (instead of misreporting a published
+// record as not_found).
+func TestValidateAndBuildRequest_Items_NormalisedTo18Char(t *testing.T) {
+	req, err := svc.ValidateAndBuildRequest(&membershipservice.AdminReindexPayload{
+		Type:  "project_membership",
+		Items: []*membershipservice.AdminReindexItem{{UID: "001000000000001"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, req.Items, 1)
+	assert.Equal(t, "001000000000001AAA", req.Items[0])
+}
+
+// Regression: duplicate item UIDs — including the 15- and 18-char forms of the
+// same ID — collapse to one after normalisation, so countAbsent reconciles
+// against len(Items) instead of counting a duplicate as absent.
+func TestValidateAndBuildRequest_Items_Deduplicated(t *testing.T) {
+	req, err := svc.ValidateAndBuildRequest(&membershipservice.AdminReindexPayload{
+		Type: "project_membership",
+		Items: []*membershipservice.AdminReindexItem{
+			{UID: "001000000000001"},    // 15-char form
+			{UID: "001000000000001AAA"}, // same ID, 18-char form
+			{UID: "001000000000002AAA"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"001000000000001AAA", "001000000000002AAA"}, req.Items)
+}

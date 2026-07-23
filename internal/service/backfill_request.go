@@ -94,17 +94,30 @@ func ValidateAndBuildRequest(p *membershipservice.AdminReindexPayload) (Backfill
 		return BackfillRequest{}, pkgerrors.NewValidation("until requires since")
 	}
 
-	// Validate items (UID-only; the type is the top-level type).
-	items := make([]string, len(p.Items))
-	for i, item := range p.Items {
+	// Validate, normalise, and de-duplicate items (UID-only; the type is the
+	// top-level type). Normalize18 both validates and canonicalises to 18-char,
+	// matching the UIDs the batch readers return — so countAbsent reconciles a
+	// 15-char request against an 18-char result instead of misreporting a published
+	// record as not_found. De-duplication (including 15/18-char forms of the same
+	// ID, which collapse after normalisation) keeps published + not_found +
+	// conversion_error reconciling against len(Items), since Salesforce returns each
+	// matching record only once.
+	seen := make(map[string]struct{}, len(p.Items))
+	items := make([]string, 0, len(p.Items))
+	for _, item := range p.Items {
 		if item == nil {
 			return BackfillRequest{}, pkgerrors.NewValidation("items must not contain a null entry")
 		}
-		if !sfuuid.IsSFID(item.UID) {
+		uid, normErr := sfuuid.Normalize18(item.UID)
+		if normErr != nil {
 			return BackfillRequest{}, pkgerrors.NewValidation(
 				fmt.Sprintf("invalid Salesforce ID %q for type %q", item.UID, p.Type))
 		}
-		items[i] = item.UID
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		items = append(items, uid)
 	}
 
 	// Validate and normalise since.

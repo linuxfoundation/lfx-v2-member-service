@@ -2627,7 +2627,7 @@ components:
             properties:
                 cdc_repair:
                     type: boolean
-                    description: When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since and items.
+                    description: When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since, until, and items; does not support dry_run.
                     default: false
                     example: false
                 dry_run:

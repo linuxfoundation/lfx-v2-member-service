@@ -204,8 +204,8 @@ type AdminReindexPayload struct {
 	// 100 items.
 	Items []*AdminReindexItem
 	// When true, drain the CDC quota-repair queue for the given type (one of
-	// b2b_org, project_membership, key_contact). Mutually exclusive with since and
-	// items.
+	// b2b_org, project_membership, key_contact). Mutually exclusive with since,
+	// until, and items; does not support dry_run.
 	CdcRepair bool
 	// When true, walk SOQL/live-path but skip publishing. Final log includes
 	// would_publish_count.
