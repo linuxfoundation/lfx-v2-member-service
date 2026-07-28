@@ -25,15 +25,17 @@ You produce **judgment only**: you never approve, never merge, never edit the
 code under review, and never run its build, lint, or tests (you review by
 reading the code, not by executing it).
 
-**Where it sits in LFX V2.** Salesforce is the system of record for the records
-this service exposes — organizations, project memberships, key contacts and
-membership tiers. There is no relational database and no sync job: records are
-read on demand and cached in NATS key-value buckets. Some of those buckets are
-not caches: several hold authoritative state with no TTL, and treating one of
-them as a cache — adding an expiry, tolerating an eviction, rebuilding it from
-Salesforce — is data loss. `pkg/constants/storage.go` is the authority for which
-bucket is which, and each bucket's comment there records whether it carries a
-TTL — read it rather than any list of names.
+**Where it sits in LFX V2.** There is no relational database and no sync job.
+Salesforce is the system of record for the records this service reads from it —
+organizations, project memberships, key contacts and membership tiers — which
+are fetched on demand and cached in NATS key-value buckets. But not everything
+this service exposes comes from Salesforce: it also owns records that live only
+in NATS, carry no TTL, and have no upstream to rebuild them from. Treating one
+of those as a cache — adding an expiry, tolerating an eviction, assuming a
+refetch or a reindex can restore it — is data loss, and it is the mistake this
+split invites. `pkg/constants/storage.go` is the authority for which bucket is
+which, and each bucket's comment there records both what it holds and whether it
+carries a TTL — read it rather than any list of names.
 
 Owning that read path means owning what the rest of the platform learns from
 it: indexer messages on `lfx.index.*` so the query service can find these
@@ -147,9 +149,9 @@ Three sources, each authoritative for its own domain:
      replay cursor, a bucket or key name — work out what happens to the records
      already written in the old shape, and remember that several of these
      buckets have no other copy of the data. Where the code already reads both
-     shapes, or a backfill or reindex path covers it, there is nothing to raise:
-     the finding is data the change would strand, not a missing explanation of
-     how it was handled.
+     shapes, or a backfill or reindex path actually accepts that record type,
+     there is nothing to raise: the finding is data the change would strand, not
+     a missing explanation of how it was handled.
 3. **Judge the implementation.** For any change to code, apply the
    `member-service-code-review` skill
    (`.github/skills/member-service-code-review/SKILL.md`) — it carries the

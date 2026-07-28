@@ -72,10 +72,12 @@ with it. They live in:
   `known-false-positives.md` recording what the team has already rejected. Use
   the category files as a checklist of known shapes and the false-positive file
   as a floor: a finding that matches something the team has explicitly rejected
-  does not get posted, however well you can argue it. The knowledge base is a
-  snapshot taken at an earlier point on `main`, so treat it as a floor of
-  known-good patterns and a rejection list, never as an inventory of what
-  matters — whole areas of the service postdate it.
+  does not get posted, however well you can argue it. That authority runs to
+  what the team has decided; where an entry also describes what some tool
+  already catches, that description can go stale — see *What not to flag*. The
+  knowledge base is a snapshot taken at an earlier point on `main`, so treat it
+  as a floor of known-good patterns and a rejection list, never as an inventory
+  of what matters — whole areas of the service postdate it.
 - **`CLAUDE.md`, `README.md` and `ARCHITECTURE.md`** — good evidence of intent
   and the fastest orientation, and demonstrably drifted in their details. They
   disagree with each other and with the code about how many KV buckets exist,
@@ -236,16 +238,25 @@ Run these on the changed code, scaled to the size of the change:
   that invariant with no local symptom. In the same area, change types are
   matched by exact equality rather than by suffix, deliberately, because one
   change type ends with the same word as another and must route the other way.
-- **Write-path publish policy is deliberate.** Creates and updates publish
-  without waiting and log rather than fail when the publish does not land, with
-  the admin reindex path as the recovery route; deletes propagate the failure.
-  Do not raise the fire-and-forget itself — that is settled. A publish that
-  swallows the error with no log at all is still a real finding, because it
-  removes the only signal the recovery path has. Ordering between the emissions
-  on a settings write is also load-bearing rather than incidental; take it from
-  the sibling flow — the settings writer's own publish helper in
-  `internal/service/` publishes the FGA message before the indexer message and
-  says why — and treat an inversion as a finding.
+- **Write-path publish policy is deliberate, and it is decided per emission.**
+  Creates and updates publish without waiting and log rather than fail. Do not
+  raise the fire-and-forget itself — that is settled. Deletes are where the
+  policy is easiest to get wrong, because it is not uniform there: what decides
+  whether a failed publish propagates is the *consequence* of the message never
+  landing, not the fact that it is a delete. A lost indexer message leaves a
+  stale search entry, and the writers that swallow it say so in a comment; a
+  lost FGA removal leaves a permission granted to someone who should no longer
+  have it, which is why that one is returned as an error. Read the sibling
+  writer in `internal/service/` before calling either shape wrong. Two things
+  are still findings: a publish that swallows the error with no log at all,
+  since that removes the only signal anyone has, and a swallow justified by
+  reindexability for a record type the admin reindex path does not actually
+  accept — the supported types are enumerated in the backfill request
+  validation, so check them rather than assuming the route covers everything.
+  Ordering between the emissions on a settings write is load-bearing rather than
+  incidental; take it from the sibling flow — the settings writer's own publish
+  helper in `internal/service/` publishes the FGA message before the indexer
+  message and says why — and treat an inversion as a finding.
 - **Optimistic concurrency.** Mutating paths are conditional: a caller-supplied
   precondition is compared against a service-computed version and a stale value
   is refused, and at least one path uses the store's own revision for a
@@ -266,9 +277,14 @@ Run these on the changed code, scaled to the size of the change:
   against a single required location.
 - **Chart and code move together.** The chart declares the Heimdall RuleSet, the
   KV buckets, the deployment shape and the environment the service reads. A new
-  endpoint whose route has no rule is unauthorized or unreachable in a cluster; a
-  new bucket or environment variable the chart does not create is a runtime
-  failure. No check in CI reasons about what this chart declares, and the
+  endpoint whose route has no rule is unauthorized or unreachable in a cluster,
+  and a new bucket the chart does not create is a runtime failure. Environment
+  variables need the narrower test: the gap matters only for configuration the
+  service actually *requires*, or that must differ per environment. This repo
+  deliberately leaves optional knobs out of the chart and defaults them in code,
+  so an unset variable that falls back to a sane default is the intended design,
+  not a missing chart entry — read how the code handles the empty value before
+  raising it. No check in CI reasons about what this chart declares, and the
   coupling is invisible in the Go diff, which is exactly why it gets missed.
   Deployed values, the Salesforce secret, and the platform-wide OpenFGA model
   live in other repos; the chart consumes them and does not define them.
@@ -339,14 +355,17 @@ not a reportable security finding.
   authorization header so downstream services act as the caller. Anything that
   logs, persists, or echoes a whole envelope leaks a live token; the publisher's
   current habit of logging only subject and size is load-bearing, not incidental.
-- **PII in logs and errors.** Member and contact emails, names, usernames and
-  principals are PII, and this service handles them constantly — one resource
-  even carries an email in the URL path, so it reaches request lines and access
-  logs by design. A redaction helper exists and is applied by hand; it is not
+- **PII in logs and errors.** Member and contact emails, names and usernames
+  identify people, and this service handles them constantly — one resource even
+  carries an email in the URL path, so it reaches request lines and access logs
+  by design. A redaction helper exists and is applied by hand; it is not
   automatic, and some existing sites log raw addresses. Those are known drift,
-  not a template to copy: a *new* log or error that emits a raw email, name,
-  principal, or credential is a finding, and error strings returned to clients
-  count, since an error that echoes an address leaks it just as effectively.
+  not a template to copy: a *new* log or error that emits a raw email, personal
+  name, or credential is a finding, and error strings returned to clients count,
+  since an error that echoes an address leaks it just as effectively. The
+  opaque principal identifier is the deliberate exception — the repo's logging
+  standard asks for it as a stable structured field, and established call sites
+  emit it; it is how a request is traced without naming a person.
 - **Existence masking on nested resources.** A nested resource is authorized
   against its parent, so the code re-verifies that the child actually belongs to
   the parent named in the path and answers a mismatch as "not found" rather than
@@ -386,13 +405,17 @@ not a reportable security finding.
 - The chart version and appVersion. They are placeholders replaced at release
   time from the git tag and carry an in-file instruction not to increment them;
   "bump the chart version" is always wrong here.
-- Anything recorded in `docs/reviews/knowledge-base/known-false-positives.md` —
-  it is a floor that overrides any other match. It covers, among others, the
-  fire-and-forget publish policy on the write path, the debug variables endpoint
-  being unauthenticated and served as plain text, self-heal creates that skip
-  publication, the whole-object hash used as a version token, and a set of
-  validation items the team has deferred to specific tickets. Read the file
-  rather than trusting this summary of it.
+- Anything recorded in `docs/reviews/knowledge-base/known-false-positives.md`.
+  It covers, among others, the fire-and-forget publish policy on the write path,
+  the debug variables endpoint being unauthenticated and served as plain text,
+  self-heal creates that skip publication, the whole-object hash used as a
+  version token, and a set of validation items the team has deferred to specific
+  tickets. Read the file rather than trusting this summary of it. Its authority
+  is over what the team has *decided*, and on that it settles the matter. Where
+  an entry instead asserts a fact about tooling — that some check already
+  catches a class of problem — that part can go stale as the tooling moves, and
+  a stale entry would suppress a real finding on a false premise. Trust the
+  tooling's own configuration over the entry's description of it.
 - Bucket counts, endpoint tables, and subject lists in the general prose that
   disagree with the code, on a PR that did not touch them. Use the code and move
   on; the drift matters when *this* change creates it in an owned contract doc.

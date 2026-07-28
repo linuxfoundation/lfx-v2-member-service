@@ -33,13 +33,16 @@ Salesforce Change Data Capture consumer among them, selected by `RUN_MODE` in
 `cmd/member-api/main.go` — so a change to shared wiring can land in a process
 whose diff does not show it.
 
-Salesforce is the system of record for the member-facing records this service
-serves; there is no relational database here, and NATS key-value buckets hold
-caches of those records. Not every bucket is a cache, and that distinction is
-load-bearing: several of them hold authoritative state carrying no TTL, where an
-eviction is data loss rather than a refetch. `pkg/constants/storage.go` is the
-authority for which bucket is which, and each bucket's comment there records
-whether it carries a TTL — read it rather than any list of names.
+There is no relational database here. Storage splits two ways, and the split is
+load-bearing. Salesforce is the system of record for the records this service
+*reads* from it — organizations, memberships, tiers, key contacts — which NATS
+key-value buckets cache, so an eviction there costs a refetch. Other records
+this service owns outright: they live only in NATS, carry no TTL, and nothing
+upstream can rebuild them, so an eviction is data loss. Which bucket is which
+decides what a lost or stale entry means, and therefore how a diff touching it
+should read. `pkg/constants/storage.go` is the authority, and each bucket's
+comment there records both what it holds and whether it carries a TTL — read it
+rather than any list of names.
 
 The service tells the rest of the platform about that state by publishing
 indexer messages on `lfx.index.*`, consumed by the indexer service so the query
