@@ -29,6 +29,20 @@ All messages use the generic FGA message format on the following NATS subjects:
 
 ---
 
+## Delivery Semantics
+
+**All FGA publication from the member service is asynchronous.** No FGA flow uses NATS request/reply, and no flow waits for or inspects an fga-sync response. The publisher API has no synchronous selector, so a callsite cannot opt back into request/reply.
+
+This matters for revocation. A successful API call means the message was handed to NATS — **not** that OpenFGA has converged. Between a successful response and fga-sync applying the tuple change there is an asynchronous convergence window in which the old access is still live. Callers that need certainty must re-check against OpenFGA rather than infer it from a 2xx.
+
+Waiting for a reply would not fix this and would actively mislead. Once the membership subjects are captured by a JetStream stream, a request on those subjects is answered by the broker acknowledging storage, not by fga-sync reporting completion — so a synchronous caller would receive a fast success that proves nothing about convergence.
+
+**One exception confirms delivery, not convergence.** The API key-contact deletion path flushes the NATS connection after publishing `member_remove`. Publishing alone only buffers the message locally, so a crash immediately afterwards could discard a revocation the API had already reported as done. The flush closes that window by confirming the server received the message. It still does not wait for fga-sync or for OpenFGA. A flush failure is reported as an error rather than as a successful deletion.
+
+No other membership publication flushes — not the email-change revocation that shares the deletion path's publication helper, not CDC removals, and no grants. Those paths already tolerate publish failure by logging and relying on repair.
+
+---
+
 ## B2B Org
 
 **Source struct:** `internal/domain/model/b2b_org.go` — `B2BOrg`
@@ -120,8 +134,8 @@ Workspace CRUD operations (`POST/PUT/DELETE /b2b_orgs/{uid}/workspaces/…`) and
 | Update project membership | `project_membership` | `lfx.fga-sync.update_access` | Sets `b2b_org` + `project` refs; excludes `key_contact` |
 | CDC `AssetChangeEvent` | `project_membership` | `lfx.fga-sync.update_access` | Same as update |
 | Create key contact | `project_membership` | `lfx.fga-sync.member_put` | Only when contact has a resolved LFID username |
-| Update key contact (username change) | `project_membership` | `lfx.fga-sync.member_remove` + `lfx.fga-sync.member_put` | Revokes old username, grants new username |
+| Update key contact (username change) | `project_membership` | `lfx.fga-sync.member_put` + `lfx.fga-sync.member_remove` | Grants the new username before revoking the old one, so no window leaves the contact without access. Skipped entirely when the username resolves unchanged |
 | CDC `Project_Role__ChangeEvent` | `project_membership` | `lfx.fga-sync.member_put` | LFID resolved via `UserReader.UsernameByEmail`; skipped when email has no LFID |
-| Delete key contact | `project_membership` | `lfx.fga-sync.member_remove` | Always sent when username is known |
+| Delete key contact | `project_membership` | `lfx.fga-sync.member_remove` | Always sent when username is known; the connection is flushed afterwards to confirm delivery |
 | CDC `Project_Role__ChangeEvent` (delete) | `project_membership` | `lfx.fga-sync.member_remove` | `username` is empty — fga-sync cleans up by object-id |
 | `invite_accepted` b2b_org event | `project_membership` | `lfx.fga-sync.member_put` | One grant per key contact in the org whose email matches `recipient.email`; `username = accepted_by` |

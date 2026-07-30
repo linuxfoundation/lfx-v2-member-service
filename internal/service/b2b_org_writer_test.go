@@ -81,12 +81,14 @@ func (p *capturingPublisher) Indexer(_ context.Context, _ string, msg any, _ boo
 	return nil
 }
 
-func (p *capturingPublisher) Access(_ context.Context, _ string, _ any, _ bool) error {
+func (p *capturingPublisher) Access(_ context.Context, _ string, _ any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.accessCallCount++
 	return nil
 }
+
+func (p *capturingPublisher) Flush(_ context.Context) error { return nil }
 
 func (p *capturingPublisher) getIndexerMessages() []any {
 	p.mu.Lock()

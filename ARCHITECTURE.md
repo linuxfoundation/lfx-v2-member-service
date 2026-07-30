@@ -1104,9 +1104,14 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 > **Status:** Implemented. The service publishes `lfx.fga-sync.update_access` /
 > `lfx.fga-sync.delete_access` for `b2b_org`, b2b_org settings, and key contacts via
 > `port.MemberPublisher`. The b2b_org create message includes the `global_org_admin` reference;
-> HTTP updates omit it (the CDC consumer always sets it — see `docs/fga-contract.md`). Publishes
-> are fire-and-forget on the write path (recoverable via `POST /admin/reindex`); deletes
-> propagate publish errors.
+> HTTP updates omit it (the CDC consumer always sets it — see `docs/fga-contract.md`). All FGA
+> publication is asynchronous — no FGA path uses NATS request/reply, and the publisher API
+> exposes no synchronous selector, so success means the message reached NATS rather than that
+> OpenFGA converged. Publishes are fire-and-forget on the write path (recoverable via
+> `POST /admin/reindex`); deletes propagate publish errors, and the API key-contact delete also
+> flushes the connection to confirm the revocation reached the server. Indexer publication is
+> unaffected and keeps its own delivery selection. See `docs/fga-contract.md` for the full
+> delivery semantics.
 
 - On every create / update / delete of a `b2b_org` or `key_contact` (via the HTTP API), and on
   every `project_membership` change received via PubSub CDC or backfill, publish a FGA Sync

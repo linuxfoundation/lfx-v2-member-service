@@ -151,12 +151,12 @@ func publishB2BOrgUpsertEvents(
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return publisher.Access(gCtx, constants.FGASyncUpdateAccessSubject, fgaMsg, false)
+		return publisher.Access(gCtx, constants.FGASyncUpdateAccessSubject, fgaMsg)
 	})
 	for _, reparentMsg := range BuildB2BOrgReparentingMessages(current, org, oldParentChildren, newParentChildren) {
 		msg := reparentMsg
 		g.Go(func() error {
-			return publisher.Access(gCtx, constants.FGASyncUpdateAccessSubject, msg, false)
+			return publisher.Access(gCtx, constants.FGASyncUpdateAccessSubject, msg)
 		})
 	}
 

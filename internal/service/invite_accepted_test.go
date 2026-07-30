@@ -275,6 +275,7 @@ func TestInviteAcceptedService_Handle_GrantsKeyContactFGA_OnMatch(t *testing.T) 
 	}
 	assert.Equal(t, 2, accessCount, "must publish key_contact FGA grant for each matching contact")
 	assert.Equal(t, 2, indexerCount, "must publish key_contact indexer update for each matching contact")
+	assert.Zero(t, pub.FlushCount, "grants are publish-only; only the API deletion path confirms delivery")
 }
 
 func TestInviteAcceptedService_Handle_NoKeyContactMatch_NoFGAGrant(t *testing.T) {

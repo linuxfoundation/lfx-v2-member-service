@@ -150,7 +150,9 @@ func (p *countingPublisher) Indexer(_ context.Context, _ string, _ any, _ bool) 
 	return nil
 }
 
-func (p *countingPublisher) Access(_ context.Context, _ string, _ any, _ bool) error { return nil }
+func (p *countingPublisher) Access(_ context.Context, _ string, _ any) error { return nil }
+
+func (p *countingPublisher) Flush(_ context.Context) error { return nil }
 
 // capturingSinceIterator captures the since/until parameters passed to IterB2BOrgs.
 type capturingSinceIterator struct {
@@ -515,10 +517,12 @@ func (p *countingAccessPublisher) Indexer(_ context.Context, _ string, _ any, _ 
 	return nil
 }
 
-func (p *countingAccessPublisher) Access(_ context.Context, _ string, _ any, _ bool) error {
+func (p *countingAccessPublisher) Access(_ context.Context, _ string, _ any) error {
 	p.accessCount.Add(1)
 	return nil
 }
+
+func (p *countingAccessPublisher) Flush(_ context.Context) error { return nil }
 
 // capturingBackfillPublisher captures both indexer message payloads and access
 // call count so tests can assert on is_parent and FGA parent tuple messages.
@@ -535,12 +539,14 @@ func (p *capturingBackfillPublisher) Indexer(_ context.Context, _ string, msg an
 	return nil
 }
 
-func (p *capturingBackfillPublisher) Access(_ context.Context, _ string, _ any, _ bool) error {
+func (p *capturingBackfillPublisher) Access(_ context.Context, _ string, _ any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.accessCount++
 	return nil
 }
+
+func (p *capturingBackfillPublisher) Flush(_ context.Context) error { return nil }
 
 // indexerIsParentForUID returns true if any captured indexer message has
 // data.uid == uid and data.is_parent == true.
