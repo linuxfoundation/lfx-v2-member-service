@@ -33,13 +33,13 @@ All messages use the generic FGA message format on the following NATS subjects:
 
 **All FGA publication from the member service is asynchronous.** No FGA flow uses NATS request/reply, and no flow waits for or inspects an fga-sync response. The publisher API has no synchronous selector, so a callsite cannot opt back into request/reply.
 
-This matters for revocation. A successful API call means the message was handed to NATS — **not** that OpenFGA has converged. Between a successful response and fga-sync applying the tuple change there is an asynchronous convergence window in which the old access is still live. Callers that need certainty must re-check against OpenFGA rather than infer it from a 2xx.
+This matters for revocation. `Access` returning success means the local NATS client accepted the message onto the connection — it does **not** by itself mean the broker received it, and it never means OpenFGA has converged. Only the flushed key-contact deletion path below confirms broker receipt; every other path's success is client-side acceptance only. Between any successful publish and fga-sync applying the tuple change there is an asynchronous convergence window in which the old access is still live. Callers that need certainty must re-check against OpenFGA rather than infer it from a 2xx.
 
 Waiting for a reply would not fix this and would actively mislead. Once the membership subjects are captured by a JetStream stream, a request on those subjects is answered by the broker acknowledging storage, not by fga-sync reporting completion — so a synchronous caller would receive a fast success that proves nothing about convergence.
 
 **One exception confirms delivery, not convergence.** The API key-contact deletion path flushes the NATS connection after publishing `member_remove`. Publishing alone only buffers the message locally, so a crash immediately afterwards could discard a revocation the API had already reported as done. The flush closes that window by confirming the server received the message. It still does not wait for fga-sync or for OpenFGA. A flush failure is reported as an error rather than as a successful deletion.
 
-No other membership publication flushes — not the email-change revocation that shares the deletion path's publication helper, not CDC removals, and no grants. Those paths already tolerate publish failure by logging and relying on repair.
+No other membership publication flushes — not the email-change revocation that shares the deletion path's publication helper, not CDC removals, and no grants. These do not carry equal risk on publish failure: a failed grant/update is repairable via `POST /admin/reindex`, which re-publishes current state. A failed email-change or CDC removal is not — reindex only re-asserts the current grant, it never re-issues a `member_remove` for a superseded username, so a dangling grant from either path needs a targeted FGA sync or a manual re-send of the remove message (see `docs/cdc-consumer.md`'s `fga_revoke_failed_dangling_tuple` entry for the CDC case).
 
 ---
 
