@@ -243,7 +243,9 @@ The consumer's `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`) and the drain's `ADMI
 
 The final log line reports `total_items`, `published`, `not_found`, and `would_publish_count`; the batched arms additionally report `conversion_error` so `published + not_found + conversion_error` reconciles against `total_items`.
 
-`PublishKeyContactFGA` emits its `member_put` grant only when the assembled record has a non-empty `Username` (`internal/service/messaging.go`); the backfill publishes the record's FGA state as assembled from Salesforce and does not itself perform an email→LFID lookup.
+`PublishKeyContactFGA` emits its `member_put` grant only when the assembled record has a non-empty `Username` (`internal/service/key_contact_grant.go`); the backfill publishes the record's FGA state as assembled from Salesforce and does not itself perform an email→LFID lookup.
+
+Each published grant is recorded in the `key-contact-grants` KV bucket, which is what lets a later CDC delete address the revoke. A `key_contact` reindex is therefore also the way to populate that bucket for contacts granted before it existed. Over a cold bucket the run emits `member_put` only: there is no recorded grant to compare against, so no supersede `member_remove` traffic is produced. It does **not** repair tuples that were already orphaned before the bucket existed — those grants were never recorded, so nothing knows they need revoking.
 
 ---
 

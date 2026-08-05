@@ -109,7 +109,11 @@ Manages the `key_contact` relation on `project_membership` objects.
 
 > **CDC upsert path:** the CDC consumer now resolves the LFID via `UserReader.UsernameByEmail` before publishing. If the email has no LFID, the `username` remains empty and the grant is skipped (pending until the user accepts an invite).
 
-> **CDC delete path:** when a `Project_Role__c` DELETE event arrives, `username` is empty (not available from the CDC payload). The fga-sync service performs cleanup by object-id when `username` is empty. Org-dashboard access is also not revoked on CDC delete (the pre-deletion `B2BOrgUID` + email are unavailable after Salesforce removes the record); revocation only happens via the API delete endpoint.
+> **CDC delete path:** a `Project_Role__c` DELETE event carries only the key contact's own SFID, and the Salesforce record is already gone when it is handled — neither the parent membership nor the granted username can be re-read. Both are recovered from the `key-contact-grants` KV bucket, which records every `member_put` this service publishes; the `member_remove` targets `project_membership:{membership_uid}` with the recorded username, and the entry is deleted afterwards.
+>
+> A contact with no recorded grant (granted before that bucket existed) falls back to the contact's own SFID with an empty `username`. **fga-sync rejects a `member_remove` with an empty username outright and performs no cleanup** — it does *not* clean up by object-id, contrary to what this document previously stated (verified against `lfx-v2-fga-sync@v0.2.17` `handler_generic.go:455-457`). That fallback therefore revokes nothing and is logged with `fga_revoke_failed_dangling_tuple=true`; it is retained only so no case behaves worse than before the index existed.
+>
+> Org-dashboard access is also not revoked on CDC delete (the pre-deletion `B2BOrgUID` + email are unavailable after Salesforce removes the record); revocation only happens via the API delete endpoint.
 
 ---
 
@@ -135,7 +139,7 @@ Workspace CRUD operations (`POST/PUT/DELETE /b2b_orgs/{uid}/workspaces/…`) and
 | CDC `AssetChangeEvent` | `project_membership` | `lfx.fga-sync.update_access` | Same as update |
 | Create key contact | `project_membership` | `lfx.fga-sync.member_put` | Only when contact has a resolved LFID username |
 | Update key contact (username change) | `project_membership` | `lfx.fga-sync.member_put` + `lfx.fga-sync.member_remove` | Grants the new username before revoking the old one, so no window leaves the contact without access. Skipped entirely when the username resolves unchanged |
-| CDC `Project_Role__ChangeEvent` | `project_membership` | `lfx.fga-sync.member_put` | LFID resolved via `UserReader.UsernameByEmail`; skipped when email has no LFID |
-| Delete key contact | `project_membership` | `lfx.fga-sync.member_remove` | Always sent when username is known; the connection is flushed afterwards to confirm delivery |
-| CDC `Project_Role__ChangeEvent` (delete) | `project_membership` | `lfx.fga-sync.member_remove` | `username` is empty — fga-sync cleans up by object-id |
+| CDC `Project_Role__ChangeEvent` | `project_membership` | `lfx.fga-sync.member_put` (+ `lfx.fga-sync.member_remove`) | LFID resolved via `UserReader.UsernameByEmail`; skipped when email has no LFID. A `member_remove` for the previously recorded `{membership_uid, username}` follows the put when the grant target changed (Salesforce-side reparent, or a changed LFID) |
+| Delete key contact | `project_membership` | `lfx.fga-sync.member_remove` | Sent when a username is known, falling back to the one recorded in `key-contact-grants` when live LFID lookup yields nothing; the connection is flushed afterwards to confirm delivery |
+| CDC `Project_Role__ChangeEvent` (delete) | `project_membership` | `lfx.fga-sync.member_remove` | `membership_uid` + `username` recovered from `key-contact-grants`. With no recorded grant, falls back to the contact's own SFID and an empty username, which fga-sync rejects (revokes nothing) |
 | `invite_accepted` b2b_org event | `project_membership` | `lfx.fga-sync.member_put` | One grant per key contact in the org whose email matches `recipient.email`; `username = accepted_by` |

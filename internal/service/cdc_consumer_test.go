@@ -576,18 +576,105 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesIndexerAndFGAMemberRemove(t *te
 	assert.True(t, isStr, "key_contact delete data must be a JSON string (object ID), not an object")
 	assert.Equal(t, sfid("kc-uid-del"), data)
 
-	// CDC has no username to revoke, so fga-sync cleans up by object ID. The
-	// empty username is the signal for that, not an omission.
+	// With no recorded grant there is nothing to address the revoke with, so the
+	// remove falls back to the key contact's own UID and an empty username. This
+	// message is knowingly rejected by fga-sync; it is retained only for parity
+	// with the behaviour that predates the grant index.
 	require.NotEmpty(t, pub.accessMessages)
 	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
 	require.True(t, ok)
 	assert.Equal(t, "member_remove", removeMsg.Operation)
 	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
 	require.True(t, ok)
-	assert.Empty(t, removeData.Username, "empty username drives object-ID cleanup")
+	assert.Equal(t, sfid("kc-uid-del"), removeData.UID,
+		"index miss must fall back to the key contact's own UID")
+	assert.Empty(t, removeData.Username)
 
 	assert.Zero(t, pub.flushCount,
 		"CDC removal is publish-only; only the API deletion path confirms delivery")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex covers the bug this index
+// exists for: the revoke must target the project_membership the grant was made
+// on, not the key contact's own SFID, which OpenFGA has no tuple for.
+func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
+	kcUID := sfid("kc-uid-indexed")
+	membershipUID := sfid("asset-parent")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 7},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8b")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_remove", removeMsg.Operation)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, membershipUID, removeData.UID,
+		"revoke must target the membership the grant was made on, not the key contact SFID")
+	assert.Equal(t, "jdoe", removeData.Username,
+		"fga-sync rejects a member_remove with an empty username")
+
+	assert.Equal(t, []string{kcUID}, grants.Deletes,
+		"the grant entry must be cleared once the revoke is published")
+}
+
+// TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex covers the second
+// deletion trigger: a record that vanished from the upsert query rather than
+// arriving as an explicit delete event. It routes through the same handler, so
+// it must resolve the revoke the same way.
+func TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex(t *testing.T) {
+	kcUID := sfid("kc-uid-absent")
+	membershipUID := sfid("asset-absent-parent")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "asmith", Revision: 2},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r8c")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		// The batch reader returns no contact for the requested SFID, which the
+		// consumer treats as a soft delete.
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, membershipUID, removeData.UID)
+	assert.Equal(t, "asmith", removeData.Username)
+	assert.Equal(t, []string{kcUID}, grants.Deletes)
 }
 
 // ── Error resilience ──────────────────────────────────────────────────────────

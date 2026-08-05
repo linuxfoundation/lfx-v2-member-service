@@ -79,6 +79,7 @@ type CDCConsumer struct {
 	quotaSkipThreshold     float64
 	quotaRefreshStaleAfter time.Duration
 	repairStore            port.CDCRepairStore
+	grantIndex             port.KeyContactGrantIndex
 	globalOrgAdminTeamUID  string
 	userReader             port.UserReader
 	orgSettings            OrgSettingsPrincipalWriter
@@ -140,6 +141,14 @@ func WithCDCQuotaGauge(g port.SalesforceQuotaGauge) CDCConsumerOption {
 // only logged (no durable queue).
 func WithCDCRepairStore(s port.CDCRepairStore) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.repairStore = s }
+}
+
+// WithCDCKeyContactGrantIndex injects the durable record of published
+// key_contact FGA grants. When set, upserts record the grant they publish and
+// deletes use it to address the revoke; when nil, a delete falls back to the
+// unaddressable remove that predates the index.
+func WithCDCKeyContactGrantIndex(i port.KeyContactGrantIndex) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.grantIndex = i }
 }
 
 func WithCDCGlobalOrgAdminTeamUID(uid string) CDCConsumerOption {
@@ -775,7 +784,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 
 	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
-	PublishKeyContactFGA(ctx, o.publisher, kc)
+	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc)
 
 	// Provision org-dashboard access silently for registered contacts when the
 	// indexer path ran (project_uid resolved). kc.Username is non-empty only when
@@ -805,10 +814,22 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 
 	// key_contact delete FGA revoke: best-effort, alertable on failure.
 	// Uses GenericMemberRemoveSubject to match the key_contact_writer delete path.
-	// The username is not available from the CDC event — the FGA sync
-	// service performs cleanup by object-id when username is empty.
-	if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject,
-		BuildKeyContactFGARemoveMessage(uid, "")); err != nil {
+	// The CDC event carries only the key contact's own SFID and the Salesforce
+	// record is already gone, so the grant index is the only place the membership
+	// object and granted username can be recovered from.
+	grant, indexed := o.lookupKeyContactGrant(ctx, uid)
+	removeMsg := BuildKeyContactFGARemoveMessage(grant.MembershipUID, grant.Username)
+	if !indexed {
+		// Pre-index contact, or a grant that was never recorded. Retained for
+		// parity with the behaviour that predates the index, though fga-sync
+		// rejects a remove with an empty username without cleaning anything up:
+		// this contact's grant, if any, is already dangling either way.
+		removeMsg = BuildKeyContactFGARemoveMessage(uid, "")
+		slog.WarnContext(ctx, "cdc: key_contact delete has no recorded grant — revoke cannot be addressed",
+			"uid", uid, "fga_revoke_failed_dangling_tuple", true)
+	}
+
+	if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, removeMsg); err != nil {
 		// fga_revoke_failed_dangling_tuple=true signals a dangling FGA tuple:
 		// the key_contact was deleted in Salesforce but the FGA relation was not
 		// revoked. Unlike publish_failed_for_backfill_repair, this cannot be
@@ -816,6 +837,35 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		// re-sending the remove message manually.
 		slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke failed — dangling tuple requires manual cleanup",
 			"uid", uid, "error", err, "fga_revoke_failed_dangling_tuple", true)
+		// Keep the index entry: it is the only record of what still needs
+		// revoking, and the contact is gone so nothing will rebuild it.
+		return nil
+	}
+
+	if indexed {
+		if err := o.grantIndex.Delete(ctx, uid); err != nil {
+			slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
+				"uid", uid, "error", err)
+		}
 	}
 	return nil
+}
+
+// lookupKeyContactGrant returns the grant recorded for uid. It reports false
+// when the index is not wired, holds no entry, or cannot be read — in each case
+// the caller has no addressable grant to revoke.
+func (o *CDCConsumer) lookupKeyContactGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool) {
+	if o.grantIndex == nil {
+		return port.KeyContactGrant{}, false
+	}
+	grant, found, err := o.grantIndex.Get(ctx, uid)
+	if err != nil {
+		slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete — falling back to unaddressed revoke",
+			"uid", uid, "error", err)
+		return port.KeyContactGrant{}, false
+	}
+	if !found || grant.MembershipUID == "" || grant.Username == "" {
+		return port.KeyContactGrant{}, false
+	}
+	return grant, true
 }

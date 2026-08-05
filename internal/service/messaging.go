@@ -632,25 +632,6 @@ func PublishProjectMembershipFGAPreservingMissingRefs(ctx context.Context, p por
 	}
 }
 
-// PublishKeyContactFGA emits an FGA member_put for accepted key contacts
-// (non-empty username + membershipUID). Pending contacts have no FGA tuple.
-// Used by the CDC consumer, the key_contact writer, and the backfill runner.
-func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, kc *model.KeyContact) {
-	if kc.Username == "" || kc.MembershipUID == "" {
-		return
-	}
-	msg := BuildKeyContactFGAPutMessage(kc.MembershipUID, kc.Username)
-	if err := p.Access(ctx, fgaconstants.GenericMemberPutSubject, msg); err != nil {
-		slog.WarnContext(ctx, "key_contact FGA member_put publish failed",
-			"uid", kc.UID, "membership_uid", kc.MembershipUID,
-			"error", err, "publish_failed_for_backfill_repair", true)
-	} else {
-		slog.DebugContext(ctx, "key_contact FGA member_put published",
-			"uid", kc.UID, "membership_uid", kc.MembershipUID,
-			"subject", fgaconstants.GenericMemberPutSubject)
-	}
-}
-
 // buildKeyContactIndexerInput returns the indexer message data for a key_contact.
 func buildKeyContactIndexerInput(kc *model.KeyContact, action indexerConstants.MessageAction) any {
 	return buildIndexerInput(kc.UID, kc, action)

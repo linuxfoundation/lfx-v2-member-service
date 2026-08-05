@@ -82,6 +82,7 @@ type keyContactWriterOrchestrator struct {
 	memberPublisher         port.MemberPublisher
 	userReader              port.UserReader
 	orgSettings             OrgSettingsPrincipalWriter
+	grantIndex              port.KeyContactGrantIndex
 }
 
 // KeyContactWriterOption configures a keyContactWriterOrchestrator.
@@ -109,6 +110,13 @@ func WithKCUserReader(r port.UserReader) KeyContactWriterOption {
 
 func WithKCOrgSettings(w OrgSettingsPrincipalWriter) KeyContactWriterOption {
 	return func(o *keyContactWriterOrchestrator) { o.orgSettings = w }
+}
+
+// WithKCGrantIndex wires the durable record of published key_contact FGA grants.
+// It makes an API-published grant revocable by a later CDC delete, and gives this
+// path a stored username to revoke with when live LFID lookup comes up empty.
+func WithKCGrantIndex(i port.KeyContactGrantIndex) KeyContactWriterOption {
+	return func(o *keyContactWriterOrchestrator) { o.grantIndex = i }
 }
 
 // kcRoleToOrgRole maps a key-contact role string to the B2BOrgSettings role.
@@ -300,7 +308,7 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 	// Resolve username, publish indexer, then FGA put.
 	kc.Username = o.resolveUsernameForContact(ctx, "", kc.Email)
 	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionCreated)
-	o.publishFGAPut(ctx, kc.MembershipUID, kc.Username)
+	PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, kc)
 	o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
 
 	return kc, nil
@@ -357,11 +365,23 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 
 	if emailChanging {
 		// Paired FGA: put new username first (avoid no-access window), then remove old.
-		newUsername := o.resolveUsernameForContact(ctx, "", newKC.Email)
-		newKC.Username = newUsername
-		o.publishFGAPut(ctx, newKC.MembershipUID, newUsername)
+		newKC.Username = o.resolveUsernameForContact(ctx, "", newKC.Email)
+		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
+		// This revoke is intentionally unconditional, even though
+		// PublishKeyContactFGA's recordKeyContactGrant also revokes a superseded
+		// grant when the index already holds one — a duplicate member_remove is
+		// idempotent, but skipping this one is not safe. The index-driven revoke
+		// only fires when idx.Get finds a stored entry for this contact; it does
+		// nothing on a cold index (pre-backfill, or any prior write that failed),
+		// when the new email resolves to no LFID (PublishKeyContactFGA returns
+		// before ever reading the index), or when the put publish or the index
+		// read itself fails. This path is the only one that resolves the old
+		// grant from live data (current.Username/current.Email) rather than from
+		// the index, so it is also the only one that reproduces the legacy
+		// auth0|-prefix fallback in resolveUsernameForContact — it must run
+		// regardless of whether the index-driven path also ran.
 		oldUsername := o.resolveUsernameForContact(ctx, current.Username, current.Email)
-		if oldUsername != newUsername {
+		if oldUsername != newKC.Username {
 			if pubErr := o.publishFGARemove(ctx, newKC.MembershipUID, oldUsername); pubErr != nil {
 				// Log at error severity (dangling permission), but do not propagate — the
 				// SF update already succeeded and returning an error would mislead callers.
@@ -383,7 +403,7 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		}
 		newKC.Role = derefOrStr(in.Role, current.Role)
 		newKC.Username = o.resolveUsernameForContact(ctx, current.Username, newKC.Email)
-		o.publishFGAPut(ctx, newKC.MembershipUID, newKC.Username)
+		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
 		if in.Role != nil && *in.Role != current.Role {
 			o.remapOrgDashboardRole(ctx, newKC)
 		}
@@ -434,6 +454,13 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// auto-repairable. Publication succeeding is not revocation succeeding; it
 	// only means fga-sync has been told, and it converges asynchronously.
 	username := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
+	if username == "" {
+		// Live lookup can come up empty for a contact that was granted access
+		// earlier (auth-service unavailable, or the account since renamed or
+		// removed). The grant index still holds the username the grant was made
+		// to, and revoking with it beats skipping the revoke silently.
+		username = o.grantedUsername(ctx, in.UID)
+	}
 
 	// Org-dashboard revoke is best-effort; run it regardless of FGA outcome so a
 	// failed FGA publish does not leave a stale writer/auditor entry.
@@ -456,6 +483,14 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 			"uid", in.UID, "error", flushErr)
 		return pkgerrors.NewUnexpected("failed to confirm delivery of FGA revocation for deleted key contact", flushErr)
 	}
+
+	// Clear the recorded grant now that the revoke is confirmed delivered. This
+	// runs whether or not a member_remove was published: when no username could
+	// be resolved from either source there is nothing to revoke, and leaving the
+	// entry behind would orphan it permanently — the contact is gone, so nothing
+	// will ever revisit it. The two error paths above deliberately keep the
+	// entry: it is then the only record of a grant still needing manual cleanup.
+	o.clearGrantIndex(ctx, in.UID)
 
 	return nil
 }
@@ -482,14 +517,33 @@ func (o *keyContactWriterOrchestrator) resolveUsernameForContact(ctx context.Con
 	return ""
 }
 
-func (o *keyContactWriterOrchestrator) publishFGAPut(ctx context.Context, membershipUID, username string) {
-	if username == "" {
+// grantedUsername returns the username recorded for a key contact's published
+// grant, or "" when the index is not wired, holds no entry, or cannot be read.
+func (o *keyContactWriterOrchestrator) grantedUsername(ctx context.Context, uid string) string {
+	if o.grantIndex == nil {
+		return ""
+	}
+	grant, found, err := o.grantIndex.Get(ctx, uid)
+	if err != nil {
+		slog.WarnContext(ctx, "key contact grant index read failed", "uid", uid, "error", err)
+		return ""
+	}
+	if !found {
+		return ""
+	}
+	return grant.Username
+}
+
+// clearGrantIndex drops a deleted key contact's recorded grant. Best-effort: the
+// Salesforce record is already gone, so failing the caller's request over a
+// bookkeeping write would misreport a delete that did happen.
+func (o *keyContactWriterOrchestrator) clearGrantIndex(ctx context.Context, uid string) {
+	if o.grantIndex == nil {
 		return
 	}
-	msg := BuildKeyContactFGAPutMessage(membershipUID, username)
-	if pubErr := o.memberPublisher.Access(ctx, fgaconstants.GenericMemberPutSubject, msg); pubErr != nil {
-		slog.WarnContext(ctx, "key contact FGA put publish failed",
-			"membership_uid", membershipUID, "error", pubErr, "publish_failed_for_backfill_repair", true)
+	if err := o.grantIndex.Delete(ctx, uid); err != nil {
+		slog.WarnContext(ctx, "key contact grant index cleanup failed after delete",
+			"uid", uid, "error", err)
 	}
 }
 

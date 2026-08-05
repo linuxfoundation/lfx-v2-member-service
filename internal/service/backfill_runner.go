@@ -99,6 +99,7 @@ type Runner struct {
 	natsClient            *natspkg.NATSClient
 	globalOrgAdminTeamUID string
 	resolver              port.ProjectResolver
+	grantIndex            port.KeyContactGrantIndex
 
 	// cdc_repair collaborators (optional; only the repair path uses them).
 	repairStore          port.CDCRepairStore
@@ -132,6 +133,13 @@ func WithUserReader(u port.UserReader) RunnerOption {
 // runs.
 func WithRepairStore(s port.CDCRepairStore) RunnerOption {
 	return func(r *Runner) { r.repairStore = s }
+}
+
+// WithKeyContactGrantIndex wires the durable record of published key_contact FGA
+// grants, so a key_contact reindex populates it for contacts whose grant predates
+// the index.
+func WithKeyContactGrantIndex(i port.KeyContactGrantIndex) RunnerOption {
+	return func(r *Runner) { r.grantIndex = i }
 }
 
 // WithQuotaGauge wires the Salesforce quota gauge used to gate cdc_repair drains.
@@ -401,7 +409,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					}
-					PublishKeyContactFGA(ctx, r.publisher, kc)
+					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 					published++
 				}
 			}
@@ -679,12 +687,12 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-			PublishKeyContactFGA(ctx, r.publisher, kc)
+			PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 			return outcomeRetry
 		}
 		kc.ProjectUID = resolvedUID
 		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-		PublishKeyContactFGA(ctx, r.publisher, kc)
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 		return outcomeIssued
 
 	case entityTypeB2BOrgSettings:
@@ -849,7 +857,7 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 		}
-		PublishKeyContactFGA(ctx, r.publisher, kc)
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 		published++
 	}
 
