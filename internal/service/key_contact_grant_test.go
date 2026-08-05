@@ -331,6 +331,52 @@ func TestKeyContactWriter_Delete_RevokesStaleIndexedPairDistinctFromLive(t *test
 	assert.Equal(t, []string{"kc-1"}, grants.Deletes, "the stale entry is cleared once both pairs are revoked")
 }
 
+// failOnMembershipRemovePublisher fails only the member_remove targeting a
+// specific membership UID, letting other Access calls (the live-pair revoke,
+// the indexer publish) succeed — isolates one specific revoke's failure.
+type failOnMembershipRemovePublisher struct {
+	accessPayloadPublisher
+	failMembershipUID string
+}
+
+func (p *failOnMembershipRemovePublisher) Access(ctx context.Context, subject string, msg any) error {
+	if err := p.accessPayloadPublisher.Access(ctx, subject, msg); err != nil {
+		return err
+	}
+	if fgaMsg, ok := msg.(fgatypes.GenericFGAMessage); ok && fgaMsg.Operation == "member_remove" {
+		if data, ok := fgaMsg.Data.(fgatypes.GenericMemberData); ok && data.UID == p.failMembershipUID {
+			return assert.AnError
+		}
+	}
+	return nil
+}
+
+// TestKeyContactWriter_Delete_StaleIndexedPairRevokeFailure_PreservesEntry
+// covers a review finding: if the distinct stale-indexed-pair revoke fails to
+// publish, the index entry must not be cleared afterward — clearing it anyway
+// would erase the only remaining record that pair's grant was ever made,
+// leaving it live with nothing left to revoke it by.
+func TestKeyContactWriter_Delete_StaleIndexedPairRevokeFailure_PreservesEntry(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: testMembershipUID, Email: "alice@example.com"}
+	pub := &failOnMembershipRemovePublisher{failMembershipUID: "pm-old-stale"}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "pm-old-stale", Username: "alice", Revision: 4},
+		},
+	}
+
+	w := newKCWriterWithGrantIndex(newSeededStorage(kc), &seededPMReader{}, pub, userReaderFunc(
+		func(_ context.Context, _ string) (string, error) { return "alice", nil }), grants)
+
+	require.NoError(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
+		MembershipUID: testMembershipUID,
+		UID:           "kc-1",
+	}))
+
+	assert.Empty(t, grants.Deletes,
+		"the entry must be preserved when the stale indexed pair's revoke failed to publish")
+}
+
 // TestKeyContactWriter_Delete_GrantIndexReadFailure_PreservesEntry covers a
 // transient index read failure (distinct from a genuine miss): the delete
 // must not clear the entry on an inconclusive read, or a still-live grant's

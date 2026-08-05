@@ -36,6 +36,12 @@
 
 set -euo pipefail
 
+# The output files carry LFID usernames. umask 077 (owner rwx, nothing for
+# group/other) applies to both the directory this creates and every file the
+# Python export writes into it, so a shared /tmp default output_dir doesn't
+# leave that data world/group-readable for other users on the host.
+umask 077
+
 OUT_DIR="${1:-/tmp/key-contact-grants-backfill}"
 OPENSEARCH_URL="${OPENSEARCH_URL:-http://localhost:9299}"
 INDEX="${OPENSEARCH_INDEX:-resources}"

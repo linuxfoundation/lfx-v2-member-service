@@ -476,13 +476,17 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// Salesforce reparent/rename): the replacement's member_put succeeded and
 	// is what kc.MembershipUID/username now describe, but the swallowed Put
 	// failure left the index still pointing at the old pair, whose own
-	// member_put was never revoked. Revoke that indexed pair too — best-effort,
-	// like revokeSupersededKeyContactGrant — before the index entry is cleared
-	// below; once cleared it is the only remaining record that pair's grant
-	// was ever made, and the Salesforce record backing it is now gone too.
+	// member_put was never revoked. Revoke that indexed pair too before the
+	// index entry is cleared below. indexedPairRevokeFailed gates that clear:
+	// if this publish fails, clearing the entry anyway would erase the only
+	// remaining record that the old pair's grant was ever made, right as the
+	// Salesforce record backing it is gone too — leaving it live with no way
+	// to ever revisit it.
+	indexedPairRevokeFailed := false
 	if grantErr == nil && grantFound && (grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
 		if revokeErr := o.publishFGARemove(ctx, grant.MembershipUID, grant.Username); revokeErr != nil {
-			slog.ErrorContext(ctx, "key contact indexed grant remove publish failed on delete — dangling tuple requires manual cleanup",
+			indexedPairRevokeFailed = true
+			slog.ErrorContext(ctx, "key contact indexed grant remove publish failed on delete — preserving index entry for retry",
 				"uid", in.UID, "membership_uid", grant.MembershipUID, "error", revokeErr,
 				"fga_revoke_failed_dangling_tuple", true)
 		}
@@ -517,9 +521,10 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// will ever revisit it. Conditioned on the revision read above, so a grant
 	// written concurrently is preserved rather than deleted out from under its
 	// writer. The three error paths above (publish, flush, grant read) all
-	// deliberately return or skip before this point, keeping the entry as the
-	// only record of a grant still needing manual follow-up.
-	if grantErr == nil && o.grantIndex != nil {
+	// deliberately return or skip before this point, and indexedPairRevokeFailed
+	// above skips this clear specifically, all keeping the entry as the only
+	// record of a grant still needing manual follow-up.
+	if grantErr == nil && !indexedPairRevokeFailed && o.grantIndex != nil {
 		if err := o.grantIndex.Delete(ctx, in.UID, grant.Revision); err != nil {
 			slog.WarnContext(ctx, "key contact grant index cleanup failed after delete",
 				"uid", in.UID, "error", err)

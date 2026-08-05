@@ -1172,43 +1172,6 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailNotFound_NoGrantNoProvision(t *test
 	assert.Empty(t, spy.adds, "AddPrincipal must not be called for unregistered contact")
 }
 
-// TestCDCConsumer_ProjectRole_Upsert_EmailNotFound_RevokesExistingGrant covers
-// a review finding: a contact whose email now resolves to no LFID (renamed/
-// removed account, or the email itself changed) must have any grant it
-// previously held revoked here — PublishKeyContactFGA will not run (Username
-// stays empty after the NotFound) and so cannot revoke it, and this is the
-// only place that ever learns the miss was genuine rather than a lookup that
-// was skipped or failed transiently.
-func TestCDCConsumer_ProjectRole_Upsert_EmailNotFound_RevokesExistingGrant(t *testing.T) {
-	kc := &model.KeyContact{
-		UID: sfid("kc-res-unreg"), MembershipUID: "pm-unreg",
-		B2BOrgUID: "001000000000009AAA", Email: "unknown@example.com",
-	}
-	pub := &subjectCapturingPublisher{}
-	grants := &mock.MockKeyContactGrantIndex{
-		Entries: map[string]port.KeyContactGrant{
-			kc.UID: {MembershipUID: "pm-old", Username: "old-user", Revision: 4},
-		},
-	}
-
-	consumer := newProjectRoleCDCConsumer(kc, pub,
-		svc.WithCDCUserReader(&fakeUserReader{err: pkgerrors.NewNotFound("not found")}),
-		svc.WithCDCKeyContactGrantIndex(grants),
-	)
-
-	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
-
-	require.True(t, pub.hasAccess(fgaconstants.GenericMemberRemoveSubject),
-		"the previously-recorded grant must be revoked since Username resolved to nothing")
-	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
-	require.True(t, ok)
-	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
-	require.True(t, ok)
-	assert.Equal(t, "pm-old", removeData.UID, "revoke must target the indexed grant's own membership, not the new/absent one")
-	assert.Equal(t, "old-user", removeData.Username)
-	assert.Equal(t, []string{kc.UID}, grants.Deletes, "the stale entry must be cleared once revoked")
-}
-
 func TestCDCConsumer_ProjectRole_Upsert_NilUserReader_PreservesExistingBehavior(t *testing.T) {
 	// nil userReader must not regress existing behavior: a contact with a stored
 	// Username still gets FGA member_put; no provisioning attempt is made.

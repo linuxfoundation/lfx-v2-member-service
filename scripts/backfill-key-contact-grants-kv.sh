@@ -37,6 +37,11 @@
 
 set -euo pipefail
 
+# The failure file (written below) carries LFID usernames from rows that
+# failed to create. umask 077 (owner rwx, nothing for group/other) keeps it
+# from being world/group-readable under a shared /tmp default input_dir.
+umask 077
+
 INPUT_DIR="/tmp/key-contact-grants-backfill"
 MODE="dry-run"
 
