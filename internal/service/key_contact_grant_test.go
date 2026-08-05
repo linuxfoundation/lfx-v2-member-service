@@ -315,3 +315,29 @@ func TestKeyContactWriter_Delete_ClearsGrantWithNoUsernameAnywhere(t *testing.T)
 	assert.Equal(t, []string{"kc-1"}, grants.Deletes,
 		"cleanup must not be conditional on a publish, or the entry would be orphaned forever")
 }
+
+// TestKeyContactWriter_Delete_ColdReadRevisionZero_DoesNotTombstoneConcurrentGrant
+// covers the case a Copilot review caught after the previous fix round: a
+// cold-read revision of 0 must never reach the store as an unconditional
+// delete. nats.go's jetstream KV Delete only sets the expected-sequence
+// header when revision != 0 (jetstream/kv.go); LastRevision(0) is otherwise a
+// silent no-op on that check, not "delete only if absent". This simulates a
+// grant written by another writer after Delete's own read found nothing (a
+// re-invite racing this delete) — the grant must survive.
+func TestKeyContactWriter_Delete_ColdReadRevisionZero_DoesNotTombstoneConcurrentGrant(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: testMembershipUID, Username: "alice", Revision: 7},
+		},
+	}
+
+	// Directly exercise the index contract Delete relies on: a caller that
+	// read no entry (revision 0) must not be able to erase one that exists
+	// now, regardless of how that read happened.
+	err := grants.Delete(context.Background(), "kc-1", 0)
+
+	require.NoError(t, err)
+	_, found, getErr := grants.Get(context.Background(), "kc-1")
+	require.NoError(t, getErr)
+	assert.True(t, found, "revision-0 delete must be a no-op, not an unconditional delete")
+}

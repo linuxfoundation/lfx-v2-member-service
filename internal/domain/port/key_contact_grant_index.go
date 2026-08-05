@@ -54,5 +54,9 @@ type KeyContactGrantIndex interface {
 	// between the caller's read and this call (a re-invite racing a delete, for
 	// example) is never silently tombstoned. An already-absent entry is
 	// success regardless of revision.
+	//
+	// revision == 0 (the caller read no entry — see KeyContactGrant.Revision)
+	// is a no-op: there is nothing to delete, and implementations must not
+	// treat it as "delete unconditionally".
 	Delete(ctx context.Context, uid string, revision uint64) error
 }

@@ -260,10 +260,14 @@ func (i *MockKeyContactGrantIndex) Delete(_ context.Context, uid string, revisio
 	if i.DeleteErr != nil {
 		return i.DeleteErr
 	}
-	// Mirror the adapter's CAS semantics: a non-zero revision that no longer
+	// Mirror the adapter: revision 0 (the caller read no entry) is a no-op —
+	// it must never delete unconditionally. A non-zero revision that no longer
 	// matches the stored entry means the grant changed since the caller read
-	// it, so it must not be deleted.
-	if stored, exists := i.Entries[uid]; exists && revision != 0 && stored.Revision != revision {
+	// it, so it must not be deleted either.
+	if revision == 0 {
+		return nil
+	}
+	if stored, exists := i.Entries[uid]; exists && stored.Revision != revision {
 		return errs.NewConflict(fmt.Sprintf("key-contact-grants: grant for %s changed since read", uid))
 	}
 	delete(i.Entries, uid)

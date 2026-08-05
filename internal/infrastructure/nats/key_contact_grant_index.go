@@ -166,9 +166,22 @@ func (s *KeyContactGrantIndex) Put(ctx context.Context, uid string, grant port.K
 // as Conflict so the newer grant survives instead of being tombstoned. An
 // already-absent entry is success: the contact is gone either way, and the
 // caller must not fail a delete over it.
+//
+// revision == 0 (the port's documented "not currently stored" value, e.g. a
+// caller that read no entry) is a no-op: it returns immediately without
+// calling NATS. This is required, not just an optimization — jetstream.go's
+// KV Delete only sets the expected-sequence header when revision != 0
+// (jetstream/kv.go), so LastRevision(0) is silently unconditional and would
+// delete whatever is currently stored, tombstoning a grant written
+// concurrently since the caller's read. A zero revision means the caller
+// never saw an entry to delete in the first place, so skipping is correct
+// even without that pitfall.
 func (s *KeyContactGrantIndex) Delete(ctx context.Context, uid string, revision uint64) error {
 	if uid == "" {
 		return errs.NewValidation("key-contact-grants: uid is required")
+	}
+	if revision == 0 {
+		return nil
 	}
 	kv, err := s.kv()
 	if err != nil {
