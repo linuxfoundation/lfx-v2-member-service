@@ -636,6 +636,96 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 		"the grant entry must be cleared once the revoke is published")
 }
 
+// TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries covers
+// a review finding: a grant-index read failure must not be collapsed into an
+// ordinary miss on the first try — the index may still hold the exact address
+// needed to revoke this grant, and once this handler returns, the replay
+// cursor advances with no other chance to retry a deleted contact. A bounded
+// retry that recovers within this call must still use the recorded grant.
+func TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries(t *testing.T) {
+	kcUID := sfid("kc-uid-flaky")
+	membershipUID := sfid("asset-flaky-parent")
+
+	pub := &subjectCapturingPublisher{}
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			if calls == 1 {
+				// One transient failure, then the read succeeds — well within
+				// maxGrantIndexReadAttempts.
+				return port.KeyContactGrant{}, false, assert.AnError
+			}
+			return port.KeyContactGrant{MembershipUID: membershipUID, Username: "jdoe", Revision: 3}, true, nil
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8flaky")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, membershipUID, removeData.UID,
+		"a read that recovers within the retry budget must still use the recorded grant, not the unaddressed fallback")
+	assert.Equal(t, "jdoe", removeData.Username)
+}
+
+// TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndExhaustsRetries
+// covers the other side of the same finding: once every retry attempt fails,
+// the handler must still fall back to the (known-useless) unaddressed revoke
+// rather than blocking the batch — but only after exhausting the retry
+// budget, not on the first error.
+func TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndExhaustsRetries(t *testing.T) {
+	kcUID := sfid("kc-uid-downtime")
+
+	pub := &subjectCapturingPublisher{}
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			return port.KeyContactGrant{}, false, assert.AnError
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8down")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	replay := &fakeReplayStore{}
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+	assert.Equal(t, 3, calls, "must exhaust the retry budget, not give up on the first error")
+	assert.Equal(t, []byte("r8down"), replay.saved, "the batch must not be blocked by an exhausted retry")
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, kcUID, removeData.UID,
+		"once retries are exhausted, the handler still falls back to the unaddressed revoke rather than blocking")
+}
+
 // TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex covers the second
 // deletion trigger: a record that vanished from the upsert query rather than
 // arriving as an explicit delete event. It routes through the same handler, so

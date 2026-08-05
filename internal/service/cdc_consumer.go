@@ -851,21 +851,38 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	return nil
 }
 
+// maxGrantIndexReadAttempts bounds the retry when a grant-index read fails
+// during a CDC delete. A read failure here is not the same as a Get miss: the
+// index may still hold the exact address needed to revoke this grant, but the
+// read itself — not the answer — failed. This handler's caller commits the
+// replay cursor regardless of outcome, and unlike a live contact (repairable
+// by the next CDC event or /admin/reindex), a deleted one has no other chance
+// to retry — so a transient blip that a bounded, immediate retry would have
+// ridden out must not be treated the same as "no grant was ever recorded."
+const maxGrantIndexReadAttempts = 3
+
 // lookupKeyContactGrant returns the grant recorded for uid. It reports false
-// when the index is not wired, holds no entry, or cannot be read — in each case
-// the caller has no addressable grant to revoke.
+// when the index is not wired or holds no entry — both mean, correctly, that
+// the caller has no addressable grant to revoke. A read failure is retried
+// (see maxGrantIndexReadAttempts); only once retries are exhausted does it
+// also report false, logged distinctly from a genuine miss so it is
+// alertable as a fresh dangling tuple rather than the accepted pre-index gap.
 func (o *CDCConsumer) lookupKeyContactGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool) {
 	if o.grantIndex == nil {
 		return port.KeyContactGrant{}, false
 	}
-	grant, found, err := o.grantIndex.Get(ctx, uid)
-	if err != nil {
-		slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete — falling back to unaddressed revoke",
-			"uid", uid, "error", err)
-		return port.KeyContactGrant{}, false
+	var lastErr error
+	for attempt := 1; attempt <= maxGrantIndexReadAttempts; attempt++ {
+		grant, found, err := o.grantIndex.Get(ctx, uid)
+		if err == nil {
+			if !found || grant.MembershipUID == "" || grant.Username == "" {
+				return port.KeyContactGrant{}, false
+			}
+			return grant, true
+		}
+		lastErr = err
 	}
-	if !found || grant.MembershipUID == "" || grant.Username == "" {
-		return port.KeyContactGrant{}, false
-	}
-	return grant, true
+	slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete after retries — falling back to unaddressed revoke",
+		"uid", uid, "error", lastErr, "attempts", maxGrantIndexReadAttempts, "fga_revoke_failed_dangling_tuple", true)
+	return port.KeyContactGrant{}, false
 }
