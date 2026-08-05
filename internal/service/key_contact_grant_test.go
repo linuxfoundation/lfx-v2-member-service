@@ -269,6 +269,35 @@ func TestKeyContactWriter_Delete_FallsBackToRecordedUsername(t *testing.T) {
 	assert.Equal(t, []string{"kc-1"}, grants.Deletes)
 }
 
+// TestKeyContactWriter_Delete_GrantIndexReadFailure_PreservesEntry covers a
+// transient index read failure (distinct from a genuine miss): the delete
+// must not clear the entry on an inconclusive read, or a still-live grant's
+// only address is erased with nothing left to revoke it by.
+func TestKeyContactWriter_Delete_GrantIndexReadFailure_PreservesEntry(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: testMembershipUID, Email: "alice@example.com"}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+		},
+		GetErr: assert.AnError,
+	}
+
+	// Live LFID lookup also comes up empty, so the only source for a revoke
+	// username is the (failing) index read.
+	w := newKCWriterWithGrantIndex(newSeededStorage(kc), &seededPMReader{}, pub, userReaderFunc(
+		func(_ context.Context, _ string) (string, error) { return "", nil }), grants)
+
+	require.NoError(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
+		MembershipUID: testMembershipUID,
+		UID:           "kc-1",
+	}))
+
+	assert.Empty(t, removeMessages(t, pub), "no username was resolvable, so nothing was revoked")
+	assert.Empty(t, grants.Deletes,
+		"an inconclusive read must not clear a possibly still-live grant — the entry is the only record of it")
+}
+
 func TestKeyContactWriter_Delete_ClearsGrantWithNoUsernameAnywhere(t *testing.T) {
 	kc := &model.KeyContact{UID: "kc-1", MembershipUID: testMembershipUID, Email: "alice@example.com"}
 	pub := &accessPayloadPublisher{}

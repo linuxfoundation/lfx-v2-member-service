@@ -743,6 +743,55 @@ func TestBackfillRunner_ProjectMembership_TargetedMode_ResolverFailure_Publishes
 	assert.NotEmpty(t, pub.accessMessages, "targeted resolver failure must still publish OpenFGA")
 }
 
+// TestBackfillRunner_KeyContact_ResolvesUsernameBeforePublishing covers the
+// bug where every key_contact source this runner reads (SOQL page, single-item
+// sObject assembly, and the SFID batch reader) sets Email but never Username —
+// without an LFID lookup here, PublishKeyContactFGA was a guaranteed no-op for
+// every reindexed key contact, silently defeating both the FGA grant and the
+// key-contact-grants index it should populate.
+func TestBackfillRunner_KeyContact_ResolvesUsernameBeforePublishing(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-lfid-1", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "alice@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, email string) (string, error) {
+			assert.Equal(t, "alice@example.com", email)
+			return "alice", nil
+		})),
+		svc.WithKeyContactGrantIndex(grants),
+	)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+	fgaMsgs := pub.fgaMessages(t)
+	require.Len(t, fgaMsgs, 1, "a resolved LFID must produce a member_put")
+	assert.Equal(t, "member_put", fgaMsgs[0].Operation)
+	assert.Contains(t, grants.Entries, "kc-lfid-1", "the resolved grant must be recorded in the index")
+}
+
+// TestBackfillRunner_KeyContact_UnregisteredEmail_PublishesNothing covers the
+// pending-contact case: an email with no LFID must leave Username empty and
+// skip the FGA publish, same as CDC/API — not treat NotFound as an error.
+func TestBackfillRunner_KeyContact_UnregisteredEmail_PublishesNothing(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-pending-1", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "unregistered@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
+			return "", pkgerrors.NewNotFound("no LFID for email")
+		})),
+	)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+	assert.Empty(t, pub.fgaMessages(t), "an unregistered email must leave the contact pending, not error")
+}
+
 func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
 	kc := &model.KeyContact{UID: "kc-tgt-1", ProjectSlug: "unknown-slug", MembershipUID: "pm-1", B2BOrgUID: "org-tgt-1", Username: "jdoe"}
 	resolver := mock.NewMockProjectResolver()

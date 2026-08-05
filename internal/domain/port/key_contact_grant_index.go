@@ -48,6 +48,11 @@ type KeyContactGrantIndex interface {
 	// re-read and re-evaluate rather than clobbering a concurrent write.
 	Put(ctx context.Context, uid string, grant KeyContactGrant) error
 
-	// Delete removes the entry for uid. An already-absent entry is success.
-	Delete(ctx context.Context, uid string) error
+	// Delete removes the entry for uid, conditional on revision: the entry is
+	// removed only if its stored revision still matches. A mismatch returns a
+	// Conflict error rather than deleting, so a grant written concurrently
+	// between the caller's read and this call (a re-invite racing a delete, for
+	// example) is never silently tombstoned. An already-absent entry is
+	// success regardless of revision.
+	Delete(ctx context.Context, uid string, revision uint64) error
 }

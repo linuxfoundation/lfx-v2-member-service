@@ -454,12 +454,21 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// auto-repairable. Publication succeeding is not revocation succeeding; it
 	// only means fga-sync has been told, and it converges asynchronously.
 	username := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
-	if username == "" {
+
+	// Read the recorded grant once: it supplies a username fallback when live
+	// lookup comes up empty, and its revision (when the read succeeds) is what
+	// the CAS delete below is conditioned on, so a grant written concurrently
+	// (e.g. a re-invite racing this delete) is never silently tombstoned.
+	grant, grantFound, grantErr := o.getGrant(ctx, in.UID)
+	if grantErr != nil {
+		slog.WarnContext(ctx, "key contact grant index read failed on delete — will not clear the index entry",
+			"uid", in.UID, "error", grantErr)
+	} else if username == "" && grantFound {
 		// Live lookup can come up empty for a contact that was granted access
 		// earlier (auth-service unavailable, or the account since renamed or
 		// removed). The grant index still holds the username the grant was made
 		// to, and revoking with it beats skipping the revoke silently.
-		username = o.grantedUsername(ctx, in.UID)
+		username = grant.Username
 	}
 
 	// Org-dashboard revoke is best-effort; run it regardless of FGA outcome so a
@@ -488,9 +497,17 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// runs whether or not a member_remove was published: when no username could
 	// be resolved from either source there is nothing to revoke, and leaving the
 	// entry behind would orphan it permanently — the contact is gone, so nothing
-	// will ever revisit it. The two error paths above deliberately keep the
-	// entry: it is then the only record of a grant still needing manual cleanup.
-	o.clearGrantIndex(ctx, in.UID)
+	// will ever revisit it. Conditioned on the revision read above, so a grant
+	// written concurrently is preserved rather than deleted out from under its
+	// writer. The three error paths above (publish, flush, grant read) all
+	// deliberately return or skip before this point, keeping the entry as the
+	// only record of a grant still needing manual follow-up.
+	if grantErr == nil && o.grantIndex != nil {
+		if err := o.grantIndex.Delete(ctx, in.UID, grant.Revision); err != nil {
+			slog.WarnContext(ctx, "key contact grant index cleanup failed after delete",
+				"uid", in.UID, "error", err)
+		}
+	}
 
 	return nil
 }
@@ -517,34 +534,16 @@ func (o *keyContactWriterOrchestrator) resolveUsernameForContact(ctx context.Con
 	return ""
 }
 
-// grantedUsername returns the username recorded for a key contact's published
-// grant, or "" when the index is not wired, holds no entry, or cannot be read.
-func (o *keyContactWriterOrchestrator) grantedUsername(ctx context.Context, uid string) string {
+// getGrant returns the grant recorded for uid. found reports whether an entry
+// exists; err is non-nil only on a genuine read failure, distinct from a miss,
+// so callers can tell "nothing to revoke/clear" from "we don't actually know."
+// A nil grantIndex (mock mode) reports found=false, err=nil — unwired, not a
+// failure.
+func (o *keyContactWriterOrchestrator) getGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool, error) {
 	if o.grantIndex == nil {
-		return ""
+		return port.KeyContactGrant{}, false, nil
 	}
-	grant, found, err := o.grantIndex.Get(ctx, uid)
-	if err != nil {
-		slog.WarnContext(ctx, "key contact grant index read failed", "uid", uid, "error", err)
-		return ""
-	}
-	if !found {
-		return ""
-	}
-	return grant.Username
-}
-
-// clearGrantIndex drops a deleted key contact's recorded grant. Best-effort: the
-// Salesforce record is already gone, so failing the caller's request over a
-// bookkeeping write would misreport a delete that did happen.
-func (o *keyContactWriterOrchestrator) clearGrantIndex(ctx context.Context, uid string) {
-	if o.grantIndex == nil {
-		return
-	}
-	if err := o.grantIndex.Delete(ctx, uid); err != nil {
-		slog.WarnContext(ctx, "key contact grant index cleanup failed after delete",
-			"uid", uid, "error", err)
-	}
+	return o.grantIndex.Get(ctx, uid)
 }
 
 // publishFGARemove publishes a membership revocation and returns only immediate

@@ -70,7 +70,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 if ! nats kv ls "$BUCKET" >/dev/null 2>&1; then
-  echo "ERROR: bucket '$BUCKET' not reachable — is it created yet? (see tasks.md 6.1)" >&2
+  echo "ERROR: bucket '$BUCKET' not reachable — is it created yet? (see charts/lfx-v2-member-service/templates/nats-kv-buckets.yaml)" >&2
   exit 1
 fi
 

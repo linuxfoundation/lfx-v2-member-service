@@ -13,6 +13,16 @@
 # these are the only key contacts that ever got a member_put, so they're the
 # only ones that need a grant-index entry.
 #
+# Caveat: OpenSearch is a secondary index, not authoritative evidence that a
+# member_put was actually published — PublishKeyContactIndexer (which writes
+# this doc) and PublishKeyContactFGA (which publishes the grant) are two
+# independent publish calls that can fail independently. A key contact with a
+# live FGA grant whose indexer publish failed (or hasn't run yet) is absent
+# from this export and is left with no grant-index entry, same as if it
+# predated the index entirely — its next CDC delete still hits the documented
+# fallback (see docs/fga-contract.md). This export closes the common case
+# cheaply; it is not a substitute for a full FGA-state reconciliation.
+#
 # Prerequisites:
 #   kubectl --context lfx-v2-prod -n lfx port-forward pod/opensearch-proxy-… 9299:9200
 #
@@ -89,7 +99,13 @@ def post(path, body):
 
 
 def get_total():
-    body = {"size": 0, "query": QUERY["query"]}
+    # track_total_hits: true forces an exact count. Without it OpenSearch caps
+    # hits.total.value at its default threshold (10,000) once that many
+    # matches are found, so on a full export (~100k key contacts) "expected"
+    # would silently read 10,000 regardless of the true count. The scroll
+    # below still returns every row either way, but the len(rows) != expected
+    # check further down would then fail every valid run.
+    body = {"size": 0, "track_total_hits": True, "query": QUERY["query"]}
     data = post(f"{index}/_search", body)
     total = data["hits"]["total"]
     if isinstance(total, dict):

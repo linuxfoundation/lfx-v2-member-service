@@ -843,7 +843,7 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	}
 
 	if indexed {
-		if err := o.grantIndex.Delete(ctx, uid); err != nil {
+		if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 			slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
 				"uid", uid, "error", err)
 		}

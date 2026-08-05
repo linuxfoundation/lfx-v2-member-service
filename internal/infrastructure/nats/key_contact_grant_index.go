@@ -140,16 +140,19 @@ func (s *KeyContactGrantIndex) Put(ctx context.Context, uid string, grant port.K
 	}
 
 	if _, updateErr := kv.Update(ctx, key, data, grant.Revision); updateErr != nil {
-		// ErrKeyExists here means a "wrong last sequence" rejection — i.e. a
-		// revision mismatch because another writer changed (or deleted) the
-		// grant since the read this call was built on. Anything else (a
-		// transient NATS/network failure, context cancellation) is not a
-		// conflict: mapping it to Conflict would make the caller's CAS retry
-		// loop burn its attempts re-reading the same unchanged value against an
-		// outage, republish the superseded revoke on every attempt, and finally
-		// log "abandoned after repeated conflicts" for what was never a
-		// conflict — discarding the real cause.
-		if errors.Is(updateErr, jetstream.ErrKeyExists) {
+		// ErrKeyExists means a "wrong last sequence" rejection — i.e. a
+		// revision mismatch because another writer changed the grant since the
+		// read this call was built on. ErrKeyNotFound means the entry was
+		// deleted since that read (e.g. the CDC delete path raced this write) —
+		// also stale-read, not a real failure: the caller's CAS loop re-reads,
+		// finds no entry, and retries as a create. Anything else (a transient
+		// NATS/network failure, context cancellation) is not a conflict:
+		// mapping it to Conflict would make the retry loop burn its attempts
+		// re-reading the same unchanged value against an outage, republish the
+		// superseded revoke on every attempt, and finally log "abandoned after
+		// repeated conflicts" for what was never a conflict — discarding the
+		// real cause.
+		if errors.Is(updateErr, jetstream.ErrKeyExists) || errors.Is(updateErr, jetstream.ErrKeyNotFound) {
 			return errs.NewConflict(fmt.Sprintf("key-contact-grants: grant for %s changed since read", uid))
 		}
 		return errs.NewUnexpected(fmt.Sprintf("key-contact-grants: failed to update grant for %s", uid), updateErr)
@@ -157,9 +160,13 @@ func (s *KeyContactGrantIndex) Put(ctx context.Context, uid string, grant port.K
 	return nil
 }
 
-// Delete removes the entry for uid. An already-absent entry is success: the
-// contact is gone either way, and the caller must not fail a delete over it.
-func (s *KeyContactGrantIndex) Delete(ctx context.Context, uid string) error {
+// Delete revision-conditionally removes the entry for uid, mirroring
+// CDCRepairStore.DeletePending: a revision mismatch (the entry was rewritten
+// since the caller's read — e.g. a re-invite racing this delete) is reported
+// as Conflict so the newer grant survives instead of being tombstoned. An
+// already-absent entry is success: the contact is gone either way, and the
+// caller must not fail a delete over it.
+func (s *KeyContactGrantIndex) Delete(ctx context.Context, uid string, revision uint64) error {
 	if uid == "" {
 		return errs.NewValidation("key-contact-grants: uid is required")
 	}
@@ -167,11 +174,13 @@ func (s *KeyContactGrantIndex) Delete(ctx context.Context, uid string) error {
 	if err != nil {
 		return err
 	}
-	if delErr := kv.Delete(ctx, grantKey(uid)); delErr != nil {
+	if delErr := kv.Delete(ctx, grantKey(uid), jetstream.LastRevision(revision)); delErr != nil {
 		if errors.Is(delErr, jetstream.ErrKeyNotFound) {
 			return nil
 		}
-		return errs.NewUnexpected(fmt.Sprintf("key-contact-grants: failed to delete grant for %s", uid), delErr)
+		// Any other error (notably a last-revision mismatch) means the grant
+		// was rewritten since the caller's read.
+		return errs.NewConflict(fmt.Sprintf("key-contact-grants: grant for %s changed since read", uid))
 	}
 	return nil
 }
