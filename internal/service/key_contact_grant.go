@@ -123,6 +123,36 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 		"uid", uid, "membership_uid", membershipUID, "attempts", maxGrantIndexAttempts)
 }
 
+// revokeKeyContactGrantIfUnregistered revokes and clears any grant recorded
+// for uid. Call this only when a username lookup for the contact has
+// definitively resolved to "no LFID" (a genuine NotFound) — never when the
+// lookup was skipped (no email, no reader wired) or failed transiently. A
+// definitive miss means the contact currently has no LFID, so
+// PublishKeyContactFGA will not run for it and cannot revoke a grant made to
+// whatever LFID it used to resolve to (a since-changed email, or a renamed/
+// removed account); this closes that gap. A transient failure carries no such
+// guarantee and must leave a possibly-still-valid grant untouched for the
+// next attempt to retry.
+func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string) {
+	if idx == nil || uid == "" {
+		return
+	}
+	stored, found, err := idx.Get(ctx, uid)
+	if err != nil {
+		slog.WarnContext(ctx, "key_contact grant index read failed while checking for revoke on unregistered email",
+			"uid", uid, "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+	revokeSupersededKeyContactGrant(ctx, p, uid, stored)
+	if delErr := idx.Delete(ctx, uid, stored.Revision); delErr != nil {
+		slog.WarnContext(ctx, "key_contact grant index cleanup failed after revoke on unregistered email",
+			"uid", uid, "error", delErr)
+	}
+}
+
 // revokeSupersededKeyContactGrant revokes a recorded grant that a newly
 // published one replaces. The replacement's FGA member_put was already
 // published before this call (PublishKeyContactFGA), and its index entry was

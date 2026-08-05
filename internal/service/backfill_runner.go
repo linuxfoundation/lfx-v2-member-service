@@ -884,6 +884,11 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 		if !errs.IsNotFound(err) {
 			log.WarnContext(ctx, "resolve LFID for key contact failed",
 				"uid", kc.UID, "error", err)
+		} else {
+			// A definitive miss, not a transient failure: revoke any grant
+			// this contact previously held, mirroring the CDC consumer — see
+			// revokeKeyContactGrantIfUnregistered for why this only fires here.
+			revokeKeyContactGrantIfUnregistered(ctx, r.publisher, r.grantIndex, kc.UID)
 		}
 		// NotFound is expected for unregistered emails — leave Username empty.
 		return

@@ -471,6 +471,23 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 		username = grant.Username
 	}
 
+	// The index can describe a different pair than the one about to be revoked
+	// below when an earlier recordKeyContactGrant Put failed (e.g. mid
+	// Salesforce reparent/rename): the replacement's member_put succeeded and
+	// is what kc.MembershipUID/username now describe, but the swallowed Put
+	// failure left the index still pointing at the old pair, whose own
+	// member_put was never revoked. Revoke that indexed pair too — best-effort,
+	// like revokeSupersededKeyContactGrant — before the index entry is cleared
+	// below; once cleared it is the only remaining record that pair's grant
+	// was ever made, and the Salesforce record backing it is now gone too.
+	if grantErr == nil && grantFound && (grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
+		if revokeErr := o.publishFGARemove(ctx, grant.MembershipUID, grant.Username); revokeErr != nil {
+			slog.ErrorContext(ctx, "key contact indexed grant remove publish failed on delete — dangling tuple requires manual cleanup",
+				"uid", in.UID, "membership_uid", grant.MembershipUID, "error", revokeErr,
+				"fga_revoke_failed_dangling_tuple", true)
+		}
+	}
+
 	// Org-dashboard revoke is best-effort; run it regardless of FGA outcome so a
 	// failed FGA publish does not leave a stale writer/auditor entry.
 	o.revokeOrDowngradeOrgDashboardRole(ctx, kc)

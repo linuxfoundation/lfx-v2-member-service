@@ -296,6 +296,41 @@ func TestKeyContactWriter_Delete_FallsBackToRecordedUsername(t *testing.T) {
 	assert.Equal(t, []string{"kc-1"}, grants.Deletes)
 }
 
+// TestKeyContactWriter_Delete_RevokesStaleIndexedPairDistinctFromLive covers a
+// review finding: the index can describe a different pair than the contact's
+// current live membership when an earlier recordKeyContactGrant Put failed
+// (e.g. mid Salesforce reparent) — the replacement's member_put succeeded but
+// the swallowed Put failure left the index still pointing at the old pair,
+// whose own member_put was never revoked. Delete must revoke that indexed
+// pair too, not just the live one, before clearing the entry — otherwise the
+// old pair is left dangling forever once the Salesforce record is gone.
+func TestKeyContactWriter_Delete_RevokesStaleIndexedPairDistinctFromLive(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: testMembershipUID, Email: "alice@example.com"}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			// A stale entry from a reparent whose index Put failed: it still
+			// names the pre-reparent membership, not the contact's current one.
+			"kc-1": {MembershipUID: "pm-old-stale", Username: "alice", Revision: 4},
+		},
+	}
+
+	w := newKCWriterWithGrantIndex(newSeededStorage(kc), &seededPMReader{}, pub, userReaderFunc(
+		func(_ context.Context, _ string) (string, error) { return "alice", nil }), grants)
+
+	require.NoError(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
+		MembershipUID: testMembershipUID,
+		UID:           "kc-1",
+	}))
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 2, "both the live pair and the distinct stale indexed pair must be revoked")
+	uids := []string{removes[0].UID, removes[1].UID}
+	assert.Contains(t, uids, testMembershipUID, "the live membership's grant must be revoked")
+	assert.Contains(t, uids, "pm-old-stale", "the stale indexed membership's grant must also be revoked")
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes, "the stale entry is cleared once both pairs are revoked")
+}
+
 // TestKeyContactWriter_Delete_GrantIndexReadFailure_PreservesEntry covers a
 // transient index read failure (distinct from a genuine miss): the delete
 // must not clear the entry on an inconclusive read, or a still-live grant's

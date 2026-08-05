@@ -763,6 +763,14 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 			if !pkgerrors.IsNotFound(usernameErr) {
 				slog.WarnContext(ctx, "cdc: resolve LFID for key contact failed",
 					"uid", kc.UID, "error", usernameErr)
+			} else {
+				// A definitive miss, not a transient failure: any grant this
+				// contact previously held was made to an LFID that no longer
+				// resolves from its current email (renamed/removed account, or
+				// the email itself changed) and must be revoked —
+				// PublishKeyContactFGA below will not run (Username stays
+				// empty) and would otherwise leave it dangling.
+				revokeKeyContactGrantIfUnregistered(ctx, o.publisher, o.grantIndex, kc.UID)
 			}
 			// NotFound is expected for unregistered emails — leave Username empty.
 		} else {

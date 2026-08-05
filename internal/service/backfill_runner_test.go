@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
+
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -829,6 +831,40 @@ func TestBackfillRunner_KeyContact_UnregisteredEmail_PublishesNothing(t *testing
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	assert.Empty(t, pub.fgaMessages(t), "an unregistered email must leave the contact pending, not error")
+}
+
+// TestBackfillRunner_KeyContact_UnregisteredEmail_RevokesExistingGrant covers
+// the same review finding as the CDC path: a definitive NotFound during
+// reindex must revoke any grant the contact previously held, since
+// PublishKeyContactFGA will not run (Username stays empty) and so cannot.
+func TestBackfillRunner_KeyContact_UnregisteredEmail_RevokesExistingGrant(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-pending-2", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "unregistered@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-pending-2": {MembershipUID: "pm-old", Username: "old-user", Revision: 5},
+		},
+	}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
+			return "", pkgerrors.NewNotFound("no LFID for email")
+		})),
+		svc.WithKeyContactGrantIndex(grants),
+	)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+	fgaMsgs := pub.fgaMessages(t)
+	require.Len(t, fgaMsgs, 1, "the previously-recorded grant must be revoked since Username resolved to nothing")
+	assert.Equal(t, "member_remove", fgaMsgs[0].Operation)
+	removeData, ok := fgaMsgs[0].Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, "pm-old", removeData.UID, "revoke must target the indexed grant's own membership")
+	assert.Equal(t, "old-user", removeData.Username)
+	assert.Equal(t, []string{"kc-pending-2"}, grants.Deletes, "the stale entry must be cleared once revoked")
 }
 
 func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
