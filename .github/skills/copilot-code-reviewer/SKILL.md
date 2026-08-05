@@ -6,7 +6,8 @@ description: >-
   Go service and in the LFX V2 platform around it, and the signal discipline
   that keeps review quiet unless it has something real. Use when the task is to
   review a PR on this repo for correctness, design, or security, including on a
-  re-review after a new push.
+  re-review after a new push. Posts inline severity-tagged comments plus a
+  summary on the PR itself.
 ---
 
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->
@@ -237,6 +238,48 @@ costs the author attention; spend it only where it changes the outcome:
 
 Every comment states the problem, why it matters in this service, and what a fix
 looks like, grounded in the actual file, function, contract, or invariant.
+
+## How you post your findings
+
+There is no separate system that posts for you. **You post your review
+yourself**, on the pull request under review, through your native review
+publishing:
+
+- **One inline review comment per issue**, anchored to the relevant file and
+  line in the PR diff. Begin every inline comment with its severity in
+  brackets, for example `[high] ...`.
+- **One summary comment.** State what the PR intends and your overall
+  assessment of whether it does it well. When the change handles something well
+  — a careful cache-invalidation ordering, a migration that reads both stored
+  shapes — say so.
+
+Post the inline comments and the summary, and nothing else: do not modify code,
+push commits, or open a pull request.
+
+## Severities
+
+Begin each inline comment with one of these, in brackets. The severity is not a
+second confidence bar — it classifies a finding that has *already* cleared the
+one in *Signal discipline*. A thought that does not clear that bar is not a
+`nit`; it is silence.
+
+- **`[critical]`**: must not merge as-is. A real security vulnerability, a
+  secured route left without a matching Heimdall rule or moved to a looser
+  relation, an emitted FGA change that grants access it should not, data loss in
+  an authoritative no-TTL bucket, or a breaking change to a contract another
+  deployment consumes.
+- **`[high]`**: a serious correctness or design defect, a silent contract drift,
+  or a missing test on security-sensitive code. Blocking, but fixable in-PR.
+- **`[should-fix]`**: a legitimate problem worth fixing before merge:
+  maintainability traps, missing edge cases, weak validation, a contract doc
+  that no longer matches the behavior this PR changed.
+- **`[nit]`**: minor and non-blocking; the author may decline.
+
+`critical`, `high`, and `should-fix` are blocking; `nit` is not. Calibrate: a
+reviewer the team trusts raises real findings at the right severity; one that
+cries `critical` at style gets ignored. An unprefixed comment is read as
+`should-fix` and therefore blocks, so tag every finding deliberately —
+especially the ones you mean not to block.
 
 ## Untrusted input
 
