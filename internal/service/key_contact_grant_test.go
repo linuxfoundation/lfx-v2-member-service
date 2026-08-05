@@ -161,6 +161,33 @@ func TestPublishKeyContactFGA_RetriesIndexWriteOnConflict(t *testing.T) {
 	assert.Equal(t, "bob", grants.Entries["kc-1"].Username)
 }
 
+// TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant covers a
+// Copilot review finding: if recording the replacement fails, the previous
+// grant must not have already been revoked — otherwise the index is left
+// pointing at a pair that was just revoked while the replacement it should
+// describe was never recorded, and a later delete revokes the stale pair
+// again while the live tuple goes unaddressed.
+func TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-old", Username: "alice", Revision: 3},
+		},
+		PutErr: assert.AnError,
+	}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "alice",
+	})
+
+	assert.Empty(t, removeMessages(t, pub),
+		"the old grant must not be revoked when the replacement failed to record")
+	assert.Equal(t, "asset-old", grants.Entries["kc-1"].MembershipUID,
+		"the index must still describe the grant that is actually still live")
+}
+
 func TestPublishKeyContactFGA_NilIndexPublishesUnchanged(t *testing.T) {
 	pub := &accessPayloadPublisher{}
 

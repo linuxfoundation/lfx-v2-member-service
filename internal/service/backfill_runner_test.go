@@ -772,6 +772,45 @@ func TestBackfillRunner_KeyContact_ResolvesUsernameBeforePublishing(t *testing.T
 	assert.Contains(t, grants.Entries, "kc-lfid-1", "the resolved grant must be recorded in the index")
 }
 
+// indexerDataUsername extracts data.username from the i-th captured indexer
+// message, for asserting the OpenSearch doc reflects a resolved LFID.
+func indexerDataUsername(t *testing.T, p *subjectCapturingPublisher, i int) string {
+	t.Helper()
+	require.Greater(t, len(p.indexerMessages), i)
+	b, err := json.Marshal(p.indexerMessages[i])
+	require.NoError(t, err)
+	var env struct {
+		Data struct {
+			Username string `json:"username"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(b, &env))
+	return env.Data.Username
+}
+
+// TestBackfillRunner_KeyContact_FullMode_IndexerReflectsResolvedUsername
+// covers a review finding: the full/filtered key_contact page published the
+// OpenSearch indexer document before resolving the LFID username, so the
+// indexed doc kept an empty username while the FGA/grant-index publish right
+// after it used the resolved one — inconsistent with the targeted reindex
+// paths, which resolve first.
+func TestBackfillRunner_KeyContact_FullMode_IndexerReflectsResolvedUsername(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-lfid-2", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "alice@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil })),
+	)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+	require.NotEmpty(t, pub.indexerMessages)
+	assert.Equal(t, "alice", indexerDataUsername(t, pub, 0),
+		"the indexed doc must carry the resolved username, not the pre-resolution empty value")
+}
+
 // TestBackfillRunner_KeyContact_UnregisteredEmail_PublishesNothing covers the
 // pending-contact case: an email with no LFID must leave Username empty and
 // skip the FGA publish, same as CDC/API — not treat NotFound as an error.

@@ -69,6 +69,15 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 // dangling grant this index exists to prevent. On conflict the comparison is
 // redone against the new value.
 //
+// The superseded revoke fires only after the conditional Put has committed, not
+// before: revoking first and then failing to record the replacement (a
+// transient KV error, or conflicts exhausted) would leave the index pointing at
+// a pair that was just revoked while the new grant it should describe is
+// unrecorded — a later delete would revoke the stale pair again and leave the
+// live tuple unaddressed. Recording first means a Put failure simply abandons
+// the revoke (logged), leaving the stale index entry in place for the next
+// write to reconcile, rather than leaving the index confidently wrong.
+//
 // Every failure is logged and swallowed. The grant itself is already published,
 // and failing the caller (a CDC event, a backfill page, an invite acceptance)
 // would cost more than the degraded delete path that a missing entry causes.
@@ -87,9 +96,6 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 		if found && stored.MembershipUID == membershipUID && stored.Username == username {
 			return
 		}
-		if found {
-			revokeSupersededKeyContactGrant(ctx, p, uid, stored)
-		}
 
 		// A zero revision on a miss is the create-only condition.
 		putErr := idx.Put(ctx, uid, port.KeyContactGrant{
@@ -98,6 +104,9 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 			Revision:      stored.Revision,
 		})
 		if putErr == nil {
+			if found {
+				revokeSupersededKeyContactGrant(ctx, p, uid, stored)
+			}
 			return
 		}
 		if !pkgerrors.IsConflict(putErr) {
@@ -105,6 +114,9 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 				"uid", uid, "membership_uid", membershipUID, "error", putErr)
 			return
 		}
+		// Conflict: another writer changed the grant since Get. Loop back and
+		// re-read/re-evaluate against the new value — nothing was revoked for
+		// this candidate, so there is nothing to undo.
 	}
 
 	slog.WarnContext(ctx, "key_contact grant index write abandoned after repeated conflicts — delete may be unable to address the revoke",
@@ -112,8 +124,11 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 }
 
 // revokeSupersededKeyContactGrant revokes a recorded grant that a newly
-// published one replaces. The replacement is published first, so the contact is
-// never left without access in between.
+// published one replaces. The replacement's FGA member_put was already
+// published before this call (PublishKeyContactFGA), and its index entry was
+// already committed (recordKeyContactGrant calls this only after its Put
+// succeeds), so the contact is never left without access, and the index never
+// points at a pair that no longer has a recorded replacement.
 func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, uid string, stored port.KeyContactGrant) {
 	if stored.MembershipUID == "" || stored.Username == "" {
 		return

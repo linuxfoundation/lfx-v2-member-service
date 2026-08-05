@@ -401,6 +401,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
+					r.resolveKeyContactUsername(ctx, log, kc)
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					if ok {
 						kc.ProjectUID = uid
@@ -409,7 +410,6 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					}
-					r.resolveKeyContactUsername(ctx, log, kc)
 					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 					published++
 				}

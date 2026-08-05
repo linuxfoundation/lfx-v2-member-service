@@ -63,6 +63,10 @@ page_size = int(page_size)
 
 QUERY = {
     "size": page_size,
+    # track_total_hits here (not just in a separate count call) lets the scroll's
+    # own opening response report the exact total for the same snapshot the
+    # scroll reads from — see the expected/rows check below.
+    "track_total_hits": True,
     "_source": [
         "object_id",
         "data.membership_uid",
@@ -98,34 +102,26 @@ def post(path, body):
         return json.load(resp)
 
 
-def get_total():
-    # track_total_hits: true forces an exact count. Without it OpenSearch caps
-    # hits.total.value at its default threshold (10,000) once that many
-    # matches are found, so on a full export (~100k key contacts) "expected"
-    # would silently read 10,000 regardless of the true count. The scroll
-    # below still returns every row either way, but the len(rows) != expected
-    # check further down would then fail every valid run.
-    body = {"size": 0, "track_total_hits": True, "query": QUERY["query"]}
-    data = post(f"{index}/_search", body)
-    total = data["hits"]["total"]
-    if isinstance(total, dict):
-        return total.get("value", 0)
-    return int(total)
-
-
 try:
-    expected = get_total()
+    initial = post(f"{index}/_search?scroll={scroll_ttl}", QUERY)
 except urllib.error.URLError as e:
     print(f"ERROR: cannot reach OpenSearch at {base}: {e}", file=sys.stderr)
     print("Start port-forward, e.g.:", file=sys.stderr)
     print("  kubectl --context lfx-v2-prod -n lfx port-forward pod/opensearch-proxy-… 9299:9200", file=sys.stderr)
     sys.exit(1)
 
+# Read the total from this same response rather than a separate _count/_search
+# call: a separate call opens its own snapshot, so live writes between it and
+# the scroll's own open (constant CDC traffic against ~100k key contacts)
+# could make "expected" and the scroll's actual snapshot disagree, failing an
+# otherwise-valid export with the mismatch check below. track_total_hits on
+# QUERY (used for this same request) keeps the total exact rather than capped
+# at OpenSearch's default 10,000 threshold.
+total = initial["hits"]["total"]
+expected = total.get("value", 0) if isinstance(total, dict) else int(total)
 print(f"→ Expected docs (key_contact, resolved username + membership_uid): {expected:,}")
 
 rows = []
-
-initial = post(f"{index}/_search?scroll={scroll_ttl}", QUERY)
 scroll_id = initial["_scroll_id"]
 hits = initial["hits"]["hits"]
 
@@ -172,13 +168,13 @@ with open(csv_path, "w", newline="", encoding="utf-8") as f:
 
 with open(summary_path, "w", encoding="utf-8") as f:
     f.write(f"total={len(rows)}\n")
-    f.write(f"expected_from_count_api={expected}\n")
+    f.write(f"expected_from_scroll_open={expected}\n")
 
 print(f"→ Wrote {len(rows):,} rows to {jsonl_path}")
 print(f"→ Wrote CSV to {csv_path}")
 
 if expected and len(rows) != expected:
-    print(f"WARNING: scroll returned {len(rows):,} rows but _count reported {expected:,}", file=sys.stderr)
+    print(f"WARNING: scroll returned {len(rows):,} rows but the scroll-open total reported {expected:,}", file=sys.stderr)
     sys.exit(2)
 PY
 
