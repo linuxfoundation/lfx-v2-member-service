@@ -31,22 +31,34 @@ const (
 
 // trackingPublisher records (subject, call order) to verify publish sequencing.
 type trackingPublisher struct {
-	mu  sync.Mutex
-	log []string // subject per call
+	mu          sync.Mutex
+	log         []string // subject per call, plus "flush" entries
+	flushErr    error    // returned by every Flush call when set
+	indexerSync []bool   // delivery selection per Indexer call
+	indexerMsgs []any    // payload per Indexer call
 }
 
-func (p *trackingPublisher) Indexer(_ context.Context, subject string, _ any, _ bool) error {
+func (p *trackingPublisher) Indexer(_ context.Context, subject string, msg any, sync bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.log = append(p.log, "indexer:"+subject)
+	p.indexerSync = append(p.indexerSync, sync)
+	p.indexerMsgs = append(p.indexerMsgs, msg)
 	return nil
 }
 
-func (p *trackingPublisher) Access(_ context.Context, subject string, _ any, _ bool) error {
+func (p *trackingPublisher) Access(_ context.Context, subject string, _ any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.log = append(p.log, "access:"+subject)
 	return nil
+}
+
+func (p *trackingPublisher) Flush(_ context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.log = append(p.log, "flush")
+	return p.flushErr
 }
 
 func (p *trackingPublisher) calls() []string {
@@ -63,7 +75,7 @@ type accessPayloadPublisher struct {
 	accessMsgs []any
 }
 
-func (p *accessPayloadPublisher) Access(_ context.Context, subject string, msg any, _ bool) error {
+func (p *accessPayloadPublisher) Access(_ context.Context, subject string, msg any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.log = append(p.log, "access:"+subject)
@@ -74,11 +86,12 @@ func (p *accessPayloadPublisher) Access(_ context.Context, subject string, msg a
 	return nil
 }
 
-// errorPublisher returns an error from Access (FGA remove) to test error propagation.
+// errorFGARemovePublisher fails the immediate publish of an FGA remove — the
+// message never reaches NATS — to test error propagation.
 type errorFGARemovePublisher struct{ trackingPublisher }
 
-func (p *errorFGARemovePublisher) Access(ctx context.Context, subject string, msg any, sync bool) error {
-	_ = p.trackingPublisher.Access(ctx, subject, msg, sync)
+func (p *errorFGARemovePublisher) Access(ctx context.Context, subject string, msg any) error {
+	_ = p.trackingPublisher.Access(ctx, subject, msg)
 	if strings.Contains(subject, fgaconstants.GenericMemberRemoveSubject) {
 		return pkgerrors.NewUnexpected("nats unavailable", nil)
 	}
@@ -368,6 +381,11 @@ func TestKeyContactWriter_Update_EmailChange_RemoveError_NotPropagated(t *testin
 	_, err := w.Update(context.Background(), in)
 
 	assert.NoError(t, err, "FGA remove error on email change must NOT be propagated")
+	// Guards against a vacuous pass: the removal must actually have been
+	// attempted and failed. Delete propagates the same helper's failure, so the
+	// two callers keep opposing policies over one publication helper.
+	assert.NotEqual(t, -1, firstCallIndex(pub.calls(), fgaconstants.GenericMemberRemoveSubject),
+		"the failing removal must have been attempted")
 }
 
 func TestKeyContactWriter_Update_IfMatch_Mismatch_PreconditionFailed(t *testing.T) {
@@ -953,4 +971,184 @@ func TestKeyContactWriter_Delete_OrgScanError_SkipsRevoke(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, spy.removes, "RemovePrincipal must NOT be called when the org scan fails (fail-safe)")
+}
+
+// ── Asynchronous FGA membership publication ───────────────────────────────
+
+// firstCallIndex returns the index of the first call whose entry contains sub,
+// or -1 when absent.
+func firstCallIndex(calls []string, sub string) int {
+	for i, c := range calls {
+		if strings.Contains(c, sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+func kcForFGA() *model.KeyContact {
+	return &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "alice@example.com", Username: "alice",
+	}
+}
+
+func resolvesTo(username string) userReaderFunc {
+	return func(_ context.Context, _ string) (string, error) { return username, nil }
+}
+
+func TestKeyContactWriter_Delete_FlushesAfterFGARemove(t *testing.T) {
+	storage := newSeededStorage(kcForFGA())
+	pub := &trackingPublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, resolvesTo("alice"))
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err)
+	calls := pub.calls()
+	removeIdx := firstCallIndex(calls, fgaconstants.GenericMemberRemoveSubject)
+	flushIdx := firstCallIndex(calls, "flush")
+	require.NotEqual(t, -1, removeIdx, "FGA remove must be published on delete")
+	require.NotEqual(t, -1, flushIdx,
+		"delete must flush so a crash cannot discard a revocation already reported as done")
+	assert.Less(t, removeIdx, flushIdx, "flush must follow the remove it confirms")
+}
+
+func TestKeyContactWriter_Delete_FlushError_Propagated(t *testing.T) {
+	storage := newSeededStorage(kcForFGA())
+	pub := &trackingPublisher{flushErr: errors.New("flush timed out")}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, resolvesTo("alice"))
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "indeterminate delivery must not be reported as a successful deletion")
+}
+
+func TestKeyContactWriter_Delete_FGARemovePublishError_SkipsFlush(t *testing.T) {
+	storage := newSeededStorage(kcForFGA())
+	pub := &errorFGARemovePublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, resolvesTo("alice"))
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "an immediate publication failure must propagate")
+	assert.Equal(t, -1, firstCallIndex(pub.calls(), "flush"),
+		"nothing was published, so there is no delivery to confirm")
+}
+
+func TestKeyContactWriter_Update_EmailChange_DoesNotFlush(t *testing.T) {
+	oldKC := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "old@example.com", Username: "old-sub",
+		Role: "role-a", Status: "Active", UpdatedAt: time.Now(),
+	}
+	storage := newSeededStorage(oldKC)
+	pub := &trackingPublisher{}
+	newEmail := "new@example.com"
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(func(_ context.Context, email string) (string, error) {
+		if strings.EqualFold(email, newEmail) {
+			return "new-sub", nil
+		}
+		return "old-sub", nil
+	}))
+
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID, Email: &newEmail,
+	})
+
+	require.NoError(t, err)
+	calls := pub.calls()
+	require.NotEqual(t, -1, firstCallIndex(calls, fgaconstants.GenericMemberRemoveSubject),
+		"email change must still revoke the superseded username")
+	assert.Equal(t, -1, firstCallIndex(calls, "flush"),
+		"the email-change path shares publishFGARemove with delete but must stay publish-only")
+}
+
+func TestKeyContactWriter_Update_UnchangedUsername_EmitsNoFGARemove(t *testing.T) {
+	oldKC := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "old@example.com", Username: "alice",
+		Role: "role-a", Status: "Active", UpdatedAt: time.Now(),
+	}
+	storage := newSeededStorage(oldKC)
+	pub := &trackingPublisher{}
+	newEmail := "new@example.com"
+
+	// Both addresses resolve to the same LFID, so the grant already covers the user.
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, resolvesTo("alice"))
+
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID, Email: &newEmail,
+	})
+
+	require.NoError(t, err)
+	calls := pub.calls()
+	require.NotEqual(t, -1, firstCallIndex(calls, fgaconstants.GenericMemberPutSubject),
+		"the grant is still republished")
+	assert.Equal(t, -1, firstCallIndex(calls, fgaconstants.GenericMemberRemoveSubject),
+		"a grant and revocation for the same object and username must never both enter the stream")
+}
+
+func TestKeyContactWriter_Update_EmailChange_MemberPutPayloadUnchanged(t *testing.T) {
+	oldKC := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "old@example.com", Username: "old-sub",
+		Role: "role-a", Status: "Active", UpdatedAt: time.Now(),
+	}
+	storage := newSeededStorage(oldKC)
+	pub := &accessPayloadPublisher{}
+	newEmail := "new@example.com"
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(func(_ context.Context, email string) (string, error) {
+		if strings.EqualFold(email, newEmail) {
+			return "new-sub", nil
+		}
+		return "old-sub", nil
+	}))
+
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID, Email: &newEmail,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, pub.accessMsgs, 2, "email change emits exactly one grant and one revocation")
+
+	put, ok := pub.accessMsgs[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "project_membership", put.ObjectType)
+	assert.Equal(t, "member_put", put.Operation)
+	putData, ok := put.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, testMembershipUID, putData.UID)
+	assert.Equal(t, "new-sub", putData.Username)
+	assert.Equal(t, []string{"key_contact"}, putData.Relations)
+
+	remove, ok := pub.accessMsgs[1].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_remove", remove.Operation)
+	removeData, ok := remove.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, testMembershipUID, removeData.UID)
+	assert.Equal(t, "old-sub", removeData.Username)
+}
+
+func TestKeyContactWriter_Delete_IndexerDeliverySelectionUnchanged(t *testing.T) {
+	storage := newSeededStorage(kcForFGA())
+	pub := &trackingPublisher{}
+
+	w := newKCWriter(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, resolvesTo("alice"))
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err)
+	assert.NotEqual(t, -1, firstCallIndex(pub.calls(), "indexer:"+constants.IndexKeyContactSubject),
+		"indexer subject must be unchanged by the FGA publication change")
+	require.Len(t, pub.indexerSync, 1)
+	assert.False(t, pub.indexerSync[0],
+		"the indexer keeps its own delivery selection, independent of the FGA contract")
+	assert.NotNil(t, pub.indexerMsgs[0], "indexer payload must still be built and published")
 }

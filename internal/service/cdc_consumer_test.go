@@ -151,6 +151,7 @@ type subjectCapturingPublisher struct {
 	indexerMessages []any    // payloads, parallel to indexer
 	access          []string // subjects
 	accessMessages  []any    // payloads, parallel to access
+	flushCount      int      // CDC paths must never flush
 }
 
 func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, msg any, _ bool) error {
@@ -160,11 +161,18 @@ func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, m
 	p.indexerMessages = append(p.indexerMessages, msg)
 	return nil
 }
-func (p *subjectCapturingPublisher) Access(_ context.Context, subject string, msg any, _ bool) error {
+func (p *subjectCapturingPublisher) Access(_ context.Context, subject string, msg any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.access = append(p.access, subject)
 	p.accessMessages = append(p.accessMessages, msg)
+	return nil
+}
+
+func (p *subjectCapturingPublisher) Flush(_ context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.flushCount++
 	return nil
 }
 
@@ -567,6 +575,19 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesIndexerAndFGAMemberRemove(t *te
 	data, isStr := pub.indexerDataIsString(0)
 	assert.True(t, isStr, "key_contact delete data must be a JSON string (object ID), not an object")
 	assert.Equal(t, sfid("kc-uid-del"), data)
+
+	// CDC has no username to revoke, so fga-sync cleans up by object ID. The
+	// empty username is the signal for that, not an omission.
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_remove", removeMsg.Operation)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Empty(t, removeData.Username, "empty username drives object-ID cleanup")
+
+	assert.Zero(t, pub.flushCount,
+		"CDC removal is publish-only; only the API deletion path confirms delivery")
 }
 
 // ── Error resilience ──────────────────────────────────────────────────────────

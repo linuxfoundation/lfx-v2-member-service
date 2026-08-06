@@ -712,7 +712,7 @@ func (o *orgSettingsWriterOrchestrator) publishAll(ctx context.Context, in B2BOr
 		fgaUsernames(in.Auditors, settings.ActiveAuditorUsernames()),
 		nil,
 	)
-	if pubErr := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg, false); pubErr != nil {
+	if pubErr := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg); pubErr != nil {
 		slog.WarnContext(ctx, "b2b org settings FGA publish failed",
 			"uid", in.OrgUID, "error", pubErr,
 			"publish_failed_for_backfill_repair", true)

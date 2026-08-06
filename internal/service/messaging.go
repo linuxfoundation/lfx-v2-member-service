@@ -402,7 +402,7 @@ func PublishB2BOrgGlobalAdminFGA(ctx context.Context, p port.MemberPublisher, or
 		return
 	}
 	msg := BuildB2BOrgFGAMessage(org, globalOrgAdminTeamUID, nil, nil, nil)
-	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg, false); pubErr != nil {
+	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 		slog.WarnContext(ctx, "b2b org global admin FGA publish failed",
 			"uid", org.UID,
 			"error", pubErr,
@@ -421,7 +421,7 @@ func PublishB2BOrgParentFGA(ctx context.Context, p port.MemberPublisher, org *mo
 	// the new parent tuple without attempting to clean up a prior parent reference.
 	current := &model.B2BOrg{UID: org.UID}
 	for _, msg := range BuildB2BOrgReparentingMessages(current, org, nil, parentChildren) {
-		if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg, false); pubErr != nil {
+		if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 			slog.WarnContext(ctx, "b2b org parent FGA publish failed",
 				"uid", org.UID,
 				"parent_uid", org.ParentUID,
@@ -605,7 +605,7 @@ func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishProjectMembershipFGA(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership) {
 	msg := BuildProjectMembershipFGAMessage(pm)
-	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg, false); pubErr != nil {
+	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 		slog.WarnContext(ctx, "project membership fga publish failed",
 			"uid", pm.UID,
 			"error", pubErr,
@@ -621,7 +621,7 @@ func PublishProjectMembershipFGA(ctx context.Context, p port.MemberPublisher, pm
 // transiently unresolved parents are preserved.
 func PublishProjectMembershipFGAPreservingMissingRefs(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership) {
 	msg := BuildProjectMembershipFGAMessagePreserveMissingRefs(pm)
-	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg, false); pubErr != nil {
+	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 		slog.WarnContext(ctx, "project membership fga publish failed",
 			"uid", pm.UID,
 			"error", pubErr,
@@ -640,7 +640,7 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, kc *model
 		return
 	}
 	msg := BuildKeyContactFGAPutMessage(kc.MembershipUID, kc.Username)
-	if err := p.Access(ctx, fgaconstants.GenericMemberPutSubject, msg, false); err != nil {
+	if err := p.Access(ctx, fgaconstants.GenericMemberPutSubject, msg); err != nil {
 		slog.WarnContext(ctx, "key_contact FGA member_put publish failed",
 			"uid", kc.UID, "membership_uid", kc.MembershipUID,
 			"error", err, "publish_failed_for_backfill_repair", true)

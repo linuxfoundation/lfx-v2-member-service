@@ -292,7 +292,7 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 
 	// PM FGA update_access first so the parent tuple exists before the key_contact put.
 	pmMsg := BuildProjectMembershipFGAMessage(pm)
-	if pubErr := o.memberPublisher.Access(ctx, constants.FGASyncUpdateAccessSubject, pmMsg, false); pubErr != nil {
+	if pubErr := o.memberPublisher.Access(ctx, constants.FGASyncUpdateAccessSubject, pmMsg); pubErr != nil {
 		slog.WarnContext(ctx, "project membership FGA publish failed on key contact create",
 			"membership_uid", pm.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
 	}
@@ -365,7 +365,9 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			if pubErr := o.publishFGARemove(ctx, newKC.MembershipUID, oldUsername); pubErr != nil {
 				// Log at error severity (dangling permission), but do not propagate — the
 				// SF update already succeeded and returning an error would mislead callers.
-				slog.ErrorContext(ctx, "key contact FGA remove failed on email change — dangling permission",
+				// Not flushed either: this path accepts the loss it already accepts on a
+				// publish failure.
+				slog.ErrorContext(ctx, "key contact FGA remove publish failed on email change — dangling permission",
 					"uid", in.UID, "error", pubErr)
 			}
 		}
@@ -428,17 +430,31 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// Indexer delete: swallow (reindexable via /admin/reindex).
 	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionDeleted)
 
-	// FGA remove: propagate — dangling permissions are not auto-repairable.
+	// FGA remove: propagate a publication failure — dangling permissions are not
+	// auto-repairable. Publication succeeding is not revocation succeeding; it
+	// only means fga-sync has been told, and it converges asynchronously.
 	username := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
 
 	// Org-dashboard revoke is best-effort; run it regardless of FGA outcome so a
-	// transient fga-sync timeout does not leave a stale writer/auditor entry.
+	// failed FGA publish does not leave a stale writer/auditor entry.
 	o.revokeOrDowngradeOrgDashboardRole(ctx, kc)
 
 	if pubErr := o.publishFGARemove(ctx, kc.MembershipUID, username); pubErr != nil {
-		slog.ErrorContext(ctx, "key contact FGA remove failed on delete — dangling permission",
+		slog.ErrorContext(ctx, "key contact FGA remove publish failed on delete — dangling permission",
 			"uid", in.UID, "error", pubErr)
-		return pkgerrors.NewUnexpected("failed to revoke FGA access for deleted key contact", pubErr)
+		return pkgerrors.NewUnexpected("failed to publish FGA revocation for deleted key contact", pubErr)
+	}
+
+	// The publish above only hands the revocation to the local connection. Flush
+	// so a crash cannot discard a revocation this call has already reported as
+	// done. This confirms the server received the message, not that OpenFGA
+	// converged. It lives here rather than in publishFGARemove because the
+	// email-change path shares that helper under a log-only failure policy and
+	// must not pay for, or fail on, a flush.
+	if flushErr := o.memberPublisher.Flush(ctx); flushErr != nil {
+		slog.ErrorContext(ctx, "key contact FGA remove flush failed on delete — delivery indeterminate",
+			"uid", in.UID, "error", flushErr)
+		return pkgerrors.NewUnexpected("failed to confirm delivery of FGA revocation for deleted key contact", flushErr)
 	}
 
 	return nil
@@ -471,18 +487,22 @@ func (o *keyContactWriterOrchestrator) publishFGAPut(ctx context.Context, member
 		return
 	}
 	msg := BuildKeyContactFGAPutMessage(membershipUID, username)
-	if pubErr := o.memberPublisher.Access(ctx, fgaconstants.GenericMemberPutSubject, msg, false); pubErr != nil {
+	if pubErr := o.memberPublisher.Access(ctx, fgaconstants.GenericMemberPutSubject, msg); pubErr != nil {
 		slog.WarnContext(ctx, "key contact FGA put publish failed",
 			"membership_uid", membershipUID, "error", pubErr, "publish_failed_for_backfill_repair", true)
 	}
 }
 
+// publishFGARemove publishes a membership revocation and returns only immediate
+// publication failures; it carries no failure policy of its own because its two
+// callers disagree. Delete propagates and then flushes, update-on-email-change
+// logs and continues. Adding either here would silently change the other.
 func (o *keyContactWriterOrchestrator) publishFGARemove(ctx context.Context, membershipUID, username string) error {
 	if username == "" {
 		return nil
 	}
 	msg := BuildKeyContactFGARemoveMessage(membershipUID, username)
-	return o.memberPublisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg, true)
+	return o.memberPublisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg)
 }
 
 func hasAnyKCChange(in KeyContactUpdateInput) bool {

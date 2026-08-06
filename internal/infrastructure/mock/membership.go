@@ -397,10 +397,12 @@ type MockMemberPublisher struct {
 	mu                 sync.Mutex
 	accessErr          error
 	indexerErr         error
+	flushErr           error
 	LastAccessData     any      // last payload passed to Access; nil if never called
 	LastIndexSubject   string   // last subject passed to Indexer; empty if never called
 	LastIndexerPayload any      // last message payload passed to Indexer; nil if never called
-	CallOrder          []string // "access" or "indexer" in call order, for ordering assertions
+	FlushCount         int      // number of Flush calls
+	CallOrder          []string // "access", "indexer", or "flush" in call order, for ordering assertions
 }
 
 // NewMockMemberPublisher creates a new MockMemberPublisher.
@@ -422,6 +424,13 @@ func (m *MockMemberPublisher) SetIndexerError(err error) {
 	m.indexerErr = err
 }
 
+// SetFlushError configures the mock to return err on the next Flush call.
+func (m *MockMemberPublisher) SetFlushError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushErr = err
+}
+
 // Indexer logs the message, captures the subject, records call order, and returns the configured error (if any).
 func (m *MockMemberPublisher) Indexer(ctx context.Context, subject string, msg any, _ bool) error {
 	slog.DebugContext(ctx, "mock: indexer publish (no-op)", "subject", subject)
@@ -439,7 +448,7 @@ func (m *MockMemberPublisher) Indexer(ctx context.Context, subject string, msg a
 }
 
 // Access logs the message, captures the payload, records call order, and returns the configured error (if any).
-func (m *MockMemberPublisher) Access(ctx context.Context, subject string, msg any, _ bool) error {
+func (m *MockMemberPublisher) Access(ctx context.Context, subject string, msg any) error {
 	slog.DebugContext(ctx, "mock: access publish (no-op)", "subject", subject)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -448,6 +457,21 @@ func (m *MockMemberPublisher) Access(ctx context.Context, subject string, msg an
 	if m.accessErr != nil {
 		err := m.accessErr
 		m.accessErr = nil
+		return err
+	}
+	return nil
+}
+
+// Flush records the call and returns the configured error (if any).
+func (m *MockMemberPublisher) Flush(ctx context.Context) error {
+	slog.DebugContext(ctx, "mock: flush (no-op)")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.FlushCount++
+	m.CallOrder = append(m.CallOrder, "flush")
+	if m.flushErr != nil {
+		err := m.flushErr
+		m.flushErr = nil
 		return err
 	}
 	return nil

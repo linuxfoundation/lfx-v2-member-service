@@ -606,7 +606,7 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 	// nil access (writers/auditors) = preserve; empty = clear. For delete we
 	// pass nil to let FGA sync handle cleanup based on the delete indexer event.
 	fgaMsg := BuildB2BOrgFGAMessage(stubOrg, o.globalOrgAdminTeamUID, nil, nil, nil)
-	if err := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg, false); err != nil {
+	if err := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg); err != nil {
 		slog.WarnContext(ctx, "cdc: b2b_org delete FGA publish failed",
 			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
 	}
@@ -808,7 +808,7 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// The username is not available from the CDC event — the FGA sync
 	// service performs cleanup by object-id when username is empty.
 	if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject,
-		BuildKeyContactFGARemoveMessage(uid, ""), false); err != nil {
+		BuildKeyContactFGARemoveMessage(uid, "")); err != nil {
 		// fga_revoke_failed_dangling_tuple=true signals a dangling FGA tuple:
 		// the key_contact was deleted in Salesforce but the FGA relation was not
 		// revoked. Unlike publish_failed_for_backfill_repair, this cannot be
