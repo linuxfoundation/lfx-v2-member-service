@@ -5,10 +5,12 @@ package mock
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
+	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
 // compile-time interface checks.
@@ -19,6 +21,7 @@ var (
 	_ port.AccountBatchReader    = (*MockAccountBatchReader)(nil)
 	_ port.SalesforceQuotaGauge  = (*MockSalesforceQuotaGauge)(nil)
 	_ port.CDCRepairStore        = (*MockCDCRepairStore)(nil)
+	_ port.KeyContactGrantIndex  = (*MockKeyContactGrantIndex)(nil)
 )
 
 // MockCacheInvalidator is a test double for port.CacheInvalidator that counts
@@ -180,4 +183,93 @@ func (s *MockCDCRepairStore) ListPending(_ context.Context, reindexType string, 
 func (s *MockCDCRepairStore) DeletePending(_ context.Context, reindexType, sfid string, revision uint64) error {
 	s.Deletes = append(s.Deletes, MockRepairDelete{Type: reindexType, SFID: sfid, Revision: revision})
 	return s.DeleteErr
+}
+
+// MockKeyContactGrantIndex is an in-memory test double for
+// port.KeyContactGrantIndex. It enforces the same revision-conditional write
+// semantics as the NATS adapter so tests can exercise the conflict-and-retry
+// path rather than only the uncontended one.
+type MockKeyContactGrantIndex struct {
+	// Entries is the stored state, keyed by key contact UID. Seed it directly
+	// to set up a test; each value's Revision is maintained by Put.
+	Entries map[string]port.KeyContactGrant
+
+	// Puts and Deletes record calls in order for assertions.
+	Puts    []MockGrantPut
+	Deletes []string
+
+	// GetErr, PutErr and DeleteErr inject failures when non-nil.
+	GetErr    error
+	PutErr    error
+	DeleteErr error
+
+	// GetFn, when set, replaces Get entirely. Use it to simulate a grant that
+	// changes between reads (for example, to drive a CAS retry).
+	GetFn func(ctx context.Context, uid string) (port.KeyContactGrant, bool, error)
+}
+
+// MockGrantPut records a Put call, including the revision it was conditioned on.
+type MockGrantPut struct {
+	UID           string
+	MembershipUID string
+	Username      string
+	Revision      uint64
+}
+
+func (i *MockKeyContactGrantIndex) Get(ctx context.Context, uid string) (port.KeyContactGrant, bool, error) {
+	if i.GetFn != nil {
+		return i.GetFn(ctx, uid)
+	}
+	if i.GetErr != nil {
+		return port.KeyContactGrant{}, false, i.GetErr
+	}
+	grant, ok := i.Entries[uid]
+	if !ok {
+		return port.KeyContactGrant{}, false, nil
+	}
+	return grant, true, nil
+}
+
+func (i *MockKeyContactGrantIndex) Put(_ context.Context, uid string, grant port.KeyContactGrant) error {
+	i.Puts = append(i.Puts, MockGrantPut{
+		UID:           uid,
+		MembershipUID: grant.MembershipUID,
+		Username:      grant.Username,
+		Revision:      grant.Revision,
+	})
+	if i.PutErr != nil {
+		return i.PutErr
+	}
+	stored, exists := i.Entries[uid]
+	// Mirror the adapter: revision 0 means create-only, non-zero means the
+	// stored revision must still match.
+	conflict := exists != (grant.Revision != 0) || (exists && stored.Revision != grant.Revision)
+	if conflict {
+		return errs.NewConflict(fmt.Sprintf("key-contact-grants: grant for %s changed since read", uid))
+	}
+	if i.Entries == nil {
+		i.Entries = make(map[string]port.KeyContactGrant)
+	}
+	grant.Revision = stored.Revision + 1
+	i.Entries[uid] = grant
+	return nil
+}
+
+func (i *MockKeyContactGrantIndex) Delete(_ context.Context, uid string, revision uint64) error {
+	i.Deletes = append(i.Deletes, uid)
+	if i.DeleteErr != nil {
+		return i.DeleteErr
+	}
+	// Mirror the adapter: revision 0 (the caller read no entry) is a no-op —
+	// it must never delete unconditionally. A non-zero revision that no longer
+	// matches the stored entry means the grant changed since the caller read
+	// it, so it must not be deleted either.
+	if revision == 0 {
+		return nil
+	}
+	if stored, exists := i.Entries[uid]; exists && stored.Revision != revision {
+		return errs.NewConflict(fmt.Sprintf("key-contact-grants: grant for %s changed since read", uid))
+	}
+	delete(i.Entries, uid)
+	return nil
 }

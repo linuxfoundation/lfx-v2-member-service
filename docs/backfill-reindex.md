@@ -232,7 +232,7 @@ The consumer's `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`) and the drain's `ADMI
 |---|---|
 | `b2b_org` | Batched child-UID fetch for every org + its parent (`FetchChildUIDsByParentUIDs`, one query per page) → set `IsParent` → `PublishB2BOrgIndexer` (`updated`) + `PublishB2BOrgGlobalAdminFGA` + `PublishB2BOrgParentFGA` when `ParentUID` is set and children are cached. |
 | `project_membership` | resolve `project_uid` → on success: `PublishProjectMembershipIndexer` (`updated`) + `PublishProjectMembershipFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only**. |
-| `key_contact` | resolve `project_uid` → on success: `PublishKeyContactIndexer` (`updated`) + `PublishKeyContactFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only** (when `Username` is set). Logs a warning when `since` is set (the filter only checks `Project_Role__c.LastModifiedDate`; Contact/Asset field changes are not captured). |
+| `key_contact` | resolve LFID via `userReader.UsernameByEmail` when the assembled record has no `Username` (the SOQL/sObject sources set `Email` only) → resolve `project_uid` → on success: `PublishKeyContactIndexer` (`updated`) + `PublishKeyContactFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only** (when `Username` resolved). Logs a warning when `since` is set (the filter only checks `Project_Role__c.LastModifiedDate`; Contact/Asset field changes are not captured). |
 | `b2b_org_settings` | List org UIDs (`ListSettingsOrgUIDs`) → `GetSettings` → (optionally enrich avatars) → `GetB2BOrg` → `PublishB2BOrgSettingsIndexer` (`updated`). Requires a `settingsReader`; avatar enrichment additionally requires a `userReader` + `settingsWriter`. Publishes the **indexer** doc only (no FGA message). |
 
 ### Targeted (`runTargeted`)
@@ -243,7 +243,9 @@ The consumer's `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`) and the drain's `ADMI
 
 The final log line reports `total_items`, `published`, `not_found`, and `would_publish_count`; the batched arms additionally report `conversion_error` so `published + not_found + conversion_error` reconciles against `total_items`.
 
-`PublishKeyContactFGA` emits its `member_put` grant only when the assembled record has a non-empty `Username` (`internal/service/messaging.go`); the backfill publishes the record's FGA state as assembled from Salesforce and does not itself perform an email→LFID lookup.
+`PublishKeyContactFGA` emits its `member_put` grant only when the assembled record has a non-empty `Username` (`internal/service/key_contact_grant.go`). Every `key_contact` source this runner reads (full/filtered SOQL page, single-item sObject assembly, and the SFID batch reader) sets `Email` but never `Username`; `resolveKeyContactUsername` (`internal/service/backfill_runner.go`) resolves it via `userReader.UsernameByEmail` before every publish call, mirroring the CDC consumer's `processKeyContact`. Without that resolution step every `key_contact` reindex would silently publish nothing and record nothing — an unregistered email (`NotFound`) still leaves `Username` empty and the contact pending, same as CDC/API.
+
+Each published grant is recorded in the `key-contact-grants` KV bucket, which is what lets a later CDC delete address the revoke. A `key_contact` reindex is therefore also a way to populate that bucket for contacts granted before it existed. Over a cold bucket the run emits `member_put` only: there is no recorded grant to compare against, so no supersede `member_remove` traffic is produced. It does **not** repair tuples that were already orphaned before the bucket existed — those grants were never recorded, so nothing knows they need revoking.
 
 ---
 

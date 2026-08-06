@@ -253,6 +253,23 @@ func NewClient(ctx context.Context, config Config) (*NATSClient, error) {
 		"bucket", constants.KVBucketNameCDCRepair,
 	)
 
+	// key-contact-grants: durable record of the FGA key_contact grant published
+	// per key contact. No MaxAge TTL (an evicted entry cannot be rebuilt once
+	// the Salesforce record is deleted) and history 1 (only the current grant is
+	// ever read). Both defaults come from KeyValueStore (no TTL branch) and
+	// jetstream.KeyValueConfig. Initialised in both consumer and API modes: both
+	// publish key_contact grants and both revoke them.
+	if err := client.KeyValueStore(ctx, constants.KVBucketNameKeyContactGrants); err != nil {
+		slog.ErrorContext(ctx, "failed to initialize key-contact-grants key-value store",
+			"error", err,
+			"bucket", constants.KVBucketNameKeyContactGrants,
+		)
+		return nil, errors.NewServiceUnavailable("failed to initialize key-contact-grants key-value store", err)
+	}
+	slog.InfoContext(ctx, "NATS key-value store initialized",
+		"bucket", constants.KVBucketNameKeyContactGrants,
+	)
+
 	slog.InfoContext(ctx, "NATS client created successfully",
 		"connected_url", conn.ConnectedUrl(),
 		"status", conn.Status(),

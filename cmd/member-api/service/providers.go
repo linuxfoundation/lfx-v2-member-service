@@ -473,6 +473,18 @@ func B2BOrgSettingsWriterImpl(ctx context.Context) port.B2BOrgSettingsWriter {
 	return nats.NewStorage(natsClient)
 }
 
+// KeyContactGrantIndexImpl returns the port.KeyContactGrantIndex implementation:
+// the NATS KV "key-contact-grants" bucket (authoritative, no MaxAge TTL), or nil
+// when REPOSITORY_SOURCE=mock. Callers pass the nil through — every consumer
+// treats a nil index as "not wired" and falls back to pre-index behaviour.
+func KeyContactGrantIndexImpl(ctx context.Context) port.KeyContactGrantIndex {
+	if os.Getenv("REPOSITORY_SOURCE") == "mock" {
+		return nil
+	}
+	natsInit(ctx)
+	return nats.NewKeyContactGrantIndex(natsClient)
+}
+
 // BackfillRunnerImpl constructs a BackfillRunner wired with all production
 // (or mock) dependencies based on REPOSITORY_SOURCE / MESSAGING_SOURCE.
 //
@@ -519,6 +531,9 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
 			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
+			// A key_contact reindex populates the grant index for contacts whose
+			// grant predates it.
+			usecaseSvc.WithKeyContactGrantIndex(nats.NewKeyContactGrantIndex(nc)),
 		)
 	}
 	if threshold, ok := adminReindexQuotaThresholdFromEnv(); ok {
@@ -600,6 +615,7 @@ func KeyContactWriterUseCase(ctx context.Context) usecaseSvc.KeyContactWriter {
 		usecaseSvc.WithKCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithKCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithKCOrgSettings(OrgSettingsWriterUseCase(ctx)),
+		usecaseSvc.WithKCGrantIndex(KeyContactGrantIndexImpl(ctx)),
 	)
 }
 
@@ -742,6 +758,7 @@ func InviteAcceptedServiceImpl(ctx context.Context) *usecaseSvc.InviteAcceptedSe
 		usecaseSvc.WithInviteAcceptedOrgSettingsWriter(OrgSettingsWriterUseCase(ctx)),
 		usecaseSvc.WithInviteAcceptedKeyContactReader(MemberReaderImpl(ctx)),
 		usecaseSvc.WithInviteAcceptedPublisher(MemberPublisherImpl(ctx)),
+		usecaseSvc.WithInviteAcceptedKeyContactGrantIndex(KeyContactGrantIndexImpl(ctx)),
 	)
 }
 
@@ -873,6 +890,9 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// Durable repair queue — records the records skipped by the quota guard so
 		// they can be repaired via POST /admin/reindex {cdc_repair:true}.
 		usecaseSvc.WithCDCRepairStore(nats.NewCDCRepairStore(natsClient)),
+		// Durable grant record — lets a key_contact delete, which carries only the
+		// contact's own SFID after the Salesforce record is gone, address the revoke.
+		usecaseSvc.WithCDCKeyContactGrantIndex(nats.NewKeyContactGrantIndex(natsClient)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),

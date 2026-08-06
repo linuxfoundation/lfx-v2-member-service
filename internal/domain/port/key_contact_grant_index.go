@@ -1,0 +1,86 @@
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+
+package port
+
+import "context"
+
+// KeyContactGrant is the FGA key_contact grant this service last published for a
+// key contact: the project_membership object the relation was granted on, and
+// the username it was granted to.
+//
+// It exists because a CDC delete event carries only the key contact's own SFID —
+// no field payloads — and the Salesforce record is already gone by the time the
+// event is handled, so neither the parent membership nor the username can be
+// recovered at revoke time. Both are required: fga-sync rejects a member_remove
+// with an empty username without performing any cleanup.
+type KeyContactGrant struct {
+	// MembershipUID is the parent Asset SFID — the project_membership object
+	// the key_contact relation was granted on.
+	MembershipUID string
+
+	// Username is the LFID the relation was granted to.
+	Username string
+
+	// PendingRevoke, when non-nil, is a grant this one has superseded (a
+	// Salesforce-side reparent, or a changed username) whose member_remove has
+	// not yet been confirmed delivered.
+	//
+	// It is written in the same CAS Put that commits the replacement above,
+	// not in a separate write: KV writes on this index are already durable on
+	// return, so once that Put commits, MembershipUID/Username above is the
+	// only address left in durable storage unless the superseded pair rides
+	// along in the same write. Carrying it here means a crash between that
+	// Put and the revoke's confirmed delivery still leaves the address
+	// recoverable — nothing is lost, only left pending — instead of silently
+	// gone the instant the replacement commits. It is cleared (set back to
+	// nil) once the revoke is confirmed delivered.
+	PendingRevoke *KeyContactGrantRef
+
+	// Revision is the KV revision observed on read, used for the
+	// revision-conditional write that guards the read-modify-write in the put
+	// path. Zero means "not currently stored".
+	Revision uint64
+}
+
+// KeyContactGrantRef identifies a grant by the pair a member_remove needs to
+// address it: the project_membership it was made on and the username it was
+// made to. Unlike KeyContactGrant it carries no Revision — it never has its
+// own KV entry, only ever appearing nested inside one as KeyContactGrant.PendingRevoke.
+type KeyContactGrantRef struct {
+	MembershipUID string
+	Username      string
+}
+
+// KeyContactGrantIndex is the durable record of published key_contact grants,
+// keyed by key contact UID. It is authoritative rather than a cache: entries
+// must outlive the grant they describe (key contacts can live for years before
+// deletion), so it has no TTL and there is no source to rebuild an entry from
+// once the Salesforce record is deleted.
+//
+// The index tracks what this service published, not live OpenFGA state — FGA
+// reconciliation is asynchronous, so a published message is not a converged
+// tuple. That is the correct basis for deciding what to revoke.
+type KeyContactGrantIndex interface {
+	// Get returns the stored grant for uid. The bool reports whether an entry
+	// exists; a missing entry is not an error.
+	Get(ctx context.Context, uid string) (KeyContactGrant, bool, error)
+
+	// Put stores the grant for uid, conditional on grant.Revision: zero writes
+	// only if no entry exists, non-zero writes only if the stored revision still
+	// matches. Either mismatch returns a Conflict error so the caller can
+	// re-read and re-evaluate rather than clobbering a concurrent write.
+	Put(ctx context.Context, uid string, grant KeyContactGrant) error
+
+	// Delete removes the entry for uid, conditional on revision: the entry is
+	// removed only if its stored revision still matches. A mismatch returns a
+	// Conflict error rather than deleting, so a grant written concurrently
+	// between the caller's read and this call (a re-invite racing a delete, for
+	// example) is never silently tombstoned. An already-absent entry is
+	// success regardless of revision.
+	//
+	// revision == 0 (the caller read no entry — see KeyContactGrant.Revision)
+	// is a no-op: there is nothing to delete, and implementations must not
+	// treat it as "delete unconditionally".
+	Delete(ctx context.Context, uid string, revision uint64) error
+}

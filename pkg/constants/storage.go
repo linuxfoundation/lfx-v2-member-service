@@ -55,4 +55,17 @@ const (
 	// revisions are never needed). No distributed lock: concurrent drains are
 	// made safe by idempotent targeted reindex plus revision-conditional delete.
 	KVBucketNameCDCRepair = "cdc-repair"
+
+	// KVBucketNameKeyContactGrants is the name of the KV bucket recording the
+	// FGA key_contact grant published for each key contact, keyed
+	// "key_contact.{sfid}" with a {membership_uid, username} value. A CDC delete
+	// event carries only the key contact's own SFID and the Salesforce record is
+	// already gone when it is handled, so this is the only place the parent
+	// membership and granted username can be recovered to build a correct
+	// member_remove. No MaxAge TTL — a key contact may live for years before
+	// deletion, and an evicted entry cannot be rebuilt from any other source.
+	// History is 1 (current grant only — prior grants are never replayed).
+	// Writes are revision-conditional so the read-compare-publish-write cycle in
+	// the put path cannot silently lose a concurrent grant change.
+	KVBucketNameKeyContactGrants = "key-contact-grants"
 )

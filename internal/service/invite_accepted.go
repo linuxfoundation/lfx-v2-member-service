@@ -28,6 +28,7 @@ type InviteAcceptedService struct {
 	orgSettingsWriter OrgSettingsUpdater
 	keyContactReader  KeyContactOrgReader
 	publisher         port.MemberPublisher
+	grantIndex        port.KeyContactGrantIndex
 }
 
 // InviteAcceptedServiceOption configures an InviteAcceptedService.
@@ -53,6 +54,13 @@ func WithInviteAcceptedKeyContactReader(r KeyContactOrgReader) InviteAcceptedSer
 // WithInviteAcceptedPublisher sets the publisher for FGA grants.
 func WithInviteAcceptedPublisher(p port.MemberPublisher) InviteAcceptedServiceOption {
 	return func(s *InviteAcceptedService) { s.publisher = p }
+}
+
+// WithInviteAcceptedKeyContactGrantIndex sets the durable record of published
+// key_contact FGA grants, so a grant made on invite acceptance is revocable when
+// the contact is later deleted.
+func WithInviteAcceptedKeyContactGrantIndex(i port.KeyContactGrantIndex) InviteAcceptedServiceOption {
+	return func(s *InviteAcceptedService) { s.grantIndex = i }
 }
 
 // NewInviteAcceptedService creates a new InviteAcceptedService.
@@ -150,7 +158,7 @@ func (s *InviteAcceptedService) resolveKeyContactsInOrg(ctx context.Context, org
 			continue
 		}
 		kc.Username = strings.TrimPrefix(acceptedBy, legacyAuth0UsernamePrefix)
-		PublishKeyContactFGA(ctx, s.publisher, kc)
+		PublishKeyContactFGA(ctx, s.publisher, s.grantIndex, kc)
 		PublishKeyContactIndexer(ctx, s.publisher, kc, indexerConstants.ActionUpdated)
 	}
 }

@@ -179,3 +179,27 @@ spec:
   # IMPORTANT: no ttl — a pending repair marker must never be silently evicted
   # before it is drained via POST /admin/reindex {cdc_repair:true}.
 {{- end }}
+---
+{{- if .Values.nats.kv_bucket_key_contact_grants.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.kv_bucket_key_contact_grants.name }}
+  namespace: lfx
+  {{- if .Values.nats.kv_bucket_key_contact_grants.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+spec:
+  bucket: {{ .Values.nats.kv_bucket_key_contact_grants.name }}
+  replicas: {{ .Values.nats.kv_bucket_key_contact_grants.replicas }}
+  history: {{ .Values.nats.kv_bucket_key_contact_grants.history }}
+  storage: {{ .Values.nats.kv_bucket_key_contact_grants.storage }}
+  maxValueSize: {{ .Values.nats.kv_bucket_key_contact_grants.maxValueSize }}
+  maxBytes: {{ .Values.nats.kv_bucket_key_contact_grants.maxBytes }}
+  compression: {{ .Values.nats.kv_bucket_key_contact_grants.compression }}
+  # IMPORTANT: no ttl — an evicted entry cannot be rebuilt once the Salesforce
+  # record is deleted, leaving the key contact's FGA grant permanently dangling.
+{{- end }}

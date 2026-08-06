@@ -23,7 +23,7 @@ The same binary also runs as a **CDC consumer** (`RUN_MODE=consumer`) that subsc
 - **Language**: Go 1.24+
 - **API Framework**: Goa v3 (code generation framework)
 - **Messaging**: NATS with JetStream for KV caching and RPC
-- **Storage**: Seven NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `cdc-repair`, `org-workspaces`, `org_workspace_projects`
+- **Storage**: Eight NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `cdc-repair`, `org-workspaces`, `org_workspace_projects`, `key-contact-grants`
 - **Primary data source**: Salesforce REST API (SOQL queries via `github.com/k-capehart/go-salesforce/v3`)
 - **CDC**: Salesforce Pub/Sub gRPC API + Apache Avro decoding (`github.com/linkedin/goavro/v2`)
 - **Authentication**: JWT with Heimdall middleware
@@ -313,6 +313,10 @@ Stores the Salesforce Pub/Sub replay cursor (opaque `[]byte`) per CDC channel. *
 ### `cdc-repair` Bucket
 
 Stores durable pending markers for records the CDC consumer's quota guard skipped while the Salesforce API quota was near-exhausted. **Authoritative state** — no MaxAge TTL, `history: 1`. Key pattern: `pending.{reindex_type}.{sfid}` → `{"skipped_at": "<RFC 3339>"}`. Written by the consumer (`recordSkippedForRepair`); listed and revision-conditionally deleted by `POST /admin/reindex {cdc_repair:true}` (no distributed lock — idempotent reindex + revision-conditional delete is the sole race guard). See [docs/backfill-reindex.md](./docs/backfill-reindex.md#cdc-quota-repair-drain) and [docs/cdc-consumer.md](./docs/cdc-consumer.md#quota-guard).
+
+### `key-contact-grants` Bucket
+
+Stores the durable index of published key-contact FGA grants: `{membership_uid, username}` per key contact UID. **Authoritative state** — no MaxAge TTL, `history: 1`. Key pattern: `key_contact.{sfid}`. It exists because a CDC delete for `Project_Role__c` carries only the key contact's own SFID — by then the Salesforce record is gone, so the parent `MembershipUID` and the granted `username` cannot be recovered from any other source. Written (revision-conditional CAS) by `PublishKeyContactFGA` on every successful `member_put`; read and cleared by the CDC delete handler and the API delete path. (LFXV2-2907)
 
 ### `org-settings` Bucket
 

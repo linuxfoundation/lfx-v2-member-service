@@ -151,7 +151,8 @@ type subjectCapturingPublisher struct {
 	indexerMessages []any    // payloads, parallel to indexer
 	access          []string // subjects
 	accessMessages  []any    // payloads, parallel to access
-	flushCount      int      // CDC paths must never flush
+	flushCount      int      // most CDC paths never flush; key_contact delete/supersede do (see flushErr)
+	flushErr        error    // returned by every Flush call when set
 }
 
 func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, msg any, _ bool) error {
@@ -173,7 +174,7 @@ func (p *subjectCapturingPublisher) Flush(_ context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.flushCount++
-	return nil
+	return p.flushErr
 }
 
 // hasAccess returns true if any access call subject contains the given substring.
@@ -576,18 +577,237 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesIndexerAndFGAMemberRemove(t *te
 	assert.True(t, isStr, "key_contact delete data must be a JSON string (object ID), not an object")
 	assert.Equal(t, sfid("kc-uid-del"), data)
 
-	// CDC has no username to revoke, so fga-sync cleans up by object ID. The
-	// empty username is the signal for that, not an omission.
+	// With no recorded grant there is nothing to address the revoke with, so the
+	// remove falls back to the key contact's own UID and an empty username. This
+	// message is knowingly rejected by fga-sync; it is retained only for parity
+	// with the behaviour that predates the grant index.
 	require.NotEmpty(t, pub.accessMessages)
 	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
 	require.True(t, ok)
 	assert.Equal(t, "member_remove", removeMsg.Operation)
 	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
 	require.True(t, ok)
-	assert.Empty(t, removeData.Username, "empty username drives object-ID cleanup")
+	assert.Equal(t, sfid("kc-uid-del"), removeData.UID,
+		"index miss must fall back to the key contact's own UID")
+	assert.Empty(t, removeData.Username)
 
 	assert.Zero(t, pub.flushCount,
-		"CDC removal is publish-only; only the API deletion path confirms delivery")
+		"no grant index is wired, so there is no index entry to flush before clearing")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex covers the bug this index
+// exists for: the revoke must target the project_membership the grant was made
+// on, not the key contact's own SFID, which OpenFGA has no tuple for.
+func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
+	kcUID := sfid("kc-uid-indexed")
+	membershipUID := sfid("asset-parent")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 7},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8b")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_remove", removeMsg.Operation)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, membershipUID, removeData.UID,
+		"revoke must target the membership the grant was made on, not the key contact SFID")
+	assert.Equal(t, "jdoe", removeData.Username,
+		"fga-sync rejects a member_remove with an empty username")
+
+	assert.Equal(t, []string{kcUID}, grants.Deletes,
+		"the grant entry must be cleared once the revoke is published")
+	assert.Equal(t, 1, pub.flushCount,
+		"delivery must be confirmed before the only recorded address is cleared")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry covers
+// an lfx-reviewer finding: Access only hands the revoke to the local NATS
+// connection, it does not confirm the broker received it. Deleting the index
+// entry immediately after a nil Access error — without confirming delivery —
+// would create a crash/disconnect window where the member_remove is lost and
+// a replayed CDC delete can no longer address the tuple because its only
+// address is already gone. Flush must be confirmed first, and a failed flush
+// must leave the entry in place for the next delivery attempt to use.
+func TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry(t *testing.T) {
+	kcUID := sfid("kc-uid-flushfail")
+	membershipUID := sfid("asset-flushfail-parent")
+
+	pub := &subjectCapturingPublisher{flushErr: assert.AnError}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 7},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8flush")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages, "the revoke was handed to NATS even though delivery was never confirmed")
+	assert.Empty(t, grants.Deletes,
+		"an unconfirmed flush must not clear the only recorded address for this grant")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.True(t, found, "the entry must survive so a retry can still address the revoke")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries covers
+// a review finding: a grant-index read failure must not be collapsed into an
+// ordinary miss on the first try — the index may still hold the exact address
+// needed to revoke this grant, and once this handler returns, the replay
+// cursor advances with no other chance to retry a deleted contact. A bounded
+// retry that recovers within this call must still use the recorded grant.
+func TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries(t *testing.T) {
+	kcUID := sfid("kc-uid-flaky")
+	membershipUID := sfid("asset-flaky-parent")
+
+	pub := &subjectCapturingPublisher{}
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			if calls == 1 {
+				// One transient failure, then the read succeeds — well within
+				// maxGrantIndexReadAttempts.
+				return port.KeyContactGrant{}, false, assert.AnError
+			}
+			return port.KeyContactGrant{MembershipUID: membershipUID, Username: "jdoe", Revision: 3}, true, nil
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8flaky")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, membershipUID, removeData.UID,
+		"a read that recovers within the retry budget must still use the recorded grant, not the unaddressed fallback")
+	assert.Equal(t, "jdoe", removeData.Username)
+}
+
+// TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndExhaustsRetries
+// covers the other side of the same finding: once every retry attempt fails,
+// the handler must still fall back to the (known-useless) unaddressed revoke
+// rather than blocking the batch — but only after exhausting the retry
+// budget, not on the first error.
+func TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndExhaustsRetries(t *testing.T) {
+	kcUID := sfid("kc-uid-downtime")
+
+	pub := &subjectCapturingPublisher{}
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			return port.KeyContactGrant{}, false, assert.AnError
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8down")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	replay := &fakeReplayStore{}
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+	assert.Equal(t, 3, calls, "must exhaust the retry budget, not give up on the first error")
+	assert.Equal(t, []byte("r8down"), replay.saved, "the batch must not be blocked by an exhausted retry")
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, kcUID, removeData.UID,
+		"once retries are exhausted, the handler still falls back to the unaddressed revoke rather than blocking")
+}
+
+// TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex covers the second
+// deletion trigger: a record that vanished from the upsert query rather than
+// arriving as an explicit delete event. It routes through the same handler, so
+// it must resolve the revoke the same way.
+func TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex(t *testing.T) {
+	kcUID := sfid("kc-uid-absent")
+	membershipUID := sfid("asset-absent-parent")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "asmith", Revision: 2},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r8c")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		// The batch reader returns no contact for the requested SFID, which the
+		// consumer treats as a soft delete.
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages)
+	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, membershipUID, removeData.UID)
+	assert.Equal(t, "asmith", removeData.Username)
+	assert.Equal(t, []string{kcUID}, grants.Deletes)
 }
 
 // ── Error resilience ──────────────────────────────────────────────────────────

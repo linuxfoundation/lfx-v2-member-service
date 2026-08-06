@@ -99,6 +99,7 @@ type Runner struct {
 	natsClient            *natspkg.NATSClient
 	globalOrgAdminTeamUID string
 	resolver              port.ProjectResolver
+	grantIndex            port.KeyContactGrantIndex
 
 	// cdc_repair collaborators (optional; only the repair path uses them).
 	repairStore          port.CDCRepairStore
@@ -132,6 +133,13 @@ func WithUserReader(u port.UserReader) RunnerOption {
 // runs.
 func WithRepairStore(s port.CDCRepairStore) RunnerOption {
 	return func(r *Runner) { r.repairStore = s }
+}
+
+// WithKeyContactGrantIndex wires the durable record of published key_contact FGA
+// grants, so a key_contact reindex populates it for contacts whose grant predates
+// the index.
+func WithKeyContactGrantIndex(i port.KeyContactGrantIndex) RunnerOption {
+	return func(r *Runner) { r.grantIndex = i }
 }
 
 // WithQuotaGauge wires the Salesforce quota gauge used to gate cdc_repair drains.
@@ -393,6 +401,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
+					r.resolveKeyContactUsername(ctx, log, kc)
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					if ok {
 						kc.ProjectUID = uid
@@ -401,7 +410,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					}
-					PublishKeyContactFGA(ctx, r.publisher, kc)
+					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 					published++
 				}
 			}
@@ -675,16 +684,17 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		if req.DryRun {
 			return outcomeIssued
 		}
+		r.resolveKeyContactUsername(ctx, log, kc)
 		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-			PublishKeyContactFGA(ctx, r.publisher, kc)
+			PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 			return outcomeRetry
 		}
 		kc.ProjectUID = resolvedUID
 		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-		PublishKeyContactFGA(ctx, r.publisher, kc)
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 		return outcomeIssued
 
 	case entityTypeB2BOrgSettings:
@@ -841,6 +851,7 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			published++
 			continue
 		}
+		r.resolveKeyContactUsername(ctx, log, kc)
 		uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if ok {
 			kc.ProjectUID = uid
@@ -849,13 +860,35 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 		}
-		PublishKeyContactFGA(ctx, r.publisher, kc)
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
 		published++
 	}
 
 	returned := makeReturnedSet(contacts, func(kc *model.KeyContact) string { return kc.UID }, convErrSFIDs)
 	notFound := countAbsent(req.Items, returned)
 	logTargetedBatchComplete(ctx, log, req, published, notFound, len(convErrSFIDs))
+}
+
+// resolveKeyContactUsername resolves kc's LFID username from its email when the
+// assembled record has none, mirroring the CDC consumer's processKeyContact.
+// Every key_contact source used by this runner (SOQL page, single-item sObject
+// assembly, and the SFID batch reader) sets Email but never Username, so
+// without this call PublishKeyContactFGA is a guaranteed no-op for every
+// reindexed key contact — no member_put, and no grant-index entry.
+func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger, kc *model.KeyContact) {
+	if r.userReader == nil || kc.Username != "" || kc.Email == "" {
+		return
+	}
+	username, err := r.userReader.UsernameByEmail(ctx, kc.Email)
+	if err != nil {
+		if !errs.IsNotFound(err) {
+			log.WarnContext(ctx, "resolve LFID for key contact failed",
+				"uid", kc.UID, "error", err)
+		}
+		// NotFound is expected for unregistered emails — leave Username empty.
+		return
+	}
+	kc.Username = username
 }
 
 // countAbsent counts requested SFIDs not present in the returned set (which

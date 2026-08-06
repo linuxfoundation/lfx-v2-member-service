@@ -277,6 +277,26 @@ nats:
     maxBytes: 1073741824 # 1GB
     compression: true
 
+  # kv_bucket_key_contact_grants is the configuration for the key-contact-grants
+  # KV bucket. Records the FGA key_contact grant published per key contact, keyed
+  # "key_contact.{sfid}" with a {membership_uid, username} value, so a CDC delete
+  # (which carries only the key contact's own SFID, after the Salesforce record is
+  # already gone) can still build a correctly addressed member_remove. No MaxAge
+  # TTL — a key contact may live for years before deletion and an evicted entry
+  # cannot be rebuilt from any other source, so eviction means a permanently
+  # dangling grant. History is 1 (only the current grant is read; the revision is
+  # used for conditional writes).
+  kv_bucket_key_contact_grants:
+    creation: true
+    keep: true
+    name: key-contact-grants
+    replicas: 1
+    history: 1
+    storage: file
+    maxValueSize: 65536 # 64KB — a value is two SFID/LFID-sized strings
+    maxBytes: 1073741824 # 1GB
+    compression: true
+
 # consumer is the configuration for the CDC consumer Deployment.
 # The consumer runs as a separate single-replica Deployment (RUN_MODE=consumer)
 # using the same container image as the API. Kubernetes is the single-active

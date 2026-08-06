@@ -170,8 +170,8 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 
 | Change | Actions |
 |---|---|
-| Upsert | Invalidate cache → fetch contacts → per contact (`processKeyContact`): resolve LFID via `UserReader.UsernameByEmail` when username is empty → resolve `project_uid` → on success: `PublishKeyContactIndexer` + `PublishKeyContactFGA` (`member_put` only when an LFID resolved) + **silently** provision org-dashboard access (`AddPrincipal` with `SuppressNotification: true`). On resolver failure: skip indexer + provisioning, log ERROR, **OpenFGA only** (when LFID resolved). |
-| Delete | Invalidate cache → `PublishKeyContactIndexer` (`deleted`, stub) → `member_remove` with empty username (fga-sync cleans up by object-id). |
+| Upsert | Invalidate cache → fetch contacts → per contact (`processKeyContact`): resolve LFID via `UserReader.UsernameByEmail` when username is empty → resolve `project_uid` → on success: `PublishKeyContactIndexer` + `PublishKeyContactFGA` (`member_put` only when an LFID resolved) + **silently** provision org-dashboard access (`AddPrincipal` with `SuppressNotification: true`). On resolver failure: skip indexer + provisioning, log ERROR, **OpenFGA only** (when LFID resolved). A published `member_put` is recorded in `key-contact-grants`; when the recorded `{membership_uid, username}` differs from the new one (Salesforce-side reparent, or a changed LFID) the superseded pair rides along as a `PendingRevoke` marker in the **same** CAS write that commits the replacement, then a `member_remove` for that pair is published and flushed. The marker is cleared only once that flush confirms delivery — a lost or unconfirmed revoke leaves it in place (`fga_revoke_failed_dangling_tuple=true`) rather than losing the superseded pair's address the instant the replacement commits. |
+| Delete | Invalidate cache → `PublishKeyContactIndexer` (`deleted`, stub) → look up `key-contact-grants` → `member_remove` targeting the recorded `project_membership:{membership_uid}` with the recorded username → **Flush** to confirm broker delivery → delete the index entry only once flush succeeds. A transient index read failure is retried (bounded, `maxGrantIndexReadAttempts`) before falling back, since the deleted contact has no other chance to retry once this handler returns. A failed flush leaves the entry in place for the next delivery attempt rather than clearing the only recorded address before delivery is confirmed. On an index miss (retries exhausted, or a contact granted before this bucket existed) it falls back to the contact's own SFID with an empty username, which fga-sync rejects — logged with `fga_revoke_failed_dangling_tuple=true`. |
 
 > **CDC never sends email.** It is a passive sync. `processKeyContact` provisions org-dashboard access with `SuppressNotification: true`, and the org-settings resend-in-place path honours that flag (it refreshes the pending entry without re-sending an invite).
 
@@ -327,7 +327,7 @@ Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `
 
 ## NATS Storage
 
-The CDC consumer touches five NATS KV buckets:
+The CDC consumer touches six NATS KV buckets:
 
 | Bucket | Use by the consumer | TTL |
 |---|---|---|
@@ -336,6 +336,7 @@ The CDC consumer touches five NATS KV buckets:
 | `membership-cache` | Read/written by the injected `ProjectResolver` while resolving `project_uid` for `Asset` / `Project_Role__c` upserts — it looks up and populates `project-uid.<slug>` via `Storage.GetProjectUID` / `PutProjectUID`. | 6 h stale / 23 h expire |
 | `org-settings` | Read/written when a **registered** key contact upsert succeeds `project_uid` resolution: `processKeyContact` calls `AddPrincipal` (`SuppressNotification: true`), which reads and updates the authoritative org-settings KV. Not touched on resolver failure. | none (authoritative) |
 | `cdc-repair` | The consumer **writes** one pending marker per skipped record when the quota guard skips an upsert batch (`recordSkippedForRepair` → `PutPending`). **Never read or deleted here** — `/admin/reindex {cdc_repair:true}` (a different process, the API) lists and revision-conditionally deletes markers on drain. See [CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain). | none (authoritative), `history: 1` |
+| `key-contact-grants` | Records the `key_contact` FGA grant published per contact (`key_contact.{sfid}` → `{membership_uid, username}`). Written on every upsert that publishes a `member_put`; read on delete to address the `member_remove`, then deleted. Writes are revision-conditional. Also written by the API and by `/admin/reindex`. | none (authoritative), `history: 1` |
 
 > The batch record re-fetch path itself is uncached SOQL; the `membership-cache` access is the `ProjectResolver`'s slug→UID cache, and `org-settings` is touched only when `project_uid` resolution succeeds and the key contact has a known LFID (org-dashboard provisioning).
 
