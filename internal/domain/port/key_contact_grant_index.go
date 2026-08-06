@@ -22,10 +22,34 @@ type KeyContactGrant struct {
 	// Username is the LFID the relation was granted to.
 	Username string
 
+	// PendingRevoke, when non-nil, is a grant this one has superseded (a
+	// Salesforce-side reparent, or a changed username) whose member_remove has
+	// not yet been confirmed delivered.
+	//
+	// It is written in the same CAS Put that commits the replacement above,
+	// not in a separate write: KV writes on this index are already durable on
+	// return, so once that Put commits, MembershipUID/Username above is the
+	// only address left in durable storage unless the superseded pair rides
+	// along in the same write. Carrying it here means a crash between that
+	// Put and the revoke's confirmed delivery still leaves the address
+	// recoverable — nothing is lost, only left pending — instead of silently
+	// gone the instant the replacement commits. It is cleared (set back to
+	// nil) once the revoke is confirmed delivered.
+	PendingRevoke *KeyContactGrantRef
+
 	// Revision is the KV revision observed on read, used for the
 	// revision-conditional write that guards the read-modify-write in the put
 	// path. Zero means "not currently stored".
 	Revision uint64
+}
+
+// KeyContactGrantRef identifies a grant by the pair a member_remove needs to
+// address it: the project_membership it was made on and the username it was
+// made to. Unlike KeyContactGrant it carries no Revision — it never has its
+// own KV entry, only ever appearing nested inside one as KeyContactGrant.PendingRevoke.
+type KeyContactGrantRef struct {
+	MembershipUID string
+	Username      string
 }
 
 // KeyContactGrantIndex is the durable record of published key_contact grants,

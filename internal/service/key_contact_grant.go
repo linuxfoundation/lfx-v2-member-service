@@ -78,6 +78,13 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 // the revoke (logged), leaving the stale index entry in place for the next
 // write to reconcile, rather than leaving the index confidently wrong.
 //
+// The superseded pair rides along as PendingRevoke in that same Put, rather
+// than being dropped once the new pair is recorded: KV writes on this index are
+// already durable on return, so the instant the Put above committed without a
+// PendingRevoke, the old pair's address would be gone from every durable store
+// with the revoke not yet even attempted. Carrying it means a crash in that
+// window still leaves the address recoverable from the index itself.
+//
 // Every failure is logged and swallowed. The grant itself is already published,
 // and failing the caller (a CDC event, a backfill page, an invite acceptance)
 // would cost more than the degraded delete path that a missing entry causes.
@@ -94,18 +101,36 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 			return
 		}
 		if found && stored.MembershipUID == membershipUID && stored.Username == username {
+			// Unchanged pair — any PendingRevoke already stored is from an
+			// earlier supersede and is untouched by this call.
 			return
 		}
 
-		// A zero revision on a miss is the create-only condition.
-		putErr := idx.Put(ctx, uid, port.KeyContactGrant{
+		newGrant := port.KeyContactGrant{
 			MembershipUID: membershipUID,
 			Username:      username,
 			Revision:      stored.Revision,
-		})
+		}
+		var superseded *port.KeyContactGrantRef
+		if found {
+			superseded = &port.KeyContactGrantRef{MembershipUID: stored.MembershipUID, Username: stored.Username}
+			if stored.PendingRevoke != nil {
+				// The previous supersede's revoke was never confirmed
+				// delivered before this one landed — this requires two
+				// reparents/renames of the same contact inside one Flush
+				// round trip, vanishingly rare, but overwriting it here would
+				// discard the only remaining address for that older grant.
+				slog.ErrorContext(ctx, "key_contact grant index pending revoke overwritten by a newer supersede before it was confirmed delivered — dangling tuple requires manual cleanup",
+					"uid", uid, "membership_uid", stored.PendingRevoke.MembershipUID,
+					"fga_revoke_failed_dangling_tuple", true)
+			}
+			newGrant.PendingRevoke = superseded
+		}
+
+		putErr := idx.Put(ctx, uid, newGrant)
 		if putErr == nil {
-			if found {
-				revokeSupersededKeyContactGrant(ctx, p, uid, stored)
+			if superseded != nil {
+				revokeSupersededKeyContactGrant(ctx, p, idx, uid, *superseded)
 			}
 			return
 		}
@@ -125,24 +150,72 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 
 // revokeSupersededKeyContactGrant revokes a recorded grant that a newly
 // published one replaces. The replacement's FGA member_put was already
-// published before this call (PublishKeyContactFGA), and its index entry was
-// already committed (recordKeyContactGrant calls this only after its Put
-// succeeds), so the contact is never left without access, and the index never
-// points at a pair that no longer has a recorded replacement.
-func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, uid string, stored port.KeyContactGrant) {
-	if stored.MembershipUID == "" || stored.Username == "" {
+// published before this call (PublishKeyContactFGA), and its index entry —
+// carrying superseded as PendingRevoke — was already committed
+// (recordKeyContactGrant calls this only after its Put succeeds), so the
+// contact is never left without access, and the superseded pair's address
+// survives even if this call is interrupted.
+//
+// Access alone does not prove delivery — a nil error only means the message
+// was handed to the local NATS connection. Flush closes that window: only once
+// it confirms delivery is the PendingRevoke marker cleared. A crash or lost
+// flush between Access and Flush leaves the marker in place for the next
+// opportunity to retry, rather than losing the address the moment the message
+// was merely handed off.
+func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string, superseded port.KeyContactGrantRef) {
+	if superseded.MembershipUID == "" || superseded.Username == "" {
 		return
 	}
-	msg := BuildKeyContactFGARemoveMessage(stored.MembershipUID, stored.Username)
+	msg := BuildKeyContactFGARemoveMessage(superseded.MembershipUID, superseded.Username)
 	if err := p.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg); err != nil {
-		// Not recoverable by /admin/reindex: a reindex republishes the current
-		// grant, and the superseded pair is about to be overwritten in the index,
-		// so nothing will retry this revoke.
-		slog.ErrorContext(ctx, "key_contact superseded grant revoke failed — dangling tuple requires manual cleanup",
-			"uid", uid, "membership_uid", stored.MembershipUID,
+		slog.ErrorContext(ctx, "key_contact superseded grant revoke publish failed — pending revoke retained in index for retry",
+			"uid", uid, "membership_uid", superseded.MembershipUID,
 			"error", err, "fga_revoke_failed_dangling_tuple", true)
 		return
 	}
+	if flushErr := p.Flush(ctx); flushErr != nil {
+		slog.ErrorContext(ctx, "key_contact superseded grant revoke flush failed — delivery indeterminate, pending revoke retained in index for retry",
+			"uid", uid, "membership_uid", superseded.MembershipUID,
+			"error", flushErr, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
 	slog.InfoContext(ctx, "key_contact superseded grant revoked",
-		"uid", uid, "membership_uid", stored.MembershipUID)
+		"uid", uid, "membership_uid", superseded.MembershipUID)
+
+	clearPendingRevoke(ctx, idx, uid, superseded)
+}
+
+// clearPendingRevoke removes the PendingRevoke marker for superseded now that
+// its revoke is confirmed delivered. It is best-effort: leaving a
+// confirmed-delivered marker in place after this fails is stale but harmless
+// (the grant it names really was revoked), unlike leaving it in place because
+// delivery was never confirmed.
+func clearPendingRevoke(ctx context.Context, idx port.KeyContactGrantIndex, uid string, superseded port.KeyContactGrantRef) {
+	for attempt := 1; attempt <= maxGrantIndexAttempts; attempt++ {
+		current, found, err := idx.Get(ctx, uid)
+		if err != nil || !found {
+			// A read failure leaves the marker for a later successful
+			// read-modify-write to clear; an absent entry (delete raced this
+			// call) has nothing left to clear.
+			return
+		}
+		if current.PendingRevoke == nil || *current.PendingRevoke != superseded {
+			// Already cleared, or superseded by a marker for a different
+			// grant — leave that one alone rather than clobbering it.
+			return
+		}
+		current.PendingRevoke = nil
+		putErr := idx.Put(ctx, uid, current)
+		if putErr == nil {
+			return
+		}
+		if !pkgerrors.IsConflict(putErr) {
+			slog.WarnContext(ctx, "key_contact grant index pending-revoke marker clear failed — confirmed-delivered marker left in index",
+				"uid", uid, "membership_uid", superseded.MembershipUID, "error", putErr)
+			return
+		}
+		// Conflict: re-read and retry against the new value.
+	}
+	slog.WarnContext(ctx, "key_contact grant index pending-revoke marker clear abandoned after repeated conflicts",
+		"uid", uid, "membership_uid", superseded.MembershipUID)
 }

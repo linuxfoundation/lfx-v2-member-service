@@ -842,7 +842,19 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		return nil
 	}
 
+	// Access only hands the revoke to the local NATS connection; it does not
+	// confirm the broker received it. Flush before clearing the index entry
+	// below, the same as the API delete path: without it, a crash or
+	// disconnect in the window between Access and actual broker delivery
+	// loses the member_remove while this call has already erased the only
+	// {membership_uid, username} record needed to retry it — and unlike a
+	// live contact, a deleted one gets no other chance to.
 	if indexed {
+		if flushErr := o.publisher.Flush(ctx); flushErr != nil {
+			slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke flush failed — delivery indeterminate, keeping index entry",
+				"uid", uid, "error", flushErr, "fga_revoke_failed_dangling_tuple", true)
+			return nil
+		}
 		if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 			slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
 				"uid", uid, "error", err)

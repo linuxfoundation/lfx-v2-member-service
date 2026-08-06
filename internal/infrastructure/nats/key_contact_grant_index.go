@@ -26,6 +26,14 @@ const keyContactGrantPrefix = "key_contact."
 type keyContactGrantValue struct {
 	MembershipUID string `json:"membership_uid"`
 	Username      string `json:"username"`
+
+	// PendingRevokeMembershipUID/PendingRevokeUsername mirror
+	// port.KeyContactGrant.PendingRevoke — a superseded pair whose
+	// member_remove has not yet been confirmed delivered. omitempty so a
+	// grant with no pending revoke serializes the same as before this field
+	// existed.
+	PendingRevokeMembershipUID string `json:"pending_revoke_membership_uid,omitempty"`
+	PendingRevokeUsername      string `json:"pending_revoke_username,omitempty"`
 }
 
 // KeyContactGrantIndex implements port.KeyContactGrantIndex over the
@@ -93,11 +101,18 @@ func (s *KeyContactGrantIndex) Get(ctx context.Context, uid string) (port.KeyCon
 		return port.KeyContactGrant{Revision: entry.Revision()}, true, nil
 	}
 
-	return port.KeyContactGrant{
+	grant := port.KeyContactGrant{
 		MembershipUID: val.MembershipUID,
 		Username:      val.Username,
 		Revision:      entry.Revision(),
-	}, true, nil
+	}
+	if val.PendingRevokeMembershipUID != "" && val.PendingRevokeUsername != "" {
+		grant.PendingRevoke = &port.KeyContactGrantRef{
+			MembershipUID: val.PendingRevokeMembershipUID,
+			Username:      val.PendingRevokeUsername,
+		}
+	}
+	return grant, true, nil
 }
 
 // Put stores the grant for uid, conditional on grant.Revision. A revision of
@@ -120,10 +135,15 @@ func (s *KeyContactGrantIndex) Put(ctx context.Context, uid string, grant port.K
 		return err
 	}
 
-	data, marshalErr := json.Marshal(keyContactGrantValue{
+	value := keyContactGrantValue{
 		MembershipUID: grant.MembershipUID,
 		Username:      grant.Username,
-	})
+	}
+	if grant.PendingRevoke != nil {
+		value.PendingRevokeMembershipUID = grant.PendingRevoke.MembershipUID
+		value.PendingRevokeUsername = grant.PendingRevoke.Username
+	}
+	data, marshalErr := json.Marshal(value)
 	if marshalErr != nil {
 		return errs.NewUnexpected(fmt.Sprintf("key-contact-grants: failed to marshal grant for %s", uid), marshalErr)
 	}

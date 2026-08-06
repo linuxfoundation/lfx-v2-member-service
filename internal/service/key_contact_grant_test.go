@@ -157,8 +157,13 @@ func TestPublishKeyContactFGA_RetriesIndexWriteOnConflict(t *testing.T) {
 		Username:      "bob",
 	})
 
-	assert.Equal(t, 2, reads, "a rejected write must be retried against a fresh read")
+	// Two reads for the rejected write's retry, plus one more when
+	// clearPendingRevoke re-reads the entry to clear the PendingRevoke marker
+	// after the superseded username's revoke is confirmed delivered.
+	assert.Equal(t, 3, reads, "a rejected write must be retried against a fresh read")
 	assert.Equal(t, "bob", grants.Entries["kc-1"].Username)
+	assert.Nil(t, grants.Entries["kc-1"].PendingRevoke,
+		"the pending-revoke marker must be cleared once the superseded grant's revoke is confirmed delivered")
 }
 
 // TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant covers a
@@ -186,6 +191,64 @@ func TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant(t *testing
 		"the old grant must not be revoked when the replacement failed to record")
 	assert.Equal(t, "asset-old", grants.Entries["kc-1"].MembershipUID,
 		"the index must still describe the grant that is actually still live")
+}
+
+// TestPublishKeyContactFGA_SupersededRevokePublishFailure_PreservesPendingRevoke
+// covers an lfx-reviewer finding: Access only hands the superseded revoke to
+// the local NATS connection. The replacement Put (which commits durably on
+// return) has already committed by this point, so if publish fails outright
+// the old pair's address must survive as PendingRevoke in the index — losing
+// it here would leave the old tuple live with nothing left anywhere to
+// address its revoke by.
+func TestPublishKeyContactFGA_SupersededRevokePublishFailure_PreservesPendingRevoke(t *testing.T) {
+	pub := &errorFGARemovePublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-old", Username: "alice", Revision: 3},
+		},
+	}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "alice",
+	})
+
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-new", entry.MembershipUID, "the replacement must still be recorded")
+	require.NotNil(t, entry.PendingRevoke,
+		"a failed revoke publish must leave the superseded pair's address recorded, not discarded")
+	assert.Equal(t, "asset-old", entry.PendingRevoke.MembershipUID)
+	assert.Equal(t, "alice", entry.PendingRevoke.Username)
+}
+
+// TestPublishKeyContactFGA_SupersededRevokeFlushFailure_PreservesPendingRevoke
+// covers the other half of the same finding: a nil error from Access only
+// means the message was handed to the local connection, not that the broker
+// received it. Flush is what confirms delivery; when Flush fails (or a crash
+// interrupts it), the PendingRevoke marker must still not be cleared — an
+// unconfirmed revoke is indistinguishable from a lost one.
+func TestPublishKeyContactFGA_SupersededRevokeFlushFailure_PreservesPendingRevoke(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	pub.flushErr = assert.AnError
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-old", Username: "alice", Revision: 3},
+		},
+	}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "alice",
+	})
+
+	require.NotEmpty(t, removeMessages(t, pub),
+		"the revoke was handed to NATS even though delivery was never confirmed")
+	entry := grants.Entries["kc-1"]
+	require.NotNil(t, entry.PendingRevoke,
+		"an unconfirmed flush must leave the superseded pair's address recorded for retry")
+	assert.Equal(t, "asset-old", entry.PendingRevoke.MembershipUID)
 }
 
 func TestPublishKeyContactFGA_NilIndexPublishesUnchanged(t *testing.T) {

@@ -151,7 +151,8 @@ type subjectCapturingPublisher struct {
 	indexerMessages []any    // payloads, parallel to indexer
 	access          []string // subjects
 	accessMessages  []any    // payloads, parallel to access
-	flushCount      int      // CDC paths must never flush
+	flushCount      int      // most CDC paths never flush; key_contact delete/supersede do (see flushErr)
+	flushErr        error    // returned by every Flush call when set
 }
 
 func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, msg any, _ bool) error {
@@ -173,7 +174,7 @@ func (p *subjectCapturingPublisher) Flush(_ context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.flushCount++
-	return nil
+	return p.flushErr
 }
 
 // hasAccess returns true if any access call subject contains the given substring.
@@ -591,7 +592,7 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesIndexerAndFGAMemberRemove(t *te
 	assert.Empty(t, removeData.Username)
 
 	assert.Zero(t, pub.flushCount,
-		"CDC removal is publish-only; only the API deletion path confirms delivery")
+		"no grant index is wired, so there is no index entry to flush before clearing")
 }
 
 // TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex covers the bug this index
@@ -634,6 +635,48 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 
 	assert.Equal(t, []string{kcUID}, grants.Deletes,
 		"the grant entry must be cleared once the revoke is published")
+	assert.Equal(t, 1, pub.flushCount,
+		"delivery must be confirmed before the only recorded address is cleared")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry covers
+// an lfx-reviewer finding: Access only hands the revoke to the local NATS
+// connection, it does not confirm the broker received it. Deleting the index
+// entry immediately after a nil Access error — without confirming delivery —
+// would create a crash/disconnect window where the member_remove is lost and
+// a replayed CDC delete can no longer address the tuple because its only
+// address is already gone. Flush must be confirmed first, and a failed flush
+// must leave the entry in place for the next delivery attempt to use.
+func TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry(t *testing.T) {
+	kcUID := sfid("kc-uid-flushfail")
+	membershipUID := sfid("asset-flushfail-parent")
+
+	pub := &subjectCapturingPublisher{flushErr: assert.AnError}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 7},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8flush")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages, "the revoke was handed to NATS even though delivery was never confirmed")
+	assert.Empty(t, grants.Deletes,
+		"an unconfirmed flush must not clear the only recorded address for this grant")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.True(t, found, "the entry must survive so a retry can still address the revoke")
 }
 
 // TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries covers
