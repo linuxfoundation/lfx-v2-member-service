@@ -1,1 +1,4 @@
-* @linuxfoundation/lfx-v2-member-service
+# lfx-reviewer is the agentic-review machine user (auto-merge pilot); either
+# owner satisfies code-owner review, so the gate's approving review counts
+# under code-owner branch protection without displacing the maintainer team.
+* @linuxfoundation/lfx-v2-member-service @lfx-reviewer
