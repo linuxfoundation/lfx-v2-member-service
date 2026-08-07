@@ -18,7 +18,7 @@ Read access to **all six document types this service indexes**, on every org. Tw
 
 Workspaces and workspace-projects have no `auditor` REST route at all (every workspace route is `writer`-gated), but their index documents access-check `auditor` on the parent `b2b_org` by design, so they are reachable via search.
 
-Note that `GET /b2b_orgs/{uid}/settings` exposes **pending-invite email addresses**. That route was gated on `auditor` rather than `writer` on the premise that auditors are per-org trusted principals; the blanket grant changes that premise.
+Note that `GET /b2b_orgs/{uid}/settings` exposes **pending-invite email addresses**. That route was gated on `auditor` rather than `writer` on the premise that auditors are per-org trusted principals; the blanket grant changes that premise. The `b2b_org_settings` index document carries the same `auditor` access check, so the roster is reachable through search as well as through the route — any narrowing has to cover both. Tracked in [LFXV2-3037](https://linuxfoundation.atlassian.net/browse/LFXV2-3037).
 
 No write access anywhere. The `[user, team#member]` branch of `b2b_org.auditor` feeds nothing upward, unlike `global_org_admin`, which flows into `writer`.
 
