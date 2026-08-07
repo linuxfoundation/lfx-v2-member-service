@@ -91,7 +91,14 @@ The live form prompts for the store ID before deleting, because it differs from 
 
 Deletes only tuples whose subject is exactly one of the configured teams; per-user `auditor` grants and `global_org_admin` are never touched. Batches set `"on_missing": "ignore"` inside the `deletes` object — the mirror of the grant script's problem, since the tuple list comes from a paginated read that can go stale mid-run.
 
-Reconfigure or revert the service as well, or the next write re-grants everything.
+**Stop the emission before you revoke, not after.** Set both team names to `""` (or revert) and roll out the API *and* the CDC consumer first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because the subject begins with `team:`. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
+
+### Rollback order
+
+1. Set `LF_STAFF_TEAM_NAME` and `LF_CONTRACTOR_TEAM_NAME` to `""` (or revert the code) and roll out both deployments.
+2. Confirm no pod is still running the emitting config.
+3. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run.
+4. Re-run the dry-run; expect zero. This is only meaningful once step 1 has landed.
 
 ## Rollout order
 

@@ -20,6 +20,15 @@
 # teams. Per-user auditor grants and global_org_admin are never touched.
 #
 # Prerequisites:
+#   Stop the service emitting the grants FIRST — set LF_STAFF_TEAM_NAME and
+#   LF_CONTRACTOR_TEAM_NAME to "" (or revert the code) and roll out, on the API
+#   and the CDC consumer both. Revoking while the service is still emitting
+#   leaves a race this script cannot win: any org written during or after the
+#   run re-acquires the tuple, and fga-sync will not reap it afterwards because
+#   the subject begins with `team:`. Order matters more here than usual because
+#   the residue is invisible — a post-run dry-run reports only what it can see
+#   at that instant.
+#
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
 #   export LF_STAFF_TEAM_NAME=… LF_CONTRACTOR_TEAM_NAME=…

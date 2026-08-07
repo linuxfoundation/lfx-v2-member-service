@@ -4,7 +4,8 @@
 #
 # openfga-team-auditor.sh — shared helpers for the LFXV2-2937 b2b_org auditor
 # team grant scripts. Sourced by grant-lf-teams-auditor-openfga.sh and
-# revoke-lf-teams-auditor-openfga.sh; not executable on its own.
+# revoke-lf-teams-auditor-openfga.sh; it only defines functions, so running it
+# directly does nothing.
 #
 # The two scripts were near-identical copies. They are shared here because the
 # revoke script is the rollback path that runs under incident pressure, and a
@@ -160,10 +161,10 @@ fga_apply_uid_file() {
 # The store ID is required with no default: a default target on a script whose
 # writes cannot be undone is a foot-gun, not a convenience.
 fga_require_store_id() {
-	local store_id="$1"
+	local candidate="$1"
 	local usage="$2"
 
-	if [[ -z "$store_id" || "$store_id" == --* ]]; then
+	if [[ -z "$candidate" || "$candidate" == --* ]]; then
 		echo "ERROR: the OpenFGA store ID is required as the first argument." >&2
 		echo "Usage: $usage" >&2
 		exit 1

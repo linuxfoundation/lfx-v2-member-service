@@ -40,12 +40,26 @@ echo ""
 
 python3 - "$OPENSEARCH_URL" "$INDEX" "$SCROLL_TTL" "$PAGE_SIZE" "$JSONL" "$SUMMARY" <<'PY'
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
 base, index, scroll_ttl, page_size, jsonl_path, summary_path = sys.argv[1:7]
 page_size = int(page_size)
+
+# Clear any previous run's output before doing anything else. Refusing to write
+# a bad census is not enough on its own: if this directory already holds a good
+# census from an earlier run, an abort leaves that file in place, and the grant
+# script's only validation is that the file exists. The operator would proceed
+# on a stale census — omitting newer orgs, or worse, targeting the census of a
+# different environment — with the failure already scrolled off screen. Deleting
+# up front means a failed run leaves nothing rather than something plausible.
+for stale in (jsonl_path, summary_path):
+    try:
+        os.unlink(stale)
+    except FileNotFoundError:
+        pass
 
 # latest=true excludes superseded document versions; the deleted_at must_not
 # excludes soft-deleted orgs. Neither guarantees uniqueness on its own — see
@@ -166,15 +180,21 @@ if expected and raw_hits != expected:
     )
     sys.exit(2)
 
-with open(jsonl_path, "w", encoding="utf-8") as f:
+# Write via temp files and rename, so the final paths only ever appear complete.
+# A crash between the two writes would otherwise leave a census with no summary,
+# which reads as a successful run to anything that only checks for the file.
+with open(jsonl_path + ".tmp", "w", encoding="utf-8") as f:
     for uid in ordered:
         f.write(json.dumps({"uid": uid}) + "\n")
 
-with open(summary_path, "w", encoding="utf-8") as f:
+with open(summary_path + ".tmp", "w", encoding="utf-8") as f:
     f.write(f"raw_hits={raw_hits}\n")
     f.write(f"unique_uids={len(ordered)}\n")
     f.write(f"duplicates_dropped={duplicates}\n")
     f.write(f"expected_from_search_api={expected}\n")
+
+os.replace(jsonl_path + ".tmp", jsonl_path)
+os.replace(summary_path + ".tmp", summary_path)
 
 print(f"→ Wrote {len(ordered):,} unique UIDs to {jsonl_path}")
 if duplicates:
