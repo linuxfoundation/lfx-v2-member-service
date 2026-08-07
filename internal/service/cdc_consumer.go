@@ -619,8 +619,11 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 	stubOrg := &model.B2BOrg{UID: uid}
 	PublishB2BOrgIndexer(ctx, o.publisher, stubOrg, indexerConstants.ActionDeleted)
 
-	// nil access (writers/auditors) = preserve; empty = clear. For delete we
-	// pass nil to let FGA sync handle cleanup based on the delete indexer event.
+	// nil access (writers/auditors) = preserve; empty = clear. Passing nil here
+	// reconciles nothing away: every relation lands in ExcludeRelations, so the
+	// org's per-user grants and hierarchy edges outlive the delete. Nothing
+	// reaps them today — fga-sync subscribes to no indexer subject, so the
+	// delete indexer event above does not drive FGA cleanup. See LFXV2-3034.
 	//
 	// No team references are asserted here — neither the global-admin UID nor
 	// the auditor teams. fga-sync never deletes a tuple whose subject begins
