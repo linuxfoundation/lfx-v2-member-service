@@ -81,6 +81,7 @@ type CDCConsumer struct {
 	repairStore            port.CDCRepairStore
 	grantIndex             port.KeyContactGrantIndex
 	globalOrgAdminTeamUID  string
+	b2bOrgAuditorTeams     []string
 	userReader             port.UserReader
 	orgSettings            OrgSettingsPrincipalWriter
 
@@ -153,6 +154,12 @@ func WithCDCKeyContactGrantIndex(i port.KeyContactGrantIndex) CDCConsumerOption 
 
 func WithCDCGlobalOrgAdminTeamUID(uid string) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.globalOrgAdminTeamUID = uid }
+}
+
+// WithCDCB2BOrgAuditorTeams sets the LF team names granted blanket auditor
+// access on every org the CDC consumer upserts.
+func WithCDCB2BOrgAuditorTeams(teams []string) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.b2bOrgAuditorTeams = teams }
 }
 
 func WithCDCUserReader(r port.UserReader) CDCConsumerOption {
@@ -556,7 +563,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 
 	// CDC always passes globalOrgAdminTeamUID (not create-only like the writer).
 	for _, org := range orgs {
-		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID)
+		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
 		// CDC-created child org gets its parent + child-list tuples even when no
 		// reparent was detected. publishB2BOrgUpsertEvents only emits reparenting
@@ -614,7 +621,12 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 
 	// nil access (writers/auditors) = preserve; empty = clear. For delete we
 	// pass nil to let FGA sync handle cleanup based on the delete indexer event.
-	fgaMsg := BuildB2BOrgFGAMessage(stubOrg, o.globalOrgAdminTeamUID, nil, nil, nil)
+	//
+	// No team references are asserted here — neither the global-admin UID nor
+	// the auditor teams. fga-sync never deletes a tuple whose subject begins
+	// with "team:", so any team reference written for an org that no longer
+	// exists is a permanent orphan on a dead object that nothing can reap.
+	fgaMsg := BuildB2BOrgFGAMessage(stubOrg, B2BOrgFGARefs{})
 	if err := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg); err != nil {
 		slog.WarnContext(ctx, "cdc: b2b_org delete FGA publish failed",
 			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)

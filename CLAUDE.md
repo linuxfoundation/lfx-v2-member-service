@@ -498,13 +498,18 @@ type b2b_org
 
 type project_membership
   relations
+    define b2b_org: [b2b_org]
+    define project: [project]
+    define writer: writer from b2b_org
+    define auditor: writer or auditor from b2b_org or auditor from project
     define key_contact: [user]
-    define auditor: [user, team#member] or key_contact
 ```
 
 **Hierarchy cascade:** `auditor` on `b2b_org` propagates transitively through the entire connected org hierarchy via `parent` and `child` tuples. A user with `auditor` on any org can view every other org in the same hierarchy. `writer` does not cascade — edit access stays on the assigned org only.
 
-**Key contact access:** a user with `key_contact` on a `project_membership` automatically becomes `auditor` on the parent `b2b_org` (via `key_contact from membership`).
+**Downward cascade to memberships:** `project_membership.auditor` includes `auditor from b2b_org`, so an `auditor` grant on an org also confers auditor on every `project_membership` under it — and, since key-contact routes access-check the parent membership, on every key contact under those. This is why the LF team grant below is written on `b2b_org` only.
+
+**Blanket LF team auditor grants:** `team:lf-staff#member` and `team:lf-contractor#member` hold `auditor` on **every** `b2b_org`, asserted on every full-sync publish path (see [docs/fga-contract.md](./docs/fga-contract.md)). Combined with the cascade above, LF staff and contractors have read access to all orgs, memberships and key contacts. These grants are effectively permanent: fga-sync never deletes a tuple whose subject begins with `team:`, so no service code path can revoke them — only `scripts/revoke-lf-teams-auditor-openfga.sh`.
 
 Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/templates/ruleset.yaml`):
 - **GET `/b2b_orgs/:uid`** — `auditor` on `b2b_org:{uid}`
@@ -551,6 +556,8 @@ When `openfga.enabled` is false (local dev), every rule falls back to `allow_all
 | `RUN_MODE`                               | `consumer` (CDC consumer) / `avatar-backfill` (one-off Job); omit for API | `""` (API mode)           | No       |
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
+| `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set to `""` to stop emitting new grants for this team; already-written tuples survive (fga-sync never deletes a `team:`-subject tuple) | `lf-staff` | No |
+| `LF_CONTRACTOR_TEAM_NAME`                | As above, for the contractor team | `lf-contractor` | No |
 | `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which the backfill quota guard refuses/stops a run: the `cdc_repair` drain (refuses to start / stops mid-page) **and** the full/filtered reindex paths (synchronous HTTP `503` + mid-run stop). Targeted (`items`) is exempt. | `0.80` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
@@ -578,6 +585,8 @@ before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end witho
 | `SF_CDC_CHANNEL`      | CDC channel to subscribe to                                                 | `/data/ChangeEvents`                 | No       |
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the quota guard issues an active `/limits` refresh. `0` disables active refresh. | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the platform org-admin team (same as API mode)            | `_null`                              | No       |
+| `LF_STAFF_TEAM_NAME`  | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `lf-staff`      | No       |
+| `LF_CONTRACTOR_TEAM_NAME` | As above, for the contractor team                                       | `lf-contractor`                      | No       |
 
 ### Salesforce Credentials
 

@@ -45,6 +45,17 @@ app:
   # call POST /b2b_orgs and POST /admin/reindex. The placeholder _null
   # never matches a real team UID; override per-environment.
   globalOrgAdminTeamUID: "_null"
+  # lfStaffTeamName and lfContractorTeamName are the LDAP-backed OpenFGA teams
+  # granted blanket auditor (read-only) access on every b2b_org. Unlike
+  # globalOrgAdminTeamUID these are team *names*, not UIDs, and they are real
+  # rather than placeholders — the grant is meant to be on by default.
+  #
+  # Setting either to "" stops new grants being emitted for that team. It does
+  # not revoke grants already written: fga-sync never deletes a tuple whose
+  # subject begins with "team:", so removal needs
+  # scripts/revoke-lf-teams-auditor-openfga.sh.
+  lfStaffTeamName: "lf-staff"
+  lfContractorTeamName: "lf-contractor"
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.
   lfxSelfServeBaseURL: ""

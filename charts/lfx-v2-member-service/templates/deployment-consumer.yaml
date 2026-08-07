@@ -42,6 +42,10 @@ spec:
               value: {{ .Values.app.logAddSource | quote }}
             - name: GLOBAL_ORG_ADMIN_TEAM_UID
               value: {{ .Values.app.globalOrgAdminTeamUID | quote }}
+            - name: LF_STAFF_TEAM_NAME
+              value: {{ .Values.app.lfStaffTeamName | quote }}
+            - name: LF_CONTRACTOR_TEAM_NAME
+              value: {{ .Values.app.lfContractorTeamName | quote }}
             - name: SF_PUBSUB_ENDPOINT
               value: {{ .Values.consumer.pubsubEndpoint | quote }}
             - name: SF_CDC_CHANNEL

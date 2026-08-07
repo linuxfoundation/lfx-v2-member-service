@@ -134,6 +134,12 @@ spec:
       # the full principal list, including pending-invite email addresses. This is
       # intentional — auditors are trusted principals who need visibility into who
       # has access in order to manage invitations.
+      #
+      # Note that auditor is no longer only an explicit per-org grant, which is the
+      # premise the justification above was written under. team:lf-staff#member and
+      # team:lf-contractor#member now hold auditor on every b2b_org, so this route
+      # exposes pending-invite email addresses to all LF staff and contractors, not
+      # only to principals granted on this specific org.
       execute:
         - authenticator: oidc
         - authenticator: anonymous_authenticator

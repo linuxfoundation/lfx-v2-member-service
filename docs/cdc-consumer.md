@@ -150,8 +150,8 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 
 | Change | Actions |
 |---|---|
-| Upsert | Invalidate b2b_org cache → fetch accounts → set `IsParent` from a batched child-UID query → `PublishB2BOrgIndexer` (`updated`) + `BuildB2BOrgFGAMessage` (`global_org_admin` always set, not create-only) + reparenting messages on a genuine parent change + **parent/child hierarchy tuples** (see below). |
-| Delete | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org) → `update_access` for the stub org (writers/auditors passed as `nil` = preserve; fga-sync reconciles tuple removal from the delete). |
+| Upsert | Invalidate b2b_org cache → fetch accounts → set `IsParent` from a batched child-UID query → `PublishB2BOrgIndexer` (`updated`) + `BuildB2BOrgFGAMessage` (`global_org_admin` always set, not create-only; auditor team references always set) + reparenting messages on a genuine parent change + **parent/child hierarchy tuples** (see below). |
+| Delete | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org) → `update_access` for the stub org (writers/auditors passed as `nil` = preserve; fga-sync reconciles tuple removal from the delete). **No team references are asserted** — neither `global_org_admin` nor the auditor teams. fga-sync never deletes a `team:`-subject tuple, so asserting one on an org that no longer exists creates a permanent orphan on a dead object that no code path can reap. |
 
 ### Asset → `project_membership`
 
@@ -210,7 +210,7 @@ For an org with a non-empty `ParentUID`, `handleAccountUpsertBatch` emits the pa
 
 ```407:418:internal/service/cdc_consumer.go
 	for _, org := range orgs {
-		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID)
+		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
 		// CDC-created child org gets its parent + child-list tuples even when no
 		// reparent was detected. publishB2BOrgUpsertEvents only emits reparenting
