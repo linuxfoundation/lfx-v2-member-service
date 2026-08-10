@@ -2,9 +2,9 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# grant-lf-teams-auditor-openfga.sh — Grant team:lf-staff#member and
-# team:lf-contractor#member the `auditor` relation on every b2b_org in the
-# exported census. One-off backfill for orgs that existed before the service
+# grant-lf-teams-auditor-openfga.sh — Grant the configured team subjects
+# (the LF staff team by default) the `auditor` relation on every b2b_org in
+# the exported census. One-off backfill for orgs that existed before the service
 # started asserting these grants on every write. See LFXV2-2937.
 #
 # Read-diff-write: it reads the tuples each team already holds, diffs against
@@ -21,7 +21,7 @@
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
 #   ./scripts/export-b2b-org-uids-from-opensearch.sh has been run
-#   export LF_STAFF_TEAM_NAME=… LF_CONTRACTOR_TEAM_NAME=…
+#   export LF_STAFF_TEAM_NAME=…   (at least one team; see fga_team_names)
 #
 # Usage:
 #   ./scripts/grant-lf-teams-auditor-openfga.sh <store-id> [input_dir] [--dry-run]

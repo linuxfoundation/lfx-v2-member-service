@@ -135,18 +135,20 @@ spec:
       # intentional — auditors are trusted principals who need visibility into who
       # has access in order to manage invitations.
       #
-      # The premise above no longer holds: auditor is not only an explicit per-org
-      # grant. team:lf-staff#member and team:lf-contractor#member hold auditor on
-      # every b2b_org, so once those grants are backfilled this route exposes
-      # pending-invite email addresses to all LF staff and contractors rather than
-      # to principals granted on this specific org. The b2b_org_settings search
-      # document carries the same auditor access check, so tightening this route
-      # alone would leave the roster reachable through search.
+      # The premise above no longer holds as literally: auditor is not only an
+      # explicit per-org grant. The configured LF staff team holds auditor on
+      # every b2b_org (LFXV2-2937), so once those grants are backfilled this
+      # route exposes pending-invite email addresses to all LF staff rather
+      # than only to principals granted on this specific org. The
+      # b2b_org_settings search document carries the same auditor access check,
+      # so tightening this route alone would leave the roster reachable
+      # through search.
       #
-      # The gate is deliberately unchanged here — narrowing it would also remove
-      # roster read from per-org auditors who have it today, which is a product
-      # decision, not a side effect of the grants. Tracked in LFXV2-3037, which
-      # blocks the prod backfill.
+      # The gate stays as it is, deliberately. LFXV2-3026 is Org Dash / PCC
+      # parity, and staff already reach this roster in legacy, so the grant
+      # migrates an existing disclosure rather than creating one. Narrowing to
+      # writer would also strip roster read from the per-org auditors who have
+      # it today — a product change, not a consequence of the team grant.
       execute:
         - authenticator: oidc
         - authenticator: anonymous_authenticator

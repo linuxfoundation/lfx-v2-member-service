@@ -4,7 +4,7 @@
 #
 # export-b2b-org-uids-from-opensearch.sh — Scroll OpenSearch for every live
 # b2b_org and write its UID to a JSONL file, as the authoritative org census
-# for the lf-staff / lf-contractor auditor backfill. See LFXV2-2937.
+# for the LF staff team auditor backfill. See LFXV2-2937.
 #
 # Why OpenSearch and not OpenFGA: an FGA-based census can only enumerate orgs
 # that already hold some tuple. Reading global_org_admin grants would skip any

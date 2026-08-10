@@ -79,7 +79,7 @@ fga_read_org_uids() {
 # fga_apply_batch writes or deletes one batch of auditor tuples for a subject.
 #
 #   $1 mode: "writes" or "deletes"
-#   $2 subject, e.g. team:lf-staff#member
+#   $2 subject, e.g. team:<staff-team>#member
 #   $3 JSON array of bare org UIDs
 #
 # on_duplicate/on_missing "ignore" is load-bearing, not defensive. /write is
@@ -176,16 +176,35 @@ fga_require_store_id() {
 # Required, not defaulted: the defaults live in values.yaml and providers.go,
 # and a third copy here would drift. Granting the wrong team name is as
 # unreapable as granting the wrong store.
+#
+# Any non-empty subset is accepted; only the empty set is an error. Two callers
+# need that. The shipped grant is the staff team alone (LFXV2-3071 owns
+# contractor access), so demanding both names would make the backfill
+# unrunnable. And the revoke path has to target a team the service no longer
+# emits — clearing LF_STAFF_TEAM_NAME while setting LF_CONTRACTOR_TEAM_NAME
+# revokes contractor tuples without touching the staff grants that are meant
+# to stay.
 fga_team_names() {
-	if [[ -z "${LF_STAFF_TEAM_NAME:-}" || -z "${LF_CONTRACTOR_TEAM_NAME:-}" ]]; then
-		echo "ERROR: LF_STAFF_TEAM_NAME and LF_CONTRACTOR_TEAM_NAME must both be set." >&2
-		echo "       They are deliberately not defaulted here — the authoritative values" >&2
-		echo "       are in charts/lfx-v2-member-service/values.yaml. Export them to match" >&2
+	local names=()
+	local name
+
+	for name in "${LF_STAFF_TEAM_NAME:-}" "${LF_CONTRACTOR_TEAM_NAME:-}"; do
+		# Trim surrounding whitespace so a padded value cannot render as
+		# "team: #member", mirroring the trim in providers.go.
+		name="${name#"${name%%[![:space:]]*}"}"
+		name="${name%"${name##*[![:space:]]}"}"
+		[[ -n "$name" ]] && names+=("$name")
+	done
+
+	if [[ ${#names[@]} -eq 0 ]]; then
+		echo "ERROR: no auditor team configured. Set at least one of" >&2
+		echo "       LF_STAFF_TEAM_NAME or LF_CONTRACTOR_TEAM_NAME." >&2
+		echo "       They are deliberately not defaulted here — the authoritative value" >&2
+		echo "       is in charts/lfx-v2-member-service/values.yaml. Export it to match" >&2
 		echo "       the environment you are targeting, e.g.:" >&2
-		echo "         export LF_STAFF_TEAM_NAME=lf-staff" >&2
-		echo "         export LF_CONTRACTOR_TEAM_NAME=lf-contractor" >&2
+		echo "         export LF_STAFF_TEAM_NAME=<staff-team>" >&2
 		exit 1
 	fi
-	echo "$LF_STAFF_TEAM_NAME"
-	echo "$LF_CONTRACTOR_TEAM_NAME"
+
+	printf '%s\n' "${names[@]}"
 }

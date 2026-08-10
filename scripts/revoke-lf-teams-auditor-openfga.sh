@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 #
 # revoke-lf-teams-auditor-openfga.sh — Remove the blanket `auditor` grants held
-# by team:lf-staff#member and team:lf-contractor#member on b2b_org objects.
-# The inverse of grant-lf-teams-auditor-openfga.sh. See LFXV2-2937.
+# by the configured team subjects on b2b_org objects. The inverse of
+# grant-lf-teams-auditor-openfga.sh. See LFXV2-2937.
 #
 # This exists because the grant is otherwise irreversible: fga-sync never
 # deletes a tuple whose subject begins with `team:`, so reverting the service
@@ -18,11 +18,14 @@
 #
 # Scope: it deletes only tuples whose subject is exactly one of the configured
 # teams. Per-user auditor grants and global_org_admin are never touched.
+# Configure the teams narrowly — to revoke one team while leaving another in
+# place, export only that team's name.
 #
 # Prerequisites:
-#   Stop the service emitting the grants FIRST — set LF_STAFF_TEAM_NAME and
-#   LF_CONTRACTOR_TEAM_NAME to "" (or revert the code) and roll out, on the API
-#   and the CDC consumer both. Revoking while the service is still emitting
+#   Stop the service emitting the grants FIRST — set LF_STAFF_TEAM_NAME to ""
+#   (or revert the code) and roll out, on the API and the CDC consumer both.
+#   This does not apply to a team the service never emits, such as a contractor
+#   team left over from earlier testing. Revoking while the service is emitting
 #   leaves a race this script cannot win: any org written during or after the
 #   run re-acquires the tuple, and fga-sync will not reap it afterwards because
 #   the subject begins with `team:`. Order matters more here than usual because
@@ -31,7 +34,7 @@
 #
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
-#   export LF_STAFF_TEAM_NAME=… LF_CONTRACTOR_TEAM_NAME=…
+#   export LF_STAFF_TEAM_NAME=…   (at least one team; see fga_team_names)
 #
 # Usage:
 #   ./scripts/revoke-lf-teams-auditor-openfga.sh <store-id> [--dry-run] [--yes]
@@ -143,6 +146,6 @@ if [[ "$DRY_RUN" == true ]]; then
 else
 	echo "Deleted $TOTAL_TARGETS tuples. Re-run with --dry-run to confirm zero remaining."
 	echo ""
-	echo "Reminder: revert or reconfigure the service too (LF_STAFF_TEAM_NAME/"
-	echo "LF_CONTRACTOR_TEAM_NAME set to \"\"), or the next write re-grants them."
+	echo "Reminder: revert or reconfigure the service too (LF_STAFF_TEAM_NAME"
+	echo "set to \"\"), or the next write re-grants them."
 fi

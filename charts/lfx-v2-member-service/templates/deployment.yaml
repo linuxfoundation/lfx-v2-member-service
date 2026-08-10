@@ -50,8 +50,6 @@ spec:
               value: {{ .Values.app.globalOrgAdminTeamUID | quote }}
             - name: LF_STAFF_TEAM_NAME
               value: {{ .Values.app.lfStaffTeamName | quote }}
-            - name: LF_CONTRACTOR_TEAM_NAME
-              value: {{ .Values.app.lfContractorTeamName | quote }}
             - name: LFX_SELF_SERVE_BASE_URL
               value: {{ .Values.app.lfxSelfServeBaseURL | quote }}
             {{- $adminReindexQuotaThreshold := .Values.app.adminReindexQuotaThreshold | toString | trim }}

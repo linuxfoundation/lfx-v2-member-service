@@ -45,17 +45,20 @@ app:
   # call POST /b2b_orgs and POST /admin/reindex. The placeholder _null
   # never matches a real team UID; override per-environment.
   globalOrgAdminTeamUID: "_null"
-  # lfStaffTeamName and lfContractorTeamName are the LDAP-backed OpenFGA teams
-  # granted blanket auditor (read-only) access on every b2b_org. Unlike
-  # globalOrgAdminTeamUID these are team *names*, not UIDs, and they are real
-  # rather than placeholders — the grant is meant to be on by default.
+  # lfStaffTeamName is the LDAP-backed OpenFGA team granted blanket auditor
+  # (read-only) access on every b2b_org. Unlike globalOrgAdminTeamUID this is a
+  # team *name*, not a UID, and it is real rather than a placeholder — the grant
+  # is meant to be on by default.
   #
-  # Setting either to "" stops new grants being emitted for that team. It does
-  # not revoke grants already written: fga-sync never deletes a tuple whose
-  # subject begins with "team:", so removal needs
-  # scripts/revoke-lf-teams-auditor-openfga.sh.
+  # Setting it to "" stops new grants being emitted. It does not revoke grants
+  # already written: fga-sync never deletes a tuple whose subject begins with
+  # "team:", so removal needs scripts/revoke-lf-teams-auditor-openfga.sh.
+  #
+  # Only the LF staff team is granted here. Contractors do not inherit staff
+  # access — see LFXV2-3071. Because the grant is unreapable, a contractor key
+  # is absent rather than present-and-blank: a deployment from stale values
+  # would otherwise write tuples nothing can remove.
   lfStaffTeamName: "lf-staff"
-  lfContractorTeamName: "lf-contractor"
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.
   lfxSelfServeBaseURL: ""

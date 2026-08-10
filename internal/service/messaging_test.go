@@ -379,8 +379,8 @@ func TestPublishB2BOrgTeamGrantsFGA_Guard(t *testing.T) {
 	}{
 		{
 			name: "blank admin UID with teams still publishes", adminUID: "",
-			auditorTeams: []string{"lf-staff"}, wantPublish: true,
-			wantAuditorRefs: []string{"team:lf-staff#member"},
+			auditorTeams: []string{"staff-team"}, wantPublish: true,
+			wantAuditorRefs: []string{"team:staff-team#member"},
 		},
 		{
 			name: "admin UID with no teams still publishes", adminUID: "admin-uid",
@@ -389,8 +389,8 @@ func TestPublishB2BOrgTeamGrantsFGA_Guard(t *testing.T) {
 		},
 		{
 			name: "both configured publishes", adminUID: "admin-uid",
-			auditorTeams: []string{"lf-staff", "lf-contractor"}, wantPublish: true,
-			wantAuditorRefs: []string{"team:lf-staff#member", "team:lf-contractor#member"},
+			auditorTeams: []string{"staff-team", "second-team"}, wantPublish: true,
+			wantAuditorRefs: []string{"team:staff-team#member", "team:second-team#member"},
 			wantAdminRefs:   []string{"team:admin-uid#member"},
 		},
 		{name: "both absent publishes nothing", adminUID: "", auditorTeams: nil, wantPublish: false},
@@ -447,25 +447,25 @@ func TestBuildB2BOrgFGAMessage_AuditorTeams(t *testing.T) {
 			// ExcludeRelations only when deleting, so the exclusion preserves
 			// per-user auditor tuples this caller is not managing.
 			name:         "teams with nil auditors are written and auditor stays excluded",
-			auditorTeams: []string{"lf-staff", "lf-contractor"},
+			auditorTeams: []string{"staff-team", "second-team"},
 			auditors:     nil,
-			wantRefs:     []string{"team:lf-staff#member", "team:lf-contractor#member"},
+			wantRefs:     []string{"team:staff-team#member", "team:second-team#member"},
 			wantRelation: nil,
 			wantExcluded: true,
 		},
 		{
 			name:         "teams coexist with an explicit auditor list",
-			auditorTeams: []string{"lf-staff"},
+			auditorTeams: []string{"staff-team"},
 			auditors:     []string{"alice"},
-			wantRefs:     []string{"team:lf-staff#member"},
+			wantRefs:     []string{"team:staff-team#member"},
 			wantRelation: []string{"alice"},
 			wantExcluded: false,
 		},
 		{
 			name:         "blank and whitespace-only names are dropped",
-			auditorTeams: []string{"lf-staff", "", "   "},
+			auditorTeams: []string{"staff-team", "", "   "},
 			auditors:     nil,
-			wantRefs:     []string{"team:lf-staff#member"},
+			wantRefs:     []string{"team:staff-team#member"},
 			wantRelation: nil,
 			wantExcluded: true,
 		},

@@ -407,22 +407,29 @@ func GlobalOrgAdminTeamUID() string {
 }
 
 // B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
-// on every b2b_org, from LF_STAFF_TEAM_NAME and LF_CONTRACTOR_TEAM_NAME.
+// on every b2b_org, from LF_STAFF_TEAM_NAME.
 //
 // An unset variable falls back to its default; a variable set to an empty or
 // whitespace-only value is treated as a deliberate opt-out and drops that team.
-// Both are trimmed, so no path can produce a "team:#member" subject with an
+// Names are trimmed, so no path can produce a "team:#member" subject with an
 // empty name — the trap GLOBAL_ORG_ADMIN_TEAM_UID leaves open by guarding only
 // on != "" while the chart defaults it to the placeholder "_null".
 //
 // An empty result stops new auditor team references being emitted on every
 // path. It does not revoke tuples already written: fga-sync never deletes a
 // tuple whose subject begins with "team:", so no service code path can.
+//
+// The slice return is not over-engineering for a single team. That same
+// irreversibility means a team granted by default cannot be taken back by
+// changing config or reverting code, so the contractor team is absent here
+// rather than present-and-blanked: a pod deployed from stale values would
+// otherwise write tuples nothing can reap. Adding a team (LFXV2-3071 for
+// contractor access) stays a config-and-provider change with no reach into
+// message construction.
 func B2BOrgAuditorTeamNames() []string {
-	names := make([]string, 0, 2)
+	names := make([]string, 0, 1)
 	for _, name := range []string{
 		envOrDefault("LF_STAFF_TEAM_NAME", "lf-staff"),
-		envOrDefault("LF_CONTRACTOR_TEAM_NAME", "lf-contractor"),
 	} {
 		if name != "" {
 			names = append(names, name)

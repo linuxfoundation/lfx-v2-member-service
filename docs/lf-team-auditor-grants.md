@@ -3,7 +3,9 @@
 
 # LF Team Auditor Grants — Operator Runbook
 
-`team:lf-staff#member` and `team:lf-contractor#member` hold the `auditor` relation on every `b2b_org`. The service asserts these grants on every full-sync publish path; the scripts in this document exist for the orgs that already existed when that behaviour shipped, and for rolling the grant back.
+The LF staff team — named by `LF_STAFF_TEAM_NAME`, written as `team:<staff-team>#member` throughout this document — holds the `auditor` relation on every `b2b_org`. The service asserts the grant on every full-sync publish path; the scripts in this document exist for the orgs that already existed when that behaviour shipped, and for rolling the grant back.
+
+**Staff only.** Contractors do not inherit staff access — contractor is its own role, tracked in [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071). The scripts and the message plumbing take a list of teams, so a future role is a configuration change, but nothing here grants a contractor team by default.
 
 See [fga-contract.md](./fga-contract.md) for the message-level contract and [LFXV2-2937](https://linuxfoundation.atlassian.net/browse/LFXV2-2937) for the change itself.
 
@@ -18,13 +20,17 @@ Read access to **all six document types this service indexes**, on every org. Tw
 
 Workspaces and workspace-projects have no `auditor` REST route at all (every workspace route is `writer`-gated), but their index documents access-check `auditor` on the parent `b2b_org` by design, so they are reachable via search.
 
-Note that `GET /b2b_orgs/{uid}/settings` exposes **pending-invite email addresses**. That route was gated on `auditor` rather than `writer` on the premise that auditors are per-org trusted principals; the blanket grant changes that premise. The `b2b_org_settings` index document carries the same `auditor` access check, so the roster is reachable through search as well as through the route — any narrowing has to cover both. Tracked in [LFXV2-3037](https://linuxfoundation.atlassian.net/browse/LFXV2-3037).
+Note that `GET /b2b_orgs/{uid}/settings` exposes **pending-invite email addresses**. That route was gated on `auditor` rather than `writer` on the premise that auditors are per-org trusted principals; the blanket grant changes that premise. The `b2b_org_settings` index document carries the same `auditor` access check, so the roster is reachable through search as well as through the route — any narrowing would have to cover both.
+
+This was reviewed and accepted rather than narrowed. [LFXV2-3026](https://linuxfoundation.atlassian.net/browse/LFXV2-3026) is Org Dash / PCC parity, and staff already reach this roster in legacy, so the grant migrates an existing disclosure rather than creating one. Narrowing the route to `writer` would also strip roster read from the per-org auditors who hold it today.
 
 No write access anywhere. The `[user, team#member]` branch of `b2b_org.auditor` feeds nothing upward, unlike `global_org_admin`, which flows into `writer`.
 
 ## The one-way-door property
 
-**fga-sync never deletes a tuple whose subject begins with `team:`.** Reverting the service code stops *new* grants being written; it does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` / `LF_CONTRACTOR_TEAM_NAME` to `""` behaves the same way.
+**fga-sync never deletes a tuple whose subject begins with `team:`.** Reverting the service code stops *new* grants being written; it does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` to `""` behaves the same way.
+
+This is also why the contractor default was deleted outright rather than blanked in `values.yaml`. A configuration opt-out only holds if every pod in every environment is deployed from the values carrying it; one stale rollout writes tuples nothing can reap.
 
 Removing the tuples requires `revoke-lf-teams-auditor-openfga.sh`. That is why it ships alongside the grant script rather than being written later under incident pressure.
 
@@ -38,12 +44,13 @@ The scripts are the primary route because reindex re-fetches every org from Sale
 
 All three live in `scripts/`. The two OpenFGA scripts take the store ID as a **required first argument** — there is deliberately no default, because a default target on a script whose writes cannot be undone is a foot-gun.
 
-For the same reason they require the team names in the environment rather than defaulting them. The authoritative values live in `charts/lfx-v2-member-service/values.yaml`; a third hardcoded copy in the scripts would drift, and granting the wrong team name is exactly as unreapable as granting on the wrong store:
+For the same reason they require the team names in the environment rather than defaulting them. The authoritative value lives in `charts/lfx-v2-member-service/values.yaml`; a third hardcoded copy in the scripts would drift, and granting the wrong team name is exactly as unreapable as granting on the wrong store:
 
 ```bash
-export LF_STAFF_TEAM_NAME=lf-staff
-export LF_CONTRACTOR_TEAM_NAME=lf-contractor
+export LF_STAFF_TEAM_NAME=<staff-team>
 ```
+
+At least one team must be set; any non-empty subset is accepted. `LF_CONTRACTOR_TEAM_NAME` is still read if exported, which is how the revoke script targets contractor tuples without touching the staff grants — set `LF_STAFF_TEAM_NAME=""` and export the contractor name alone. Nothing reads it by default.
 
 The grant and revoke scripts share their OpenFGA helpers via `scripts/lib/openfga-team-auditor.sh` (pagination, batch apply, the transport guard, argument validation). They were near-copies; sharing matters here because the revoke script is the rollback path that runs under incident pressure, and a rollback that has quietly drifted from the tested grant path is worse than no rollback. Both scripts source the library relative to their own location, so they must be run from a checkout rather than copied to a pod in isolation.
 
@@ -91,14 +98,15 @@ The live form prompts for the store ID before deleting, because it differs from 
 
 Deletes only tuples whose subject is exactly one of the configured teams; per-user `auditor` grants and `global_org_admin` are never touched. Batches set `"on_missing": "ignore"` inside the `deletes` object — the mirror of the grant script's problem, since the tuple list comes from a paginated read that can go stale mid-run.
 
-**Stop the emission before you revoke, not after.** Set both team names to `""` (or revert) and roll out the API *and* the CDC consumer first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because the subject begins with `team:`. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
+**Stop the emission before you revoke, not after.** Set the team name to `""` (or revert) and roll out the API *and* the CDC consumer first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because the subject begins with `team:`. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
 
 ### Rollback order
 
-1. Set `LF_STAFF_TEAM_NAME` and `LF_CONTRACTOR_TEAM_NAME` to `""` (or revert the code) and roll out both deployments.
+1. Set `LF_STAFF_TEAM_NAME` to `""` (or revert the code) and roll out both deployments.
 2. Confirm no pod is still running the emitting config.
-3. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run.
-4. Re-run the dry-run; expect zero. This is only meaningful once step 1 has landed.
+3. Export the team name to revoke — the service no longer emits it, but the script still needs to know what to look for.
+4. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run.
+5. Re-run the dry-run; expect zero. This is only meaningful once step 1 has landed.
 
 ## Rollout order
 
@@ -106,6 +114,6 @@ Deletes only tuples whose subject is exactly one of the configured teams; per-us
 2. Deploy to prod. From this point CDC upserts assert the grants for any org that changes.
 3. Run the export, then the grant script's dry-run, then the live run.
 4. Re-run the dry-run; expect zero.
-5. Spot-check the cascade: pick an org with no per-user auditor, confirm an `lf-staff` member can `GET` it and the `project_membership` beneath it.
+5. Spot-check the cascade: pick an org with no per-user auditor, confirm a staff-team member can `GET` it and the `project_membership` beneath it.
 
 Step 3 comes after step 2 deliberately — that ordering is why the collision handling is required rather than optional.

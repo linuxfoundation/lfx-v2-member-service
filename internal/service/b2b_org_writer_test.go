@@ -207,7 +207,7 @@ func TestB2BOrgWriter_Update_EmitsAuditorTeams(t *testing.T) {
 		svc.WithB2BOrgWriter(&seededOrgWriter{updateOrg: updated}),
 		svc.WithB2BOrgPublisher(pub),
 		svc.WithGlobalOrgAdminTeamUID("global-admin-uid"),
-		svc.WithB2BOrgAuditorTeams([]string{"lf-staff", "lf-contractor"}),
+		svc.WithB2BOrgAuditorTeams([]string{"staff-team", "second-team"}),
 	)
 
 	_, err := w.Update(context.Background(), testB2BOrgUID, model.B2BOrgInput{Name: "Updated Name"}, "")
@@ -220,7 +220,7 @@ func TestB2BOrgWriter_Update_EmitsAuditorTeams(t *testing.T) {
 	require.True(t, ok)
 
 	assert.Equal(t,
-		[]string{"team:lf-staff#member", "team:lf-contractor#member"},
+		[]string{"team:staff-team#member", "team:second-team#member"},
 		data.References["auditor"],
 		"the auditor team grant must be asserted on update, not only on create")
 	assert.NotContains(t, data.References, "global_org_admin",

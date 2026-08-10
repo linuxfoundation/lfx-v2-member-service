@@ -442,7 +442,7 @@ func TestCDCConsumer_Account_Delete_AssertsNoTeamReferences(t *testing.T) {
 		&mock.MockCacheInvalidator{},
 		pub,
 		"global-admin-team",
-		svc.WithCDCB2BOrgAuditorTeams([]string{"lf-staff", "lf-contractor"}),
+		svc.WithCDCB2BOrgAuditorTeams([]string{"staff-team", "second-team"}),
 	)
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
