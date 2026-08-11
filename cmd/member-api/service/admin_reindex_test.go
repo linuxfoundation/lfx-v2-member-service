@@ -173,11 +173,14 @@ func TestAdminReindex_CdcRepair_SupportedTypesAccepted(t *testing.T) {
 // emitter is the path that had its guard widened so a blank global-admin UID
 // could not silently swallow these grants.
 //
-// The default is load-bearing rather than cosmetic. A team named here holds
-// auditor on every b2b_org, and fga-sync never deletes a tuple whose subject
-// begins with "team:" — so a team that reaches this default cannot be taken
-// back by changing config or reverting code. The contractor team is
-// deliberately absent (LFXV2-3071); this fails if it is reintroduced.
+// These cases are load-bearing rather than cosmetic. A team reaching this
+// function holds auditor on every b2b_org, and fga-sync never deletes a tuple
+// whose subject begins with "team:", so the grant cannot be taken back by
+// changing config or reverting code. Only a name given explicitly may get
+// through: the chart supplies it (values.yaml is the single copy), and an
+// absent, blank or whitespace-only variable must grant nothing rather than fall
+// back to a hardcoded name that could drift from the chart. The contractor
+// variable is deliberately never read (LFXV2-3071); this fails if it returns.
 func TestB2BOrgAuditorTeamNames(t *testing.T) {
 	tests := []struct {
 		name string
@@ -185,17 +188,17 @@ func TestB2BOrgAuditorTeamNames(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "unset falls back to the staff team alone",
+			name: "unset grants nothing rather than falling back to a default",
 			env:  nil,
-			want: []string{"lf-staff"},
+			want: []string{},
 		},
 		{
-			name: "explicit override replaces the default",
+			name: "an explicitly configured team is granted",
 			env:  map[string]string{"LF_STAFF_TEAM_NAME": "staff-team-dev"},
 			want: []string{"staff-team-dev"},
 		},
 		{
-			name: "blank is a deliberate opt-out, not a fallback",
+			name: "blank grants nothing",
 			env:  map[string]string{"LF_STAFF_TEAM_NAME": ""},
 			want: []string{},
 		},

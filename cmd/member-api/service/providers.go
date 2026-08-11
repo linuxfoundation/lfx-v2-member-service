@@ -409,44 +409,36 @@ func GlobalOrgAdminTeamUID() string {
 // B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
 // on every b2b_org, from LF_STAFF_TEAM_NAME.
 //
-// An unset variable falls back to its default; a variable set to an empty or
-// whitespace-only value is treated as a deliberate opt-out and drops that team.
-// Names are trimmed, so no path can produce a "team:#member" subject with an
-// empty name — the trap GLOBAL_ORG_ADMIN_TEAM_UID leaves open by guarding only
-// on != "" while the chart defaults it to the placeholder "_null".
+// No team name is hardcoded here. The authoritative copy lives in
+// charts/lfx-v2-member-service/values.yaml, which both deployments inject
+// unconditionally; a second copy in this file could drift from it and would be
+// the harder one to notice. An unset variable therefore grants nothing, which
+// is also the safe direction for anything running outside the chart.
 //
-// An empty result stops new auditor team references being emitted on every
-// path. It does not revoke tuples already written: fga-sync never deletes a
-// tuple whose subject begins with "team:", so no service code path can.
+// Names are trimmed and blank or whitespace-only values are dropped, so no path
+// can produce a "team:#member" subject with an empty name — the trap
+// GLOBAL_ORG_ADMIN_TEAM_UID leaves open by guarding only on != "" while the
+// chart defaults it to the placeholder "_null".
 //
-// The slice return is not over-engineering for a single team. That same
-// irreversibility means a team granted by default cannot be taken back by
-// changing config or reverting code, so the contractor team is absent here
-// rather than present-and-blanked: a pod deployed from stale values would
-// otherwise write tuples nothing can reap. Adding a team (LFXV2-3071 for
-// contractor access) stays a config-and-provider change with no reach into
-// message construction.
+// Clearing the variable stops new references being emitted but revokes nothing:
+// fga-sync never deletes a tuple whose subject begins with "team:" (that guard
+// lives in the deployed service, v0.3.1 or later), so no service code path can
+// remove them — only scripts/revoke-lf-teams-auditor-openfga.sh.
+//
+// The slice return is not over-engineering for a single team. Adding one
+// (LFXV2-3071 for contractor access) stays a config-and-provider change with no
+// reach into message construction. The contractor variable is deliberately not
+// read here, so a pod deployed from stale values cannot reintroduce it.
 func B2BOrgAuditorTeamNames() []string {
 	names := make([]string, 0, 1)
 	for _, name := range []string{
-		envOrDefault("LF_STAFF_TEAM_NAME", "lf-staff"),
+		strings.TrimSpace(os.Getenv("LF_STAFF_TEAM_NAME")),
 	} {
 		if name != "" {
 			names = append(names, name)
 		}
 	}
 	return names
-}
-
-// envOrDefault returns the trimmed value of the named environment variable, or
-// def when the variable is unset. A variable that is set but blank returns "",
-// which callers treat as a deliberate opt-out rather than falling back.
-func envOrDefault(key, def string) string {
-	value, set := os.LookupEnv(key)
-	if !set {
-		return def
-	}
-	return strings.TrimSpace(value)
 }
 
 // BackfillIteratorImpl returns the BackfillIterator implementation selected by

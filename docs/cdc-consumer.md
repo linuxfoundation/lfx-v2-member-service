@@ -151,7 +151,7 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 | Change | Actions |
 |---|---|
 | Upsert | Invalidate b2b_org cache → fetch accounts → set `IsParent` from a batched child-UID query → `PublishB2BOrgIndexer` (`updated`) + `BuildB2BOrgFGAMessage` (`global_org_admin` always set, not create-only; auditor team references always set) + reparenting messages on a genuine parent change + **parent/child hierarchy tuples** (see below). |
-| Delete | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org) → `update_access` for the stub org (writers/auditors passed as `nil` = preserve; fga-sync reconciles tuple removal from the delete). **No team references are asserted** — neither `global_org_admin` nor the auditor teams. fga-sync never deletes a `team:`-subject tuple, so asserting one on an org that no longer exists creates a permanent orphan on a dead object that no code path can reap. |
+| Delete | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org) → `update_access` for the stub org. No references or relations are asserted, so every b2b_org relation lands in `ExcludeRelations` and the message reconciles **nothing** away — all existing tuples survive the delete, `team:`-subject and per-user alike (see [LFXV2-3034](https://linuxfoundation.atlassian.net/browse/LFXV2-3034)). **No team references are asserted** either — neither `global_org_admin` nor the auditor teams. fga-sync never deletes a `team:`-subject tuple, so asserting one on an org that no longer exists creates a permanent orphan on a dead object that no code path can reap. |
 
 ### Asset → `project_membership`
 

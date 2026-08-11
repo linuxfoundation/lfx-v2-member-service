@@ -509,7 +509,7 @@ type project_membership
 
 **Downward cascade to memberships:** `project_membership.auditor` includes `auditor from b2b_org`, so an `auditor` grant on an org also confers auditor on every `project_membership` under it — and, since key-contact routes access-check the parent membership, on every key contact under those. This is why the LF team grant below is written on `b2b_org` only.
 
-**Blanket LF team auditor grants:** the configured LF staff team (`LF_STAFF_TEAM_NAME`) holds `auditor` on **every** `b2b_org`, asserted on every full-sync publish path (see [docs/fga-contract.md](./docs/fga-contract.md)). Combined with the cascade above, LF staff have read access to all orgs, memberships and key contacts. Contractors are not included — contractor is its own role (LFXV2-3071), not an inheritance of the staff grant. These grants are effectively permanent: fga-sync never deletes a tuple whose subject begins with `team:`, so no service code path can revoke them — only `scripts/revoke-lf-teams-auditor-openfga.sh`.
+**Blanket LF team auditor grants:** the team named by `LF_STAFF_TEAM_NAME` holds `auditor` on **every** `b2b_org`, asserted on every full-sync publish path (see [docs/fga-contract.md](./docs/fga-contract.md)). Combined with the cascade above, LF staff have read access to all orgs, memberships and key contacts. The name is env-invariant, so `charts/lfx-v2-member-service/values.yaml` holds the single authoritative copy and the deploy — not the backfill — is when grants start being written. Contractors are not included — contractor is its own role (LFXV2-3071), not an inheritance of the staff grant. These grants are effectively permanent: fga-sync never deletes a tuple whose subject begins with `team:` (the guard is in the deployed fga-sync, v0.3.1 or later, not this repo's `go.mod` pin), so no service code path can revoke them — only `scripts/revoke-lf-teams-auditor-openfga.sh`.
 
 Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/templates/ruleset.yaml`):
 - **GET `/b2b_orgs/:uid`** — `auditor` on `b2b_org:{uid}`
@@ -556,7 +556,7 @@ When `openfga.enabled` is false (local dev), every rule falls back to `allow_all
 | `RUN_MODE`                               | `consumer` (CDC consumer) / `avatar-backfill` (one-off Job); omit for API | `""` (API mode)           | No       |
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
-| `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set to `""` to stop emitting new grants for this team; already-written tuples survive (fga-sync never deletes a `team:`-subject tuple) | `lf-staff` | No |
+| `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set from `values.yaml` (`lf-staff`), which is the only copy of the name; unset grants nothing. Clearing it stops new grants but already-written tuples survive (fga-sync never deletes a `team:`-subject tuple) | `""` (chart sets `lf-staff`) | No |
 | `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which the backfill quota guard refuses/stops a run: the `cdc_repair` drain (refuses to start / stops mid-page) **and** the full/filtered reindex paths (synchronous HTTP `503` + mid-run stop). Targeted (`items`) is exempt. | `0.80` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
@@ -584,7 +584,7 @@ before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end witho
 | `SF_CDC_CHANNEL`      | CDC channel to subscribe to                                                 | `/data/ChangeEvents`                 | No       |
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the quota guard issues an active `/limits` refresh. `0` disables active refresh. | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the platform org-admin team (same as API mode)            | `_null`                              | No       |
-| `LF_STAFF_TEAM_NAME`  | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `lf-staff`      | No       |
+| `LF_STAFF_TEAM_NAME`  | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `""` (chart sets `lf-staff`) | No       |
 
 ### Salesforce Credentials
 

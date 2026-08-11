@@ -47,17 +47,26 @@ app:
   globalOrgAdminTeamUID: "_null"
   # lfStaffTeamName is the LDAP-backed OpenFGA team granted blanket auditor
   # (read-only) access on every b2b_org. Unlike globalOrgAdminTeamUID this is a
-  # team *name*, not a UID, and it is real rather than a placeholder — the grant
-  # is meant to be on by default.
+  # team *name*, not a UID: it is the same in every environment, so it is a real
+  # value here rather than a placeholder overridden per environment. This is the
+  # single authoritative copy — nothing else in the repo hardcodes it.
+  #
+  # Deploying is the cutover. Every write path asserts the reference, so orgs
+  # begin acquiring the tuple as CDC events arrive; the backfill scripts only
+  # sweep up orgs that never change on their own. Plan the rollout knowing the
+  # grant starts here, not at the backfill.
   #
   # Setting it to "" stops new grants being emitted. It does not revoke grants
   # already written: fga-sync never deletes a tuple whose subject begins with
-  # "team:", so removal needs scripts/revoke-lf-teams-auditor-openfga.sh.
+  # "team:", so removal needs scripts/revoke-lf-teams-auditor-openfga.sh. That
+  # guard is in the deployed fga-sync (added in v0.3.1; the platform chart
+  # deploys ~0.3.5), not in this repo's go.mod pin, which only supplies message
+  # types. See docs/lf-team-auditor-grants.md.
   #
-  # Only the LF staff team is granted here. Contractors do not inherit staff
-  # access — see LFXV2-3071. Because the grant is unreapable, a contractor key
-  # is absent rather than present-and-blank: a deployment from stale values
-  # would otherwise write tuples nothing can remove.
+  # Only an LF staff team belongs here. Contractors do not inherit staff access
+  # — see LFXV2-3071. Because the grant is unreapable, a contractor key is
+  # absent rather than present-and-blank: a deployment from stale values would
+  # otherwise write tuples nothing can remove.
   lfStaffTeamName: "lf-staff"
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.

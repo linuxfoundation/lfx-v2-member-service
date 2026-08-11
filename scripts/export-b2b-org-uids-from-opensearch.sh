@@ -66,6 +66,10 @@ for stale in (jsonl_path, summary_path):
 # the dedupe below.
 QUERY = {
     "size": page_size,
+    # track_total_hits lives on the scroll query itself, not in a separate
+    # count call, so the scroll's opening response reports the exact total for
+    # the same snapshot the scroll reads from — see read_total below.
+    "track_total_hits": True,
     "_source": ["object_id"],
     "query": {
         "bool": {
@@ -94,18 +98,17 @@ def post(path, body):
         return json.load(resp)
 
 
-def get_total():
-    # track_total_hits is required: without it OpenSearch stops counting at
-    # 10,000 and reports {"value": 10000, "relation": "gte"}. The consistency
-    # check below compares the scroll's hit count against this number, so a
-    # capped total would turn every run over a 10k estate into a false
-    # truncation warning — training the operator to ignore the one check that
-    # would catch a real truncation.
-    data = post(
-        f"{index}/_search",
-        {"size": 0, "track_total_hits": True, "query": QUERY["query"]},
-    )
-    total = data["hits"]["total"]
+def read_total(payload):
+    # Read the total off the scroll's own opening response rather than a
+    # separate _search?size=0 call. Two requests observe two snapshots, so any
+    # index write landing between them fails the consistency check below on an
+    # export that was never truncated — and that check aborts the run.
+    #
+    # Without track_total_hits OpenSearch stops counting at 10,000 and reports
+    # {"value": 10000, "relation": "gte"}. A capped total would turn every run
+    # over a 10k estate into a false truncation failure, training the operator
+    # to ignore the one check that would catch a real truncation.
+    total = payload["hits"]["total"]
     if isinstance(total, dict):
         if total.get("relation") == "gte":
             raise RuntimeError(
@@ -117,8 +120,12 @@ def get_total():
     return int(total)
 
 
+raw_hits = 0
+uids = set()
+
 try:
-    expected = get_total()
+    initial = post(f"{index}/_search?scroll={scroll_ttl}", QUERY)
+    expected = read_total(initial)
 except urllib.error.URLError as e:
     print(f"ERROR: cannot reach OpenSearch at {base}: {e}", file=sys.stderr)
     print("Start port-forward, e.g.:", file=sys.stderr)
@@ -130,10 +137,6 @@ except RuntimeError as e:
 
 print(f"→ Expected docs (b2b_org, latest, not deleted): {expected:,}")
 
-raw_hits = 0
-uids = set()
-
-initial = post(f"{index}/_search?scroll={scroll_ttl}", QUERY)
 scroll_id = initial["_scroll_id"]
 hits = initial["hits"]["hits"]
 
@@ -174,7 +177,7 @@ duplicates = raw_hits - len(ordered)
 # backfill while the follow-up dry-run confirms the wrong answer.
 if expected and raw_hits != expected:
     print(
-        f"ERROR: scroll returned {raw_hits:,} hits but _search reported {expected:,} — "
+        f"ERROR: scroll returned {raw_hits:,} hits but the scroll-open total reported {expected:,} — "
         "refusing to write a possibly truncated census.",
         file=sys.stderr,
     )
@@ -191,7 +194,7 @@ with open(summary_path + ".tmp", "w", encoding="utf-8") as f:
     f.write(f"raw_hits={raw_hits}\n")
     f.write(f"unique_uids={len(ordered)}\n")
     f.write(f"duplicates_dropped={duplicates}\n")
-    f.write(f"expected_from_search_api={expected}\n")
+    f.write(f"expected_from_scroll_open={expected}\n")
 
 os.replace(jsonl_path + ".tmp", jsonl_path)
 os.replace(summary_path + ".tmp", summary_path)
