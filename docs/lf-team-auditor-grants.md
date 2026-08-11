@@ -67,7 +67,9 @@ export LF_STAFF_TEAM_NAME=$(kubectl --context <ctx> -n lfx get deploy lfx-v2-mem
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LF_STAFF_TEAM_NAME")].value}')
 ```
 
-At least one team must be set; any non-empty subset is accepted. `LF_CONTRACTOR_TEAM_NAME` is still read if exported, which is how the revoke script targets contractor tuples without touching the staff grants — set `LF_STAFF_TEAM_NAME=""` and export the contractor name alone. Nothing reads it by default.
+The two scripts deliberately do not have the same reach. The grant script reads `LF_STAFF_TEAM_NAME` and nothing else, so it cannot grant the contractor team even if `LF_CONTRACTOR_TEAM_NAME` is exported in the same shell — which it very plausibly is, since the revoke script is the reason to export it. Granting contractors before LFXV2-3071 has decided whether they get access would be unreapable by any service path.
+
+The revoke script reads both, because rollback has to be able to target a team the service no longer emits. Export only the team you intend to remove; whichever variable is left unset is left untouched. That is how the contractor tuples were cleared from dev without disturbing the staff grants. Either script errors out if none of the variables it reads is set.
 
 The grant and revoke scripts share their OpenFGA helpers via `scripts/lib/openfga-team-auditor.sh` (pagination, batch apply, the transport guard, argument validation). They were near-copies; sharing matters here because the revoke script is the rollback path that runs under incident pressure, and a rollback that has quietly drifted from the tested grant path is worse than no rollback. Both scripts source the library relative to their own location, so they must be run from a checkout rather than copied to a pod in isolation.
 

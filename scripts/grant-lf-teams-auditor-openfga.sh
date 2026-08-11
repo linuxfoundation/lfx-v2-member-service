@@ -21,7 +21,7 @@
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
 #   ./scripts/export-b2b-org-uids-from-opensearch.sh has been run
-#   export LF_STAFF_TEAM_NAME=…   (at least one team; see fga_team_names)
+#   export LF_STAFF_TEAM_NAME=…   (the only team this script can grant)
 #
 # Usage:
 #   ./scripts/grant-lf-teams-auditor-openfga.sh <store-id> [input_dir] [--dry-run]
@@ -75,7 +75,13 @@ fi
 #
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
-TEAM_NAMES=$(fga_team_names)
+#
+# Staff only, named explicitly: LF_CONTRACTOR_TEAM_NAME is deliberately out of
+# reach here. The revoke script needs that variable, so an operator who has just
+# used it can easily still have it exported — and a grant it picked up would
+# blanket-grant contractors before LFXV2-3071 decides whether they get access,
+# with no service path able to take a team tuple back.
+TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME)
 TEAMS=()
 while IFS= read -r team_name; do
 	TEAMS+=("$team_name")

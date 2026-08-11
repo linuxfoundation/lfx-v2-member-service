@@ -171,24 +171,35 @@ fga_require_store_id() {
 	fi
 }
 
-# fga_team_names echoes the configured team names, one per line.
+# fga_team_names echoes the configured team names, one per line, reading only
+# the environment variables named in "$@". Any non-empty subset of those is
+# accepted; only the empty set is an error.
 #
 # Required, not defaulted: the defaults live in values.yaml and providers.go,
 # and a third copy here would drift. Granting the wrong team name is as
 # unreapable as granting the wrong store.
 #
-# Any non-empty subset is accepted; only the empty set is an error. Two callers
-# need that. The shipped grant is the staff team alone (LFXV2-3071 owns
-# contractor access), so demanding both names would make the backfill
-# unrunnable. And the revoke path has to target a team the service no longer
-# emits — clearing LF_STAFF_TEAM_NAME while setting LF_CONTRACTOR_TEAM_NAME
-# revokes contractor tuples without touching the staff grants that are meant
-# to stay.
+# The caller names the variables instead of this helper reading every team
+# variable it knows about, because the two callers must not have the same
+# reach. Revoke legitimately targets the contractor team — clearing the dev
+# contractor tuples needs exactly that, and it has to work while the service
+# no longer emits the grant. Grant must not: an operator who exported
+# LF_CONTRACTOR_TEAM_NAME for a revoke and then ran the backfill in the same
+# shell would blanket-grant contractors before LFXV2-3071 has decided whether
+# they get access at all, and no service path can take a team tuple back.
 fga_team_names() {
-	local names=()
-	local name
+	if [[ $# -eq 0 ]]; then
+		echo "ERROR: fga_team_names requires the names of the environment" >&2
+		echo "       variables to read, e.g. fga_team_names LF_STAFF_TEAM_NAME." >&2
+		exit 1
+	fi
 
-	for name in "${LF_STAFF_TEAM_NAME:-}" "${LF_CONTRACTOR_TEAM_NAME:-}"; do
+	local varnames=("$@")
+	local names=()
+	local varname name
+
+	for varname in "${varnames[@]}"; do
+		name="${!varname:-}"
 		# Trim surrounding whitespace so a padded value cannot render as
 		# "team: #member", mirroring the trim in providers.go.
 		name="${name#"${name%%[![:space:]]*}"}"
@@ -198,11 +209,11 @@ fga_team_names() {
 
 	if [[ ${#names[@]} -eq 0 ]]; then
 		echo "ERROR: no auditor team configured. Set at least one of" >&2
-		echo "       LF_STAFF_TEAM_NAME or LF_CONTRACTOR_TEAM_NAME." >&2
+		echo "       ${varnames[*]}." >&2
 		echo "       They are deliberately not defaulted here — the authoritative value" >&2
 		echo "       is in charts/lfx-v2-member-service/values.yaml. Export it to match" >&2
 		echo "       the environment you are targeting, e.g.:" >&2
-		echo "         export LF_STAFF_TEAM_NAME=<staff-team>" >&2
+		echo "         export ${varnames[0]}=<team-name>" >&2
 		exit 1
 	fi
 

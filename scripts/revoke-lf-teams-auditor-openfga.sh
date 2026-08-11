@@ -34,7 +34,8 @@
 #
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
-#   export LF_STAFF_TEAM_NAME=…   (at least one team; see fga_team_names)
+#   export LF_STAFF_TEAM_NAME=… and/or LF_CONTRACTOR_TEAM_NAME=…
+#     (set only the team you intend to revoke; see fga_team_names)
 #
 # Usage:
 #   ./scripts/revoke-lf-teams-auditor-openfga.sh <store-id> [--dry-run] [--yes]
@@ -81,7 +82,12 @@ done
 #
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
-TEAM_NAMES=$(fga_team_names)
+#
+# Both teams, unlike the grant script: revoke has to be able to target a team
+# the service no longer emits, which is how the contractor tuples get cleared.
+# Set only the variable for the team you intend to remove — whichever is left
+# unset is left untouched.
+TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME LF_CONTRACTOR_TEAM_NAME)
 TEAMS=()
 while IFS= read -r team_name; do
 	TEAMS+=("$team_name")
