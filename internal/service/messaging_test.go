@@ -269,7 +269,7 @@ func TestBuildB2BOrgReparentingMessages_NoChange(t *testing.T) {
 }
 
 func TestBuildB2BOrgFGAMessage_ExcludesParentChildAndMembership(t *testing.T) {
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "", nil, nil, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
@@ -281,7 +281,7 @@ func TestBuildB2BOrgFGAMessage_ExcludesParentChildAndMembership(t *testing.T) {
 }
 
 func TestBuildB2BOrgFGAMessage_GlobalOrgAdminNotExcludedWhenSet(t *testing.T) {
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "global-admin-uid", nil, nil, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamUID: "global-admin-uid"})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
@@ -292,7 +292,7 @@ func TestBuildB2BOrgFGAMessage_GlobalOrgAdminNotExcludedWhenSet(t *testing.T) {
 func TestBuildB2BOrgFGAMessage_NilWritersAuditorsExcluded(t *testing.T) {
 	// nil writers/auditors means "don't touch these relations" (e.g. b2b_org field
 	// update that must not wipe settings-driven ACL tuples set by a prior PUT /settings).
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "", nil, nil, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
@@ -304,7 +304,7 @@ func TestBuildB2BOrgFGAMessage_NilWritersAuditorsExcluded(t *testing.T) {
 
 func TestBuildB2BOrgFGAMessage_ExplicitWritersAuditorsNotExcluded(t *testing.T) {
 	// Non-nil (even empty) slices mean "replace this relation" — must NOT be excluded.
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "", []string{}, []string{}, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{Writers: []string{}, Auditors: []string{}})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
@@ -317,7 +317,7 @@ func TestBuildB2BOrgFGAMessage_ExplicitWritersAuditorsNotExcluded(t *testing.T) 
 func TestBuildB2BOrgFGAMessage_WithWritersAndAuditors(t *testing.T) {
 	writers := []string{"alice", "bob"}
 	auditors := []string{"viewer1"}
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "global-admin-uid", writers, auditors, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamUID: "global-admin-uid", Writers: writers, Auditors: auditors})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
@@ -328,7 +328,7 @@ func TestBuildB2BOrgFGAMessage_WithWritersAndAuditors(t *testing.T) {
 
 func TestBuildB2BOrgFGAMessage_WithMembershipUIDs(t *testing.T) {
 	membershipUIDs := []string{"pm-uid-001", "pm-uid-002"}
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "", nil, nil, membershipUIDs)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{MembershipUIDs: membershipUIDs})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
@@ -340,7 +340,7 @@ func TestBuildB2BOrgFGAMessage_WithMembershipUIDs(t *testing.T) {
 }
 
 func TestBuildB2BOrgFGAMessage_WithGlobalAdmin(t *testing.T) {
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "global-admin-team-uid", nil, nil, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamUID: "global-admin-team-uid"})
 
 	assert.Equal(t, "b2b_org", msg.ObjectType)
 	assert.Equal(t, "update_access", msg.Operation)
@@ -353,11 +353,163 @@ func TestBuildB2BOrgFGAMessage_WithGlobalAdmin(t *testing.T) {
 }
 
 func TestBuildB2BOrgFGAMessage_NoGlobalAdmin(t *testing.T) {
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, "", nil, nil, nil)
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
 	assert.NotContains(t, data.References, "global_org_admin")
+}
+
+// TestPublishB2BOrgTeamGrantsFGA_Guard covers the widened early return. This
+// emitter is the only FGA publisher on both /admin/reindex b2b_org paths, so
+// keeping the old "blank global-admin UID → return" guard would make reindex —
+// the tool an operator reaches for to repair missing grants — silently skip the
+// auditor grants.
+func TestPublishB2BOrgTeamGrantsFGA_Guard(t *testing.T) {
+	// wantAuditorRefs and wantAdminRefs are spelled out as literals rather than
+	// derived from teamMemberRefs: asserting with the renderer the code under
+	// test uses would pass through any rendering regression.
+	tests := []struct {
+		name            string
+		adminUID        string
+		auditorTeams    []string
+		wantPublish     bool
+		wantAuditorRefs []string
+		wantAdminRefs   []string
+	}{
+		{
+			name: "blank admin UID with teams still publishes", adminUID: "",
+			auditorTeams: []string{"staff-team"}, wantPublish: true,
+			wantAuditorRefs: []string{"team:staff-team#member"},
+		},
+		{
+			name: "admin UID with no teams still publishes", adminUID: "admin-uid",
+			auditorTeams: nil, wantPublish: true,
+			wantAdminRefs: []string{"team:admin-uid#member"},
+		},
+		{
+			name: "both configured publishes", adminUID: "admin-uid",
+			auditorTeams: []string{"staff-team", "second-team"}, wantPublish: true,
+			wantAuditorRefs: []string{"team:staff-team#member", "team:second-team#member"},
+			wantAdminRefs:   []string{"team:admin-uid#member"},
+		},
+		{name: "both absent publishes nothing", adminUID: "", auditorTeams: nil, wantPublish: false},
+		{
+			name: "whitespace-only values count as absent", adminUID: "  ",
+			auditorTeams: []string{"  "}, wantPublish: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pub := mock.NewMockMemberPublisher()
+			PublishB2BOrgTeamGrantsFGA(context.Background(), pub, testB2BOrg, tt.adminUID, tt.auditorTeams)
+
+			if !tt.wantPublish {
+				assert.Empty(t, pub.CallOrder, "nothing to assert means nothing to publish")
+				return
+			}
+			// CallOrder, not just a non-nil payload: this pins exactly one
+			// publish, which LastAccessData alone would not catch.
+			assert.Equal(t, []string{"access"}, pub.CallOrder)
+			msg, ok := pub.LastAccessData.(fgatypes.GenericFGAMessage)
+			require.True(t, ok)
+			data, ok := msg.Data.(fgatypes.GenericAccessData)
+			require.True(t, ok)
+
+			if tt.wantAuditorRefs != nil {
+				assert.Equal(t, tt.wantAuditorRefs, data.References["auditor"])
+			} else {
+				assert.NotContains(t, data.References, "auditor")
+			}
+			if tt.wantAdminRefs != nil {
+				assert.Equal(t, tt.wantAdminRefs, data.References["global_org_admin"])
+			} else {
+				assert.NotContains(t, data.References, "global_org_admin",
+					"a blank admin UID must not produce a team:#member subject")
+			}
+		})
+	}
+}
+
+func TestBuildB2BOrgFGAMessage_AuditorTeams(t *testing.T) {
+	tests := []struct {
+		name         string
+		auditorTeams []string
+		auditors     []string
+		wantRefs     []string
+		wantRelation []string
+		wantExcluded bool
+	}{
+		{
+			// The common case on every non-settings path. The team refs must be
+			// written even though "auditor" is excluded: fga-sync applies
+			// ExcludeRelations only when deleting, so the exclusion preserves
+			// per-user auditor tuples this caller is not managing.
+			name:         "teams with nil auditors are written and auditor stays excluded",
+			auditorTeams: []string{"staff-team", "second-team"},
+			auditors:     nil,
+			wantRefs:     []string{"team:staff-team#member", "team:second-team#member"},
+			wantRelation: nil,
+			wantExcluded: true,
+		},
+		{
+			name:         "teams coexist with an explicit auditor list",
+			auditorTeams: []string{"staff-team"},
+			auditors:     []string{"alice"},
+			wantRefs:     []string{"team:staff-team#member"},
+			wantRelation: []string{"alice"},
+			wantExcluded: false,
+		},
+		{
+			name:         "blank and whitespace-only names are dropped",
+			auditorTeams: []string{"staff-team", "", "   "},
+			auditors:     nil,
+			wantRefs:     []string{"team:staff-team#member"},
+			wantRelation: nil,
+			wantExcluded: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{
+				AuditorTeams: tt.auditorTeams,
+				Auditors:     tt.auditors,
+			})
+
+			data, ok := msg.Data.(fgatypes.GenericAccessData)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantRefs, data.References["auditor"])
+			assert.Equal(t, tt.wantRelation, data.Relations["auditor"])
+			if tt.wantExcluded {
+				assert.Contains(t, data.ExcludeRelations, "auditor",
+					"nil auditors must still exclude auditor so per-user tuples survive")
+			} else {
+				assert.NotContains(t, data.ExcludeRelations, "auditor")
+			}
+		})
+	}
+}
+
+// TestBuildB2BOrgFGAMessage_NoAuditorTeamsIsUnchanged pins the compatibility
+// guarantee the spec makes: with no teams configured the message must be
+// identical to what the pre-change implementation produced, so an operator can
+// disable the grants and get exactly the old behaviour back.
+func TestBuildB2BOrgFGAMessage_NoAuditorTeamsIsUnchanged(t *testing.T) {
+	for _, teams := range [][]string{nil, {}, {"", "  "}} {
+		msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{
+			GlobalOrgAdminTeamUID: "global-admin-uid",
+			AuditorTeams:          teams,
+		})
+
+		data, ok := msg.Data.(fgatypes.GenericAccessData)
+		require.True(t, ok)
+		assert.NotContains(t, data.References, "auditor",
+			"no configured teams must leave References[auditor] absent, not empty")
+		assert.Equal(t, []string{"team:global-admin-uid#member"}, data.References["global_org_admin"])
+		assert.Contains(t, data.ExcludeRelations, "auditor")
+	}
 }
 
 func TestBuildProjectMembershipFGAMessage(t *testing.T) {

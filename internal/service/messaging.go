@@ -115,50 +115,97 @@ func BuildB2BOrgSettingsIndexingConfig(org *model.B2BOrg, settings *model.B2BOrg
 	}
 }
 
-// BuildB2BOrgFGAMessage constructs a GenericFGAMessage for a B2BOrg access-control
-// update.
+// teamMemberRefs renders team names as fully-qualified FGA userset subjects.
+// Blank and whitespace-only names are dropped rather than rendered as
+// "team:#member", which OpenFGA would reject. Named for the shape it renders,
+// not for one relation, because both the auditor teams and the global-admin
+// team need the same subject form.
+func teamMemberRefs(teams ...string) []string {
+	refs := make([]string, 0, len(teams))
+	for _, name := range teams {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			refs = append(refs, "team:"+trimmed+"#member")
+		}
+	}
+	return refs
+}
+
+// B2BOrgFGARefs carries the access-control inputs for a b2b_org FGA message.
 //
-//   - globalOrgAdminTeamUID: set on create to grant the LF global-admin team; empty on updates.
-//   - writers, auditors: LFID usernames of accepted principals from OrgSettings.
-//   - membershipUIDs: UIDs of project_memberships owned by this org. When non-empty,
+// This is a struct rather than positional parameters because the four slices
+// have three *different* nil semantics, and transposing two of them compiles
+// cleanly while silently changing what gets revoked:
+//
+//   - GlobalOrgAdminTeamUID: set on create to grant the LF global-admin team; empty on updates.
+//   - AuditorTeams: LF team names granted blanket auditor access on this org, emitted as
+//     References["auditor"] entries. Independent of Auditors below: these are team
+//     subjects, those are per-user LFIDs, and the two coexist in one message. Empty
+//     omits the reference.
+//   - Writers, Auditors: LFID usernames of accepted principals from OrgSettings.
+//     nil = caller is not managing this relation → existing tuples are *preserved*.
+//     Non-nil, even empty = caller explicitly replaces → the full-sync runs and revokes.
+//   - MembershipUIDs: UIDs of project_memberships owned by this org. When non-empty,
 //     References["membership"] is populated. When empty or nil, "membership" is added
 //     to ExcludeRelations so existing membership tuples are not accidentally wiped.
 //
+// The zero value is the common case — no team grants, no relation managed — so
+// most callers can pass B2BOrgFGARefs{} and name only the fields they mean.
+type B2BOrgFGARefs struct {
+	GlobalOrgAdminTeamUID string
+	AuditorTeams          []string
+	Writers               []string
+	Auditors              []string
+	MembershipUIDs        []string
+}
+
+// BuildB2BOrgFGAMessage constructs a GenericFGAMessage for a B2BOrg access-control
+// update.
+//
 // parent and child tuples are always excluded — managed by BuildB2BOrgReparentingMessages.
-func BuildB2BOrgFGAMessage(org *model.B2BOrg, globalOrgAdminTeamUID string, writers, auditors, membershipUIDs []string) fgatypes.GenericFGAMessage {
+func BuildB2BOrgFGAMessage(org *model.B2BOrg, in B2BOrgFGARefs) fgatypes.GenericFGAMessage {
+	adminUID := strings.TrimSpace(in.GlobalOrgAdminTeamUID)
+
 	refs := make(map[string][]string)
-	if globalOrgAdminTeamUID != "" {
-		refs["global_org_admin"] = []string{"team:" + globalOrgAdminTeamUID + "#member"}
+	if adminRefs := teamMemberRefs(adminUID); len(adminRefs) > 0 {
+		refs["global_org_admin"] = adminRefs
 	}
-	if len(membershipUIDs) > 0 {
-		mRefs := make([]string, len(membershipUIDs))
-		for i, uid := range membershipUIDs {
+	if teamRefs := teamMemberRefs(in.AuditorTeams...); len(teamRefs) > 0 {
+		refs["auditor"] = teamRefs
+	}
+	if len(in.MembershipUIDs) > 0 {
+		mRefs := make([]string, len(in.MembershipUIDs))
+		for i, uid := range in.MembershipUIDs {
 			mRefs[i] = "project_membership:" + uid
 		}
 		refs["membership"] = mRefs
 	}
 
 	relations := make(map[string][]string)
-	if len(writers) > 0 {
-		relations["writer"] = writers
+	if len(in.Writers) > 0 {
+		relations["writer"] = in.Writers
 	}
-	if len(auditors) > 0 {
-		relations["auditor"] = auditors
+	if len(in.Auditors) > 0 {
+		relations["auditor"] = in.Auditors
 	}
 
 	excludes := []string{"parent", "child"}
-	if globalOrgAdminTeamUID == "" {
+	if adminUID == "" {
 		excludes = append(excludes, "global_org_admin")
 	}
-	if len(membershipUIDs) == 0 {
+	if len(in.MembershipUIDs) == 0 {
 		excludes = append(excludes, "membership")
 	}
 	// nil = caller is not managing this relation → preserve existing tuples.
 	// non-nil (even empty) = caller explicitly replaces → let full-sync run.
-	if writers == nil {
+	if in.Writers == nil {
 		excludes = append(excludes, "writer")
 	}
-	if auditors == nil {
+	if in.Auditors == nil {
+		// Excluding "auditor" here while refs["auditor"] carries the team
+		// subjects is deliberate, not a contradiction: fga-sync applies
+		// ExcludeRelations only in its delete branch, so the exclusion
+		// suppresses reaping of the per-user auditor tuples this caller is not
+		// managing, while the team references are still written.
 		excludes = append(excludes, "auditor")
 	}
 
@@ -394,16 +441,25 @@ func BuildChildListMessage(parentUID string, children []string) fgatypes.Generic
 	}
 }
 
-// PublishB2BOrgGlobalAdminFGA emits the global_org_admin FGA tuple for a B2BOrg.
+// PublishB2BOrgTeamGrantsFGA emits the team-subject FGA tuples for a B2BOrg —
+// the global_org_admin grant and the blanket auditor team grants.
 // Safe to call during backfill — idempotent (fga-sync diffs before writing).
-// No-op when globalOrgAdminTeamUID is empty.
-func PublishB2BOrgGlobalAdminFGA(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, globalOrgAdminTeamUID string) {
-	if strings.TrimSpace(globalOrgAdminTeamUID) == "" {
+//
+// It is the only FGA publisher on both /admin/reindex b2b_org paths, so the
+// guard is on *either* grant being configured rather than on the global-admin
+// UID alone: gating on that UID would let a blank value silently swallow the
+// auditor grants on exactly the path an operator would use to repair them.
+func PublishB2BOrgTeamGrantsFGA(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, globalOrgAdminTeamUID string, auditorTeams []string) {
+	globalOrgAdminTeamUID = strings.TrimSpace(globalOrgAdminTeamUID)
+	if globalOrgAdminTeamUID == "" && len(teamMemberRefs(auditorTeams...)) == 0 {
 		return
 	}
-	msg := BuildB2BOrgFGAMessage(org, globalOrgAdminTeamUID, nil, nil, nil)
+	msg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
+		GlobalOrgAdminTeamUID: globalOrgAdminTeamUID,
+		AuditorTeams:          auditorTeams,
+	})
 	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
-		slog.WarnContext(ctx, "b2b org global admin FGA publish failed",
+		slog.WarnContext(ctx, "b2b org team grants FGA publish failed",
 			"uid", org.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)

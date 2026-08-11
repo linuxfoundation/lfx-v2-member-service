@@ -28,6 +28,7 @@ type b2bOrgWriterOrchestrator struct {
 	b2bOrgWriter          port.B2BOrgWriter
 	memberPublisher       port.MemberPublisher
 	globalOrgAdminTeamUID string
+	auditorTeams          []string
 }
 
 // B2BOrgWriterOption configures a b2bOrgWriterOrchestrator.
@@ -47,6 +48,12 @@ func WithB2BOrgPublisher(p port.MemberPublisher) B2BOrgWriterOption {
 
 func WithGlobalOrgAdminTeamUID(uid string) B2BOrgWriterOption {
 	return func(o *b2bOrgWriterOrchestrator) { o.globalOrgAdminTeamUID = uid }
+}
+
+// WithB2BOrgAuditorTeams sets the LF team names granted blanket auditor access
+// on every org this writer publishes.
+func WithB2BOrgAuditorTeams(teams []string) B2BOrgWriterOption {
+	return func(o *b2bOrgWriterOrchestrator) { o.auditorTeams = teams }
 }
 
 // NewB2BOrgWriter constructs a B2BOrgWriter.
@@ -119,7 +126,10 @@ func (o *b2bOrgWriterOrchestrator) publishEvents(ctx context.Context, current, o
 	if action == indexerConstants.ActionCreated {
 		orgAdminTeamUID = o.globalOrgAdminTeamUID
 	}
-	publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.memberPublisher, current, org, action, orgAdminTeamUID)
+	// auditorTeams is deliberately not gated on ActionCreated the way
+	// orgAdminTeamUID is: the grant is required on update too, so an org that
+	// existed before this change picks it up on its next write.
+	publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.memberPublisher, current, org, action, orgAdminTeamUID, o.auditorTeams)
 }
 
 // publishB2BOrgUpsertEvents fans out an indexer message (sequential) then an
@@ -127,6 +137,8 @@ func (o *b2bOrgWriterOrchestrator) publishEvents(ctx context.Context, current, o
 // by the writer orchestrator and the CDC consumer. orgAdminTeamUID controls
 // whether the global org-admin team relation is included in the FGA message
 // (writers pass it only on ActionCreated; CDC always passes it for ActionUpdated).
+// auditorTeams, by contrast, is passed unconditionally by both callers — the
+// blanket auditor grant applies on create and update alike.
 // Publish failures are swallowed — /admin/reindex recovers missed records.
 //
 // Precondition: callers must set org.IsParent before calling. The writer uses
@@ -140,11 +152,15 @@ func publishB2BOrgUpsertEvents(
 	current, org *model.B2BOrg,
 	action indexerConstants.MessageAction,
 	orgAdminTeamUID string,
+	auditorTeams []string,
 ) {
 	// Indexer first — must be sequential (before the errgroup).
 	PublishB2BOrgIndexer(ctx, publisher, org, action)
 
-	fgaMsg := BuildB2BOrgFGAMessage(org, orgAdminTeamUID, nil, nil, nil)
+	fgaMsg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
+		GlobalOrgAdminTeamUID: orgAdminTeamUID,
+		AuditorTeams:          auditorTeams,
+	})
 
 	// Pre-fetch child lists before starting the errgroup (immutable inputs).
 	oldParentChildren, newParentChildren := fetchChildListsForReparent(ctx, reader, current, org)

@@ -425,6 +425,43 @@ func TestCDCConsumer_Account_Upsert_PassesGlobalOrgAdminTeamUID(t *testing.T) {
 	assert.NotEmpty(t, pub.access, "FGA access must be published")
 }
 
+// TestCDCConsumer_Account_Delete_AssertsNoTeamReferences pins the delete-path
+// behaviour change. fga-sync structurally never deletes a tuple whose subject
+// begins with "team:", so any team reference asserted on an org that no longer
+// exists is a permanent orphan on a dead object that nothing can ever reap.
+// Before this change the delete path re-asserted global_org_admin; adding the
+// two auditor teams would have tripled the rate of those orphans.
+func TestCDCConsumer_Account_Delete_AssertsNoTeamReferences(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("org-uid-teams")}, ReplayID: []byte("r3t")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"global-admin-team",
+		svc.WithCDCB2BOrgAuditorTeams([]string{"staff-team", "second-team"}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	require.NotEmpty(t, pub.accessMessages, "delete must still publish an access message")
+	msg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	data, ok := msg.Data.(fgatypes.GenericAccessData)
+	require.True(t, ok)
+
+	assert.NotContains(t, data.References, "auditor",
+		"auditor team refs on a deleted org would be unreapable orphans")
+	assert.NotContains(t, data.References, "global_org_admin",
+		"the pre-existing global_org_admin assertion on delete is removed for the same reason")
+	assert.Contains(t, data.ExcludeRelations, "writer",
+		"nil writers/auditors preservation behaviour must be unchanged")
+	assert.Contains(t, data.ExcludeRelations, "auditor")
+}
+
 func TestCDCConsumer_Account_Delete_PublishesIndexerAndFGA(t *testing.T) {
 	pub := &subjectCapturingPublisher{}
 	invalidator := &mock.MockCacheInvalidator{}

@@ -65,14 +65,19 @@ No other membership publication flushes — not the email-change revocation that
 | `child` | `["b2b_org:{child_uid}", ...]` | Updated on old/new parent when `ParentUID` changes |
 | `writer` | LFID username string (one per accepted writer, e.g. `"alice"`) | When org settings are updated with a non-nil writers field |
 | `auditor` | LFID username string (one per accepted auditor) | When org settings are updated with a non-nil auditors field |
+| `auditor` | `["team:{lfStaffTeamName}#member"]` | On every full-sync publish — create, update, CDC upsert, settings PUT, per-principal settings mutations and `/admin/reindex`. Not on reparenting/child-list messages, and not on delete. One entry per configured team; only the LF staff team is configured by default. See [lf-team-auditor-grants.md](./lf-team-auditor-grants.md) |
 
 > `parent` and `child` relations are always excluded from `update_access` via `ExcludeRelations` and managed by separate reparenting messages.
 >
 > `writer` and `auditor` are excluded from `update_access` when the caller passes `nil` for that field (preserve existing tuples). When the caller passes an explicit slice (even empty), the full-sync runs and revokes any tuples not in the new list. Pending invites (entries without a resolved username) do not produce FGA tuples.
+>
+> Excluding `auditor` and writing the auditor team references in the same message is not a contradiction: fga-sync consults `ExcludeRelations` only in its delete branch. The exclusion suppresses reaping of the per-user auditor tuples the caller is not managing, while the team references are still written.
 
 ### Delete
 
-On delete, only `uid` is sent — all FGA tuples for `b2b_org:{uid}` are removed by the fga-sync service.
+On delete, only `uid` is sent, and the message asserts **no** team references — neither `global_org_admin` nor the auditor teams.
+
+Note that fga-sync does not remove every tuple for `b2b_org:{uid}`. It never deletes a tuple whose subject begins with `team:`, so team-subject grants survive the delete and cannot be reaped by any service code path. That is why the delete message stops asserting them: a team reference written for an org that no longer exists is a permanent orphan on a dead object. Removing existing ones requires a one-off script.
 
 ---
 
@@ -127,14 +132,14 @@ Workspace CRUD operations (`POST/PUT/DELETE /b2b_orgs/{uid}/workspaces/…`) and
 
 | Operation | Object Type | Subject | Notes |
 |---|---|---|---|
-| Create B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Sets `global_org_admin` tuple |
-| Update B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Always sent |
+| Create B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Sets `global_org_admin` tuple + auditor team references |
+| Update B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Always sent. Carries the auditor team references but no `global_org_admin`, which is create-only |
 | CDC `AccountChangeEvent` | `b2b_org` | `lfx.fga-sync.update_access` | Same as update; `globalOrgAdminTeamUID` always set (not create-only) |
 | Reparent B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Up to 3 messages: org's own `parent`, old parent's `child` list, new parent's `child` list |
-| Delete B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Stub org (uid only); fga-sync handles cleanup |
+| Delete B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Stub org (uid only); no references or relations asserted, so every b2b_org relation lands in `ExcludeRelations` and the message reconciles **nothing** away. All existing tuples survive it, `team:`-subject and per-user alike |
 | CDC `AccountChangeEvent` (delete) | `b2b_org` | `lfx.fga-sync.update_access` | Same as delete |
-| Update org settings (`PUT /settings`) | `b2b_org` | `lfx.fga-sync.update_access` | `writer`/`auditor` relations; nil param = preserve existing tuples, explicit (even `[]`) = replace |
-| Add/update/delete settings user | `b2b_org` | `lfx.fga-sync.update_access` | Emitted by `AddPrincipal`, `UpdatePrincipalRole`, `DeletePrincipal` and `invite_accepted` promotion |
+| Update org settings (`PUT /settings`) | `b2b_org` | `lfx.fga-sync.update_access` | `writer`/`auditor` relations; nil param = preserve existing tuples, explicit (even `[]`) = replace. Also carries the auditor team references |
+| Add/update/delete settings user | `b2b_org` | `lfx.fga-sync.update_access` | Emitted by `AddPrincipal`, `UpdatePrincipalRole`, `DeletePrincipal` and `invite_accepted` promotion — all share the settings publish path, so all carry the auditor team references |
 | Update project membership | `project_membership` | `lfx.fga-sync.update_access` | Sets `b2b_org` + `project` refs; excludes `key_contact` |
 | CDC `AssetChangeEvent` | `project_membership` | `lfx.fga-sync.update_access` | Same as update |
 | Create key contact | `project_membership` | `lfx.fga-sync.member_put` | Only when contact has a resolved LFID username |

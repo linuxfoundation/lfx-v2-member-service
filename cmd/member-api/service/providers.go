@@ -406,6 +406,41 @@ func GlobalOrgAdminTeamUID() string {
 	return os.Getenv("GLOBAL_ORG_ADMIN_TEAM_UID")
 }
 
+// B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
+// on every b2b_org, from LF_STAFF_TEAM_NAME.
+//
+// No team name is hardcoded here. The authoritative copy lives in
+// charts/lfx-v2-member-service/values.yaml, which both deployments inject
+// unconditionally; a second copy in this file could drift from it and would be
+// the harder one to notice. An unset variable therefore grants nothing, which
+// is also the safe direction for anything running outside the chart.
+//
+// Names are trimmed and blank or whitespace-only values are dropped, so no path
+// can produce a "team:#member" subject with an empty name — the trap
+// GLOBAL_ORG_ADMIN_TEAM_UID leaves open by guarding only on != "" while the
+// chart defaults it to the placeholder "_null".
+//
+// Clearing the variable stops new references being emitted but revokes nothing:
+// fga-sync never deletes a tuple whose subject begins with "team:" (that guard
+// lives in the deployed service, v0.3.1 or later), so no service code path can
+// remove them — only scripts/revoke-lf-teams-auditor-openfga.sh.
+//
+// The slice return is not over-engineering for a single team. Adding one
+// (LFXV2-3071 for contractor access) stays a config-and-provider change with no
+// reach into message construction. The contractor variable is deliberately not
+// read here, so a pod deployed from stale values cannot reintroduce it.
+func B2BOrgAuditorTeamNames() []string {
+	names := make([]string, 0, 1)
+	for _, name := range []string{
+		strings.TrimSpace(os.Getenv("LF_STAFF_TEAM_NAME")),
+	} {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // BackfillIteratorImpl returns the BackfillIterator implementation selected by
 // the REPOSITORY_SOURCE environment variable:
 //
@@ -519,6 +554,7 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		// Avatar enrichment collaborators (b2b_org_settings + EnrichAvatars path / avatar-backfill Job).
 		usecaseSvc.WithSettingsWriter(B2BOrgSettingsWriterImpl(ctx)),
 		usecaseSvc.WithUserReader(UserReaderImpl(ctx)),
+		usecaseSvc.WithRunnerB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 	}
 
 	// cdc_repair drain collaborators — only wired in Salesforce mode where the
@@ -603,6 +639,7 @@ func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
 		usecaseSvc.WithB2BOrgWriter(B2BOrgWriterImpl(ctx)),
 		usecaseSvc.WithB2BOrgPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),
+		usecaseSvc.WithB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 	)
 }
 
@@ -746,6 +783,7 @@ func OrgSettingsWriterUseCase(ctx context.Context) usecaseSvc.OrgSettingsWriter 
 		usecaseSvc.WithOrgSettingsInviteSender(InviteSenderImpl(ctx)),
 		usecaseSvc.WithOrgSettingsRoleNotifier(OrgRoleNotifierImpl(ctx)),
 		usecaseSvc.WithOrgSettingsSelfServeBaseURL(os.Getenv("LFX_SELF_SERVE_BASE_URL")),
+		usecaseSvc.WithOrgSettingsAuditorTeams(B2BOrgAuditorTeamNames()),
 	)
 }
 
@@ -896,6 +934,7 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),
+		usecaseSvc.WithCDCB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 		usecaseSvc.WithCDCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithCDCOrgSettings(OrgSettingsWriterUseCase(ctx)),
 	)

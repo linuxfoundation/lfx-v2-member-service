@@ -323,8 +323,14 @@ type project_membership
   relations
     define b2b_org: [b2b_org]
     define project: [project]
-    define auditor: auditor from b2b_org or auditor from project
+    define writer: writer from b2b_org
+    define auditor: writer or auditor from b2b_org or auditor from project
+    define key_contact: [user]
 ```
+
+`charts/lfx-platform/files/model.fga` in `lfx-v2-helm` is authoritative; transcriptions here can
+drift. Note that `key_contact` currently grants nothing: the only relations that consume it live on
+`b2b_org` and traverse `b2b_org.membership`, and this service never writes those tuples.
 
 - **`b2b_org`**: reference to the owning org. Set at creation, never changed.
 - **`project`**: reference to the project this membership belongs to. Set at creation, never
@@ -568,6 +574,13 @@ See the [Indexer Backfill](#indexer-backfill) section for details.
 ---
 
 ## OpenFGA Model Fragment
+
+> **Superseded — historical proposal.** This block records the model additions originally
+> requested by this service. It no longer matches what is deployed: the live model has since
+> gained `parent`/`child`/`membership` on `b2b_org`, never adopted a standalone `key_contact`
+> type, and defines `project_membership.auditor` as `writer or auditor from b2b_org or auditor
+> from project`. Read `charts/lfx-platform/files/model.fga` in `lfx-v2-helm` for the current
+> model, and the `project_membership` section above for the accurate transcription.
 
 The following block shows the additions to the platform-wide OpenFGA model
 (`lfx-v2-helm/charts/lfx-platform/templates/openfga/model.yaml`) required by this service.

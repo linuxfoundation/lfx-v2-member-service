@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
@@ -190,6 +191,40 @@ func TestB2BOrgWriter_Update_HasChanges_IndexerBeforeAccess(t *testing.T) {
 	require.NotEmpty(t, calls)
 	assert.True(t, strings.HasPrefix(calls[0], "indexer:"),
 		"first call must be indexer (sequential before errgroup FGA); got %v", calls)
+}
+
+// TestB2BOrgWriter_Update_EmitsAuditorTeams guards the one place this change is
+// easiest to get wrong. The global-admin UID one line above is gated on
+// ActionCreated, so copying that shape for the auditor teams would silently
+// grant nothing on update — and update is the path every org that already
+// exists takes. The grant must be asserted on update too.
+func TestB2BOrgWriter_Update_EmitsAuditorTeams(t *testing.T) {
+	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
+	updated := &model.B2BOrg{UID: testB2BOrgUID, Name: "Updated Name", UpdatedAt: time.Now()}
+	pub := &subjectCapturingPublisher{}
+	w := svc.NewB2BOrgWriter(
+		svc.WithB2BOrgReader(&seededOrgReader{org: current}),
+		svc.WithB2BOrgWriter(&seededOrgWriter{updateOrg: updated}),
+		svc.WithB2BOrgPublisher(pub),
+		svc.WithGlobalOrgAdminTeamUID("global-admin-uid"),
+		svc.WithB2BOrgAuditorTeams([]string{"staff-team", "second-team"}),
+	)
+
+	_, err := w.Update(context.Background(), testB2BOrgUID, model.B2BOrgInput{Name: "Updated Name"}, "")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, pub.accessMessages, "an update with changes must publish an access message")
+	msg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	data, ok := msg.Data.(fgatypes.GenericAccessData)
+	require.True(t, ok)
+
+	assert.Equal(t,
+		[]string{"team:staff-team#member", "team:second-team#member"},
+		data.References["auditor"],
+		"the auditor team grant must be asserted on update, not only on create")
+	assert.NotContains(t, data.References, "global_org_admin",
+		"the global-admin grant stays create-only — this test would pass vacuously if that changed")
 }
 
 func TestB2BOrgWriter_Update_IfMatch_Mismatch_PreconditionFailed(t *testing.T) {

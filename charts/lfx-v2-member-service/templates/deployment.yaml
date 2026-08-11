@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.app.jwtAuthDisabledMockLocalPrincipal }}
             - name: GLOBAL_ORG_ADMIN_TEAM_UID
               value: {{ .Values.app.globalOrgAdminTeamUID | quote }}
+            - name: LF_STAFF_TEAM_NAME
+              value: {{ .Values.app.lfStaffTeamName | quote }}
             - name: LFX_SELF_SERVE_BASE_URL
               value: {{ .Values.app.lfxSelfServeBaseURL | quote }}
             {{- $adminReindexQuotaThreshold := .Values.app.adminReindexQuotaThreshold | toString | trim }}

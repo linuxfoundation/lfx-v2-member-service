@@ -109,6 +109,7 @@ type orgSettingsWriterOrchestrator struct {
 	inviteSender        port.InviteSender
 	roleNotifier        port.OrgRoleNotifier
 	lfxSelfServeBaseURL string
+	auditorTeams        []string
 }
 
 // OrgSettingsWriterOption configures an orgSettingsWriterOrchestrator.
@@ -120,6 +121,12 @@ func WithOrgSettingsReader(r port.B2BOrgSettingsReader) OrgSettingsWriterOption 
 
 func WithOrgSettingsWriter(w port.B2BOrgSettingsWriter) OrgSettingsWriterOption {
 	return func(o *orgSettingsWriterOrchestrator) { o.settingsWriter = w }
+}
+
+// WithOrgSettingsAuditorTeams sets the LF team names granted blanket auditor
+// access on every org whose settings this writer publishes.
+func WithOrgSettingsAuditorTeams(teams []string) OrgSettingsWriterOption {
+	return func(o *orgSettingsWriterOrchestrator) { o.auditorTeams = teams }
 }
 
 func WithOrgSettingsB2BOrgReader(r port.B2BOrgReader) OrgSettingsWriterOption {
@@ -705,13 +712,14 @@ func (o *orgSettingsWriterOrchestrator) publishAll(ctx context.Context, in B2BOr
 		return
 	}
 
-	fgaMsg := BuildB2BOrgFGAMessage(
-		org,
-		"",
-		fgaUsernames(in.Writers, settings.ActiveWriterUsernames()),
-		fgaUsernames(in.Auditors, settings.ActiveAuditorUsernames()),
-		nil,
-	)
+	// The global-admin UID is deliberately blank on this path — settings
+	// publishes do not own that grant. The auditor teams are independent of it
+	// and are always passed.
+	fgaMsg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
+		AuditorTeams: o.auditorTeams,
+		Writers:      fgaUsernames(in.Writers, settings.ActiveWriterUsernames()),
+		Auditors:     fgaUsernames(in.Auditors, settings.ActiveAuditorUsernames()),
+	})
 	if pubErr := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg); pubErr != nil {
 		slog.WarnContext(ctx, "b2b org settings FGA publish failed",
 			"uid", in.OrgUID, "error", pubErr,

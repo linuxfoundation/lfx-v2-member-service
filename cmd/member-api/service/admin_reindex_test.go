@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -161,6 +162,82 @@ func TestAdminReindex_CdcRepair_SupportedTypesAccepted(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, result.SelectedCount)
 			assert.Equal(t, 1, *result.SelectedCount)
+		})
+	}
+}
+
+// ── Provider configuration ─────────────────────────────────────────────────
+
+// Lives here because the Runner behind AdminReindex is wired with
+// B2BOrgAuditorTeamNames (WithRunnerB2BOrgAuditorTeams), and the reindex FGA
+// emitter is the path that had its guard widened so a blank global-admin UID
+// could not silently swallow these grants.
+//
+// These cases are load-bearing rather than cosmetic. A team reaching this
+// function holds auditor on every b2b_org, and fga-sync never deletes a tuple
+// whose subject begins with "team:", so the grant cannot be taken back by
+// changing config or reverting code. Only a name given explicitly may get
+// through: the chart supplies it (values.yaml is the single copy), and an
+// absent, blank or whitespace-only variable must grant nothing rather than fall
+// back to a hardcoded name that could drift from the chart. The contractor
+// variable is deliberately never read (LFXV2-3071); this fails if it returns.
+func TestB2BOrgAuditorTeamNames(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want []string
+	}{
+		{
+			name: "unset grants nothing rather than falling back to a default",
+			env:  nil,
+			want: []string{},
+		},
+		{
+			name: "an explicitly configured team is granted",
+			env:  map[string]string{"LF_STAFF_TEAM_NAME": "staff-team-dev"},
+			want: []string{"staff-team-dev"},
+		},
+		{
+			name: "blank grants nothing",
+			env:  map[string]string{"LF_STAFF_TEAM_NAME": ""},
+			want: []string{},
+		},
+		{
+			// Guards the "team:#member" subject that GLOBAL_ORG_ADMIN_TEAM_UID
+			// leaves reachable by guarding only on != "".
+			name: "whitespace-only is dropped rather than rendered",
+			env:  map[string]string{"LF_STAFF_TEAM_NAME": "   "},
+			want: []string{},
+		},
+		{
+			name: "surrounding whitespace is trimmed",
+			env:  map[string]string{"LF_STAFF_TEAM_NAME": "  staff-team  "},
+			want: []string{"staff-team"},
+		},
+		{
+			// The contractor variable is no longer read at all, so setting it
+			// cannot reintroduce the grant through a stale deployment.
+			name: "a stale contractor team name is ignored",
+			env: map[string]string{
+				"LF_STAFF_TEAM_NAME":      "staff-team",
+				"LF_CONTRACTOR_TEAM_NAME": "contractor-team",
+			},
+			want: []string{"staff-team"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setenv first so the original value is restored on cleanup, then
+			// unset, so the "unset" case does not read the developer's shell.
+			for _, k := range []string{"LF_STAFF_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"} {
+				t.Setenv(k, "")
+				require.NoError(t, os.Unsetenv(k))
+			}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			assert.Equal(t, tt.want, B2BOrgAuditorTeamNames())
 		})
 	}
 }

@@ -98,6 +98,7 @@ type Runner struct {
 	publisher             port.MemberPublisher
 	natsClient            *natspkg.NATSClient
 	globalOrgAdminTeamUID string
+	b2bOrgAuditorTeams    []string
 	resolver              port.ProjectResolver
 	grantIndex            port.KeyContactGrantIndex
 
@@ -127,6 +128,12 @@ func WithSettingsWriter(w port.B2BOrgSettingsWriter) RunnerOption {
 // WithUserReader wires the auth-service reader used to resolve avatar pictures.
 func WithUserReader(u port.UserReader) RunnerOption {
 	return func(r *Runner) { r.userReader = u }
+}
+
+// WithRunnerB2BOrgAuditorTeams wires the LF team names granted blanket auditor
+// access on every org a reindex republishes.
+func WithRunnerB2BOrgAuditorTeams(teams []string) RunnerOption {
+	return func(r *Runner) { r.b2bOrgAuditorTeams = teams }
 }
 
 // WithRepairStore wires the durable CDC quota-repair queue drained by cdc_repair
@@ -353,7 +360,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						org.IsParent = len(children) > 0
 					}
 					PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
-					PublishB2BOrgGlobalAdminFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID)
+					PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID, r.b2bOrgAuditorTeams)
 					if org.ParentUID != "" {
 						if children, ok := orgChildrenCache[org.ParentUID]; ok {
 							PublishB2BOrgParentFGA(ctx, r.publisher, org, children)
@@ -648,7 +655,7 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		}
 		org.IsParent = len(childUIDs) > 0
 		PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
-		PublishB2BOrgGlobalAdminFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID)
+		PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID, r.b2bOrgAuditorTeams)
 		if org.ParentUID != "" {
 			PublishB2BOrgParentFGA(ctx, r.publisher, org, parentChildren)
 		}
