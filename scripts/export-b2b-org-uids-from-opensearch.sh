@@ -95,14 +95,31 @@ def post(path, body):
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.load(resp)
+        payload = json.load(resp)
+
+    # A shard failure comes back as HTTP 200 with partial results, so curl-style
+    # status checking does not see it. Both hits.total and the hits themselves
+    # then describe only the shards that answered, which means they agree with
+    # each other and the raw_hits/expected check below cannot detect the gap.
+    # Guarding here rather than at the call sites covers the scroll pages too,
+    # since every request goes through this function.
+    shards = payload.get("_shards") or {}
+    if shards.get("failed"):
+        raise RuntimeError(
+            f"OpenSearch reported {shards['failed']} failed shard(s) out of "
+            f"{shards.get('total', '?')} on {path}; the response is partial, so "
+            "the census would be short without the consistency check noticing."
+        )
+    return payload
 
 
 def read_total(payload):
     # Read the total off the scroll's own opening response rather than a
     # separate _search?size=0 call. Two requests observe two snapshots, so any
     # index write landing between them fails the consistency check below on an
-    # export that was never truncated — and that check aborts the run.
+    # export that was never truncated — and that check aborts the run. One
+    # snapshot means the total cannot disagree with the hits, so the partial
+    # response case is caught by the shard guard in post() instead.
     #
     # Without track_total_hits OpenSearch stops counting at 10,000 and reports
     # {"value": 10000, "relation": "gte"}. A capped total would turn every run
@@ -140,18 +157,23 @@ print(f"→ Expected docs (b2b_org, latest, not deleted): {expected:,}")
 scroll_id = initial["_scroll_id"]
 hits = initial["hits"]["hits"]
 
-while hits:
-    for h in hits:
-        raw_hits += 1
-        src = h.get("_source", {})
-        uid = src.get("object_id") or h.get("_id", "").split(":", 1)[-1]
-        if uid:
-            uids.add(uid)
-    if raw_hits % 2000 == 0:
-        print(f"  … fetched {raw_hits:,} / {expected:,}")
-    page = post("_search/scroll", {"scroll": scroll_ttl, "scroll_id": scroll_id})
-    scroll_id = page["_scroll_id"]
-    hits = page["hits"]["hits"]
+try:
+    while hits:
+        for h in hits:
+            raw_hits += 1
+            src = h.get("_source", {})
+            uid = src.get("object_id") or h.get("_id", "").split(":", 1)[-1]
+            if uid:
+                uids.add(uid)
+        if raw_hits % 2000 == 0:
+            print(f"  … fetched {raw_hits:,} / {expected:,}")
+        page = post("_search/scroll", {"scroll": scroll_ttl, "scroll_id": scroll_id})
+        scroll_id = page["_scroll_id"]
+        hits = page["hits"]["hits"]
+except RuntimeError as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    print("No census written; re-run once the cluster is healthy.", file=sys.stderr)
+    sys.exit(1)
 
 try:
     post("_search/scroll", {"scroll_id": scroll_id, "scroll": scroll_ttl})
