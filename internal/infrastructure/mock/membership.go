@@ -390,6 +390,20 @@ func (m *MockB2BOrgWriter) UpdateB2BOrg(_ context.Context, _ string, _ model.B2B
 	return nil, errors.NewNotImplemented("update-b2b-org not implemented in mock")
 }
 
+// MockObjectStoreWriter is a stub implementation of port.ObjectStoreWriter for
+// local development when REPOSITORY_SOURCE=mock.
+type MockObjectStoreWriter struct{}
+
+// NewMockObjectStoreWriter creates a new MockObjectStoreWriter.
+func NewMockObjectStoreWriter() *MockObjectStoreWriter {
+	return &MockObjectStoreWriter{}
+}
+
+// Put always returns not-implemented.
+func (m *MockObjectStoreWriter) Put(_ context.Context, _ string, _ string, _ []byte) (string, error) {
+	return "", errors.NewNotImplemented("upload-b2b-org-logo not implemented in mock")
+}
+
 // MockMemberPublisher is a no-op implementation of port.MemberPublisher for
 // local development when MESSAGING_SOURCE=mock. All messages are logged but
 // not published to NATS.

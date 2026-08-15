@@ -133,11 +133,17 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.ProjectMembershipReaderImpl(ctx),
 		service.B2BOrgSettingsReaderImpl(ctx),
 		service.B2BOrgWriterUseCase(ctx),
+		service.LogoUploaderUseCase(ctx),
 		service.KeyContactWriterUseCase(ctx),
 		service.OrgSettingsWriterUseCase(ctx),
 		service.WorkspaceWriterUseCase(ctx),
 		service.BackfillRunnerImpl(ctx),
 	)
+
+	if err := service.EnsureObjectStoreReady(ctx); err != nil {
+		slog.ErrorContext(ctx, "logo object store not reachable", "error", err)
+		os.Exit(1)
+	}
 
 	// Wrap the services in endpoints.
 	membershipServiceEndpoints := membershipservice.NewEndpoints(membershipServiceSvc)

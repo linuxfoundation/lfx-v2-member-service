@@ -166,6 +166,62 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
+	dsl.Method("upload-b2b-org-logo", func() {
+		dsl.Description("Upload a B2B organization logo (PNG/JPEG, max 2MB) to object storage and set it as the org's logo URL")
+
+		dsl.Security(JWTAuth)
+
+		dsl.Payload(func() {
+			BearerTokenAttribute()
+			VersionAttribute()
+			dsl.Attribute("uid", dsl.String, "B2B organization UID", func() {
+				dsl.Example("001B000000IqhSLIAZ")
+			})
+			IfMatchAttribute()
+			dsl.Attribute("content_type", dsl.String, "MIME type of the uploaded logo (image/png or image/jpeg)", func() {
+				dsl.Example("image/png")
+			})
+			dsl.Attribute("content_length", dsl.Int64, "Size of the uploaded logo in bytes", func() {
+				dsl.Example(102400)
+			})
+			dsl.Required("uid", "content_type")
+		})
+
+		dsl.Result(func() {
+			dsl.Attribute("b2b_org", B2BOrgResponse, "Updated B2B organization")
+			ETagAttribute()
+			LastModifiedAttribute()
+			dsl.Required("b2b_org")
+		})
+
+		dsl.Error("NotFound", dsl.ErrorResult, "Resource not found")
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request (unsupported content type or file too large)")
+		dsl.Error("PreconditionFailed", dsl.ErrorResult, "Precondition failed")
+		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
+		dsl.Error("ServiceUnavailable", dsl.ErrorResult, "Service unavailable", func() { dsl.Temporary() })
+
+		dsl.HTTP(func() {
+			dsl.POST("/b2b_orgs/{uid}/logo")
+			dsl.Header("bearer_token:Authorization")
+			dsl.Param("version:v")
+			dsl.Param("uid")
+			dsl.Header("if_match:If-Match")
+			dsl.Header("content_type:Content-Type")
+			dsl.Header("content_length:Content-Length")
+			dsl.SkipRequestBodyEncodeDecode()
+			dsl.Response(dsl.StatusOK, func() {
+				dsl.Header("etag:ETag")
+				dsl.Header("last_modified:Last-Modified")
+				dsl.Body("b2b_org")
+			})
+			dsl.Response("NotFound", dsl.StatusNotFound)
+			dsl.Response("BadRequest", dsl.StatusBadRequest)
+			dsl.Response("PreconditionFailed", dsl.StatusPreconditionFailed)
+			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
+			dsl.Response("ServiceUnavailable", dsl.StatusServiceUnavailable)
+		})
+	})
+
 	dsl.Method("get-b2b-org-settings", func() {
 		dsl.Description("Get the access-control settings (writers and auditors) for a B2B organization")
 

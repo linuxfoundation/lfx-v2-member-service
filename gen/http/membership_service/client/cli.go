@@ -11,6 +11,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"unicode/utf8"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
@@ -171,6 +172,63 @@ func BuildUpdateB2bOrgPayload(membershipServiceUpdateB2bOrgBody string, membersh
 	return v, nil
 }
 
+// BuildUploadB2bOrgLogoPayload builds the payload for the membership-service
+// upload-b2b-org-logo endpoint from CLI flags.
+func BuildUploadB2bOrgLogoPayload(membershipServiceUploadB2bOrgLogoUID string, membershipServiceUploadB2bOrgLogoVersion string, membershipServiceUploadB2bOrgLogoBearerToken string, membershipServiceUploadB2bOrgLogoIfMatch string, membershipServiceUploadB2bOrgLogoContentType string, membershipServiceUploadB2bOrgLogoContentLength string) (*membershipservice.UploadB2bOrgLogoPayload, error) {
+	var err error
+	var uid string
+	{
+		uid = membershipServiceUploadB2bOrgLogoUID
+	}
+	var version *string
+	{
+		if membershipServiceUploadB2bOrgLogoVersion != "" {
+			version = &membershipServiceUploadB2bOrgLogoVersion
+			if !(*version == "1") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var bearerToken *string
+	{
+		if membershipServiceUploadB2bOrgLogoBearerToken != "" {
+			bearerToken = &membershipServiceUploadB2bOrgLogoBearerToken
+		}
+	}
+	var ifMatch *string
+	{
+		if membershipServiceUploadB2bOrgLogoIfMatch != "" {
+			ifMatch = &membershipServiceUploadB2bOrgLogoIfMatch
+		}
+	}
+	var contentType string
+	{
+		contentType = membershipServiceUploadB2bOrgLogoContentType
+	}
+	var contentLength *int64
+	{
+		if membershipServiceUploadB2bOrgLogoContentLength != "" {
+			val, err := strconv.ParseInt(membershipServiceUploadB2bOrgLogoContentLength, 10, 64)
+			contentLength = &val
+			if err != nil {
+				return nil, fmt.Errorf("invalid value for contentLength, must be INT64")
+			}
+		}
+	}
+	v := &membershipservice.UploadB2bOrgLogoPayload{}
+	v.UID = uid
+	v.Version = version
+	v.BearerToken = bearerToken
+	v.IfMatch = ifMatch
+	v.ContentType = contentType
+	v.ContentLength = contentLength
+
+	return v, nil
+}
+
 // BuildGetB2bOrgSettingsPayload builds the payload for the membership-service
 // get-b2b-org-settings endpoint from CLI flags.
 func BuildGetB2bOrgSettingsPayload(membershipServiceGetB2bOrgSettingsUID string, membershipServiceGetB2bOrgSettingsVersion string, membershipServiceGetB2bOrgSettingsBearerToken string) (*membershipservice.GetB2bOrgSettingsPayload, error) {
@@ -213,7 +271,7 @@ func BuildUpdateB2bOrgSettingsPayload(membershipServiceUpdateB2bOrgSettingsBody 
 	{
 		err = json.Unmarshal([]byte(membershipServiceUpdateB2bOrgSettingsBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"auditors\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ],\n      \"writers\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ]\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"auditors\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ],\n      \"writers\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ]\n   }'")
 		}
 		for _, e := range body.Writers {
 			if e != nil {
@@ -573,7 +631,7 @@ func BuildCreateKeyContactPayload(membershipServiceCreateKeyContactBody string, 
 	{
 		err = json.Unmarshal([]byte(membershipServiceCreateKeyContactBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"first_name\": \"John\",\n      \"last_name\": \"Doe\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": false,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"first_name\": \"John\",\n      \"last_name\": \"Doe\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": true,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }'")
 		}
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.email", body.Email, goa.FormatEmail))
 		if !(body.Role == "Representative/Voting Contact" || body.Role == "Authorized Signatory" || body.Role == "Billing Contact" || body.Role == "Marketing Contact" || body.Role == "Technical Contact" || body.Role == "Legal Contact" || body.Role == "Event Sponsorship Contact" || body.Role == "PO Contact" || body.Role == "PR Contact") {
@@ -642,7 +700,7 @@ func BuildUpdateKeyContactPayload(membershipServiceUpdateKeyContactBody string, 
 	{
 		err = json.Unmarshal([]byte(membershipServiceUpdateKeyContactBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": true,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"board_member\": false,\n      \"email\": \"john.doe@example.com\",\n      \"primary_contact\": false,\n      \"role\": \"Technical Contact\",\n      \"send_invite\": false,\n      \"status\": \"Active\",\n      \"title\": \"CTO\"\n   }'")
 		}
 		if body.Email != nil {
 			err = goa.MergeErrors(err, goa.ValidateFormat("body.email", *body.Email, goa.FormatEmail))
@@ -771,7 +829,7 @@ func BuildAdminReindexPayload(membershipServiceAdminReindexBody string, membersh
 	{
 		err = json.Unmarshal([]byte(membershipServiceAdminReindexBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"cdc_repair\": true,\n      \"dry_run\": true,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\",\n      \"until\": \"2026-06-20T00:00:00Z\"\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"cdc_repair\": true,\n      \"dry_run\": false,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\",\n      \"until\": \"2026-06-20T00:00:00Z\"\n   }'")
 		}
 		if body.Since != nil {
 			err = goa.MergeErrors(err, goa.ValidateFormat("body.since", *body.Since, goa.FormatDateTime))
@@ -1099,7 +1157,7 @@ func BuildBulkAddB2bOrgWorkspaceProjectsPayload(membershipServiceBulkAddB2bOrgWo
 	{
 		err = json.Unmarshal([]byte(membershipServiceBulkAddB2bOrgWorkspaceProjectsBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"projects\": [\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         }\n      ]\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"projects\": [\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         },\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         }\n      ]\n   }'")
 		}
 		if body.Projects == nil {
 			err = goa.MergeErrors(err, goa.MissingFieldError("projects", "body"))

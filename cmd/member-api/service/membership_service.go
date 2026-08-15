@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"expvar"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -33,6 +34,7 @@ type membershipServicesrvc struct {
 	projectMembershipReader port.ProjectMembershipReader
 	b2bOrgSettingsReader    port.B2BOrgSettingsReader
 	b2bOrgWriter            usecaseSvc.B2BOrgWriter
+	logoUploader            usecaseSvc.LogoUploader
 	keyContactWriter        usecaseSvc.KeyContactWriter
 	orgSettingsWriter       usecaseSvc.OrgSettingsWriter
 	workspaceWriter         usecaseSvc.WorkspaceWriter
@@ -55,6 +57,13 @@ func (s *membershipServicesrvc) Readyz(ctx context.Context) ([]byte, error) {
 	if err := s.storage.IsReady(ctx); err != nil {
 		slog.ErrorContext(ctx, "service not ready", "error", err)
 		return nil, err
+	}
+	// objectStoreClient is nil in mock mode (REPOSITORY_SOURCE=mock) — skip.
+	if objectStoreClient != nil {
+		if err := objectStoreClient.Readyz(ctx); err != nil {
+			slog.ErrorContext(ctx, "service not ready: logo object store unreachable", "error", err)
+			return nil, err
+		}
 	}
 	return []byte("OK\n"), nil
 }
@@ -154,6 +163,39 @@ func (s *membershipServicesrvc) UpdateB2bOrg(ctx context.Context, p *memberships
 
 	lastMod := org.UpdatedAt.UTC().Format(constants.HTTPDateFormat)
 	result := &membershipservice.UpdateB2bOrgResult{
+		B2bOrg:       b2bOrgToResponse(org),
+		LastModified: &lastMod,
+	}
+	if etagVal != "" {
+		result.Etag = &etagVal
+	}
+	return result, nil
+}
+
+// UploadB2bOrgLogo uploads a B2B org logo (PNG/JPEG, max 2MB) to object
+// storage and sets it as the org's Logo_URL__c via the same Update path (and
+// If-Match/etag semantics) as UpdateB2bOrg.
+func (s *membershipServicesrvc) UploadB2bOrgLogo(ctx context.Context, p *membershipservice.UploadB2bOrgLogoPayload, body io.ReadCloser) (*membershipservice.UploadB2bOrgLogoResult, error) {
+	defer body.Close() //nolint:errcheck
+
+	p.UID = normalizeSFID(p.UID)
+	ifMatch := ""
+	if p.IfMatch != nil {
+		ifMatch = *p.IfMatch
+	}
+
+	org, err := s.logoUploader.UploadB2BOrgLogo(ctx, p.UID, p.ContentType, body, ifMatch)
+	if err != nil {
+		return nil, wrapError(ctx, err)
+	}
+
+	etagVal, etagErr := etag.LFXEtag(org)
+	if etagErr != nil {
+		slog.WarnContext(ctx, "failed to compute etag for b2b org", "uid", p.UID, "error", etagErr)
+	}
+
+	lastMod := org.UpdatedAt.UTC().Format(constants.HTTPDateFormat)
+	result := &membershipservice.UploadB2bOrgLogoResult{
 		B2bOrg:       b2bOrgToResponse(org),
 		LastModified: &lastMod,
 	}
@@ -1151,6 +1193,7 @@ func NewMembershipService(
 	projectMshipR port.ProjectMembershipReader,
 	b2bOrgSettingsReader port.B2BOrgSettingsReader,
 	b2bOrgWriter usecaseSvc.B2BOrgWriter,
+	logoUploader usecaseSvc.LogoUploader,
 	keyContactWriter usecaseSvc.KeyContactWriter,
 	orgSettingsWriter usecaseSvc.OrgSettingsWriter,
 	workspaceWriter usecaseSvc.WorkspaceWriter,
@@ -1163,6 +1206,7 @@ func NewMembershipService(
 		projectMembershipReader: projectMshipR,
 		b2bOrgSettingsReader:    b2bOrgSettingsReader,
 		b2bOrgWriter:            b2bOrgWriter,
+		logoUploader:            logoUploader,
 		keyContactWriter:        keyContactWriter,
 		orgSettingsWriter:       orgSettingsWriter,
 		workspaceWriter:         workspaceWriter,

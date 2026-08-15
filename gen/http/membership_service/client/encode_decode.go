@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
@@ -610,6 +612,216 @@ func DecodeUpdateB2bOrgResponse(decoder func(*http.Response) goahttp.Decoder, re
 			return nil, goahttp.ErrInvalidResponse("membership-service", "update-b2b-org", resp.StatusCode, string(body))
 		}
 	}
+}
+
+// BuildUploadB2bOrgLogoRequest instantiates a HTTP request object with method
+// and path set to call the "membership-service" service "upload-b2b-org-logo"
+// endpoint
+func (c *Client) BuildUploadB2bOrgLogoRequest(ctx context.Context, v any) (*http.Request, error) {
+	var (
+		uid  string
+		body io.Reader
+	)
+	{
+		rd, ok := v.(*membershipservice.UploadB2bOrgLogoRequestData)
+		if !ok {
+			return nil, goahttp.ErrInvalidType("membership-service", "upload-b2b-org-logo", "membershipservice.UploadB2bOrgLogoRequestData", v)
+		}
+		p := rd.Payload
+		body = rd.Body
+		uid = p.UID
+	}
+	u := &url.URL{Scheme: c.scheme, Host: c.host, Path: UploadB2bOrgLogoMembershipServicePath(uid)}
+	req, err := http.NewRequest("POST", u.String(), body)
+	if err != nil {
+		return nil, goahttp.ErrInvalidURL("membership-service", "upload-b2b-org-logo", u.String(), err)
+	}
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
+
+	return req, nil
+}
+
+// EncodeUploadB2bOrgLogoRequest returns an encoder for requests sent to the
+// membership-service upload-b2b-org-logo server.
+func EncodeUploadB2bOrgLogoRequest(encoder func(*http.Request) goahttp.Encoder) func(*http.Request, any) error {
+	return func(req *http.Request, v any) error {
+		data, ok := v.(*membershipservice.UploadB2bOrgLogoRequestData)
+		if !ok {
+			return goahttp.ErrInvalidType("membership-service", "upload-b2b-org-logo", "*membershipservice.UploadB2bOrgLogoRequestData", v)
+		}
+		p := data.Payload
+		if p.BearerToken != nil {
+			head := *p.BearerToken
+			if !strings.Contains(head, " ") {
+				req.Header.Set("Authorization", "Bearer "+head)
+			} else {
+				req.Header.Set("Authorization", head)
+			}
+		}
+		if p.IfMatch != nil {
+			head := *p.IfMatch
+			req.Header.Set("If-Match", head)
+		}
+		{
+			head := p.ContentType
+			req.Header.Set("Content-Type", head)
+		}
+		if p.ContentLength != nil {
+			head := *p.ContentLength
+			headStr := strconv.FormatInt(head, 10)
+			req.Header.Set("Content-Length", headStr)
+		}
+		values := req.URL.Query()
+		if p.Version != nil {
+			values.Add("v", *p.Version)
+		}
+		req.URL.RawQuery = values.Encode()
+		return nil
+	}
+}
+
+// DecodeUploadB2bOrgLogoResponse returns a decoder for responses returned by
+// the membership-service upload-b2b-org-logo endpoint. restoreBody controls
+// whether the response body should be restored after having been read.
+// DecodeUploadB2bOrgLogoResponse may return the following errors:
+//   - "NotFound" (type *goa.ServiceError): http.StatusNotFound
+//   - "BadRequest" (type *goa.ServiceError): http.StatusBadRequest
+//   - "PreconditionFailed" (type *goa.ServiceError): http.StatusPreconditionFailed
+//   - "InternalServerError" (type *goa.ServiceError): http.StatusInternalServerError
+//   - "ServiceUnavailable" (type *goa.ServiceError): http.StatusServiceUnavailable
+//   - error: internal error
+func DecodeUploadB2bOrgLogoResponse(decoder func(*http.Response) goahttp.Decoder, restoreBody bool) func(*http.Response) (any, error) {
+	return func(resp *http.Response) (any, error) {
+		if restoreBody {
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			defer func() {
+				resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			}()
+		} else {
+			defer resp.Body.Close()
+		}
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var (
+				body UploadB2bOrgLogoResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			var (
+				etag         *string
+				lastModified *string
+			)
+			etagRaw := resp.Header.Get("Etag")
+			if etagRaw != "" {
+				etag = &etagRaw
+			}
+			lastModifiedRaw := resp.Header.Get("Last-Modified")
+			if lastModifiedRaw != "" {
+				lastModified = &lastModifiedRaw
+			}
+			res := NewUploadB2bOrgLogoResultOK(&body, etag, lastModified)
+			return res, nil
+		case http.StatusNotFound:
+			var (
+				body UploadB2bOrgLogoNotFoundResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoNotFoundResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			return nil, NewUploadB2bOrgLogoNotFound(&body)
+		case http.StatusBadRequest:
+			var (
+				body UploadB2bOrgLogoBadRequestResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoBadRequestResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			return nil, NewUploadB2bOrgLogoBadRequest(&body)
+		case http.StatusPreconditionFailed:
+			var (
+				body UploadB2bOrgLogoPreconditionFailedResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoPreconditionFailedResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			return nil, NewUploadB2bOrgLogoPreconditionFailed(&body)
+		case http.StatusInternalServerError:
+			var (
+				body UploadB2bOrgLogoInternalServerErrorResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoInternalServerErrorResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			return nil, NewUploadB2bOrgLogoInternalServerError(&body)
+		case http.StatusServiceUnavailable:
+			var (
+				body UploadB2bOrgLogoServiceUnavailableResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoServiceUnavailableResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			return nil, NewUploadB2bOrgLogoServiceUnavailable(&body)
+		default:
+			body, _ := io.ReadAll(resp.Body)
+			return nil, goahttp.ErrInvalidResponse("membership-service", "upload-b2b-org-logo", resp.StatusCode, string(body))
+		}
+	}
+}
+
+// // BuildUploadB2bOrgLogoStreamPayload creates a streaming endpoint request
+// payload from the method payload and the path to the file to be streamed
+func BuildUploadB2bOrgLogoStreamPayload(payload any, fpath string) (*membershipservice.UploadB2bOrgLogoRequestData, error) {
+	f, err := os.Open(fpath)
+	if err != nil {
+		return nil, err
+	}
+	return &membershipservice.UploadB2bOrgLogoRequestData{
+		Payload: payload.(*membershipservice.UploadB2bOrgLogoPayload),
+		Body:    f,
+	}, nil
 }
 
 // BuildGetB2bOrgSettingsRequest instantiates a HTTP request object with method

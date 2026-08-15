@@ -209,6 +209,10 @@ type CreateB2bOrgResponseBody B2bOrgResponseResponseBody
 // "update-b2b-org" endpoint HTTP response body.
 type UpdateB2bOrgResponseBody B2bOrgResponseResponseBody
 
+// UploadB2bOrgLogoResponseBody is the type of the "membership-service" service
+// "upload-b2b-org-logo" endpoint HTTP response body.
+type UploadB2bOrgLogoResponseBody B2bOrgResponseResponseBody
+
 // GetB2bOrgSettingsResponseBody is the type of the "membership-service"
 // service "get-b2b-org-settings" endpoint HTTP response body.
 type GetB2bOrgSettingsResponseBody B2bOrgSettingsResponseResponseBody
@@ -611,6 +615,101 @@ type UpdateB2bOrgInternalServerErrorResponseBody struct {
 // "membership-service" service "update-b2b-org" endpoint HTTP response body
 // for the "ServiceUnavailable" error.
 type UpdateB2bOrgServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoNotFoundResponseBody is the type of the "membership-service"
+// service "upload-b2b-org-logo" endpoint HTTP response body for the "NotFound"
+// error.
+type UploadB2bOrgLogoNotFoundResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoBadRequestResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "BadRequest" error.
+type UploadB2bOrgLogoBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoPreconditionFailedResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "PreconditionFailed" error.
+type UploadB2bOrgLogoPreconditionFailedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoInternalServerErrorResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "InternalServerError" error.
+type UploadB2bOrgLogoInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoServiceUnavailableResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "ServiceUnavailable" error.
+type UploadB2bOrgLogoServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name string `form:"name" json:"name" xml:"name"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -2914,6 +3013,38 @@ func NewUpdateB2bOrgResponseBody(res *membershipservice.UpdateB2bOrgResult) *Upd
 	return body
 }
 
+// NewUploadB2bOrgLogoResponseBody builds the HTTP response body from the
+// result of the "upload-b2b-org-logo" endpoint of the "membership-service"
+// service.
+func NewUploadB2bOrgLogoResponseBody(res *membershipservice.UploadB2bOrgLogoResult) *UploadB2bOrgLogoResponseBody {
+	body := &UploadB2bOrgLogoResponseBody{
+		UID:               res.B2bOrg.UID,
+		Name:              res.B2bOrg.Name,
+		Description:       res.B2bOrg.Description,
+		Phone:             res.B2bOrg.Phone,
+		Website:           res.B2bOrg.Website,
+		PrimaryDomain:     res.B2bOrg.PrimaryDomain,
+		LogoURL:           res.B2bOrg.LogoURL,
+		Industry:          res.B2bOrg.Industry,
+		Sector:            res.B2bOrg.Sector,
+		CrunchBaseURL:     res.B2bOrg.CrunchBaseURL,
+		NumberOfEmployees: res.B2bOrg.NumberOfEmployees,
+		Status:            res.B2bOrg.Status,
+		IsMember:          res.B2bOrg.IsMember,
+		Slug:              res.B2bOrg.Slug,
+		ParentUID:         res.B2bOrg.ParentUID,
+		CreatedAt:         res.B2bOrg.CreatedAt,
+		UpdatedAt:         res.B2bOrg.UpdatedAt,
+	}
+	if res.B2bOrg.DomainAliases != nil {
+		body.DomainAliases = make([]string, len(res.B2bOrg.DomainAliases))
+		for i, val := range res.B2bOrg.DomainAliases {
+			body.DomainAliases[i] = val
+		}
+	}
+	return body
+}
+
 // NewGetB2bOrgSettingsResponseBody builds the HTTP response body from the
 // result of the "get-b2b-org-settings" endpoint of the "membership-service"
 // service.
@@ -3582,6 +3713,81 @@ func NewUpdateB2bOrgInternalServerErrorResponseBody(res *goa.ServiceError) *Upda
 // service.
 func NewUpdateB2bOrgServiceUnavailableResponseBody(res *goa.ServiceError) *UpdateB2bOrgServiceUnavailableResponseBody {
 	body := &UpdateB2bOrgServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoNotFoundResponseBody builds the HTTP response body from
+// the result of the "upload-b2b-org-logo" endpoint of the "membership-service"
+// service.
+func NewUploadB2bOrgLogoNotFoundResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoNotFoundResponseBody {
+	body := &UploadB2bOrgLogoNotFoundResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoBadRequestResponseBody builds the HTTP response body from
+// the result of the "upload-b2b-org-logo" endpoint of the "membership-service"
+// service.
+func NewUploadB2bOrgLogoBadRequestResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoBadRequestResponseBody {
+	body := &UploadB2bOrgLogoBadRequestResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoPreconditionFailedResponseBody builds the HTTP response
+// body from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoPreconditionFailedResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoPreconditionFailedResponseBody {
+	body := &UploadB2bOrgLogoPreconditionFailedResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoInternalServerErrorResponseBody builds the HTTP response
+// body from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoInternalServerErrorResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoInternalServerErrorResponseBody {
+	body := &UploadB2bOrgLogoInternalServerErrorResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoServiceUnavailableResponseBody builds the HTTP response
+// body from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoServiceUnavailableResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoServiceUnavailableResponseBody {
+	body := &UploadB2bOrgLogoServiceUnavailableResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,
@@ -5168,6 +5374,20 @@ func NewUpdateB2bOrgPayload(body *UpdateB2bOrgRequestBody, uid string, version *
 	v.Version = version
 	v.BearerToken = bearerToken
 	v.IfMatch = ifMatch
+
+	return v
+}
+
+// NewUploadB2bOrgLogoPayload builds a membership-service service
+// upload-b2b-org-logo endpoint payload.
+func NewUploadB2bOrgLogoPayload(uid string, version *string, bearerToken *string, ifMatch *string, contentType string, contentLength *int64) *membershipservice.UploadB2bOrgLogoPayload {
+	v := &membershipservice.UploadB2bOrgLogoPayload{}
+	v.UID = uid
+	v.Version = version
+	v.BearerToken = bearerToken
+	v.IfMatch = ifMatch
+	v.ContentType = contentType
+	v.ContentLength = contentLength
 
 	return v
 }

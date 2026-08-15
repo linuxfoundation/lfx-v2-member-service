@@ -170,6 +170,7 @@ Key contacts are nested under their membership. GET/PUT/DELETE return 404 (not 4
 | POST   | `/b2b_orgs`                | Create a B2B org from a Salesforce Account SFID     | `member` on `team:{globalOrgAdminTeamName}` |
 | PUT    | `/b2b_orgs/{uid}`          | Partial update of a B2B org                         | `writer` on `b2b_org:{uid}`                |
 | GET    | `/b2b_orgs/{uid}`          | Get a B2B org                                       | `auditor` on `b2b_org:{uid}`               |
+| POST   | `/b2b_orgs/{uid}/logo`     | Upload a B2B org logo (PNG/JPEG, max 2MB)            | `writer` on `b2b_org:{uid}`                |
 | GET    | `/b2b_orgs/{uid}/settings`                    | Get org access-control settings (writers, auditors) | `auditor` on `b2b_org:{uid}`               |
 | PUT    | `/b2b_orgs/{uid}/settings`                    | Full-replace org writers and/or auditors            | `writer` on `b2b_org:{uid}`                |
 | POST   | `/b2b_orgs/{uid}/settings/users`              | Add a principal (invite or accept immediately)      | `writer` on `b2b_org:{uid}`                |
@@ -517,6 +518,7 @@ Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/template
 - **GET `/b2b_orgs/:uid`** — `auditor` on `b2b_org:{uid}`
 - **POST `/b2b_orgs`** — `member` on `team:{globalOrgAdminTeamName}`
 - **PUT `/b2b_orgs/:uid`** — `writer` on `b2b_org:{uid}`
+- **POST `/b2b_orgs/:uid/logo`** — `writer` on `b2b_org:{uid}`
 - **GET `/b2b_orgs/:uid/settings`** — `auditor` on `b2b_org:{uid}` (auditor, not writer, so trusted principals can see the pending-invite list)
 - **PUT `/b2b_orgs/:uid/settings`** — `writer` on `b2b_org:{uid}`
 - **POST `/b2b_orgs/:uid/settings/users` and PUT/DELETE `/b2b_orgs/:uid/settings/users/:email`** — `writer` on `b2b_org:{uid}`

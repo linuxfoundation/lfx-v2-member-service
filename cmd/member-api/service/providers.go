@@ -24,6 +24,7 @@ import (
 	infrab2borg "github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/b2borg"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/objectstore"
 	infraproject "github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/project"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/salesforce"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/salesforce/pubsub"
@@ -309,6 +310,72 @@ func B2BOrgWriterImpl(ctx context.Context) port.B2BOrgWriter {
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
 		return nil
 	}
+}
+
+// objectStoreClient is the shared S3-backed ObjectStoreWriter singleton (LFXV2-2016).
+var (
+	objectStoreClient  *objectstore.Client
+	objectStoreDoOnce  sync.Once
+	objectStoreInitErr error
+)
+
+// ObjectStoreWriterImpl initialises and returns the port.ObjectStoreWriter
+// implementation selected by the REPOSITORY_SOURCE environment variable:
+//
+//   - "mock"      — stub that always returns NotImplemented; for local dev
+//     without S3/CDN credentials configured.
+//   - "salesforce" (default) — real S3 client, config from S3_BUCKET,
+//     AWS_REGION, CDN_URL_PREFIX (required) and S3_ENDPOINT_URL (optional).
+func ObjectStoreWriterImpl(ctx context.Context) port.ObjectStoreWriter {
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	switch repoSource {
+	case "mock":
+		slog.InfoContext(ctx, "initialising mock object store writer")
+		return mock.NewMockObjectStoreWriter()
+
+	case "salesforce":
+		objectStoreDoOnce.Do(func() {
+			cfg, err := objectstore.ConfigFromEnv()
+			if err != nil {
+				objectStoreInitErr = err
+				return
+			}
+			objectStoreClient, objectStoreInitErr = objectstore.NewClient(ctx, cfg)
+		})
+		if objectStoreInitErr != nil {
+			log.Fatalf("failed to initialise object store client: %v", objectStoreInitErr)
+		}
+		slog.InfoContext(ctx, "initialising S3 object store writer")
+		return objectStoreClient
+
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+		return nil
+	}
+}
+
+// EnsureObjectStoreReady blocks until the logo bucket is reachable (retrying
+// per objectstore.Client.EnsureBucket), so the API does not accept traffic
+// before it can serve logo uploads. No-op in mock mode. Must be called after
+// ObjectStoreWriterImpl (directly or via LogoUploaderUseCase) has already run
+// at least once, since it relies on the package-level singleton they populate.
+func EnsureObjectStoreReady(ctx context.Context) error {
+	if objectStoreClient == nil {
+		return nil
+	}
+	return objectStoreClient.EnsureBucket(ctx)
+}
+
+// LogoUploaderUseCase constructs the LogoUploader use-case orchestrator wired
+// with the production (or mock) object store and the existing B2BOrgWriter
+// use-case, so a logo upload reuses the same Salesforce PATCH + indexer/FGA
+// publish path as a regular b2b_org update.
+func LogoUploaderUseCase(ctx context.Context) usecaseSvc.LogoUploader {
+	return usecaseSvc.NewLogoUploader(ObjectStoreWriterImpl(ctx), B2BOrgWriterUseCase(ctx))
 }
 
 // ProjectMembershipReaderImpl initialises and returns the port.ProjectMembershipReader
