@@ -1135,6 +1135,10 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 > `dispatchEntity` (`internal/service/cdc_consumer.go`) already logs a propagated error and
 > continues to the next record ID rather than aborting the event, so this carries no
 > batch-stranding risk. Indexer publication is unaffected and keeps its own delivery selection.
+> A failed `delete_access` publish also writes a durable marker to the CDC repair KV bucket
+> under `ReindexTypeB2BOrgDeleteAccess`/`ReindexTypeProjectMembershipDeleteAccess` so an operator
+> can find and manually re-purge it — deliberately not an automated retry, since `/admin/reindex`'s
+> targeted repair re-fetches and re-upserts the live record, which cannot repair a purge.
 > See `docs/fga-contract.md` for the full delivery semantics.
 
 - On every create / update / delete of a `b2b_org` or `key_contact` (via the HTTP API), and on

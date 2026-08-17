@@ -442,6 +442,27 @@ func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string,
 	}
 }
 
+// recordFailedDeleteAccess durably records a failed delete_access publish so
+// an operator can find and manually re-purge it later. This is deliberately
+// not wired into any automated drain: /admin/reindex's targeted repair
+// re-fetches and re-upserts the live Salesforce record, which cannot repair a
+// purge — the record is gone, so the fetch reports outcomeNotFound and no
+// delete_access is re-emitted (see ReindexTypeB2BOrgDeleteAccess). The marker
+// exists purely so ListPending(ctx, reindexType, ...) surfaces the exact
+// (type, uid) pairs that need a manual delete_access republish; the caller
+// still returns the original publish error regardless of whether this
+// best-effort write succeeds.
+func (o *CDCConsumer) recordFailedDeleteAccess(ctx context.Context, reindexType, uid string) {
+	if o.repairStore == nil {
+		return
+	}
+	if err := o.repairStore.PutPending(ctx, reindexType, uid); err != nil {
+		slog.ErrorContext(ctx, "cdc: failed to record delete_access failure for manual recovery — recover from this ID",
+			"reindex_type", reindexType, "uid", uid, "error", err,
+			"publish_failed_for_backfill_repair", true)
+	}
+}
+
 // partitionRecordIDs normalizes each raw CDC record ID to its canonical 18-char
 // SFID and splits the event into delete vs upsert lists. An ID that cannot be
 // normalized (wrong length / non-base-62) is logged and skipped, so a malformed
@@ -664,6 +685,7 @@ func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, r
 	// delete_access. dispatchEntity already logs this and continues to the
 	// next ID, so no other record in the batch is affected by propagating.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildB2BOrgDeleteAccessMessage(uid)); err != nil {
+		o.recordFailedDeleteAccess(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
 		return fmt.Errorf("cdc: b2b_org delete_access publish failed for uid %s: %w", uid, err)
 	}
 	return nil
@@ -772,6 +794,7 @@ func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, rea
 	// See handleAccountDeleteImpl for why this is propagated rather than
 	// swallowed.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
+		o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
 		return fmt.Errorf("cdc: project_membership delete_access publish failed for uid %s: %w", uid, err)
 	}
 	return nil

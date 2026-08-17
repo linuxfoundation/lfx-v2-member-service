@@ -87,6 +87,8 @@ There is no relation or exclusion field, so the message cannot be scoped to part
 
 **A purge does not leave zero tuples.** fga-sync never deletes a tuple whose subject begins with `team:`, so team-subject grants — including the staff-team reader granted to every org under LFXV2-2937 — survive and cannot be reaped by any service code path. They confer access to an object that no longer resolves, so they are inert, but any verification that asserts an empty tuple set for a deleted object will report a correct implementation as broken. Removing them requires a one-off script.
 
+**A failed publish propagates and is durably recorded.** The CDC delete handlers return the publish error rather than swallowing it (`dispatchEntity` in `internal/service/cdc_consumer.go` logs it and moves on to the next ID, so the batch is unaffected). On failure, the UID is also written to the CDC repair KV bucket under a delete-specific reindex type (`ReindexTypeB2BOrgDeleteAccess` / `ReindexTypeProjectMembershipDeleteAccess`) so an operator can find and manually re-purge it. This is deliberately not wired into `/admin/reindex`'s automated drain: that path re-fetches and re-upserts the *live* Salesforce record, which cannot repair a purge — the record is gone, so the fetch reports "not found" and no `delete_access` is re-emitted.
+
 ---
 
 ## Project Membership

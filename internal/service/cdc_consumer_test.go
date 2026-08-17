@@ -2724,9 +2724,17 @@ func TestCDCConsumer_Undelete_PublishesNoDeleteAccess(t *testing.T) {
 // necessary in the first place — that dispatchEntity's per-ID loop already
 // logs and continues rather than aborting the event on a handler error, so
 // propagating the error carries no batch-stranding risk.
+//
+// It also asserts the durable side effect that replaces the old "log and
+// hope" recovery story: on a publish failure the exact (type, uid) is written
+// to the CDC repair queue under a delete-specific type so an operator can
+// find and manually re-purge it. This is deliberately not an automated
+// retry — reindexItem's targeted repair re-fetches and re-upserts the live
+// Salesforce record, which cannot repair a purge for the reason above.
 func TestCDCConsumer_Delete_PublishFailureDoesNotStrandBatch(t *testing.T) {
 	first, second := sfid("org-fail-1"), sfid("org-fail-2")
 	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	repair := &mock.MockCDCRepairStore{}
 
 	consumer := newTestCDCConsumer(
 		&fakeCDCSubscriber{events: []model.CDCEvent{
@@ -2736,6 +2744,7 @@ func TestCDCConsumer_Delete_PublishFailureDoesNotStrandBatch(t *testing.T) {
 		&mock.MockCacheInvalidator{},
 		pub,
 		"",
+		svc.WithCDCRepairStore(repair),
 	)
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}),
@@ -2743,6 +2752,60 @@ func TestCDCConsumer_Delete_PublishFailureDoesNotStrandBatch(t *testing.T) {
 	assert.Equal(t, []string{first, second}, pub.deleteAccessUIDs(t, "b2b_org"),
 		"the second record must still be attempted after the first publish fails")
 	assert.Len(t, pub.indexerMessages, 2, "index convergence must be unaffected")
+
+	require.Len(t, repair.Puts, 2, "each failed delete_access publish must be durably recorded for manual recovery")
+	for i, id := range []string{first, second} {
+		assert.Equal(t, constants.ReindexTypeB2BOrgDeleteAccess, repair.Puts[i].Type,
+			"the marker must use the delete-specific type, not the upsert reindex type")
+		assert.Equal(t, id, repair.Puts[i].SFID)
+	}
+}
+
+// TestCDCConsumer_AssetDelete_PublishFailureRecordsRepairMarker mirrors the
+// b2b_org case above for project_membership.
+func TestCDCConsumer_AssetDelete_PublishFailureRecordsRepairMarker(t *testing.T) {
+	id := sfid("pm-fail")
+	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	repair := &mock.MockCDCRepairStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeDelete, RecordIDs: []string{id}, ReplayID: []byte("pmerrpub")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCRepairStore(repair),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	require.Len(t, repair.Puts, 1)
+	assert.Equal(t, constants.ReindexTypeProjectMembershipDeleteAccess, repair.Puts[0].Type)
+	assert.Equal(t, id, repair.Puts[0].SFID)
+}
+
+// TestCDCConsumer_Delete_PublishFailureWithNilRepairStore confirms the
+// recovery marker is best-effort: a consumer wired without a repair store
+// (mock mode, or an environment where it isn't configured) must not panic on
+// a publish failure, and the original error must still propagate.
+func TestCDCConsumer_Delete_PublishFailureWithNilRepairStore(t *testing.T) {
+	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("org-fail-norepair")}, ReplayID: []byte("norepair")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+
+	assert.NotPanics(t, func() {
+		require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+	})
 }
 
 // TestCDCConsumer_ProjectRole_Delete_PublishesNoDeleteAccess. Key
