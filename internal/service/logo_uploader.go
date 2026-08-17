@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 
 	"github.com/google/uuid"
 
@@ -59,6 +60,14 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	}
 	if len(data) == 0 {
 		return nil, pkgerrors.NewValidation("logo upload body is empty")
+	}
+
+	// The declared Content-Type header is caller-controlled and unverified up to
+	// this point — sniff the actual bytes so a mislabeled (or malicious) upload
+	// can't reach object storage and get published as a public CDN URL under a
+	// PNG/JPEG media type it doesn't have.
+	if sniffed := http.DetectContentType(data); sniffed != mediaType {
+		return nil, pkgerrors.NewValidation(fmt.Sprintf("logo content does not match declared content type %q (detected %q)", mediaType, sniffed))
 	}
 
 	// Validate the org exists and, if ifMatch is set, that it's still current —

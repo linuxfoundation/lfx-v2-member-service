@@ -21,6 +21,11 @@ import (
 // b2b_org_logos/{uid}/{uuid}{ext} — never the deterministic {uid}{ext}.
 var logoKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/[0-9a-f-]{36}\.png$`)
 
+// validPNGBytes is the minimal 8-byte PNG signature — enough for
+// http.DetectContentType to sniff "image/png", which UploadB2BOrgLogo now
+// requires to match the declared Content-Type.
+const validPNGBytes = "\x89PNG\r\n\x1a\n"
+
 // stubObjectStore captures the Put call and returns a canned URL/error.
 type stubObjectStore struct {
 	url        string
@@ -67,14 +72,14 @@ func TestLogoUploader_Happy(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "")
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
 	require.NoError(t, err)
 	require.NotNil(t, org)
 	assert.Equal(t, "uid-1", org.UID)
 	assert.Regexp(t, logoKeyPattern, objectStore.gotKey, "key must be b2b_org_logos/{uid}/{unique}.png, never the deterministic {uid}.png")
 	assert.Equal(t, "image/png", objectStore.gotType)
-	assert.Equal(t, len("fake-png-bytes"), objectStore.gotDataLen)
+	assert.Equal(t, len(validPNGBytes), objectStore.gotDataLen)
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
 	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
 }
@@ -84,7 +89,7 @@ func TestLogoUploader_ContentTypeWithParameters(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png; charset=binary", strings.NewReader("fake-png-bytes"), "")
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png; charset=binary", strings.NewReader(validPNGBytes), "")
 
 	require.NoError(t, err)
 	require.NotNil(t, org)
@@ -101,6 +106,20 @@ func TestLogoUploader_UnsupportedContentType(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
 	assert.Equal(t, "", objectStore.gotKey, "object store must not be called for a rejected content type")
+}
+
+func TestLogoUploader_ContentSniffMismatch(t *testing.T) {
+	// Declared as PNG, but the bytes aren't — the caller-declared Content-Type
+	// alone must not be trusted to publish arbitrary bytes under a PNG/JPEG URL.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/should-not-be-used"}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("this is not a png"), "")
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
+	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the sniffed content type doesn't match the declared one")
 }
 
 func TestLogoUploader_OversizedBody(t *testing.T) {
@@ -132,7 +151,7 @@ func TestLogoUploader_ObjectStoreError(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "")
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
 	require.Error(t, err)
 	assert.False(t, orgWriter.gotInput != (model.B2BOrgInput{}), "org writer must not be called when the upload fails")
@@ -147,7 +166,7 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{err: pkgerrors.NewNotFound("b2b org not found")}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "")
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
@@ -160,7 +179,7 @@ func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{validateErr: pkgerrors.NewPreconditionFailed("b2b org has been modified since last read")}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "\"stale-etag\"")
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "\"stale-etag\"")
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsPreconditionFailed(err), "expected precondition-failed error, got %T: %v", err, err)
@@ -172,7 +191,7 @@ func TestLogoUploader_OrgNotFoundPreventsUpload(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{validateErr: pkgerrors.NewNotFound("b2b org not found")}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "")
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
