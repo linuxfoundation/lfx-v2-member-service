@@ -196,6 +196,27 @@ func TestSanitize_RejectsUndefinedEntity(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSanitize_RejectsDeeplyNestedSVG(t *testing.T) {
+	// A small payload (a few hundred KB of 3-byte "<g>" tags) can encode far
+	// more nesting than any real logo needs; without a depth bound this drives
+	// sanitizeElement's recursion deep enough to risk stack exhaustion.
+	var b strings.Builder
+	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg">`)
+	for range 10_000 {
+		b.WriteString("<g>")
+	}
+	b.WriteString(`<circle r="1"/>`)
+	for range 10_000 {
+		b.WriteString("</g>")
+	}
+	b.WriteString(`</svg>`)
+
+	_, err := svgsanitize.Sanitize([]byte(b.String()))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nesting depth")
+}
+
 func TestSanitize_KeepsIDAndClassForCSSTargeting(t *testing.T) {
 	in := `<svg xmlns="http://www.w3.org/2000/svg" id="logo" class="brand"><rect id="bg" class="fill" width="1" height="1"/></svg>`
 

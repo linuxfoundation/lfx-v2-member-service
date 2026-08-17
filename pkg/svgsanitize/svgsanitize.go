@@ -77,6 +77,12 @@ var allowedAttributes = map[string]bool{
 // anything) the input declared, so sanitized output is always well-formed.
 const svgNamespace = "http://www.w3.org/2000/svg"
 
+// maxSVGNestingDepth bounds sanitizeElement's recursion. A logo has no
+// legitimate need for deep nesting; without a limit, a small payload of
+// thousands of nested allow-listed elements (e.g. minimal 3-byte <g> tags)
+// can drive the Go call stack to exhaustion.
+const maxSVGNestingDepth = 100
+
 // paintAttributes are the allow-listed attributes whose value can carry a
 // CSS url(...) paint-server or filter reference — fill, stroke, clip-path,
 // and mask all accept "url(#id)" pointing at a <linearGradient>, <pattern>,
@@ -128,7 +134,7 @@ func Sanitize(data []byte) ([]byte, error) {
 
 	var buf bytes.Buffer
 	enc := xml.NewEncoder(&buf)
-	if err := sanitizeElement(dec, enc, root, true); err != nil {
+	if err := sanitizeElement(dec, enc, root, true, 0); err != nil {
 		return nil, err
 	}
 	if err := enc.Flush(); err != nil {
@@ -171,8 +177,12 @@ func findRoot(dec *xml.Decoder) (xml.StartElement, error) {
 // into allow-listed children, drops disallowed children — and their entire
 // subtree, not just the tag — and writes the matching end element. isRoot
 // forces a fresh, known-safe xmlns onto <svg> regardless of what the input
-// declared.
-func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, isRoot bool) error {
+// declared. depth is the current nesting level, checked against
+// maxSVGNestingDepth to bound recursion.
+func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, isRoot bool, depth int) error {
+	if depth > maxSVGNestingDepth {
+		return fmt.Errorf("svgsanitize: exceeds maximum nesting depth of %d", maxSVGNestingDepth)
+	}
 	attrs := filterAttrs(se.Attr)
 	if isRoot {
 		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: svgNamespace})
@@ -190,7 +200,7 @@ func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, is
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if allowedElements[t.Name.Local] {
-				if err := sanitizeElement(dec, enc, t.Copy(), false); err != nil {
+				if err := sanitizeElement(dec, enc, t.Copy(), false, depth+1); err != nil {
 					return err
 				}
 			} else if err := skipElement(dec); err != nil {
