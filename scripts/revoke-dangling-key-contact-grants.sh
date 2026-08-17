@@ -263,7 +263,10 @@ export -f process_pair
 
 echo "Processing $TOTAL pairs ($PARALLELISM-way parallel)..."
 : >"$RECORD_FILE"
+# Single quotes below are deliberate: $0/$a/$b must expand inside the
+# xargs-spawned bash -c subshell, not this shell.
 awk -F'\t' '{print $1"|"$2}' "$INPUT_TSV" |
+	# shellcheck disable=SC2016
 	xargs -P "$PARALLELISM" -I{} bash -c 'a=${0%%|*}; b=${0#*|}; process_pair "$a" "$b"' {} >>"$RECORD_FILE"
 
 # --- summary -------------------------------------------------------------
