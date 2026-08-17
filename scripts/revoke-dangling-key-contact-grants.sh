@@ -35,11 +35,17 @@
 # indexer and FGA publishes can fail independently, so this check is
 # best-effort, not a guarantee, in either direction. This is accepted for a
 # single one-off remediation of a closed, already-small population (not a
-# recurring/automated job) — full Salesforce API integration is out of
-# proportion to that scope. Mitigate by exporting full-dangling.tsv again
-# shortly before the --live run, minimizing the window in which this
-# residual gap could matter; the dry-run preview and the JSONL audit trail's
-# manual re-grant path (see Rollback, above) remain the safety net.
+# recurring/automated job). The investigation compared 104,581 OpenSearch
+# key_contact documents and found complete live-population coverage: 1,105
+# username-bearing contacts and 1,105 grant-index entries, with zero unmatched
+# in either direction. Repeating that full comparison against Salesforce would
+# materially consume its guarded API quota, which is reserved for user-facing
+# reads; the repository's review policy flags unbatched per-record Salesforce
+# fetch loops as unsafe quota consumption. Full Salesforce API integration is
+# therefore out of proportion to this scope. Mitigate by exporting
+# full-dangling.tsv again shortly before the --live run, minimizing the window
+# in which this residual gap could matter; the dry-run preview and the JSONL
+# audit trail's manual re-grant path (see Rollback, above) remain the safety net.
 #
 # Unlike scripts/revoke-lf-teams-auditor-openfga.sh (which deletes a blanket
 # team grant and only needs a total count), this remediation must attribute
