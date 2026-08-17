@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 
@@ -78,15 +79,51 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, err
 	}
 
-	// Each attempt gets its own immutable key rather than the deterministic
-	// {uid}.{ext} — so a racing upload, or one whose subsequent Update fails,
-	// can never clobber bytes another upload (in flight or already committed)
-	// depends on.
-	key := fmt.Sprintf("b2b_org_logos/%s/%s%s", uid, uuid.NewString(), ext)
-	url, err := o.objectStore.Put(ctx, key, contentType, data)
-	if err != nil {
+	// key is deterministic and reused by every upload for this org — that's
+	// what lets a copy of an old logo URL, once superseded, converge to
+	// current bytes within the object's Cache-Control TTL instead of pointing
+	// at permanently-frozen bytes (see object_store_writer.go's Put contract
+	// and pkg/constants/logo.go's LogoCacheControl comment).
+	//
+	// A racing/losing upload must never be the one to write here, though — two
+	// concurrent uploads both writing key directly can leave it holding the
+	// loser's bytes even after the winner's Update call has already returned
+	// success (see the LFXV2-2016 Copilot review on PR #87). So each attempt
+	// first writes to its own scratch key (catching an upload failure before
+	// touching Salesforce, same rationale as the precondition check above),
+	// then only writes to the real, shared key once B2BOrgWriter.Update has
+	// confirmed — via its own optimistic-concurrency check — that this attempt
+	// actually won.
+	key := fmt.Sprintf("b2b_org_logos/%s%s", uid, ext)
+	scratchKey := fmt.Sprintf("b2b_org_logos/%s/tmp-%s%s", uid, uuid.NewString(), ext)
+
+	if _, err := o.objectStore.Put(ctx, scratchKey, contentType, data); err != nil {
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
 	}
 
-	return o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: url}, ifMatch)
+	url := o.objectStore.VersionedURL(key)
+	org, err := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: url}, ifMatch)
+	if err != nil {
+		if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
+			slog.WarnContext(ctx, "failed to clean up scratch logo object after a failed update",
+				"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
+		}
+		return nil, err
+	}
+
+	// This attempt has won: commit the bytes to the real key. A failure here
+	// leaves Salesforce pointing at url slightly ahead of the object's actual
+	// bytes at key — self-corrects on the next successful upload to the same
+	// org, same as any other stale-object case this key strategy is built to
+	// heal from.
+	if _, err := o.objectStore.Put(ctx, key, contentType, data); err != nil {
+		return nil, fmt.Errorf("committing logo for b2b org %s: %w", uid, err)
+	}
+
+	if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
+		slog.WarnContext(ctx, "failed to clean up scratch logo object after a successful update",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
+	}
+
+	return org, nil
 }

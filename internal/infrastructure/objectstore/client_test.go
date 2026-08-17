@@ -17,12 +17,21 @@ import (
 // for Client's paths, keyed on the HTTP method + path so tests stay small.
 func fakeS3Server(t *testing.T, headStatus int, putStatus int) *httptest.Server {
 	t.Helper()
+	return fakeS3ServerWithDelete(t, headStatus, putStatus, http.StatusOK)
+}
+
+// fakeS3ServerWithDelete additionally stubs DeleteObject, for tests that
+// exercise Client.Delete.
+func fakeS3ServerWithDelete(t *testing.T, headStatus, putStatus, deleteStatus int) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodHead:
 			w.WriteHeader(headStatus)
 		case http.MethodPut:
 			w.WriteHeader(putStatus)
+		case http.MethodDelete:
+			w.WriteHeader(deleteStatus)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -83,6 +92,39 @@ func TestClient_Put_UploadError(t *testing.T) {
 	client := newTestClient(t, server.URL)
 
 	_, err := client.Put(context.Background(), "b2b_org_logos/uid-1.png", "image/png", []byte("fake-png-bytes"))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "test-bucket")
+}
+
+func TestClient_VersionedURL_NoUpload(t *testing.T) {
+	server := fakeS3Server(t, http.StatusOK, http.StatusOK)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	origNowUnix := nowUnix
+	nowUnix = func() int64 { return 1700000000 }
+	defer func() { nowUnix = origNowUnix }()
+
+	url := client.VersionedURL("b2b_org_logos/uid-1.png")
+
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1700000000", url)
+}
+
+func TestClient_Delete_Success(t *testing.T) {
+	server := fakeS3ServerWithDelete(t, http.StatusOK, http.StatusOK, http.StatusNoContent)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	assert.NoError(t, client.Delete(context.Background(), "b2b_org_logos/uid-1/tmp-scratch.png"))
+}
+
+func TestClient_Delete_Error(t *testing.T) {
+	server := fakeS3ServerWithDelete(t, http.StatusOK, http.StatusOK, http.StatusInternalServerError)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.Delete(context.Background(), "b2b_org_logos/uid-1/tmp-scratch.png")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "test-bucket")

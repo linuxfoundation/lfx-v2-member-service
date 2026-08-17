@@ -115,7 +115,24 @@ func (c *Client) Put(ctx context.Context, key string, contentType string, data [
 		return "", fmt.Errorf("uploading object %s to bucket %s: %w", key, c.bucket, err)
 	}
 
-	return fmt.Sprintf("%s/%s?v=%d", c.cdn, key, nowUnix()), nil
+	return c.VersionedURL(key), nil
+}
+
+// VersionedURL implements port.ObjectStoreWriter.
+func (c *Client) VersionedURL(key string) string {
+	return fmt.Sprintf("%s/%s?v=%d", c.cdn, key, nowUnix())
+}
+
+// Delete implements port.ObjectStoreWriter.
+func (c *Client) Delete(ctx context.Context, key string) error {
+	_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &c.bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return fmt.Errorf("deleting object %s from bucket %s: %w", key, c.bucket, err)
+	}
+	return nil
 }
 
 // nowUnix is a var so tests can override it deterministically.

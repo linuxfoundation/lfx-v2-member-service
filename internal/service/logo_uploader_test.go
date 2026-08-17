@@ -17,29 +17,63 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// logoKeyPattern matches the immutable per-attempt key format
-// b2b_org_logos/{uid}/{uuid}{ext} — never the deterministic {uid}{ext}.
-var logoKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/[0-9a-f-]{36}\.png$`)
+// scratchKeyPattern matches the per-attempt scratch key format
+// b2b_org_logos/{uid}/tmp-{uuid}{ext} — never the deterministic {uid}{ext}.
+var scratchKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/tmp-[0-9a-f-]{36}\.png$`)
+
+// deterministicLogoKey is the stable, reused-every-upload key for uid-1 —
+// what makes a copy of a superseded logo URL converge to current bytes
+// within the object's Cache-Control TTL instead of staying wrong forever.
+const deterministicLogoKey = "b2b_org_logos/uid-1.png"
 
 // validPNGBytes is the minimal 8-byte PNG signature — enough for
 // http.DetectContentType to sniff "image/png", which UploadB2BOrgLogo now
 // requires to match the declared Content-Type.
 const validPNGBytes = "\x89PNG\r\n\x1a\n"
 
-// stubObjectStore captures the Put call and returns a canned URL/error.
+// stubObjectStore captures every Put/Delete call in order and returns a
+// canned URL/error for Put, keyed per-call so tests can simulate the scratch
+// write succeeding while the final commit write fails, or vice versa.
 type stubObjectStore struct {
 	url        string
 	err        error
-	gotKey     string
+	commitErr  error
+	deleteErr  error
+	putKeys    []string
 	gotType    string
 	gotDataLen int
+	deletedKey string
 }
 
 func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data []byte) (string, error) {
-	s.gotKey = key
+	s.putKeys = append(s.putKeys, key)
 	s.gotType = contentType
 	s.gotDataLen = len(data)
-	return s.url, s.err
+	if key == deterministicLogoKey && s.commitErr != nil {
+		return "", s.commitErr
+	}
+	if key != deterministicLogoKey && s.err != nil {
+		return "", s.err
+	}
+	return s.url, nil
+}
+
+func (s *stubObjectStore) VersionedURL(_ string) string {
+	return s.url
+}
+
+func (s *stubObjectStore) Delete(_ context.Context, key string) error {
+	s.deletedKey = key
+	return s.deleteErr
+}
+
+// gotKey is the scratch key from the first (always-attempted) Put call, kept
+// for tests that only care whether the object store was touched at all.
+func (s *stubObjectStore) gotKey() string {
+	if len(s.putKeys) == 0 {
+		return ""
+	}
+	return s.putKeys[0]
 }
 
 // stubLogoOrgWriter records the Update call's input. validateErr controls
@@ -77,11 +111,14 @@ func TestLogoUploader_Happy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, org)
 	assert.Equal(t, "uid-1", org.UID)
-	assert.Regexp(t, logoKeyPattern, objectStore.gotKey, "key must be b2b_org_logos/{uid}/{unique}.png, never the deterministic {uid}.png")
+	require.Len(t, objectStore.putKeys, 2, "expected a scratch write followed by the commit write to the deterministic key")
+	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "first write must be to a unique scratch key, not the deterministic one")
+	assert.Equal(t, deterministicLogoKey, objectStore.putKeys[1], "commit write must land on the deterministic key so old URLs converge to current bytes")
 	assert.Equal(t, "image/png", objectStore.gotType)
 	assert.Equal(t, len(validPNGBytes), objectStore.gotDataLen)
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
 	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must be cleaned up once the commit write succeeds")
 }
 
 func TestLogoUploader_ContentTypeWithParameters(t *testing.T) {
@@ -105,7 +142,7 @@ func TestLogoUploader_UnsupportedContentType(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
-	assert.Equal(t, "", objectStore.gotKey, "object store must not be called for a rejected content type")
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called for a rejected content type")
 }
 
 func TestLogoUploader_ContentSniffMismatch(t *testing.T) {
@@ -119,7 +156,7 @@ func TestLogoUploader_ContentSniffMismatch(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
-	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the sniffed content type doesn't match the declared one")
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called when the sniffed content type doesn't match the declared one")
 }
 
 func TestLogoUploader_OversizedBody(t *testing.T) {
@@ -132,7 +169,7 @@ func TestLogoUploader_OversizedBody(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
-	assert.Equal(t, "", objectStore.gotKey, "object store must not be called for an oversized body")
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called for an oversized body")
 }
 
 func TestLogoUploader_EmptyBody(t *testing.T) {
@@ -172,6 +209,29 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
 	assert.True(t, orgWriter.validated, "precondition must have been checked (and passed) before this call")
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL, "object store must still be called once the precondition check passes")
+	require.Len(t, objectStore.putKeys, 1, "a losing/failing Update must never reach the shared deterministic key")
+	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "the only write attempted must be the scratch one")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "the scratch object must still be cleaned up after a failed update")
+}
+
+func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
+	// Update has already committed the org's new Logo_URL__c — the commit
+	// write to the shared key is what's left, and its failure must surface as
+	// an error even though the Salesforce-side write already succeeded, so the
+	// caller knows to retry rather than assume the logo is actually live.
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: errors.New("s3 unavailable"),
+	}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	assert.True(t, orgWriter.validated)
+	require.Len(t, objectStore.putKeys, 2, "expected both the scratch write and the attempted commit write")
+	assert.Equal(t, deterministicLogoKey, objectStore.putKeys[1])
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {
@@ -183,7 +243,7 @@ func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsPreconditionFailed(err), "expected precondition-failed error, got %T: %v", err, err)
-	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the precondition check fails")
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called when the precondition check fails")
 }
 
 func TestLogoUploader_OrgNotFoundPreventsUpload(t *testing.T) {
@@ -195,7 +255,7 @@ func TestLogoUploader_OrgNotFoundPreventsUpload(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
-	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the org does not exist")
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called when the org does not exist")
 }
 
 // errReader always fails on Read, simulating a client disconnect mid-upload.
@@ -213,5 +273,5 @@ func TestLogoUploader_BodyReadError(t *testing.T) {
 	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", errReader{}, "")
 
 	require.Error(t, err)
-	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the body can't be read")
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called when the body can't be read")
 }

@@ -404,6 +404,16 @@ func (m *MockObjectStoreWriter) Put(_ context.Context, _ string, _ string, _ []b
 	return "", errors.NewNotImplemented("upload-b2b-org-logo not implemented in mock")
 }
 
+// VersionedURL returns an empty string; never reached since Put always fails.
+func (m *MockObjectStoreWriter) VersionedURL(_ string) string {
+	return ""
+}
+
+// Delete always returns not-implemented.
+func (m *MockObjectStoreWriter) Delete(_ context.Context, _ string) error {
+	return errors.NewNotImplemented("delete-b2b-org-logo not implemented in mock")
+}
+
 // MockMemberPublisher is a no-op implementation of port.MemberPublisher for
 // local development when MESSAGING_SOURCE=mock. All messages are logged but
 // not published to NATS.
