@@ -151,7 +151,8 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 | Change | Actions |
 |---|---|
 | Upsert | Invalidate b2b_org cache → fetch accounts → set `IsParent` from a batched child-UID query → `PublishB2BOrgIndexer` (`updated`) + `BuildB2BOrgFGAMessage` (`global_org_admin` always set, not create-only; auditor team references always set) + reparenting messages on a genuine parent change + **parent/child hierarchy tuples** (see below). |
-| Delete | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org) → `update_access` for the stub org. No references or relations are asserted, so every b2b_org relation lands in `ExcludeRelations` and the message reconciles **nothing** away — all existing tuples survive the delete, `team:`-subject and per-user alike (see [LFXV2-3034](https://linuxfoundation.atlassian.net/browse/LFXV2-3034)). **No team references are asserted** either — neither `global_org_admin` nor the auditor teams. fga-sync never deletes a `team:`-subject tuple, so asserting one on an org that no longer exists creates a permanent orphan on a dead object that no code path can reap. |
+| Delete | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org) → `delete_access` for the UID, which withdraws the org's tuples (see [LFXV2-3034](https://linuxfoundation.atlassian.net/browse/LFXV2-3034)). Published on the **genuine-delete path only** — see the absent-path row below. `team:`-subject tuples survive regardless: fga-sync never deletes one, so the staff-team reader grant remains on a dead object. It is inert, but an audit asserting zero remaining tuples will wrongly report this as broken. |
+| Absent → convergence | Invalidate cache → `PublishB2BOrgIndexer` (`deleted`, stub org). **No FGA message of any operation.** An org missing from the periodic query has not necessarily been deleted — a lapsed membership is enough to drop it — so withdrawing its tuples would revoke a live customer's administrators, recoverable only by an operator re-applying the org's settings. This path formerly sent an `update_access` stub in which every relation landed in `ExcludeRelations`; it reconciled nothing and was removed. |
 
 ### Asset → `project_membership`
 
@@ -161,7 +162,8 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 | Change | Actions |
 |---|---|
 | Upsert | Invalidate cache → fetch memberships → resolve `project_uid` → on success: `PublishProjectMembershipIndexer` (`created`/`updated`) + `PublishProjectMembershipFGA` (`b2b_org` + `project` refs; `key_contact` excluded). On resolver failure: skip indexer, log ERROR, **OpenFGA only** (`project` relation excluded when ref absent). |
-| Delete | Invalidate cache → `PublishProjectMembershipIndexer` (`deleted`, stub — data is the UID string). No FGA (no tuple to revoke). |
+| Delete | Invalidate cache → `PublishProjectMembershipIndexer` (`deleted`, stub — data is the UID string) → `delete_access` for the UID. Genuine-delete path only. |
+| Absent → convergence | Invalidate cache → `PublishProjectMembershipIndexer` (`deleted`, stub). **No FGA message.** A membership drops out of the query when `Product2.Family` flips off "Membership", which leaves a live record whose auditor cascade must survive. |
 
 ### Project_Role__c → `key_contact`
 
@@ -265,7 +267,9 @@ Every record in a skipped upsert batch is durably recorded so `/admin/reindex {c
 
 ### Absent-from-SOQL → delete convergence
 
-An upsert ID missing from the SOQL result means the record was soft-deleted or no longer qualifies (e.g. a `Product2.Family` flipped off "Membership"). `handleAbsentAsDelete` routes it to the delete handler so the index/FGA state converges. Present-but-unconvertible IDs are excluded from the "absent" check so a transient conversion error never triggers a spurious delete.
+An upsert ID missing from the SOQL result means the record was soft-deleted or no longer qualifies (e.g. a `Product2.Family` flipped off "Membership"). `handleAbsentAsDelete` routes it to the `handleAccountAbsent` / `handleAssetAbsent` entry point so the **index** state converges. Present-but-unconvertible IDs are excluded from the "absent" check so a transient conversion error never triggers a spurious delete.
+
+Absence and deletion are separate entry points rather than one shared handler, because they must diverge on authorization. The convergence path publishes no FGA message at all: the second disjunct above ("no longer qualifies") describes a record that still exists, so a purge here would strip a live object. Index convergence is safe on both paths — a tombstoned document is rebuilt by `POST /admin/reindex`, whereas a revoked grant is not recoverable that way. Keeping the two call sites distinct means no future edit to the shared implementation can route absence into the purge by accident.
 
 ### SFID normalisation
 

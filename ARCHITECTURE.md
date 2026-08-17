@@ -1114,16 +1114,22 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 
 ### Step 5: FGA Sync integration — *Done*
 
-> **Status:** Implemented. The service publishes `lfx.fga-sync.update_access` /
-> `lfx.fga-sync.delete_access` for `b2b_org`, b2b_org settings, and key contacts via
-> `port.MemberPublisher`. The b2b_org create message includes the `global_org_admin` reference;
+> **Status:** Implemented. The service publishes `lfx.fga-sync.update_access` via
+> `port.MemberPublisher` for `b2b_org`, b2b_org settings, and key contacts.
+> `lfx.fga-sync.delete_access` is published for `b2b_org` and `project_membership`, on genuine
+> Salesforce CDC deletes only (LFXV2-3034). Key contacts are revoked by a targeted
+> `member_remove` rather than `delete_access`, because that path knows the single person to
+> revoke; b2b_org settings have no FGA type of their own and resolve against the parent org.
+> The b2b_org create message includes the `global_org_admin` reference;
 > HTTP updates omit it (the CDC consumer always sets it — see `docs/fga-contract.md`). All FGA
 > publication is asynchronous — no FGA path uses NATS request/reply, and the publisher API
 > exposes no synchronous selector, so success means the local client accepted the message onto
 > the connection, not that the broker received it or that OpenFGA converged. Publishes are
-> fire-and-forget on the write path (recoverable via `POST /admin/reindex`); deletes propagate
-> publish errors, and the API key-contact delete also flushes the connection, which is the only
-> path that confirms the broker received the revocation. Indexer publication is
+> fire-and-forget on the write path (recoverable via `POST /admin/reindex`). On the **API**
+> delete path publish errors propagate, and the API key-contact delete also flushes the
+> connection, which is the only path that confirms the broker received the revocation. On the
+> **CDC** delete path they do not: one event carries many record IDs, so a failed publish is
+> logged and swallowed rather than stranding the rest of the batch. Indexer publication is
 > unaffected and keeps its own delivery selection. See `docs/fga-contract.md` for the full
 > delivery semantics.
 
@@ -1133,7 +1139,18 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
   above.
 - The FGA Sync message for `b2b_org` creation must always include the `global_org_admin`
   reference (team UID loaded from config at startup).
-- On delete, publish a `delete_access` message to remove all FGA tuples for the object.
+- On delete, publish a `delete_access` message to remove all FGA tuples for the object —
+  but only for a **genuine** deletion. The CDC consumer also routes records that are merely
+  *absent* from the periodic query to its delete handler for index convergence; that path is
+  excluded, because a live org whose membership has lapsed is absent too, and purging it would
+  revoke a real customer's administrators. Index convergence is safe on both paths because a
+  tombstoned document is rebuilt by `POST /admin/reindex`, whereas a revoked grant is recovered
+  only by an operator re-applying the org's settings.
+- A `delete_access` on a deleted object does **not** leave it with zero tuples. fga-sync
+  declines to delete any tuple whose subject begins with `team:`, so the staff-team reader grant
+  from LFXV2-2937 survives. It confers access to an object that no longer resolves, so it is
+  inert — but an audit asserting zero remaining tuples will report a correct implementation as
+  broken.
 
 ### Step 6: Indexer integration — *Done*
 

@@ -262,6 +262,35 @@ func BuildProjectMembershipFGAMessagePreserveMissingRefs(pm *model.ProjectMember
 	return buildProjectMembershipFGAMessage(pm, true)
 }
 
+// buildDeleteAccessMessage constructs a GenericFGAMessage that withdraws every
+// tuple fga-sync manages for the given object.
+//
+// Unlike update_access, this carries no relations, references, or exclusions —
+// the UID alone is the whole instruction, because there is no partial delete.
+// That is exactly why it must never be sent for an object that still exists:
+// there is no field with which to scope it down.
+func buildDeleteAccessMessage(objectType, uid string) fgatypes.GenericFGAMessage {
+	return fgatypes.GenericFGAMessage{
+		ObjectType: objectType,
+		Operation:  "delete_access",
+		Data:       fgatypes.GenericDeleteData{UID: uid},
+	}
+}
+
+// BuildB2BOrgDeleteAccessMessage constructs the FGA message that withdraws a
+// deleted organization's tuples. Only valid for an org genuinely deleted in
+// Salesforce — see the caller in cdc_consumer.go.
+func BuildB2BOrgDeleteAccessMessage(uid string) fgatypes.GenericFGAMessage {
+	return buildDeleteAccessMessage("b2b_org", uid)
+}
+
+// BuildProjectMembershipDeleteAccessMessage constructs the FGA message that
+// withdraws a deleted membership's tuples. Only valid for a membership
+// genuinely deleted in Salesforce — see the caller in cdc_consumer.go.
+func BuildProjectMembershipDeleteAccessMessage(uid string) fgatypes.GenericFGAMessage {
+	return buildDeleteAccessMessage("project_membership", uid)
+}
+
 // BuildProjectMembershipIndexingConfig constructs an IndexingConfig for a
 // ProjectMembership document.
 func BuildProjectMembershipIndexingConfig(pm *model.ProjectMembership) *indexerTypes.IndexingConfig {

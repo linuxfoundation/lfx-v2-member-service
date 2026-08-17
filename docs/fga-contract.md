@@ -75,9 +75,17 @@ No other membership publication flushes — not the email-change revocation that
 
 ### Delete
 
-On delete, only `uid` is sent, and the message asserts **no** team references — neither `global_org_admin` nor the auditor teams.
+On delete the service publishes `delete_access` to `lfx.fga-sync.delete_access`, carrying only `uid`:
 
-Note that fga-sync does not remove every tuple for `b2b_org:{uid}`. It never deletes a tuple whose subject begins with `team:`, so team-subject grants survive the delete and cannot be reaped by any service code path. That is why the delete message stops asserting them: a team reference written for an org that no longer exists is a permanent orphan on a dead object. Removing existing ones requires a one-off script.
+```json
+{ "object_type": "b2b_org", "operation": "delete_access", "data": { "uid": "0014100000Td9x0AAB" } }
+```
+
+There is no relation or exclusion field, so the message cannot be scoped to part of an object — which is precisely why it must only ever be sent for an object that is genuinely gone.
+
+**Genuine deletions only.** The CDC consumer also routes records that are merely *absent* from its periodic query to a delete handler for index convergence. That path publishes no FGA message: an organization missing from the query may still exist, since a lapsed membership is enough to drop it, and purging it would revoke a live customer's administrators. The two cases use separate entry points (`handleAccountDelete` vs `handleAccountAbsent`) so the distinction is structural rather than a condition someone can forget. See [LFXV2-3034](https://linuxfoundation.atlassian.net/browse/LFXV2-3034).
+
+**A purge does not leave zero tuples.** fga-sync never deletes a tuple whose subject begins with `team:`, so team-subject grants — including the staff-team reader granted to every org under LFXV2-2937 — survive and cannot be reaped by any service code path. They confer access to an object that no longer resolves, so they are inert, but any verification that asserts an empty tuple set for a deleted object will report a correct implementation as broken. Removing them requires a one-off script.
 
 ---
 
@@ -136,12 +144,15 @@ Workspace CRUD operations (`POST/PUT/DELETE /b2b_orgs/{uid}/workspaces/…`) and
 | Update B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Always sent. Carries the auditor team references but no `global_org_admin`, which is create-only |
 | CDC `AccountChangeEvent` | `b2b_org` | `lfx.fga-sync.update_access` | Same as update; `globalOrgAdminTeamUID` always set (not create-only) |
 | Reparent B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Up to 3 messages: org's own `parent`, old parent's `child` list, new parent's `child` list |
-| Delete B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Stub org (uid only); no references or relations asserted, so every b2b_org relation lands in `ExcludeRelations` and the message reconciles **nothing** away. All existing tuples survive it, `team:`-subject and per-user alike |
-| CDC `AccountChangeEvent` (delete) | `b2b_org` | `lfx.fga-sync.update_access` | Same as delete |
+| Delete B2B org | `b2b_org` | `lfx.fga-sync.delete_access` | Stub org (uid only). Withdraws the org's tuples; `team:`-subject grants survive by design |
+| CDC `AccountChangeEvent` (delete) | `b2b_org` | `lfx.fga-sync.delete_access` | Same as delete. `DELETE` and `GAP_DELETE` only |
+| CDC `AccountChangeEvent` (absent from SOQL) | `b2b_org` | *(none)* | Index tombstone only. The org may still exist — see [Delete](#delete) |
 | Update org settings (`PUT /settings`) | `b2b_org` | `lfx.fga-sync.update_access` | `writer`/`auditor` relations; nil param = preserve existing tuples, explicit (even `[]`) = replace. Also carries the auditor team references |
 | Add/update/delete settings user | `b2b_org` | `lfx.fga-sync.update_access` | Emitted by `AddPrincipal`, `UpdatePrincipalRole`, `DeletePrincipal` and `invite_accepted` promotion — all share the settings publish path, so all carry the auditor team references |
 | Update project membership | `project_membership` | `lfx.fga-sync.update_access` | Sets `b2b_org` + `project` refs; excludes `key_contact` |
 | CDC `AssetChangeEvent` | `project_membership` | `lfx.fga-sync.update_access` | Same as update |
+| CDC `AssetChangeEvent` (delete) | `project_membership` | `lfx.fga-sync.delete_access` | Withdraws the membership's tuples. `DELETE` and `GAP_DELETE` only |
+| CDC `AssetChangeEvent` (absent from SOQL) | `project_membership` | *(none)* | Index tombstone only. `Product2.Family` may simply have flipped off "Membership" |
 | Create key contact | `project_membership` | `lfx.fga-sync.member_put` | Only when contact has a resolved LFID username |
 | Update key contact (username change) | `project_membership` | `lfx.fga-sync.member_put` + `lfx.fga-sync.member_remove` | Grants the new username before revoking the old one, so no window leaves the contact without access. Skipped entirely when the username resolves unchanged |
 | CDC `Project_Role__ChangeEvent` | `project_membership` | `lfx.fga-sync.member_put` (+ `lfx.fga-sync.member_remove`) | LFID resolved via `UserReader.UsernameByEmail`; skipped when email has no LFID. A `member_remove` for the previously recorded `{membership_uid, username}` follows the put when the grant target changed (Salesforce-side reparent, or a changed LFID) |

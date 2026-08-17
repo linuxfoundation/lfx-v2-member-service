@@ -23,6 +23,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
@@ -153,6 +154,7 @@ type subjectCapturingPublisher struct {
 	accessMessages  []any    // payloads, parallel to access
 	flushCount      int      // most CDC paths never flush; key_contact delete/supersede do (see flushErr)
 	flushErr        error    // returned by every Flush call when set
+	accessErr       error    // returned by every Access call when set; the call is still recorded
 }
 
 func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, msg any, _ bool) error {
@@ -167,7 +169,7 @@ func (p *subjectCapturingPublisher) Access(_ context.Context, subject string, ms
 	defer p.mu.Unlock()
 	p.access = append(p.access, subject)
 	p.accessMessages = append(p.accessMessages, msg)
-	return nil
+	return p.accessErr
 }
 
 func (p *subjectCapturingPublisher) Flush(_ context.Context) error {
@@ -431,6 +433,11 @@ func TestCDCConsumer_Account_Upsert_PassesGlobalOrgAdminTeamUID(t *testing.T) {
 // exists is a permanent orphan on a dead object that nothing can ever reap.
 // Before this change the delete path re-asserted global_org_admin; adding the
 // two auditor teams would have tripled the rate of those orphans.
+// TestCDCConsumer_Account_Delete_AssertsNoTeamReferences guards the original
+// concern — a delete must not write team references that nothing can ever reap
+// — now that the delete path sends delete_access instead of update_access.
+// Asserting the absence of any update_access is the stronger form of the old
+// per-field checks: a message that is never sent can carry no orphan reference.
 func TestCDCConsumer_Account_Delete_AssertsNoTeamReferences(t *testing.T) {
 	pub := &subjectCapturingPublisher{}
 
@@ -447,19 +454,10 @@ func TestCDCConsumer_Account_Delete_AssertsNoTeamReferences(t *testing.T) {
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
 
-	require.NotEmpty(t, pub.accessMessages, "delete must still publish an access message")
-	msg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
-	require.True(t, ok)
-	data, ok := msg.Data.(fgatypes.GenericAccessData)
-	require.True(t, ok)
-
-	assert.NotContains(t, data.References, "auditor",
-		"auditor team refs on a deleted org would be unreapable orphans")
-	assert.NotContains(t, data.References, "global_org_admin",
-		"the pre-existing global_org_admin assertion on delete is removed for the same reason")
-	assert.Contains(t, data.ExcludeRelations, "writer",
-		"nil writers/auditors preservation behaviour must be unchanged")
-	assert.Contains(t, data.ExcludeRelations, "auditor")
+	assert.Zero(t, pub.updateAccessCount(),
+		"a delete must not write team references onto an object that no longer exists")
+	assert.Equal(t, []string{sfid("org-uid-teams")}, pub.deleteAccessUIDs(t, "b2b_org"),
+		"the delete must instead withdraw the org's tuples")
 }
 
 func TestCDCConsumer_Account_Delete_PublishesIndexerAndFGA(t *testing.T) {
@@ -531,7 +529,8 @@ func TestCDCConsumer_Asset_Delete_PublishesIndexerOnly(t *testing.T) {
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
 
 	assert.NotEmpty(t, pub.indexer, "indexer delete must be published")
-	assert.Empty(t, pub.access, "no FGA on membership delete (no tuple to revoke)")
+	assert.Zero(t, pub.updateAccessCount(),
+		"a membership delete reconciles nothing — it withdraws, via delete_access")
 	data, isStr := pub.indexerDataIsString(0)
 	assert.True(t, isStr, "project_membership delete data must be a JSON string (object ID), not an object")
 	assert.Equal(t, sfid("pm-uid-del"), data)
@@ -1206,9 +1205,11 @@ func TestCDCConsumer_Asset_GapDelete_TreatedAsDelete(t *testing.T) {
 
 	assert.NotEmpty(t, pub.indexer, "GAP_DELETE must publish a delete indexer event")
 	assert.Equal(t, 1, invalidator.MembershipCalls, "cache must be invalidated on GAP_DELETE")
-	// The indexer subject is present; verify no FGA access was published
-	// (delete path does not emit FGA member_put).
-	assert.Empty(t, pub.access, "GAP_DELETE must not emit FGA access (no re-fetch)")
+	// No re-fetch happens on the delete path, so nothing can be reconciled;
+	// the only FGA traffic is the withdrawal itself.
+	assert.Zero(t, pub.updateAccessCount(), "GAP_DELETE must not emit update_access (no re-fetch)")
+	assert.Equal(t, []string{sfid("pm-gapdel")}, pub.deleteAccessUIDs(t, "project_membership"),
+		"GAP_DELETE is a real deletion and must withdraw tuples")
 }
 
 func TestCDCConsumer_ProjectRole_GapDelete_TreatedAsDelete(t *testing.T) {
@@ -2393,4 +2394,368 @@ func TestCDCConsumer_Account_Reparent_CleansUpOldParentChildList(t *testing.T) {
 		}
 	}
 	assert.True(t, oldParentCleanup, "reparent must re-publish the old parent's child list without the moved org")
+}
+
+// ── delete_access purge on genuine CDC deletes (LFXV2-3034) ──────────────────
+
+// deleteAccessUIDs returns the UIDs carried by every delete_access message
+// published for the given object type. Filtering on the subject rather than the
+// payload keeps the helper honest: a message sent to the wrong subject is
+// invisible to fga-sync, so it must be invisible here too.
+func (p *subjectCapturingPublisher) deleteAccessUIDs(t *testing.T, objectType string) []string {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var uids []string
+	for i, subject := range p.access {
+		if subject != constants.FGASyncDeleteAccessSubject {
+			continue
+		}
+		msg, ok := p.accessMessages[i].(fgatypes.GenericFGAMessage)
+		require.True(t, ok, "delete_access payload must be a GenericFGAMessage")
+		require.Equal(t, "delete_access", msg.Operation)
+		if msg.ObjectType != objectType {
+			continue
+		}
+		data, ok := msg.Data.(fgatypes.GenericDeleteData)
+		require.True(t, ok, "delete_access must carry GenericDeleteData")
+		uids = append(uids, data.UID)
+	}
+	return uids
+}
+
+// allAccessUIDs returns the subject UID of every FGA message published,
+// whatever its operation. Used to assert that a given object was left alone
+// entirely, rather than merely spared one particular operation.
+func (p *subjectCapturingPublisher) allAccessUIDs(t *testing.T) []string {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var uids []string
+	for _, raw := range p.accessMessages {
+		msg, ok := raw.(fgatypes.GenericFGAMessage)
+		require.True(t, ok, "every FGA payload must be a GenericFGAMessage")
+		switch data := msg.Data.(type) {
+		case fgatypes.GenericDeleteData:
+			uids = append(uids, data.UID)
+		case fgatypes.GenericAccessData:
+			uids = append(uids, data.UID)
+		case fgatypes.GenericMemberData:
+			uids = append(uids, data.UID)
+		default:
+			t.Fatalf("unhandled FGA data payload %T", msg.Data)
+		}
+	}
+	return uids
+}
+
+// updateAccessCount reports how many update_access messages were published.
+func (p *subjectCapturingPublisher) updateAccessCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	n := 0
+	for _, subject := range p.access {
+		if subject == constants.FGASyncUpdateAccessSubject {
+			n++
+		}
+	}
+	return n
+}
+
+// runAccountChange drives a single Account CDC event through the consumer.
+func runAccountChange(t *testing.T, pub *subjectCapturingPublisher, ct model.CDCChangeType, ids ...string) {
+	t.Helper()
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: ct, RecordIDs: ids, ReplayID: []byte("dl-acct")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+}
+
+// runAssetChange drives a single Asset CDC event through the consumer.
+func runAssetChange(t *testing.T, pub *subjectCapturingPublisher, ct model.CDCChangeType, ids ...string) {
+	t.Helper()
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: ct, RecordIDs: ids, ReplayID: []byte("dl-asset")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+}
+
+// TestCDCConsumer_Account_Delete_PublishesDeleteAccess covers both change types
+// isDelete accepts. GAP_DELETE is included deliberately: it reaches the same
+// delete path, so omitting it would leave half the purge untested.
+func TestCDCConsumer_Account_Delete_PublishesDeleteAccess(t *testing.T) {
+	for _, ct := range []model.CDCChangeType{model.CDCChangeDelete, model.CDCChangeGapDelete} {
+		t.Run(string(ct), func(t *testing.T) {
+			pub := &subjectCapturingPublisher{}
+			runAccountChange(t, pub, ct, sfid("org-purge"))
+
+			assert.Equal(t, []string{sfid("org-purge")}, pub.deleteAccessUIDs(t, "b2b_org"),
+				"a genuinely deleted org must have its tuples withdrawn")
+		})
+	}
+}
+
+// TestCDCConsumer_Account_Delete_UIDIsNormalized guards the boundary contract:
+// OpenFGA object IDs are written from the 18-char SFID, so publishing the raw
+// 15-char form would target an object that holds no tuples and purge nothing,
+// while still reporting success.
+func TestCDCConsumer_Account_Delete_UIDIsNormalized(t *testing.T) {
+	full := sfid("org-normalize")
+	pub := &subjectCapturingPublisher{}
+	runAccountChange(t, pub, model.CDCChangeDelete, full[:15])
+
+	uids := pub.deleteAccessUIDs(t, "b2b_org")
+	require.Len(t, uids, 1)
+	assert.Equal(t, full, uids[0], "delete_access must carry the normalized 18-char SFID")
+	assert.Len(t, uids[0], 18)
+}
+
+// TestCDCConsumer_Account_Delete_StillPublishesIndexerDelete pins that the
+// purge is added alongside the index tombstone, not in place of it.
+func TestCDCConsumer_Account_Delete_StillPublishesIndexerDelete(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	runAccountChange(t, pub, model.CDCChangeDelete, sfid("org-idx"))
+
+	require.Len(t, pub.indexerMessages, 1, "the index tombstone must still be published")
+	assert.Equal(t, "deleted", pub.indexerAction(0))
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "delete indexer data must remain the object ID string")
+	assert.Equal(t, sfid("org-idx"), data)
+}
+
+// TestCDCConsumer_Asset_Delete_PublishesDeleteAccess covers the membership
+// purge. Unlike the b2b_org path this branch published no FGA message at all
+// before the change, so nothing is being replaced.
+func TestCDCConsumer_Asset_Delete_PublishesDeleteAccess(t *testing.T) {
+	for _, ct := range []model.CDCChangeType{model.CDCChangeDelete, model.CDCChangeGapDelete} {
+		t.Run(string(ct), func(t *testing.T) {
+			pub := &subjectCapturingPublisher{}
+			runAssetChange(t, pub, ct, sfid("pm-purge"))
+
+			assert.Equal(t, []string{sfid("pm-purge")}, pub.deleteAccessUIDs(t, "project_membership"),
+				"a genuinely deleted membership must have its tuples withdrawn")
+			assert.Zero(t, pub.updateAccessCount(),
+				"the membership delete path writes no update_access")
+		})
+	}
+}
+
+// TestCDCConsumer_Asset_Delete_StillPublishesIndexerDelete pins the same
+// alongside-not-instead-of property for the membership path.
+func TestCDCConsumer_Asset_Delete_StillPublishesIndexerDelete(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	runAssetChange(t, pub, model.CDCChangeDelete, sfid("pm-idx"))
+
+	require.Len(t, pub.indexerMessages, 1, "the index tombstone must still be published")
+	assert.Equal(t, "deleted", pub.indexerAction(0))
+	data, isStr := pub.indexerDataIsString(0)
+	assert.True(t, isStr, "delete indexer data must remain the object ID string")
+	assert.Equal(t, sfid("pm-idx"), data)
+}
+
+// ── Absence must never withdraw access (LFXV2-3034) ──────────────────────────
+//
+// These are the tests the feature exists to make non-vacuous. Before the purge
+// was added they would all pass trivially. They assert the constraint that a
+// record merely missing from the periodic query — an org whose membership
+// lapsed, a membership whose Product2.Family flipped off — keeps every tuple.
+
+// runAbsentBatch drives an upsert event in which one ID comes back from SOQL and
+// one does not, exercising the convergence path for the absent ID.
+func runAbsentAccountBatch(t *testing.T, pub *subjectCapturingPublisher) (present, absent string) {
+	t.Helper()
+	present, absent = sfid("org-live"), sfid("org-lapsed")
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{present, absent}, ReplayID: []byte("us3a")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{{UID: present}}}),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+	return present, absent
+}
+
+func runAbsentAssetBatch(t *testing.T, pub *subjectCapturingPublisher) (present, absent string) {
+	t.Helper()
+	present, absent = sfid("pm-live"), sfid("pm-lapsed")
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{present, absent}, ReplayID: []byte("us3b")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{{UID: present}}}),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+	return present, absent
+}
+
+// TestCDCConsumer_Account_Absent_PublishesNoDeleteAccess is the guard against
+// the worst failure mode this change could introduce: stripping a live
+// customer's administrators because a membership renewal lapsed.
+func TestCDCConsumer_Account_Absent_PublishesNoDeleteAccess(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	runAbsentAccountBatch(t, pub)
+
+	assert.Empty(t, pub.deleteAccessUIDs(t, "b2b_org"),
+		"an org absent from SOQL may still exist — purging it locks out live admins")
+}
+
+func TestCDCConsumer_Asset_Absent_PublishesNoDeleteAccess(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	runAbsentAssetBatch(t, pub)
+
+	assert.Empty(t, pub.deleteAccessUIDs(t, "project_membership"),
+		"a membership absent from SOQL may still exist")
+}
+
+// TestCDCConsumer_Absent_PublishesNoFGAMessageAtAll. The absent path
+// previously sent an update_access stub in which every relation landed in
+// ExcludeRelations, so it reconciled nothing while looking like it did. Removing
+// it makes this stronger assertion available: the convergence path is inert with
+// respect to authorization, so no future edit can widen it by accident.
+func TestCDCConsumer_Absent_PublishesNoFGAMessageAtAll(t *testing.T) {
+	// The record SOQL did return reconciles normally in the same batch, so the
+	// assertion is keyed on the absent UID rather than on a message count.
+	t.Run("b2b_org", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		_, absent := runAbsentAccountBatch(t, pub)
+		assert.NotContains(t, pub.allAccessUIDs(t), absent,
+			"the absent path must emit no FGA message of any operation")
+	})
+
+	t.Run("project_membership", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		_, absent := runAbsentAssetBatch(t, pub)
+		assert.NotContains(t, pub.allAccessUIDs(t), absent,
+			"the absent path must emit no FGA message of any operation")
+	})
+}
+
+// TestCDCConsumer_Absent_StillPublishesIndexerDelete confirms the change is
+// scoped to authorization. Index convergence on absence is unchanged, because a
+// tombstoned document is cheaply rebuilt while a revoked grant is not.
+func TestCDCConsumer_Absent_StillPublishesIndexerDelete(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	runAbsentAccountBatch(t, pub)
+
+	require.Len(t, pub.indexerMessages, 2, "both IDs must produce an indexer event")
+	assert.Equal(t, "deleted", pub.indexerAction(0), "the absent ID is still tombstoned")
+	assert.Equal(t, "updated", pub.indexerAction(1))
+}
+
+// TestCDCConsumer_MixedBatch_PurgesOnlyTheDeletedRecord is the discriminating
+// test: both records converge through the same handler, and only the genuinely
+// deleted one may lose its tuples. A regression that routed absence to the
+// delete entry point would pass every single-path test above and fail here.
+func TestCDCConsumer_MixedBatch_PurgesOnlyTheDeletedRecord(t *testing.T) {
+	deleted, present, absent := sfid("org-gone"), sfid("org-still-here"), sfid("org-no-membership")
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{deleted}, ReplayID: []byte("mix1")},
+			{Entity: "Account", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{present, absent}, ReplayID: []byte("mix2")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{{UID: present}}}),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []string{deleted}, pub.deleteAccessUIDs(t, "b2b_org"),
+		"exactly one purge, carrying the deleted record's UID and no other")
+}
+
+// TestCDCConsumer_Undelete_PublishesNoDeleteAccess raises the stakes on an
+// existing invariant. isDelete uses exact equality rather than HasSuffix so
+// UNDELETE is not caught; before this change a mis-route wrote a spurious index
+// tombstone, but now it would purge every tuple from a live restored object.
+// The existing UNDELETE test asserts the upsert path fires — this asserts the
+// delete path stays silent, which is the half that now carries the risk.
+func TestCDCConsumer_Undelete_PublishesNoDeleteAccess(t *testing.T) {
+	t.Run("Account", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		runAccountChange(t, pub, model.CDCChangeUndelete, sfid("org-restored"))
+		assert.Empty(t, pub.deleteAccessUIDs(t, "b2b_org"),
+			"UNDELETE restores a record — purging it would strip a live object")
+	})
+
+	t.Run("Asset", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		runAssetChange(t, pub, model.CDCChangeUndelete, sfid("pm-restored"))
+		assert.Empty(t, pub.deleteAccessUIDs(t, "project_membership"),
+			"UNDELETE restores a record — purging it would strip a live object")
+	})
+}
+
+// TestCDCConsumer_Delete_PublishFailureIsSwallowed. One CDC event
+// carries many record IDs, so returning the error would strand every ID after
+// the first failure. The publish is fire-and-forget and /admin/reindex repairs.
+func TestCDCConsumer_Delete_PublishFailureIsSwallowed(t *testing.T) {
+	first, second := sfid("org-fail-1"), sfid("org-fail-2")
+	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{first, second}, ReplayID: []byte("errpub")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}),
+		"a failed FGA publish must not fail the event")
+	assert.Equal(t, []string{first, second}, pub.deleteAccessUIDs(t, "b2b_org"),
+		"the second record must still be attempted after the first publish fails")
+	assert.Len(t, pub.indexerMessages, 2, "index convergence must be unaffected")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_PublishesNoDeleteAccess. Key
+// contacts are deliberately excluded from the purge: a contact grants one
+// person the key_contact relation on a membership that usually outlives them,
+// so the correct revocation is the targeted member_remove this path already
+// sends. A delete_access would carry the membership UID and strip every other
+// principal from a live object.
+func TestCDCConsumer_ProjectRole_Delete_PublishesNoDeleteAccess(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("kc-purge")}, ReplayID: []byte("kcdel")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.False(t, pub.hasAccess(constants.FGASyncDeleteAccessSubject),
+		"key contacts are revoked by a targeted member_remove, never by a whole-object purge")
 }

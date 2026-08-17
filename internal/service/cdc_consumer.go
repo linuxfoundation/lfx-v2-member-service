@@ -530,10 +530,11 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	}
 
 	// SFIDs absent from the SOQL result are soft-deleted or no longer hold a
-	// membership Asset — route them to the delete path for index/FGA convergence.
+	// membership Asset — route them to the absent path for *index* convergence.
+	// The second case is a live org, so this path withdraws no authorization.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
-	o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountDelete)
+	o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
 	// Include each org's ParentUID so we also have the parent's full child list for the
@@ -596,7 +597,9 @@ func makeReturnedSet[T any](items []T, uid func(T) string, seenButFailed []strin
 
 // handleAbsentAsDelete routes IDs that were requested in a batch upsert but
 // absent from the SOQL result (soft-deleted or no longer qualifying) to the
-// provided delete handler for index/FGA convergence.
+// provided handler for index convergence. Callers pass the *Absent entry point
+// rather than the *Delete one: absence does not prove deletion, so this path
+// must not withdraw FGA tuples. See handleAccountDeleteImpl.
 func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, upsertIDs []string, returned map[string]struct{}, deleteHandler func(context.Context, string) error) {
 	for _, id := range upsertIDs {
 		if _, found := returned[id]; !found {
@@ -610,7 +613,24 @@ func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, u
 	}
 }
 
+// handleAccountDelete handles an Account genuinely deleted in Salesforce.
 func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error {
+	return o.handleAccountDeleteImpl(ctx, uid, true)
+}
+
+// handleAccountAbsent handles an Account that was requested in a batch upsert
+// but did not come back from SOQL. Absence is not deletion: an org that still
+// exists but no longer holds a qualifying membership lands here too, which is
+// why this entry point exists separately rather than sharing the delete one.
+func (o *CDCConsumer) handleAccountAbsent(ctx context.Context, uid string) error {
+	return o.handleAccountDeleteImpl(ctx, uid, false)
+}
+
+// handleAccountDeleteImpl converges a b2b_org that is either gone or absent.
+// realDelete distinguishes the two: only a genuine Salesforce delete may
+// withdraw authorization, because only then is it certain no live org is
+// affected.
+func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, realDelete bool) error {
 	if err := o.cacheInvalidator.InvalidateB2BOrg(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: b2b_org cache invalidation failed on delete",
 			"uid", uid, "error", err)
@@ -619,19 +639,27 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 	stubOrg := &model.B2BOrg{UID: uid}
 	PublishB2BOrgIndexer(ctx, o.publisher, stubOrg, indexerConstants.ActionDeleted)
 
-	// nil access (writers/auditors) = preserve; empty = clear. Passing nil here
-	// reconciles nothing away: every relation lands in ExcludeRelations, so the
-	// org's per-user grants and hierarchy edges outlive the delete. Nothing
-	// reaps them today — fga-sync subscribes to no indexer subject, so the
-	// delete indexer event above does not drive FGA cleanup. See LFXV2-3034.
+	// Only a genuine Salesforce delete withdraws authorization. An org that is
+	// merely absent from the periodic query may still exist — a lapsed
+	// membership is enough to drop it — and purging that org's tuples would
+	// lock live administrators out of an account that is still theirs.
 	//
-	// No team references are asserted here — neither the global-admin UID nor
-	// the auditor teams. fga-sync never deletes a tuple whose subject begins
-	// with "team:", so any team reference written for an org that no longer
-	// exists is a permanent orphan on a dead object that nothing can reap.
-	fgaMsg := BuildB2BOrgFGAMessage(stubOrg, B2BOrgFGARefs{})
-	if err := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, fgaMsg); err != nil {
-		slog.WarnContext(ctx, "cdc: b2b_org delete FGA publish failed",
+	// The index tombstone above is published on both paths because it is
+	// cheaply rebuilt by /admin/reindex. Authorization is not: the writer and
+	// auditor grants live in the org's settings record, so a wrong purge is
+	// recovered only by an operator re-applying them.
+	if !realDelete {
+		return nil
+	}
+
+	// A surviving "team:" subject is expected rather than a failure. fga-sync
+	// declines to delete team-subject tuples, so a deleted org keeps the staff
+	// reader grant from LFXV2-2937. It confers access to an object that no
+	// longer resolves, so it is inert.
+	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildB2BOrgDeleteAccessMessage(uid)); err != nil {
+		// Logged and swallowed rather than returned: one CDC event carries many
+		// record IDs, and failing the event would strand the rest of the batch.
+		slog.WarnContext(ctx, "cdc: b2b_org delete_access publish failed",
 			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
 	}
 	return nil
@@ -672,10 +700,11 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	}
 
 	// IDs absent from the SOQL result are soft-deleted or no longer qualify
-	// (e.g. Product2.Family flipped off Membership) — route to delete.
+	// (e.g. Product2.Family flipped off Membership) — route to the absent path,
+	// which converges the index only, since the latter case is a live record.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(memberships, func(pm *model.ProjectMembership) string { return pm.UID }, convErrSFIDs)
-	o.handleAbsentAsDelete(ctx, "Asset", upsertIDs, returned, o.handleAssetDelete)
+	o.handleAbsentAsDelete(ctx, "Asset", upsertIDs, returned, o.handleAssetAbsent)
 
 	action := indexerConstants.ActionUpdated
 	if changeType == model.CDCChangeCreate {
@@ -705,7 +734,22 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		"absent_delete_count", len(upsertIDs)-len(returned))
 }
 
+// handleAssetDelete handles an Asset genuinely deleted in Salesforce.
 func (o *CDCConsumer) handleAssetDelete(ctx context.Context, uid string) error {
+	return o.handleAssetDeleteImpl(ctx, uid, true)
+}
+
+// handleAssetAbsent handles an Asset that was requested in a batch upsert but
+// did not come back from SOQL — soft-deleted, or no longer qualifying because
+// Product2.Family flipped off Membership. The second case is a live record, so
+// this path must not withdraw authorization.
+func (o *CDCConsumer) handleAssetAbsent(ctx context.Context, uid string) error {
+	return o.handleAssetDeleteImpl(ctx, uid, false)
+}
+
+// handleAssetDeleteImpl converges a project_membership that is either gone or
+// absent. See handleAccountDeleteImpl for what realDelete governs.
+func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, realDelete bool) error {
 	if err := o.cacheInvalidator.InvalidateProjectMembership(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed on delete",
 			"uid", uid, "error", err)
@@ -713,6 +757,18 @@ func (o *CDCConsumer) handleAssetDelete(ctx context.Context, uid string) error {
 
 	stubPM := &model.ProjectMembership{UID: uid}
 	PublishProjectMembershipIndexer(ctx, o.publisher, stubPM, indexerConstants.ActionDeleted)
+
+	// See handleAccountDeleteImpl: absence is not deletion. A membership can
+	// drop out of the periodic query because Product2.Family flipped off
+	// Membership, which leaves a live record whose auditor cascade must survive.
+	if !realDelete {
+		return nil
+	}
+
+	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
+		slog.WarnContext(ctx, "cdc: project_membership delete_access publish failed",
+			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+	}
 	return nil
 }
 
