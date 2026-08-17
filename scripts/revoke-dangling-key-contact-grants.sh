@@ -342,9 +342,12 @@ export -f process_pair
 echo "Processing $TOTAL pairs ($PARALLELISM-way parallel)..."
 : >"$RECORD_FILE"
 # Single quotes below are deliberate: $0/$a/$b must expand inside the
-# xargs-spawned bash -c subshell, not this shell.
+# xargs-spawned bash -c subshell, not this shell. The disable directive must
+# sit above the whole pipeline, not between the awk/xargs continuation lines
+# — shellcheck's parser cannot resolve a directive comment placed right after
+# a trailing `|` (SC1073/SC1126/SC1072).
+# shellcheck disable=SC2016
 awk -F'\t' '{print $1"|"$2}' "$INPUT_TSV" |
-	# shellcheck disable=SC2016
 	xargs -P "$PARALLELISM" -I{} bash -c 'a=${0%%|*}; b=${0#*|}; process_pair "$a" "$b"' {} >>"$RECORD_FILE"
 
 # --- summary -------------------------------------------------------------
