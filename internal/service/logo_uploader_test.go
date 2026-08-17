@@ -24,7 +24,10 @@ var scratchKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/tmp-[0-9a-f-]{3
 // deterministicLogoKey is the stable, reused-every-upload key for uid-1 —
 // what makes a copy of a superseded logo URL converge to current bytes
 // within the object's Cache-Control TTL instead of staying wrong forever.
-const deterministicLogoKey = "b2b_org_logos/uid-1.png"
+// It deliberately has no file extension: a content-type-derived extension
+// would change key across a type change (e.g. PNG replaced by SVG),
+// breaking convergence for exactly that case.
+const deterministicLogoKey = "b2b_org_logos/uid-1"
 
 // validPNGBytes is the minimal 8-byte PNG signature — enough for
 // http.DetectContentType to sniff "image/png", which UploadB2BOrgLogo now
@@ -185,12 +188,35 @@ func TestLogoUploader_SVGSanitizedBeforeUpload(t *testing.T) {
 	require.Len(t, objectStore.putKeys, 1)
 	assert.True(t, strings.HasSuffix(objectStore.putKeys[0], ".svg"), "scratch key must use the .svg extension")
 	require.Len(t, objectStore.copyCalls, 1)
-	assert.Equal(t, "b2b_org_logos/uid-1.svg", objectStore.copyCalls[0].dst)
+	assert.Equal(t, deterministicLogoKey, objectStore.copyCalls[0].dst, "the shared key must not embed the .svg extension")
 	require.Len(t, objectStore.putData, 1)
 	uploaded := string(objectStore.putData[0])
 	assert.NotContains(t, uploaded, "script", "the bytes handed to Put must already be sanitized, not the raw malicious input")
 	assert.NotContains(t, uploaded, "onload")
 	assert.Contains(t, uploaded, "circle", "sanitization must not drop the benign content alongside the malicious content")
+}
+
+func TestLogoUploader_KeyStableAcrossContentTypeChange(t *testing.T) {
+	// A PNG upload followed by an SVG upload for the same org must promote to
+	// the identical shared key. If the key embedded a content-type-derived
+	// extension, replacing a PNG logo with an SVG one (or vice versa) would
+	// promote to a different key than the prior upload, leaving the old key's
+	// object — and any cached or copied URL pointing at it — permanently
+	// stale instead of converging within the Cache-Control TTL.
+	pngStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1?v=1"}
+	pngUploader := svc.NewLogoUploader(pngStore, &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}})
+	_, err := pngUploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+	require.NoError(t, err)
+	require.Len(t, pngStore.copyCalls, 1)
+
+	svgStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1?v=2"}
+	svgUploader := svc.NewLogoUploader(svgStore, &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}})
+	_, err = svgUploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/svg+xml", strings.NewReader(validSVGBytes), "")
+	require.NoError(t, err)
+	require.Len(t, svgStore.copyCalls, 1)
+
+	assert.Equal(t, pngStore.copyCalls[0].dst, svgStore.copyCalls[0].dst, "the shared key must be identical regardless of content type")
+	assert.Equal(t, deterministicLogoKey, pngStore.copyCalls[0].dst)
 }
 
 func TestLogoUploader_SVGRejectsInvalidContent(t *testing.T) {

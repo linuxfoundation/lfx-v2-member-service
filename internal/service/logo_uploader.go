@@ -114,7 +114,15 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// what lets a copy of an old logo URL, once superseded, converge to
 	// current bytes within the object's Cache-Control TTL instead of pointing
 	// at permanently-frozen bytes (see object_store_writer.go's Put contract
-	// and pkg/constants/logo.go's LogoCacheControl comment).
+	// and pkg/constants/logo.go's LogoCacheControl comment). It deliberately
+	// excludes the content type's file extension: Content-Type is carried on
+	// the object itself (Put's explicit parameter, preserved across Copy by
+	// S3's default COPY metadata directive) rather than inferred from the
+	// key, so an extension here would change key whenever a re-upload's
+	// content type does — breaking convergence for exactly the case (e.g. a
+	// PNG replaced by an SVG) that most needs an old, cached, or copied URL to
+	// resolve to current bytes (see the LFXV2-2016 lfx-reviewer finding on PR
+	// #87, logo_uploader.go:131).
 	//
 	// A racing/losing upload must never be the one to write here, though — two
 	// concurrent uploads both writing key directly can leave it holding the
@@ -128,7 +136,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// sibling update-b2b-org method) specifically because it's the only
 	// B2BOrgWriter caller that also writes shared object-storage bytes — that
 	// this attempt actually won.
-	key := fmt.Sprintf("b2b_org_logos/%s%s", uid, ext)
+	key := fmt.Sprintf("b2b_org_logos/%s", uid)
 	scratchKey := fmt.Sprintf("b2b_org_logos/%s/tmp-%s%s", uid, uuid.NewString(), ext)
 
 	if _, err := o.objectStore.Put(ctx, scratchKey, contentType, data); err != nil {

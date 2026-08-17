@@ -10,10 +10,11 @@
 //
 // The approach is default-deny: only elements and attributes on an explicit
 // allow-list survive. <script>, <foreignObject>, <style>, <image>, every
-// "on*" event handler, every href/xlink:href that isn't a same-document
-// "#fragment" reference, comments, processing instructions, and
-// DOCTYPE/ENTITY declarations are all dropped or rejected outright — not
-// pattern-matched against a blocklist that could miss a variant.
+// "on*" event handler, every href/xlink:href or fill/stroke/clip-path/mask
+// url(...) reference that isn't a same-document "#fragment", comments,
+// processing instructions, and DOCTYPE/ENTITY declarations are all dropped
+// or rejected outright — not pattern-matched against a blocklist that could
+// miss a variant.
 package svgsanitize
 
 import (
@@ -21,6 +22,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -50,7 +52,10 @@ var textBearingElements = map[string]bool{
 // "style" (CSS can carry url()/expression() payloads) and every "on*" event
 // handler — excluded by construction here, not by name-matching a blocklist.
 // href/xlink:href is handled separately by filterAttrs, since it's allowed
-// only in its same-document "#fragment" form.
+// only in its same-document "#fragment" form; fill/stroke/clip-path/mask are
+// listed here (so a plain color or keyword value passes) but are also
+// checked by isSafePaintValue, since their value can alternatively be a
+// url(...) paint-server/filter reference that must be fragment-only too.
 var allowedAttributes = map[string]bool{
 	"id": true, "class": true, "transform": true,
 	"viewBox": true, "width": true, "height": true, "preserveAspectRatio": true,
@@ -71,6 +76,38 @@ var allowedAttributes = map[string]bool{
 // svgNamespace is force-declared on the output root regardless of what (if
 // anything) the input declared, so sanitized output is always well-formed.
 const svgNamespace = "http://www.w3.org/2000/svg"
+
+// paintAttributes are the allow-listed attributes whose value can carry a
+// CSS url(...) paint-server or filter reference — fill, stroke, clip-path,
+// and mask all accept "url(#id)" pointing at a <linearGradient>, <pattern>,
+// <clipPath>, or <mask> element. Unlike href, these aren't handled by
+// filterAttrs' generic allow-list branch because their value is not itself a
+// URL; a URL is only one substring a paint value can legally contain.
+var paintAttributes = map[string]bool{
+	"fill": true, "stroke": true, "clip-path": true, "mask": true,
+}
+
+// urlFragmentPattern matches a value that is *only* a same-document
+// "url(#fragment)" reference, optionally quoted and padded with whitespace —
+// the one form of url(...) that can't name an external resource. Go's RE2
+// engine has no backreferences, so this doesn't require matching quote
+// characters to agree; the character class still excludes quotes, parens,
+// and whitespace from the fragment itself, which is what actually matters
+// for safety.
+var urlFragmentPattern = regexp.MustCompile(`(?i)^url\(\s*['"]?#[^'"()\s]+['"]?\s*\)$`)
+
+// isSafePaintValue rejects a paint/filter attribute value that contains a
+// url(...) reference unless the entire value is a same-document fragment
+// reference. Without this, fill="url(https://evil/track.svg#x)" (or
+// stroke/clip-path/mask) would let a "sanitized" SVG still issue an outbound
+// request or point at attacker-controlled markup — the same class of leak
+// href's fragment-only rule exists to close, just via a different attribute.
+func isSafePaintValue(v string) bool {
+	if !strings.Contains(strings.ToLower(v), "url(") {
+		return true
+	}
+	return urlFragmentPattern.MatchString(strings.TrimSpace(v))
+}
 
 // Sanitize parses data as XML, verifies its root element is <svg>, and
 // rewrites it through the allow-lists above. It returns an error — never
@@ -209,6 +246,10 @@ func filterAttrs(attrs []xml.Attr) []xml.Attr {
 		case a.Name.Local == "href":
 			if isFragmentRef(a.Value) {
 				out = append(out, xml.Attr{Name: xml.Name{Local: "href"}, Value: a.Value})
+			}
+		case paintAttributes[a.Name.Local]:
+			if isSafePaintValue(a.Value) {
+				out = append(out, xml.Attr{Name: xml.Name{Local: a.Name.Local}, Value: a.Value})
 			}
 		case allowedAttributes[a.Name.Local]:
 			out = append(out, xml.Attr{Name: xml.Name{Local: a.Name.Local}, Value: a.Value})
