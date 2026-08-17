@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -656,11 +657,14 @@ func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, r
 	// declines to delete team-subject tuples, so a deleted org keeps the staff
 	// reader grant from LFXV2-2937. It confers access to an object that no
 	// longer resolves, so it is inert.
+	// Propagated rather than swallowed: MemberPublisher's delete policy (see
+	// port.MemberPublisher) requires this, and /admin/reindex cannot repair a
+	// dropped purge anyway — a genuinely deleted record reindexes as
+	// outcomeNotFound, which clears any repair marker without re-emitting
+	// delete_access. dispatchEntity already logs this and continues to the
+	// next ID, so no other record in the batch is affected by propagating.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildB2BOrgDeleteAccessMessage(uid)); err != nil {
-		// Logged and swallowed rather than returned: one CDC event carries many
-		// record IDs, and failing the event would strand the rest of the batch.
-		slog.WarnContext(ctx, "cdc: b2b_org delete_access publish failed",
-			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+		return fmt.Errorf("cdc: b2b_org delete_access publish failed for uid %s: %w", uid, err)
 	}
 	return nil
 }
@@ -765,9 +769,10 @@ func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, rea
 		return nil
 	}
 
+	// See handleAccountDeleteImpl for why this is propagated rather than
+	// swallowed.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
-		slog.WarnContext(ctx, "cdc: project_membership delete_access publish failed",
-			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+		return fmt.Errorf("cdc: project_membership delete_access publish failed for uid %s: %w", uid, err)
 	}
 	return nil
 }

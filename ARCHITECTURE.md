@@ -1128,10 +1128,14 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 > fire-and-forget on the write path (recoverable via `POST /admin/reindex`). On the **API**
 > delete path publish errors propagate, and the API key-contact delete also flushes the
 > connection, which is the only path that confirms the broker received the revocation. On the
-> **CDC** delete path they do not: one event carries many record IDs, so a failed publish is
-> logged and swallowed rather than stranding the rest of the batch. Indexer publication is
-> unaffected and keeps its own delivery selection. See `docs/fga-contract.md` for the full
-> delivery semantics.
+> **CDC** delete path they also propagate — `MemberPublisher`'s delete policy (see
+> `internal/domain/port/event_publisher.go`) requires this for every delete, CDC included, and
+> `/admin/reindex` cannot repair a dropped `delete_access`: a genuinely deleted record reindexes
+> as `outcomeNotFound`, which clears any repair marker without re-emitting `delete_access`.
+> `dispatchEntity` (`internal/service/cdc_consumer.go`) already logs a propagated error and
+> continues to the next record ID rather than aborting the event, so this carries no
+> batch-stranding risk. Indexer publication is unaffected and keeps its own delivery selection.
+> See `docs/fga-contract.md` for the full delivery semantics.
 
 - On every create / update / delete of a `b2b_org` or `key_contact` (via the HTTP API), and on
   every `project_membership` change received via PubSub CDC or backfill, publish a FGA Sync

@@ -2712,10 +2712,19 @@ func TestCDCConsumer_Undelete_PublishesNoDeleteAccess(t *testing.T) {
 	})
 }
 
-// TestCDCConsumer_Delete_PublishFailureIsSwallowed. One CDC event
-// carries many record IDs, so returning the error would strand every ID after
-// the first failure. The publish is fire-and-forget and /admin/reindex repairs.
-func TestCDCConsumer_Delete_PublishFailureIsSwallowed(t *testing.T) {
+// TestCDCConsumer_Delete_PublishFailureDoesNotStrandBatch. The delete-path
+// handlers now return the publish error rather than swallowing it — per
+// MemberPublisher's own delete policy (port.MemberPublisher), and because
+// /admin/reindex cannot repair a dropped purge (a genuinely deleted record
+// reindexes as outcomeNotFound, which clears any repair marker without
+// re-emitting delete_access). This test package is external (service_test)
+// and cdc_consumer.go's handleAccountDelete/handleAssetDelete are
+// unexported, so the returned error itself isn't assertable from here;
+// what this test proves is the property that made swallowing look
+// necessary in the first place — that dispatchEntity's per-ID loop already
+// logs and continues rather than aborting the event on a handler error, so
+// propagating the error carries no batch-stranding risk.
+func TestCDCConsumer_Delete_PublishFailureDoesNotStrandBatch(t *testing.T) {
 	first, second := sfid("org-fail-1"), sfid("org-fail-2")
 	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
 
