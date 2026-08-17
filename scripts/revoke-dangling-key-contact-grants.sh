@@ -17,6 +17,19 @@
 # revoke-dangling-key-contact-grants/plan.md § Complexity Tracking for the
 # full justification against Principle II of the platform constitution.
 #
+# Freshness revalidation: the input TSV is a snapshot, and a legitimate
+# key-contact create/update can re-establish the exact same {membership_uid,
+# username} pair after that snapshot was taken (internal/service/
+# key_contact_writer.go's Create republishes this FGA tuple). An OpenFGA
+# tuple-presence check alone cannot tell "still dangling" apart from "was
+# just re-legitimised" — both look identical. So before treating a present
+# tuple as dangling, each pair is revalidated against OpenSearch's
+# key_contact index — the same authoritative source
+# scripts/export-key-contact-grants-from-opensearch.sh reads, populated by
+# the same PublishKeyContactIndexer call that runs alongside the FGA
+# member_put. A live match there means the pair is presently legitimate and
+# is skipped, never deleted.
+#
 # Unlike scripts/revoke-lf-teams-auditor-openfga.sh (which deletes a blanket
 # team grant and only needs a total count), this remediation must attribute
 # an outcome to each of the 872 individual {membership_uid, username} pairs,
@@ -35,6 +48,7 @@
 #
 # Prerequisites:
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
+#   kubectl --context lfx-v2-prod -n lfx port-forward pod/opensearch-proxy-… 9299:9200
 #   curl, jq installed
 #
 # Usage:
@@ -49,11 +63,18 @@
 # and by affected organization. --live performs the actual deletes and
 # prompts for confirmation unless --yes is also given.
 #
-# Outputs (written under the output dir, default /tmp/lfxv2-3265-revoke):
-#   run-record.jsonl   one {membership_uid, username, relation, outcome,
-#                      timestamp, detail} line per pair, every run
+# Outputs: each invocation gets its own timestamped subdirectory under the
+# output dir (default /tmp/lfxv2-3265-revoke), so a re-run never overwrites a
+# prior run's evidence:
+#   run-record.jsonl   one compact-JSON {membership_uid, username, relation,
+#                      outcome, timestamp, detail} line per pair, every run.
+#                      outcome is one of: revoked, would_revoke, already_clear,
+#                      skipped_live_contact (tuple present but revalidated as
+#                      currently legitimate), failed.
 #   failed.tsv         membership_uid<TAB>username for any "failed" outcome,
 #                      written only if at least one pair failed
+#
+# Exit status is nonzero if any pair's outcome was "failed", in either mode.
 #
 # Examples:
 #   ./scripts/revoke-dangling-key-contact-grants.sh 01K3S60BS505DDR3VF9RAZDVHG full-dangling.tsv --dry-run
@@ -71,6 +92,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/openfga-team-auditor.sh"
 
 BASE_URL="${OPENFGA_URL:-http://localhost:8080}"
+OPENSEARCH_URL="${OPENSEARCH_URL:-http://localhost:9299}"
+OPENSEARCH_INDEX="${OPENSEARCH_INDEX:-resources}"
 DRY_RUN=true
 ASSUME_YES=false
 OUT_DIR="${OUT_DIR:-/tmp/lfxv2-3265-revoke}"
@@ -131,10 +154,19 @@ if ! curl -sf -m 5 "${BASE_URL}/stores/${STORE_ID}" >/dev/null 2>&1; then
 	echo "       Is the port-forward running? See this script's header comment." >&2
 	exit 1
 fi
+if ! curl -sf -m 5 "${OPENSEARCH_URL}/${OPENSEARCH_INDEX}/_count" >/dev/null 2>&1; then
+	echo "ERROR: cannot reach OpenSearch index ${OPENSEARCH_INDEX} at ${OPENSEARCH_URL}." >&2
+	echo "       Is the port-forward running? See this script's header comment." >&2
+	exit 1
+fi
 
-mkdir -p "$OUT_DIR"
-RECORD_FILE="${OUT_DIR}/run-record.jsonl"
-FAILED_FILE="${OUT_DIR}/failed.tsv"
+# Each invocation gets its own subdirectory (timestamp + pid) so a retry or
+# idempotency re-run never overwrites a prior run's revoked/failed evidence —
+# that evidence is the only rollback path this script has (see header comment).
+RUN_DIR="${OUT_DIR}/$(date -u +"%Y%m%dT%H%M%SZ")-$$"
+mkdir -p "$RUN_DIR"
+RECORD_FILE="${RUN_DIR}/run-record.jsonl"
+FAILED_FILE="${RUN_DIR}/failed.tsv"
 
 TOTAL=$(wc -l <"$INPUT_TSV" | tr -d ' ')
 echo "Store:       $STORE_ID"
@@ -166,7 +198,7 @@ fi
 
 # --- per-pair processing -------------------------------------------------
 
-export BASE_URL STORE_ID DRY_RUN RECORD_FILE
+export BASE_URL STORE_ID DRY_RUN RECORD_FILE OPENSEARCH_URL OPENSEARCH_INDEX
 # fga_curl is defined in the sourced lib; each pair runs in its own `xargs
 # -P`-spawned subshell, which only inherits functions exported into the
 # environment, not ones merely sourced into this shell.
@@ -177,16 +209,43 @@ now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 export -f now
 
 # tuple_present checks whether the specific key_contact tuple still exists.
-# contracts/openfga-revoke-contract.md § 1.
+# contracts/openfga-revoke-contract.md § 1. Fails closed (return 2) on a 200
+# response with a missing/malformed `tuples` array, rather than letting a
+# broken response silently read as absent (already_clear).
 tuple_present() {
 	local pm="$1" user="$2"
 	local body resp
 	body=$(jq -n --arg pm "project_membership:${pm}" --arg user "user:${user}" \
 		'{"tuple_key": {"object": $pm, "relation": "key_contact", "user": $user}, "page_size": 1}')
 	resp=$(fga_curl "read" "$body") || return 2
+	if ! echo "$resp" | jq -e '(.tuples | type) == "array"' >/dev/null 2>&1; then
+		return 2
+	fi
 	[[ "$(echo "$resp" | jq -r '.tuples | length')" -gt 0 ]]
 }
 export -f tuple_present
+
+# currently_live checks whether {pm, user} is presently backed by a live
+# key_contact record in OpenSearch — see the freshness-revalidation header
+# comment. Fails closed (return 2) on an unreachable host or malformed
+# response, same reasoning as tuple_present.
+currently_live() {
+	local pm="$1" user="$2"
+	local body resp
+	body=$(jq -n --arg pm "$pm" --arg user "$user" \
+		'{"size": 0, "query": {"bool": {"must": [
+			{"term": {"object_type": "key_contact"}},
+			{"term": {"data.membership_uid": $pm}},
+			{"term": {"data.username": $user}}
+		]}}}')
+	resp=$(curl -sf -m 10 -X POST "${OPENSEARCH_URL}/${OPENSEARCH_INDEX}/_search" \
+		-H "Content-Type: application/json" -d "$body") || return 2
+	if ! echo "$resp" | jq -e '(.hits.total.value // .hits.total) | type == "number"' >/dev/null 2>&1; then
+		return 2
+	fi
+	[[ "$(echo "$resp" | jq -r '.hits.total.value // .hits.total')" -gt 0 ]]
+}
+export -f currently_live
 
 # delete_tuple issues the single-tuple delete. contracts/openfga-revoke-contract.md § 2.
 delete_tuple() {
@@ -214,10 +273,14 @@ org_for_membership() {
 }
 export -f org_for_membership
 
-# emit_record writes one JSONL line to stdout (collected by the caller).
+# emit_record writes one compact (single-line) JSON record to stdout,
+# collected by the caller. Compact (-c) is required, not cosmetic: many
+# process_pair invocations run concurrently under `xargs -P` and append to the
+# same $RECORD_FILE, so a pretty-printed multi-line object here would let two
+# workers' writes interleave mid-object and corrupt the JSONL audit trail.
 emit_record() {
 	local pm="$1" user="$2" outcome="$3" detail="${4:-}"
-	jq -n --arg pm "$pm" --arg user "$user" --arg outcome "$outcome" \
+	jq -nc --arg pm "$pm" --arg user "$user" --arg outcome "$outcome" \
 		--arg ts "$(now)" --arg detail "$detail" \
 		'{membership_uid: $pm, username: $user, relation: "key_contact", outcome: $outcome, timestamp: $ts, detail: (if $detail == "" then null else $detail end)}'
 }
@@ -247,6 +310,21 @@ process_pair() {
 		return
 	fi
 
+	local live_check
+	if live_check=$(currently_live "$pm" "$user" 2>&1); then
+		live=true
+	elif [[ $? -eq 2 ]]; then
+		emit_record "$pm" "$user" "failed" "revalidation read failed: ${live_check}"
+		return
+	else
+		live=false
+	fi
+
+	if [[ "$live" == true ]]; then
+		emit_record "$pm" "$user" "skipped_live_contact" "OpenSearch shows a current key_contact record for this pair; not dangling"
+		return
+	fi
+
 	if [[ "$DRY_RUN" == true ]]; then
 		emit_record "$pm" "$user" "would_revoke"
 		return
@@ -273,15 +351,17 @@ awk -F'\t' '{print $1"|"$2}' "$INPUT_TSV" |
 
 REVOKED=$(jq -sr '[.[] | select(.outcome == "revoked")] | length' "$RECORD_FILE")
 ALREADY_CLEAR=$(jq -sr '[.[] | select(.outcome == "already_clear")] | length' "$RECORD_FILE")
+SKIPPED_LIVE=$(jq -sr '[.[] | select(.outcome == "skipped_live_contact")] | length' "$RECORD_FILE")
 WOULD_REVOKE=$(jq -sr '[.[] | select(.outcome == "would_revoke")] | length' "$RECORD_FILE")
 FAILED=$(jq -sr '[.[] | select(.outcome == "failed")] | length' "$RECORD_FILE")
 
 echo ""
 echo "=== Summary ==="
 if [[ "$DRY_RUN" == true ]]; then
-	echo "Would revoke:  $WOULD_REVOKE"
-	echo "Already clear: $ALREADY_CLEAR"
-	echo "Failed pre-check: $FAILED"
+	echo "Would revoke:      $WOULD_REVOKE"
+	echo "Already clear:     $ALREADY_CLEAR"
+	echo "Skipped (currently live): $SKIPPED_LIVE"
+	echo "Failed pre-check:  $FAILED"
 	echo ""
 	echo "=== Preview: affected users (top 10 by count) ==="
 	jq -sr '[.[] | select(.outcome == "would_revoke") | .username] | group_by(.) | map({user: .[0], count: length}) | sort_by(-.count) | .[:10][] | "\(.count)\t\(.user)"' "$RECORD_FILE"
@@ -291,9 +371,10 @@ if [[ "$DRY_RUN" == true ]]; then
 		while IFS= read -r pm; do org_for_membership "$pm"; done |
 		sort | uniq -c | sort -rn | head -10
 else
-	echo "Revoked:       $REVOKED"
-	echo "Already clear: $ALREADY_CLEAR"
-	echo "Failed:        $FAILED"
+	echo "Revoked:           $REVOKED"
+	echo "Already clear:     $ALREADY_CLEAR"
+	echo "Skipped (currently live): $SKIPPED_LIVE"
+	echo "Failed:            $FAILED"
 	echo ""
 	echo "Run record: $RECORD_FILE"
 	if [[ "$FAILED" -gt 0 ]]; then
@@ -303,4 +384,11 @@ else
 	echo ""
 	echo "Next: run the LFXV2-3265 sweep (docs/exclude-docs/LFXV2-3265-sweep-scripts/step12.sh)"
 	echo "to confirm 0 dangling grants remain."
+fi
+
+# A "failed" outcome (in either mode) must not report success: it means an
+# API pre-check, revalidation, or delete could not be completed, which an
+# operator/runbook must not treat as a clean remediation.
+if [[ "$FAILED" -gt 0 ]]; then
+	exit 1
 fi
