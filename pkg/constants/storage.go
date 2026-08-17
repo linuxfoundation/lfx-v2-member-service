@@ -54,6 +54,15 @@ const (
 	// nothing resets an entry's clock. History is 1 (a pending set — old marker
 	// revisions are never needed). No distributed lock: concurrent drains are
 	// made safe by idempotent targeted reindex plus revision-conditional delete.
+	//
+	// This bucket also holds two marker-only types — reindex_types.go's
+	// ReindexTypeB2BOrgDeleteAccess and ReindexTypeProjectMembershipDeleteAccess
+	// — written when a delete_access publish fails. These are NOT quota-skip
+	// markers and are never drained by /admin/reindex {cdc_repair:true}: a
+	// targeted reindex re-fetches and re-upserts the live Salesforce record,
+	// which cannot repair a purge. They exist purely so ListPending can surface
+	// the exact (type, uid) pairs that need a manual delete_access republish;
+	// see docs/cdc-consumer.md for the manual list/republish/delete procedure.
 	KVBucketNameCDCRepair = "cdc-repair"
 
 	// KVBucketNameKeyContactGrants is the name of the KV bucket recording the

@@ -1061,7 +1061,7 @@ func TestPublishIndexer_CreateCarriesFullObject(t *testing.T) {
 }
 
 // TestBuildDeleteAccessMessages pins the exact wire payload of the delete_access
-// envelope against contracts/fga-delete-access.md. The assertion is on serialized
+// envelope against docs/fga-contract.md. The assertion is on serialized
 // JSON rather than the struct because the consumer is a separate service reading
 // the bytes — a field-name change would keep the struct assertions passing while
 // silently breaking the contract.
