@@ -103,14 +103,20 @@ func (s *stubObjectStore) gotKey() string {
 	return s.putKeys[0]
 }
 
-// stubLogoOrgWriter records the Update call's input. validateErr controls
+// stubLogoOrgWriter records every Update call's input. validateErr controls
 // ValidatePrecondition's return value independently of err (Update's), so
 // tests can simulate a precondition failure without ever reaching Update.
+// repointErr, if set, is returned only from the second Update call — the
+// scratch-object repoint attempted after every Copy promotion retry fails —
+// independently of err, which governs the first (deterministic-key) call.
 type stubLogoOrgWriter struct {
 	org         *model.B2BOrg
 	err         error
 	validateErr error
+	repointErr  error
 	gotInput    model.B2BOrgInput
+	updateCalls []model.B2BOrgInput
+	ifMatches   []string
 	validated   bool
 }
 
@@ -123,8 +129,13 @@ func (w *stubLogoOrgWriter) ValidatePrecondition(_ context.Context, _, _ string)
 	return w.validateErr
 }
 
-func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
+func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
 	w.gotInput = input
+	w.updateCalls = append(w.updateCalls, input)
+	w.ifMatches = append(w.ifMatches, ifMatch)
+	if len(w.updateCalls) >= 2 && w.repointErr != nil {
+		return nil, w.repointErr
+	}
 	return w.org, w.err
 }
 
@@ -277,10 +288,11 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 
 func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 	// Update has already committed the org's new Logo_URL__c — promoting the
-	// scratch object to the shared key via Copy is what's left, and its
-	// failure (after exhausting retries) must surface as an error even though
-	// the Salesforce-side write already succeeded, so the caller knows to
-	// retry rather than assume the logo is actually live.
+	// scratch object to the shared key via Copy is what's left. Once every
+	// retry is exhausted, the uploader must not leave Salesforce naming a key
+	// with no matching object: it repoints Logo_URL__c at the already-uploaded
+	// scratch object instead, so the call succeeds and the logo is genuinely
+	// live, just not yet at the pretty deterministic key.
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
 		commitErr: errors.New("s3 unavailable"),
@@ -288,9 +300,10 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.Error(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, org)
 	assert.True(t, orgWriter.validated)
 	require.Len(t, objectStore.putKeys, 1, "expected only the scratch Put")
 	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts, "expected every promotion retry attempt to be exhausted")
@@ -298,6 +311,32 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 		assert.Equal(t, objectStore.putKeys[0], c.src)
 		assert.Equal(t, deterministicLogoKey, c.dst)
 	}
+	require.Len(t, orgWriter.updateCalls, 2, "expected the deterministic-key update, then a repoint to the scratch object")
+	assert.Equal(t, "", orgWriter.ifMatches[0], "original request had no if_match")
+	assert.NotEmpty(t, orgWriter.ifMatches[1], "repoint must use a freshly computed if_match, not an empty or reused one")
+	assert.NotEqual(t, orgWriter.ifMatches[0], orgWriter.ifMatches[1], "repoint's if_match must be freshly computed, not the original request's")
+	assert.Equal(t, "", objectStore.deletedKey, "scratch object must not be cleaned up once it becomes the object Salesforce names")
+}
+
+func TestLogoUploader_CommitWriteErrorAndRepointBothFail(t *testing.T) {
+	// If the scratch-object repoint itself also fails (e.g. a genuine race
+	// changed the org in the narrow window since the first Update), there is
+	// nothing left to self-heal with in-request — this must surface as an
+	// error rather than silently report success.
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: errors.New("s3 unavailable"),
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:        &model.B2BOrg{UID: "uid-1"},
+		repointErr: pkgerrors.NewPreconditionFailed("b2b org has been modified since last read"),
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	require.Len(t, orgWriter.updateCalls, 2, "expected the repoint attempt even though it went on to fail")
 }
 
 func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/svgsanitize"
 )
 
@@ -146,11 +147,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 
 	// This attempt has won and Salesforce already points at url: promote the
 	// already-uploaded scratch bytes to key via a server-side copy (not a
-	// fresh Put from data) and retry a few times. Unlike the pre-Update
-	// scratch write, a failure here can't self-heal on its own — Salesforce
-	// now names a key with no matching object (or stale bytes, if key already
-	// existed) and nothing will retry it unless this org gets a logo uploaded
-	// again (see the LFXV2-2016 Copilot review on PR #87).
+	// fresh Put from data) and retry a few times. If every retry is
+	// exhausted, repointToScratch below keeps Salesforce from naming a key
+	// with no matching object (see the LFXV2-2016 Copilot review on PR #87).
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
 		if commitErr = o.objectStore.Copy(ctx, scratchKey, key); commitErr == nil {
@@ -161,9 +160,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		}
 	}
 	if commitErr != nil {
-		slog.ErrorContext(ctx, "failed to promote logo to its shared key after the b2b org update already committed",
+		slog.ErrorContext(ctx, "failed to promote logo to its shared key after the b2b org update already committed; repointing to the scratch object instead",
 			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
-		return nil, fmt.Errorf("committing logo for b2b org %s: %w", uid, commitErr)
+		return o.repointToScratch(ctx, uid, org, scratchKey, commitErr)
 	}
 
 	if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
@@ -172,4 +171,35 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	}
 
 	return org, nil
+}
+
+// repointToScratch runs once every promotion retry has been exhausted: org's
+// Logo_URL__c already names key, but key itself has no matching object (or
+// stale bytes). Rather than leave that broken reference until this org
+// happens to get another logo uploaded, immediately re-point Logo_URL__c at
+// the scratch object instead — it's already uploaded and known-good, just not
+// at the pretty deterministic key. The scratch object is deliberately not
+// cleaned up on this path, since it's now the object Salesforce names; the
+// next successful upload for this org promotes a fresh scratch object to key
+// as normal, and this one becomes an ordinary orphan for that promotion to
+// replace.
+func (o *logoUploaderOrchestrator) repointToScratch(ctx context.Context, uid string, org *model.B2BOrg, scratchKey string, commitErr error) (*model.B2BOrg, error) {
+	repointIfMatch, etagErr := etag.LFXEtag(org)
+	if etagErr != nil {
+		slog.ErrorContext(ctx, "failed to compute etag for scratch-object repoint after a failed logo promotion",
+			"b2b_org_uid", uid, "error", etagErr)
+		return nil, fmt.Errorf("committing logo for b2b org %s: %w", uid, commitErr)
+	}
+
+	scratchURL := o.objectStore.VersionedURL(scratchKey)
+	repointed, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: scratchURL}, repointIfMatch)
+	if updateErr != nil {
+		slog.ErrorContext(ctx, "failed to repoint b2b org logo to its scratch object after a failed promotion; logo URL is durably broken until next upload",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", updateErr)
+		return nil, fmt.Errorf("committing logo for b2b org %s: %w (repoint also failed: %v)", uid, commitErr, updateErr)
+	}
+
+	slog.WarnContext(ctx, "repointed b2b org logo to its scratch object after the shared-key promotion failed; next upload will re-promote to the deterministic key",
+		"b2b_org_uid", uid, "scratch_key", scratchKey)
+	return repointed, nil
 }
