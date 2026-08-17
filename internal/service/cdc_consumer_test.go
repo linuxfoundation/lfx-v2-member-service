@@ -152,7 +152,7 @@ type subjectCapturingPublisher struct {
 	indexerMessages []any    // payloads, parallel to indexer
 	access          []string // subjects
 	accessMessages  []any    // payloads, parallel to access
-	flushCount      int      // most CDC paths never flush; key_contact delete/supersede do (see flushErr)
+	flushCount      int      // upserts never flush; key_contact delete/supersede and genuine-delete purges do (see flushErr)
 	flushErr        error    // returned by every Flush call when set
 	accessErr       error    // returned by every Access call when set; the call is still recorded
 }
@@ -2784,6 +2784,94 @@ func TestCDCConsumer_AssetDelete_PublishFailureRecordsRepairMarker(t *testing.T)
 	require.Len(t, repair.Puts, 1)
 	assert.Equal(t, constants.ReindexTypeProjectMembershipDeleteAccess, repair.Puts[0].Type)
 	assert.Equal(t, id, repair.Puts[0].SFID)
+}
+
+// TestCDCConsumer_Delete_FlushFailureRecordsRepairMarker covers the failure
+// mode a publish error cannot: Access queues on the local connection and
+// returns nil, so an unreachable broker drops the purge with no error at all.
+// Only the Flush confirms delivery, so a Flush failure must leave the same
+// recovery marker a publish failure would — otherwise a genuine purge is lost
+// silently, and nothing will re-emit it for a record Salesforce has deleted.
+func TestCDCConsumer_Delete_FlushFailureRecordsRepairMarker(t *testing.T) {
+	for _, tc := range []struct {
+		entity     string
+		channel    string
+		reindexTyp string
+	}{
+		{"Account", "/data/AccountChangeEvent", constants.ReindexTypeB2BOrgDeleteAccess},
+		{"Asset", "/data/AssetChangeEvent", constants.ReindexTypeProjectMembershipDeleteAccess},
+	} {
+		t.Run(tc.entity, func(t *testing.T) {
+			id := sfid("flush-fail")
+			pub := &subjectCapturingPublisher{flushErr: errors.New("nats: connection closed")}
+			repair := &mock.MockCDCRepairStore{}
+
+			consumer := newTestCDCConsumer(
+				&fakeCDCSubscriber{events: []model.CDCEvent{
+					{Entity: tc.entity, ChangeType: model.CDCChangeDelete, RecordIDs: []string{id}, ReplayID: []byte("flusherr")},
+				}},
+				&fakeB2BOrgReader{},
+				&mock.MockCacheInvalidator{},
+				pub,
+				"",
+				svc.WithCDCRepairStore(repair),
+			)
+
+			require.NoError(t, consumer.Run(context.Background(), tc.channel, &fakeReplayStore{}))
+
+			// The purge was handed to the connection, but delivery is
+			// indeterminate, so the marker is the only record of it.
+			assert.Contains(t, pub.access, constants.FGASyncDeleteAccessSubject)
+			require.Len(t, repair.Puts, 1)
+			assert.Equal(t, tc.reindexTyp, repair.Puts[0].Type)
+			assert.Equal(t, id, repair.Puts[0].SFID)
+		})
+	}
+}
+
+// TestCDCConsumer_Delete_SuccessFlushesAndLeavesNoMarker pins the other half:
+// a confirmed purge must flush exactly once and leave no marker, so the
+// pending list stays a true set of records needing manual recovery rather than
+// one entry per deleted record.
+func TestCDCConsumer_Delete_SuccessFlushesAndLeavesNoMarker(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	repair := &mock.MockCDCRepairStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("flush-ok")}, ReplayID: []byte("flushok")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCRepairStore(repair),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, pub.flushCount, "a genuine purge must confirm broker delivery")
+	assert.Empty(t, repair.Puts, "a confirmed purge must not leave a recovery marker")
+}
+
+// TestCDCConsumer_Delete_FlushFailureWithNilRepairStore mirrors the publish-side
+// nil-store case for the flush path.
+func TestCDCConsumer_Delete_FlushFailureWithNilRepairStore(t *testing.T) {
+	pub := &subjectCapturingPublisher{flushErr: errors.New("nats: connection closed")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("flush-norepair")}, ReplayID: []byte("flushnorepair")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+
+	assert.NotPanics(t, func() {
+		require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+	})
 }
 
 // TestCDCConsumer_Delete_PublishFailureWithNilRepairStore confirms the

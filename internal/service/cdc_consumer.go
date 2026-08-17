@@ -442,8 +442,9 @@ func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string,
 	}
 }
 
-// recordFailedDeleteAccess durably records a failed delete_access publish so
-// an operator can find and manually re-purge it later. This is deliberately
+// recordFailedDeleteAccess durably records a delete_access that was not
+// confirmed delivered — either the publish failed or the flush that confirms
+// broker receipt did — so an operator can find and manually re-purge it later. This is deliberately
 // not wired into any automated drain: /admin/reindex's targeted repair
 // re-fetches and re-upserts the live Salesforce record, which cannot repair a
 // purge — the record is gone, so the fetch reports outcomeNotFound and no
@@ -461,6 +462,25 @@ func (o *CDCConsumer) recordFailedDeleteAccess(ctx context.Context, reindexType,
 			"reindex_type", reindexType, "uid", uid, "error", err,
 			"publish_failed_for_backfill_repair", true)
 	}
+}
+
+// confirmDeleteAccessDelivery blocks until the broker acknowledges the purge
+// published just before it, recording a recovery marker if it cannot.
+//
+// Access alone only hands the message to the local NATS connection, so it
+// returns nil for a purge the broker never received — a crash or disconnect in
+// that window drops the revocation with no error to propagate and nothing to
+// mark. The key_contact delete path flushes for the same reason before it
+// erases its grant-index entry (see handleKeyContactDeleteImpl). A purge is
+// the one message with no second chance: the Salesforce record is gone, so
+// neither the next CDC event nor /admin/reindex will re-emit it, and the
+// tuples outlive the object they authorized.
+func (o *CDCConsumer) confirmDeleteAccessDelivery(ctx context.Context, reindexType, uid string) error {
+	if err := o.publisher.Flush(ctx); err != nil {
+		o.recordFailedDeleteAccess(ctx, reindexType, uid)
+		return err
+	}
+	return nil
 }
 
 // partitionRecordIDs normalizes each raw CDC record ID to its canonical 18-char
@@ -688,6 +708,9 @@ func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, r
 		o.recordFailedDeleteAccess(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
 		return fmt.Errorf("cdc: b2b_org delete_access publish failed for uid %s: %w", uid, err)
 	}
+	if err := o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid); err != nil {
+		return fmt.Errorf("cdc: b2b_org delete_access delivery unconfirmed for uid %s: %w", uid, err)
+	}
 	return nil
 }
 
@@ -796,6 +819,9 @@ func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, rea
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
 		o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
 		return fmt.Errorf("cdc: project_membership delete_access publish failed for uid %s: %w", uid, err)
+	}
+	if err := o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid); err != nil {
+		return fmt.Errorf("cdc: project_membership delete_access delivery unconfirmed for uid %s: %w", uid, err)
 	}
 	return nil
 }

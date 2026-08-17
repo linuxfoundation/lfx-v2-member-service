@@ -1127,7 +1127,7 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 > the connection, not that the broker received it or that OpenFGA converged. Publishes are
 > fire-and-forget on the write path (recoverable via `POST /admin/reindex`). On the **API**
 > delete path publish errors propagate, and the API key-contact delete also flushes the
-> connection, which is the only path that confirms the broker received the revocation. On the
+> connection to confirm the broker received the revocation. On the
 > **CDC** delete path they also propagate — `MemberPublisher`'s delete policy (see
 > `internal/domain/port/event_publisher.go`) requires this for every delete, CDC included, and
 > `/admin/reindex` cannot repair a dropped `delete_access`: a genuinely deleted record reindexes
@@ -1135,8 +1135,11 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 > `dispatchEntity` (`internal/service/cdc_consumer.go`) already logs a propagated error and
 > continues to the next record ID rather than aborting the event, so this carries no
 > batch-stranding risk. Indexer publication is unaffected and keeps its own delivery selection.
-> A failed `delete_access` publish also writes a durable marker to the CDC repair KV bucket
-> under `ReindexTypeB2BOrgDeleteAccess`/`ReindexTypeProjectMembershipDeleteAccess` so an operator
+> A genuine CDC delete also **flushes** after publishing `delete_access`, because `Access` alone
+> returns success for a purge the broker never received and a purge has no second chance — the
+> Salesforce record is gone, so nothing re-emits it. Either failure (publish or unconfirmed
+> delivery) writes a durable marker to the CDC repair KV bucket under
+> `ReindexTypeB2BOrgDeleteAccess`/`ReindexTypeProjectMembershipDeleteAccess` so an operator
 > can find and manually re-purge it — deliberately not an automated retry, since `/admin/reindex`'s
 > targeted repair re-fetches and re-upserts the live record, which cannot repair a purge.
 > See `docs/fga-contract.md` for the full delivery semantics.

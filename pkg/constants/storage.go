@@ -57,7 +57,8 @@ const (
 	//
 	// This bucket also holds two marker-only types — reindex_types.go's
 	// ReindexTypeB2BOrgDeleteAccess and ReindexTypeProjectMembershipDeleteAccess
-	// — written when a delete_access publish fails. These are NOT quota-skip
+	// — written when a delete_access publish fails or its delivery-confirming
+	// flush does. These are NOT quota-skip
 	// markers and are never drained by /admin/reindex {cdc_repair:true}: a
 	// targeted reindex re-fetches and re-upserts the live Salesforce record,
 	// which cannot repair a purge. They exist purely so ListPending can surface
