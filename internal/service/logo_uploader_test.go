@@ -4,8 +4,11 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/png"
 	"regexp"
 	"strings"
 	"testing"
@@ -29,10 +32,21 @@ var scratchKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/tmp-[0-9a-f-]{3
 // breaking convergence for exactly that case.
 const deterministicLogoKey = "b2b_org_logos/uid-1"
 
-// validPNGBytes is the minimal 8-byte PNG signature — enough for
-// http.DetectContentType to sniff "image/png", which UploadB2BOrgLogo now
-// requires to match the declared Content-Type.
-const validPNGBytes = "\x89PNG\r\n\x1a\n"
+// validPNGBytes is a real, fully-decodable 4x4 PNG — needed not just for
+// http.DetectContentType's sniff check but also for ShrinkToMax's decode-config
+// read (LFXV2-2016 dimension auto-shrink). 4x4 is well within
+// constants.MaxLogoDimensionPx, so it always takes the resize no-op path and
+// is returned byte-for-byte unchanged, preserving every test's exact-bytes
+// assertions.
+var validPNGBytes = string(mustEncodePNG(4, 4))
+
+func mustEncodePNG(width, height int) []byte {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, width, height))); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
 
 // validSVGBytes is a well-formed, entirely benign SVG document.
 const validSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>`
@@ -252,6 +266,41 @@ func TestLogoUploader_UnsupportedContentType(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
 	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called for a rejected content type")
+}
+
+func TestLogoUploader_OversizedDimensionsShrunkBeforeUpload(t *testing.T) {
+	// 2048x1024 exceeds constants.MaxLogoDimensionPx (1024) in width — the
+	// upload must still succeed, with the bytes actually reaching the object
+	// store downscaled to fit, aspect ratio preserved, rather than rejected.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+	oversized := mustEncodePNG(2048, 1024)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", bytes.NewReader(oversized), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, objectStore.putData, 1)
+	assert.Less(t, len(objectStore.putData[0]), len(oversized), "the shrunk image must be smaller than the original oversized upload")
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(objectStore.putData[0]))
+	require.NoError(t, err)
+	assert.Equal(t, 1024, cfg.Width)
+	assert.Equal(t, 512, cfg.Height, "aspect ratio (2:1) must be preserved when downscaling to the max width")
+}
+
+func TestLogoUploader_SVGDimensionsNotShrunk(t *testing.T) {
+	// SVG is vector, so it must never route through the raster resize path —
+	// confirmed by asserting the sanitized bytes are untouched by it (nothing
+	// in the SVG upload path could produce a decode error even though SVG
+	// text isn't a decodable raster image).
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.svg?v=1"}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/svg+xml", strings.NewReader(validSVGBytes), "")
+
+	require.NoError(t, err)
 }
 
 func TestLogoUploader_ContentSniffMismatch(t *testing.T) {

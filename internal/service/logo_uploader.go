@@ -19,6 +19,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/imageresize"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/svgsanitize"
 )
 
@@ -98,8 +99,20 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 			return nil, pkgerrors.NewValidation(fmt.Sprintf("invalid or unsafe SVG upload: %v", sanitizeErr))
 		}
 		data = sanitized
-	} else if sniffed := http.DetectContentType(data); sniffed != mediaType {
-		return nil, pkgerrors.NewValidation(fmt.Sprintf("logo content does not match declared content type %q (detected %q)", mediaType, sniffed))
+	} else {
+		if sniffed := http.DetectContentType(data); sniffed != mediaType {
+			return nil, pkgerrors.NewValidation(fmt.Sprintf("logo content does not match declared content type %q (detected %q)", mediaType, sniffed))
+		}
+
+		// SVG is vector and skips this: raster logos larger than
+		// MaxLogoDimensionPx in either dimension are downscaled to fit, not
+		// rejected, preserving aspect ratio (LFXV2-2016, Eric Searcy's Monday
+		// sync spec).
+		resized, resizeErr := imageresize.ShrinkToMax(data, mediaType, constants.MaxLogoDimensionPx)
+		if resizeErr != nil {
+			return nil, pkgerrors.NewValidation(fmt.Sprintf("invalid logo image: %v", resizeErr))
+		}
+		data = resized
 	}
 
 	// Validate the org exists and, if ifMatch is set, that it's still current —

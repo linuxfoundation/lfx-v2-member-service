@@ -19,6 +19,12 @@ const (
 	// year. Do not lengthen this without also changing the "?v=" cache-busting
 	// contract it depends on.
 	LogoCacheControl = "public, max-age=86400"
+
+	// MaxLogoDimensionPx is the maximum width/height, in pixels, stored for a
+	// raster (PNG/JPEG) logo. An upload exceeding this in either dimension is
+	// not rejected — it's downscaled to fit, preserving aspect ratio (Eric
+	// Searcy, Monday sync 2026-08-17). SVG is vector and exempt.
+	MaxLogoDimensionPx = 1024
 )
 
 // AllowedB2BOrgLogoContentTypes is the content-type allow-list for B2B org
