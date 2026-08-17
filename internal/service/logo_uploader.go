@@ -18,7 +18,15 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/svgsanitize"
 )
+
+// svgMediaType is the parsed (parameter-free) media type used to branch
+// content-sniffing: http.DetectContentType has no SVG signature (SVG
+// detection would require sniffing XML structure, which its mimesniff-based
+// table doesn't do), so SVG uploads are validated by actually parsing and
+// sanitizing them instead of comparing against a sniffed type.
+const svgMediaType = "image/svg+xml"
 
 // CommitPromoteAttempts and commitPromoteRetryDelay bound the retry loop that
 // promotes an already-uploaded scratch object to the shared logo key once
@@ -49,10 +57,10 @@ func NewLogoUploader(objectStore port.ObjectStoreWriter, b2bOrgWriter B2BOrgWrit
 	return &logoUploaderOrchestrator{objectStore: objectStore, b2bOrgWriter: b2bOrgWriter}
 }
 
-// UploadB2BOrgLogo validates contentType against the allow-list (PNG/JPEG —
-// SVG intentionally excluded for now, see pkg/constants/logo.go) and body size
-// against MaxB2BOrgLogoSizeBytes, uploads to object storage, then updates the
-// org's logo URL through the existing B2BOrgWriter.Update path.
+// UploadB2BOrgLogo validates contentType against the allow-list (PNG/JPEG/SVG,
+// see pkg/constants/logo.go) and body size against MaxB2BOrgLogoSizeBytes,
+// uploads to object storage, then updates the org's logo URL through the
+// existing B2BOrgWriter.Update path.
 func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, contentType string, body io.Reader, ifMatch string) (*model.B2BOrg, error) {
 	mediaType, _, parseErr := mime.ParseMediaType(contentType)
 	if parseErr != nil {
@@ -77,10 +85,19 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	}
 
 	// The declared Content-Type header is caller-controlled and unverified up to
-	// this point — sniff the actual bytes so a mislabeled (or malicious) upload
-	// can't reach object storage and get published as a public CDN URL under a
-	// PNG/JPEG media type it doesn't have.
-	if sniffed := http.DetectContentType(data); sniffed != mediaType {
+	// this point. For binary types (PNG/JPEG), sniff the actual bytes so a mislabeled (or
+	// malicious) upload can't reach object storage and get published as a
+	// public CDN URL under a media type it doesn't have. SVG is XML, not a
+	// sniffable binary signature, so it's validated by actually parsing and
+	// sanitizing it below instead — that both confirms it's really an <svg>
+	// document and strips anything unsafe (see pkg/svgsanitize).
+	if mediaType == svgMediaType {
+		sanitized, sanitizeErr := svgsanitize.Sanitize(data)
+		if sanitizeErr != nil {
+			return nil, pkgerrors.NewValidation(fmt.Sprintf("invalid or unsafe SVG upload: %v", sanitizeErr))
+		}
+		data = sanitized
+	} else if sniffed := http.DetectContentType(data); sniffed != mediaType {
 		return nil, pkgerrors.NewValidation(fmt.Sprintf("logo content does not match declared content type %q (detected %q)", mediaType, sniffed))
 	}
 

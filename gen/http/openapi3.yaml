@@ -463,7 +463,7 @@ paths:
             tags:
                 - membership-service
             summary: upload-b2b-org-logo membership-service
-            description: Upload a B2B organization logo (PNG/JPEG, max 2MB) to object storage and set it as the org's logo URL
+            description: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL
             operationId: membership-service#upload-b2b-org-logo
             parameters:
                 - name: v
@@ -498,12 +498,12 @@ paths:
                   example: "123"
                 - name: Content-Type
                   in: header
-                  description: MIME type of the uploaded logo (image/png or image/jpeg)
+                  description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
                   allowEmptyValue: true
                   required: true
                   schema:
                     type: string
-                    description: MIME type of the uploaded logo (image/png or image/jpeg)
+                    description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
                     example: image/png
                   example: image/png
                 - name: Content-Length

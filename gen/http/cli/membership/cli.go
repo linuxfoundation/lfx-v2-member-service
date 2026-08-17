@@ -449,7 +449,7 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    get-b2b-org: Get a specific B2B organization by UID`)
 	fmt.Fprintln(os.Stderr, `    create-b2b-org: Create a new B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org: Update a B2B organization`)
-	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG, max 2MB) to object storage and set it as the org's logo URL`)
+	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL`)
 	fmt.Fprintln(os.Stderr, `    get-b2b-org-settings: Get the access-control settings (writers and auditors) for a B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-settings: Replace the writers and/or auditors list on a B2B organization (full-replace semantics)`)
 	fmt.Fprintln(os.Stderr, `    add-b2b-org-settings-user: Add (invite) a single principal to a B2B organization's writers or auditors. Per-principal merge: existing members are preserved; the new entry lands as a pending invite (no username yet).`)
@@ -562,7 +562,7 @@ func membershipServiceUploadB2bOrgLogoUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG, max 2MB) to object storage and set it as the org's logo URL`)
+	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -uid STRING: B2B organization UID`)

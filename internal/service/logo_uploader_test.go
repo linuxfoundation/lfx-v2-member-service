@@ -31,6 +31,14 @@ const deterministicLogoKey = "b2b_org_logos/uid-1.png"
 // requires to match the declared Content-Type.
 const validPNGBytes = "\x89PNG\r\n\x1a\n"
 
+// validSVGBytes is a well-formed, entirely benign SVG document.
+const validSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>`
+
+// maliciousSVGBytes embeds a script and an event-handler attribute alongside
+// otherwise-valid content, to prove UploadB2BOrgLogo's SVG path sanitizes
+// rather than merely validates well-formedness.
+const maliciousSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(document.cookie)</script><circle cx="5" cy="5" r="4"/></svg>`
+
 // stubObjectStore captures every Put/Copy/Delete call in order. commitErr
 // controls the promotion Copy call (which retries commitPromoteAttempts
 // times before giving up) independently of err (the scratch Put's error), so
@@ -44,6 +52,7 @@ type stubObjectStore struct {
 	commitErrCount int
 	deleteErr      error
 	putKeys        []string
+	putData        [][]byte
 	copyCalls      []copyCall
 	gotType        string
 	gotDataLen     int
@@ -56,6 +65,7 @@ type copyCall struct {
 
 func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data []byte) (string, error) {
 	s.putKeys = append(s.putKeys, key)
+	s.putData = append(s.putData, data)
 	s.gotType = contentType
 	s.gotDataLen = len(data)
 	if s.err != nil {
@@ -152,12 +162,44 @@ func TestLogoUploader_ContentTypeWithParameters(t *testing.T) {
 	assert.Equal(t, "image/png; charset=binary", objectStore.gotType, "raw content-type header is passed through to storage, only the parsed media type is used for validation")
 }
 
+func TestLogoUploader_SVGSanitizedBeforeUpload(t *testing.T) {
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.svg?v=1"}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/svg+xml", strings.NewReader(maliciousSVGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, objectStore.putKeys, 1)
+	assert.True(t, strings.HasSuffix(objectStore.putKeys[0], ".svg"), "scratch key must use the .svg extension")
+	require.Len(t, objectStore.copyCalls, 1)
+	assert.Equal(t, "b2b_org_logos/uid-1.svg", objectStore.copyCalls[0].dst)
+	require.Len(t, objectStore.putData, 1)
+	uploaded := string(objectStore.putData[0])
+	assert.NotContains(t, uploaded, "script", "the bytes handed to Put must already be sanitized, not the raw malicious input")
+	assert.NotContains(t, uploaded, "onload")
+	assert.Contains(t, uploaded, "circle", "sanitization must not drop the benign content alongside the malicious content")
+}
+
+func TestLogoUploader_SVGRejectsInvalidContent(t *testing.T) {
+	objectStore := &stubObjectStore{}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/svg+xml", strings.NewReader("<html><body>not an svg</body></html>"), "")
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)
+	assert.Equal(t, "", objectStore.gotKey(), "object store must not be called when the SVG fails to sanitize")
+}
+
 func TestLogoUploader_UnsupportedContentType(t *testing.T) {
 	objectStore := &stubObjectStore{}
 	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/svg+xml", strings.NewReader("<svg/>"), "")
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/gif", strings.NewReader("GIF89a"), "")
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsValidation(err), "expected validation error, got %T: %v", err, err)

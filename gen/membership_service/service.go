@@ -25,8 +25,8 @@ type Service interface {
 	CreateB2bOrg(context.Context, *CreateB2bOrgPayload) (res *CreateB2bOrgResult, err error)
 	// Update a B2B organization
 	UpdateB2bOrg(context.Context, *UpdateB2bOrgPayload) (res *UpdateB2bOrgResult, err error)
-	// Upload a B2B organization logo (PNG/JPEG, max 2MB) to object storage and set
-	// it as the org's logo URL
+	// Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and
+	// set it as the org's logo URL
 	UploadB2bOrgLogo(context.Context, *UploadB2bOrgLogoPayload, io.ReadCloser) (res *UploadB2bOrgLogoResult, err error)
 	// Get the access-control settings (writers and auditors) for a B2B organization
 	GetB2bOrgSettings(context.Context, *GetB2bOrgSettingsPayload) (res *GetB2bOrgSettingsResult, err error)
@@ -886,7 +886,7 @@ type UploadB2bOrgLogoPayload struct {
 	UID string
 	// If-Match header value for conditional requests
 	IfMatch string
-	// MIME type of the uploaded logo (image/png or image/jpeg)
+	// MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
 	ContentType string
 	// Size of the uploaded logo in bytes
 	ContentLength *int64

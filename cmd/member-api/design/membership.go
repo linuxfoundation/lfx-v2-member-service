@@ -167,7 +167,7 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("upload-b2b-org-logo", func() {
-		dsl.Description("Upload a B2B organization logo (PNG/JPEG, max 2MB) to object storage and set it as the org's logo URL")
+		dsl.Description("Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL")
 
 		dsl.Security(JWTAuth)
 
@@ -185,7 +185,7 @@ var _ = dsl.Service("membership-service", func() {
 			// bytes chosen by two independently-raced writes (see the
 			// LFXV2-2016 Copilot review on PR #87).
 			IfMatchAttribute()
-			dsl.Attribute("content_type", dsl.String, "MIME type of the uploaded logo (image/png or image/jpeg)", func() {
+			dsl.Attribute("content_type", dsl.String, "MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)", func() {
 				dsl.Example("image/png")
 			})
 			dsl.Attribute("content_length", dsl.Int64, "Size of the uploaded logo in bytes", func() {

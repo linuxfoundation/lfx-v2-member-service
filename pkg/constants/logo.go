@@ -3,9 +3,10 @@
 
 package constants
 
-// B2B org logo upload constraints (LFXV2-2016). SVG is intentionally excluded
-// from the allow-list for now — matching the avatar upload's own precedent —
-// pending a real sanitizer decision; see ORG-LOGO-UPLOAD-PLAN-LFXV2-2016.md.
+// B2B org logo upload constraints (LFXV2-2016). SVG is allowed, but only
+// after passing through pkg/svgsanitize — see ORG-LOGO-UPLOAD-PLAN-LFXV2-2016.md
+// (Open Item 3 / Decision #11) for why a hand-rolled allow-list sanitizer was
+// chosen over both a blocklist and the (nonexistent) maintained Go library.
 const (
 	// MaxB2BOrgLogoSizeBytes is the maximum accepted upload size for a B2B org
 	// logo (2MB, per the ticket spec — smaller than avatar's 20MB).
@@ -23,6 +24,7 @@ const (
 // AllowedB2BOrgLogoContentTypes is the content-type allow-list for B2B org
 // logo uploads.
 var AllowedB2BOrgLogoContentTypes = map[string]string{
-	"image/png":  ".png",
-	"image/jpeg": ".jpg",
+	"image/png":     ".png",
+	"image/jpeg":    ".jpg",
+	"image/svg+xml": ".svg",
 }
