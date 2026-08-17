@@ -135,5 +135,21 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// Copy implements port.ObjectStoreWriter. It relies on S3's default COPY
+// metadata directive, so dstKey ends up with the same Content-Type and
+// Cache-Control srcKey was uploaded with.
+func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
+	source := fmt.Sprintf("%s/%s", c.bucket, srcKey)
+	_, err := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     &c.bucket,
+		Key:        &dstKey,
+		CopySource: &source,
+	})
+	if err != nil {
+		return fmt.Errorf("copying object %s to %s in bucket %s: %w", srcKey, dstKey, c.bucket, err)
+	}
+	return nil
+}
+
 // nowUnix is a var so tests can override it deterministically.
 var nowUnix = func() int64 { return time.Now().Unix() }

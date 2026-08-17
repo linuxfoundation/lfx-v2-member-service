@@ -29,4 +29,13 @@ type ObjectStoreWriter interface {
 	// scratch objects (e.g. a losing concurrent upload's temp key) and must not
 	// treat a failure as fatal to the operation that requested it.
 	Delete(ctx context.Context, key string) error
+
+	// Copy server-side copies the object at srcKey to dstKey, preserving its
+	// metadata (Content-Type, Cache-Control). It backs the scratch-to-shared-key
+	// promotion in logoUploaderOrchestrator (LFXV2-2016): once an optimistic-
+	// concurrency check has already committed dstKey's URL elsewhere (e.g. to
+	// Salesforce), promoting via Copy — rather than re-uploading the original
+	// bytes with Put — avoids re-running the caller's own upload path for a
+	// step that must not fail silently into a durably broken reference.
+	Copy(ctx context.Context, srcKey, dstKey string) error
 }

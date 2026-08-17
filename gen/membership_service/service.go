@@ -885,7 +885,7 @@ type UploadB2bOrgLogoPayload struct {
 	// B2B organization UID
 	UID string
 	// If-Match header value for conditional requests
-	IfMatch *string
+	IfMatch string
 	// MIME type of the uploaded logo (image/png or image/jpeg)
 	ContentType string
 	// Size of the uploaded logo in bytes

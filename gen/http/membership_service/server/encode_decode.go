@@ -558,7 +558,7 @@ func DecodeUploadB2bOrgLogoRequest(mux goahttp.Muxer, decoder func(*http.Request
 			uid           string
 			version       *string
 			bearerToken   *string
-			ifMatch       *string
+			ifMatch       string
 			contentType   string
 			contentLength *int64
 			err           error
@@ -579,9 +579,9 @@ func DecodeUploadB2bOrgLogoRequest(mux goahttp.Muxer, decoder func(*http.Request
 		if bearerTokenRaw != "" {
 			bearerToken = &bearerTokenRaw
 		}
-		ifMatchRaw := r.Header.Get("If-Match")
-		if ifMatchRaw != "" {
-			ifMatch = &ifMatchRaw
+		ifMatch = r.Header.Get("If-Match")
+		if ifMatch == "" {
+			err = goa.MergeErrors(err, goa.MissingFieldError("if_match", "header"))
 		}
 		contentType = r.Header.Get("Content-Type")
 		if contentType == "" {

@@ -38,6 +38,31 @@ func fakeS3ServerWithDelete(t *testing.T, headStatus, putStatus, deleteStatus in
 	}))
 }
 
+// fakeS3ServerWithCopy additionally distinguishes CopyObject from a plain
+// PutObject — both are HTTP PUTs, but CopyObject carries an
+// X-Amz-Copy-Source header and, on success, must return a well-formed
+// CopyObjectResult XML body or the SDK fails to unmarshal the response.
+func fakeS3ServerWithCopy(t *testing.T, headStatus, putStatus, copyStatus int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(headStatus)
+		case http.MethodPut:
+			if r.Header.Get("X-Amz-Copy-Source") != "" {
+				w.WriteHeader(copyStatus)
+				if copyStatus == http.StatusOK {
+					_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"fake-etag"</ETag></CopyObjectResult>`))
+				}
+				return
+			}
+			w.WriteHeader(putStatus)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
 func newTestClient(t *testing.T, endpoint string) *Client {
 	t.Helper()
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
@@ -125,6 +150,27 @@ func TestClient_Delete_Error(t *testing.T) {
 	client := newTestClient(t, server.URL)
 
 	err := client.Delete(context.Background(), "b2b_org_logos/uid-1/tmp-scratch.png")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "test-bucket")
+}
+
+func TestClient_Copy_Success(t *testing.T) {
+	server := fakeS3ServerWithCopy(t, http.StatusOK, http.StatusOK, http.StatusOK)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.Copy(context.Background(), "b2b_org_logos/uid-1/tmp-scratch.png", "b2b_org_logos/uid-1.png")
+
+	assert.NoError(t, err)
+}
+
+func TestClient_Copy_Error(t *testing.T) {
+	server := fakeS3ServerWithCopy(t, http.StatusOK, http.StatusOK, http.StatusInternalServerError)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.Copy(context.Background(), "b2b_org_logos/uid-1/tmp-scratch.png", "b2b_org_logos/uid-1.png")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "test-bucket")

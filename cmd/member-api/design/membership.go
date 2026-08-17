@@ -177,6 +177,13 @@ var _ = dsl.Service("membership-service", func() {
 			dsl.Attribute("uid", dsl.String, "B2B organization UID", func() {
 				dsl.Example("001B000000IqhSLIAZ")
 			})
+			// if_match is mandatory here, unlike the other If-Match-bearing
+			// methods in this file: this endpoint writes bytes to a shared
+			// object-storage key, so without a real optimistic-concurrency
+			// check two concurrent uploads can both call Update successfully
+			// and leave the final Salesforce URL and the final object-storage
+			// bytes chosen by two independently-raced writes (see the
+			// LFXV2-2016 Copilot review on PR #87).
 			IfMatchAttribute()
 			dsl.Attribute("content_type", dsl.String, "MIME type of the uploaded logo (image/png or image/jpeg)", func() {
 				dsl.Example("image/png")
@@ -184,7 +191,7 @@ var _ = dsl.Service("membership-service", func() {
 			dsl.Attribute("content_length", dsl.Int64, "Size of the uploaded logo in bytes", func() {
 				dsl.Example(102400)
 			})
-			dsl.Required("uid", "content_type")
+			dsl.Required("uid", "content_type", "if_match")
 		})
 
 		dsl.Result(func() {

@@ -69,7 +69,7 @@ func ParseEndpoint(
 		membershipServiceUploadB2bOrgLogoUIDFlag           = membershipServiceUploadB2bOrgLogoFlags.String("uid", "REQUIRED", "B2B organization UID")
 		membershipServiceUploadB2bOrgLogoVersionFlag       = membershipServiceUploadB2bOrgLogoFlags.String("version", "", "")
 		membershipServiceUploadB2bOrgLogoBearerTokenFlag   = membershipServiceUploadB2bOrgLogoFlags.String("bearer-token", "", "")
-		membershipServiceUploadB2bOrgLogoIfMatchFlag       = membershipServiceUploadB2bOrgLogoFlags.String("if-match", "", "")
+		membershipServiceUploadB2bOrgLogoIfMatchFlag       = membershipServiceUploadB2bOrgLogoFlags.String("if-match", "REQUIRED", "")
 		membershipServiceUploadB2bOrgLogoContentTypeFlag   = membershipServiceUploadB2bOrgLogoFlags.String("content-type", "REQUIRED", "")
 		membershipServiceUploadB2bOrgLogoContentLengthFlag = membershipServiceUploadB2bOrgLogoFlags.String("content-length", "", "")
 		membershipServiceUploadB2bOrgLogoStreamFlag        = membershipServiceUploadB2bOrgLogoFlags.String("stream", "REQUIRED", "path to file containing the streamed request body")

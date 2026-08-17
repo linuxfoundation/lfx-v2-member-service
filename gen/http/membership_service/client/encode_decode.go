@@ -660,8 +660,8 @@ func EncodeUploadB2bOrgLogoRequest(encoder func(*http.Request) goahttp.Encoder) 
 				req.Header.Set("Authorization", head)
 			}
 		}
-		if p.IfMatch != nil {
-			head := *p.IfMatch
+		{
+			head := p.IfMatch
 			req.Header.Set("If-Match", head)
 		}
 		{

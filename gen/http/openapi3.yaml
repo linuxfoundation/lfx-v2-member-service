@@ -490,6 +490,7 @@ paths:
                   in: header
                   description: If-Match header value for conditional requests
                   allowEmptyValue: true
+                  required: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests

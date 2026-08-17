@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,6 +18,18 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+)
+
+// CommitPromoteAttempts and commitPromoteRetryDelay bound the retry loop that
+// promotes an already-uploaded scratch object to the shared logo key once
+// B2BOrgWriter.Update has already committed that key's URL to Salesforce — at
+// that point a single transient failure must not be left to a future upload
+// to fix (see the LFXV2-2016 Copilot review on PR #87). CommitPromoteAttempts
+// is exported so tests can exercise the retry loop's boundary without
+// hardcoding a number that would silently drift out of sync.
+const (
+	CommitPromoteAttempts   = 3
+	commitPromoteRetryDelay = 200 * time.Millisecond
 )
 
 // LogoUploader uploads a B2B org logo to object storage and writes the
@@ -91,9 +104,12 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// success (see the LFXV2-2016 Copilot review on PR #87). So each attempt
 	// first writes to its own scratch key (catching an upload failure before
 	// touching Salesforce, same rationale as the precondition check above),
-	// then only writes to the real, shared key once B2BOrgWriter.Update has
-	// confirmed — via its own optimistic-concurrency check — that this attempt
-	// actually won.
+	// then only promotes to the real, shared key once B2BOrgWriter.Update has
+	// confirmed — via its own optimistic-concurrency check, which this
+	// endpoint requires (if_match is Required in the Goa design, unlike the
+	// sibling update-b2b-org method) specifically because it's the only
+	// B2BOrgWriter caller that also writes shared object-storage bytes — that
+	// this attempt actually won.
 	key := fmt.Sprintf("b2b_org_logos/%s%s", uid, ext)
 	scratchKey := fmt.Sprintf("b2b_org_logos/%s/tmp-%s%s", uid, uuid.NewString(), ext)
 
@@ -111,13 +127,26 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, err
 	}
 
-	// This attempt has won: commit the bytes to the real key. A failure here
-	// leaves Salesforce pointing at url slightly ahead of the object's actual
-	// bytes at key — self-corrects on the next successful upload to the same
-	// org, same as any other stale-object case this key strategy is built to
-	// heal from.
-	if _, err := o.objectStore.Put(ctx, key, contentType, data); err != nil {
-		return nil, fmt.Errorf("committing logo for b2b org %s: %w", uid, err)
+	// This attempt has won and Salesforce already points at url: promote the
+	// already-uploaded scratch bytes to key via a server-side copy (not a
+	// fresh Put from data) and retry a few times. Unlike the pre-Update
+	// scratch write, a failure here can't self-heal on its own — Salesforce
+	// now names a key with no matching object (or stale bytes, if key already
+	// existed) and nothing will retry it unless this org gets a logo uploaded
+	// again (see the LFXV2-2016 Copilot review on PR #87).
+	var commitErr error
+	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
+		if commitErr = o.objectStore.Copy(ctx, scratchKey, key); commitErr == nil {
+			break
+		}
+		if attempt < CommitPromoteAttempts {
+			time.Sleep(commitPromoteRetryDelay)
+		}
+	}
+	if commitErr != nil {
+		slog.ErrorContext(ctx, "failed to promote logo to its shared key after the b2b org update already committed",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
+		return nil, fmt.Errorf("committing logo for b2b org %s: %w", uid, commitErr)
 	}
 
 	if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {

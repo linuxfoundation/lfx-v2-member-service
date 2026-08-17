@@ -31,28 +31,34 @@ const deterministicLogoKey = "b2b_org_logos/uid-1.png"
 // requires to match the declared Content-Type.
 const validPNGBytes = "\x89PNG\r\n\x1a\n"
 
-// stubObjectStore captures every Put/Delete call in order and returns a
-// canned URL/error for Put, keyed per-call so tests can simulate the scratch
-// write succeeding while the final commit write fails, or vice versa.
+// stubObjectStore captures every Put/Copy/Delete call in order. commitErr
+// controls the promotion Copy call (which retries commitPromoteAttempts
+// times before giving up) independently of err (the scratch Put's error), so
+// tests can simulate the scratch write succeeding while the promotion fails,
+// or vice versa. commitErrCount, if nonzero, makes Copy fail only that many
+// times before succeeding, to exercise the retry loop itself.
 type stubObjectStore struct {
-	url        string
-	err        error
-	commitErr  error
-	deleteErr  error
-	putKeys    []string
-	gotType    string
-	gotDataLen int
-	deletedKey string
+	url            string
+	err            error
+	commitErr      error
+	commitErrCount int
+	deleteErr      error
+	putKeys        []string
+	copyCalls      []copyCall
+	gotType        string
+	gotDataLen     int
+	deletedKey     string
+}
+
+type copyCall struct {
+	src, dst string
 }
 
 func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data []byte) (string, error) {
 	s.putKeys = append(s.putKeys, key)
 	s.gotType = contentType
 	s.gotDataLen = len(data)
-	if key == deterministicLogoKey && s.commitErr != nil {
-		return "", s.commitErr
-	}
-	if key != deterministicLogoKey && s.err != nil {
+	if s.err != nil {
 		return "", s.err
 	}
 	return s.url, nil
@@ -65,6 +71,17 @@ func (s *stubObjectStore) VersionedURL(_ string) string {
 func (s *stubObjectStore) Delete(_ context.Context, key string) error {
 	s.deletedKey = key
 	return s.deleteErr
+}
+
+func (s *stubObjectStore) Copy(_ context.Context, src, dst string) error {
+	s.copyCalls = append(s.copyCalls, copyCall{src: src, dst: dst})
+	if s.commitErr == nil {
+		return nil
+	}
+	if s.commitErrCount > 0 && len(s.copyCalls) > s.commitErrCount {
+		return nil
+	}
+	return s.commitErr
 }
 
 // gotKey is the scratch key from the first (always-attempted) Put call, kept
@@ -111,14 +128,16 @@ func TestLogoUploader_Happy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, org)
 	assert.Equal(t, "uid-1", org.UID)
-	require.Len(t, objectStore.putKeys, 2, "expected a scratch write followed by the commit write to the deterministic key")
-	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "first write must be to a unique scratch key, not the deterministic one")
-	assert.Equal(t, deterministicLogoKey, objectStore.putKeys[1], "commit write must land on the deterministic key so old URLs converge to current bytes")
+	require.Len(t, objectStore.putKeys, 1, "expected only the scratch write via Put")
+	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "the only Put must be to a unique scratch key, not the deterministic one")
+	require.Len(t, objectStore.copyCalls, 1, "expected the scratch object promoted to the deterministic key via Copy")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.copyCalls[0].src)
+	assert.Equal(t, deterministicLogoKey, objectStore.copyCalls[0].dst, "promotion must land on the deterministic key so old URLs converge to current bytes")
 	assert.Equal(t, "image/png", objectStore.gotType)
 	assert.Equal(t, len(validPNGBytes), objectStore.gotDataLen)
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
 	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
-	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must be cleaned up once the commit write succeeds")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must be cleaned up once the promotion succeeds")
 }
 
 func TestLogoUploader_ContentTypeWithParameters(t *testing.T) {
@@ -215,10 +234,11 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 }
 
 func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
-	// Update has already committed the org's new Logo_URL__c — the commit
-	// write to the shared key is what's left, and its failure must surface as
-	// an error even though the Salesforce-side write already succeeded, so the
-	// caller knows to retry rather than assume the logo is actually live.
+	// Update has already committed the org's new Logo_URL__c — promoting the
+	// scratch object to the shared key via Copy is what's left, and its
+	// failure (after exhausting retries) must surface as an error even though
+	// the Salesforce-side write already succeeded, so the caller knows to
+	// retry rather than assume the logo is actually live.
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
 		commitErr: errors.New("s3 unavailable"),
@@ -230,8 +250,32 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, orgWriter.validated)
-	require.Len(t, objectStore.putKeys, 2, "expected both the scratch write and the attempted commit write")
-	assert.Equal(t, deterministicLogoKey, objectStore.putKeys[1])
+	require.Len(t, objectStore.putKeys, 1, "expected only the scratch Put")
+	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts, "expected every promotion retry attempt to be exhausted")
+	for _, c := range objectStore.copyCalls {
+		assert.Equal(t, objectStore.putKeys[0], c.src)
+		assert.Equal(t, deterministicLogoKey, c.dst)
+	}
+}
+
+func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {
+	// The promotion Copy fails on its first attempt but succeeds on a retry —
+	// the retry loop must paper over exactly this kind of transient failure
+	// once Update has already committed, without surfacing an error.
+	objectStore := &stubObjectStore{
+		url:            "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr:      errors.New("s3 unavailable"),
+		commitErrCount: svc.CommitPromoteAttempts - 1,
+	}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts)
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must still be cleaned up once a retry succeeds")
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {

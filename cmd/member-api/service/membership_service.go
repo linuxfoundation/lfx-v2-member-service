@@ -179,12 +179,8 @@ func (s *membershipServicesrvc) UploadB2bOrgLogo(ctx context.Context, p *members
 	defer body.Close() //nolint:errcheck
 
 	p.UID = normalizeSFID(p.UID)
-	ifMatch := ""
-	if p.IfMatch != nil {
-		ifMatch = *p.IfMatch
-	}
 
-	org, err := s.logoUploader.UploadB2BOrgLogo(ctx, p.UID, p.ContentType, body, ifMatch)
+	org, err := s.logoUploader.UploadB2BOrgLogo(ctx, p.UID, p.ContentType, body, p.IfMatch)
 	if err != nil {
 		return nil, wrapError(ctx, err)
 	}

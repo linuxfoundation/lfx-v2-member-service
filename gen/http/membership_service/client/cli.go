@@ -198,11 +198,9 @@ func BuildUploadB2bOrgLogoPayload(membershipServiceUploadB2bOrgLogoUID string, m
 			bearerToken = &membershipServiceUploadB2bOrgLogoBearerToken
 		}
 	}
-	var ifMatch *string
+	var ifMatch string
 	{
-		if membershipServiceUploadB2bOrgLogoIfMatch != "" {
-			ifMatch = &membershipServiceUploadB2bOrgLogoIfMatch
-		}
+		ifMatch = membershipServiceUploadB2bOrgLogoIfMatch
 	}
 	var contentType string
 	{

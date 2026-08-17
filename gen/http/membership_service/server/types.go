@@ -5414,7 +5414,7 @@ func NewUpdateB2bOrgPayload(body *UpdateB2bOrgRequestBody, uid string, version *
 
 // NewUploadB2bOrgLogoPayload builds a membership-service service
 // upload-b2b-org-logo endpoint payload.
-func NewUploadB2bOrgLogoPayload(uid string, version *string, bearerToken *string, ifMatch *string, contentType string, contentLength *int64) *membershipservice.UploadB2bOrgLogoPayload {
+func NewUploadB2bOrgLogoPayload(uid string, version *string, bearerToken *string, ifMatch string, contentType string, contentLength *int64) *membershipservice.UploadB2bOrgLogoPayload {
 	v := &membershipservice.UploadB2bOrgLogoPayload{}
 	v.UID = uid
 	v.Version = version
