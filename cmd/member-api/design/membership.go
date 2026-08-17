@@ -167,7 +167,12 @@ var _ = dsl.Service("membership-service", func() {
 	})
 
 	dsl.Method("upload-b2b-org-logo", func() {
-		dsl.Description("Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL")
+		dsl.Description("Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. " +
+			"The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of " +
+			"image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length " +
+			"set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body " +
+			"because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does " +
+			"not support combining with a Body(...) declaration.")
 
 		dsl.Security(JWTAuth)
 
@@ -216,6 +221,12 @@ var _ = dsl.Service("membership-service", func() {
 			dsl.Header("if_match:If-Match")
 			dsl.Header("content_type:Content-Type")
 			dsl.Header("content_length:Content-Length")
+			// Goa forbids Body(...) together with SkipRequestBodyEncodeDecode
+			// ("Cannot define a request body when using
+			// SkipRequestBodyEncodeDecode") so the raw binary body can't be
+			// modeled structurally for OpenAPI here -- it's documented in
+			// prose on the method Description above instead (see the
+			// LFXV2-2016 Copilot review on PR #87).
 			dsl.SkipRequestBodyEncodeDecode()
 			dsl.Response(dsl.StatusOK, func() {
 				dsl.Header("etag:ETag")

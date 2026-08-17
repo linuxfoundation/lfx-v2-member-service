@@ -26,7 +26,13 @@ type Service interface {
 	// Update a B2B organization
 	UpdateB2bOrg(context.Context, *UpdateB2bOrgPayload) (res *UpdateB2bOrgResult, err error)
 	// Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and
-	// set it as the org's logo URL
+	// set it as the org's logo URL. The request body is the raw logo image bytes
+	// -- not a JSON envelope -- sent with Content-Type set to one of image/png,
+	// image/jpeg, or image/svg+xml (echoed in the content_type header attribute
+	// below), and Content-Length set to the byte count (echoed in content_length).
+	// This isn't reflected as a structured OpenAPI request body because this
+	// endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which
+	// Goa's generator does not support combining with a Body(...) declaration.
 	UploadB2bOrgLogo(context.Context, *UploadB2bOrgLogoPayload, io.ReadCloser) (res *UploadB2bOrgLogoResult, err error)
 	// Get the access-control settings (writers and auditors) for a B2B organization
 	GetB2bOrgSettings(context.Context, *GetB2bOrgSettingsPayload) (res *GetB2bOrgSettingsResult, err error)

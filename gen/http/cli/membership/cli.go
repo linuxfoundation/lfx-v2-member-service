@@ -449,7 +449,7 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    get-b2b-org: Get a specific B2B organization by UID`)
 	fmt.Fprintln(os.Stderr, `    create-b2b-org: Create a new B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org: Update a B2B organization`)
-	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL`)
+	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
 	fmt.Fprintln(os.Stderr, `    get-b2b-org-settings: Get the access-control settings (writers and auditors) for a B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-settings: Replace the writers and/or auditors list on a B2B organization (full-replace semantics)`)
 	fmt.Fprintln(os.Stderr, `    add-b2b-org-settings-user: Add (invite) a single principal to a B2B organization's writers or auditors. Per-principal merge: existing members are preserved; the new entry lands as a pending invite (no username yet).`)
@@ -562,7 +562,7 @@ func membershipServiceUploadB2bOrgLogoUsage() {
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL`)
+	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -uid STRING: B2B organization UID`)
