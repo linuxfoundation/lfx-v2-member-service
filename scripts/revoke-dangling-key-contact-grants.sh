@@ -30,6 +30,17 @@
 # member_put. A live match there means the pair is presently legitimate and
 # is skipped, never deleted.
 #
+# OpenSearch is a secondary index, not Salesforce (the true source of truth):
+# export-key-contact-grants-from-opensearch.sh's own header notes the
+# indexer and FGA publishes can fail independently, so this check is
+# best-effort, not a guarantee, in either direction. This is accepted for a
+# single one-off remediation of a closed, already-small population (not a
+# recurring/automated job) — full Salesforce API integration is out of
+# proportion to that scope. Mitigate by exporting full-dangling.tsv again
+# shortly before the --live run, minimizing the window in which this
+# residual gap could matter; the dry-run preview and the JSONL audit trail's
+# manual re-grant path (see Rollback, above) remain the safety net.
+#
 # Unlike scripts/revoke-lf-teams-auditor-openfga.sh (which deletes a blanket
 # team grant and only needs a total count), this remediation must attribute
 # an outcome to each of the 872 individual {membership_uid, username} pairs,
