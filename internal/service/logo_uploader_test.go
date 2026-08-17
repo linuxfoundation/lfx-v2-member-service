@@ -49,17 +49,18 @@ const maliciousSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert
 // or vice versa. commitErrCount, if nonzero, makes Copy fail only that many
 // times before succeeding, to exercise the retry loop itself.
 type stubObjectStore struct {
-	url            string
-	err            error
-	commitErr      error
-	commitErrCount int
-	deleteErr      error
-	putKeys        []string
-	putData        [][]byte
-	copyCalls      []copyCall
-	gotType        string
-	gotDataLen     int
-	deletedKey     string
+	url              string
+	err              error
+	commitErr        error
+	commitErrCount   int
+	deleteErr        error
+	putKeys          []string
+	putData          [][]byte
+	copyCalls        []copyCall
+	versionedURLKeys []string
+	gotType          string
+	gotDataLen       int
+	deletedKey       string
 }
 
 type copyCall struct {
@@ -77,7 +78,8 @@ func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data [
 	return s.url, nil
 }
 
-func (s *stubObjectStore) VersionedURL(_ string) string {
+func (s *stubObjectStore) VersionedURL(key string) string {
+	s.versionedURLKeys = append(s.versionedURLKeys, key)
 	return s.url
 }
 
@@ -110,8 +112,9 @@ func (s *stubObjectStore) gotKey() string {
 // ValidatePrecondition's return value independently of err (Update's), so
 // tests can simulate a precondition failure without ever reaching Update.
 // repointErr, if set, is returned only from the second Update call — the
-// scratch-object repoint attempted after every Copy promotion retry fails —
-// independently of err, which governs the first (deterministic-key) call.
+// repoint from the scratch URL to the shared key's URL, attempted once Copy
+// has promoted the bytes there — independently of err, which governs the
+// first (scratch-URL) call.
 type stubLogoOrgWriter struct {
 	org         *model.B2BOrg
 	err         error
@@ -162,6 +165,14 @@ func TestLogoUploader_Happy(t *testing.T) {
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
 	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
 	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must be cleaned up once the promotion succeeds")
+
+	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update (determines the race winner), then the shared-key repoint (only after Copy promotes the bytes there)")
+	require.Len(t, objectStore.versionedURLKeys, 2)
+	assert.Regexp(t, scratchKeyPattern, objectStore.versionedURLKeys[0], "the first Update must publish the scratch object's URL -- bytes that already exist -- not the shared key's")
+	assert.Equal(t, deterministicLogoKey, objectStore.versionedURLKeys[1], "the second Update must only run after Copy has promoted bytes to the shared key")
+	assert.Equal(t, "", orgWriter.ifMatches[0], "first update forwards the original request's if_match")
+	assert.NotEmpty(t, orgWriter.ifMatches[1], "the shared-key repoint must use a freshly computed if_match")
+	assert.NotEqual(t, orgWriter.ifMatches[0], orgWriter.ifMatches[1])
 }
 
 func TestLogoUploader_ContentTypeWithParameters(t *testing.T) {
@@ -313,12 +324,12 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 }
 
 func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
-	// Update has already committed the org's new Logo_URL__c — promoting the
-	// scratch object to the shared key via Copy is what's left. Once every
-	// retry is exhausted, the uploader must not leave Salesforce naming a key
-	// with no matching object: it repoints Logo_URL__c at the already-uploaded
-	// scratch object instead, so the call succeeds and the logo is genuinely
-	// live, just not yet at the pretty deterministic key.
+	// The first Update (to the scratch object's URL) has already committed —
+	// org's Logo_URL__c already names bytes that exist. Promoting those bytes
+	// to the shared key via Copy is what's left; once every retry is
+	// exhausted, there is nothing broken to repair: org is simply left
+	// pointing at the scratch object, which is already a valid, resolvable
+	// URL, so no second Update is attempted and the call still succeeds.
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
 		commitErr: errors.New("s3 unavailable"),
@@ -337,32 +348,29 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 		assert.Equal(t, objectStore.putKeys[0], c.src)
 		assert.Equal(t, deterministicLogoKey, c.dst)
 	}
-	require.Len(t, orgWriter.updateCalls, 2, "expected the deterministic-key update, then a repoint to the scratch object")
-	assert.Equal(t, "", orgWriter.ifMatches[0], "original request had no if_match")
-	assert.NotEmpty(t, orgWriter.ifMatches[1], "repoint must use a freshly computed if_match, not an empty or reused one")
-	assert.NotEqual(t, orgWriter.ifMatches[0], orgWriter.ifMatches[1], "repoint's if_match must be freshly computed, not the original request's")
+	require.Len(t, orgWriter.updateCalls, 1, "expected only the scratch-URL update -- no repoint is needed since it already points at real bytes")
 	assert.Equal(t, "", objectStore.deletedKey, "scratch object must not be cleaned up once it becomes the object Salesforce names")
 }
 
-func TestLogoUploader_CommitWriteErrorAndRepointBothFail(t *testing.T) {
-	// If the scratch-object repoint itself also fails (e.g. a genuine race
-	// changed the org in the narrow window since the first Update), there is
-	// nothing left to self-heal with in-request — this must surface as an
-	// error rather than silently report success.
-	objectStore := &stubObjectStore{
-		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
-		commitErr: errors.New("s3 unavailable"),
-	}
+func TestLogoUploader_KeyRepointFailsAfterSuccessfulPromotion(t *testing.T) {
+	// Copy succeeds, but the second Update -- repointing Salesforce from the
+	// scratch URL to the shared key's URL -- fails. org already durably
+	// points at the scratch object from the first Update, which is already a
+	// valid, resolvable URL, so this must be tolerated rather than surfaced
+	// as an upload failure.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
 	orgWriter := &stubLogoOrgWriter{
 		org:        &model.B2BOrg{UID: "uid-1"},
 		repointErr: pkgerrors.NewPreconditionFailed("b2b org has been modified since last read"),
 	}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
-	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.Error(t, err)
-	require.Len(t, orgWriter.updateCalls, 2, "expected the repoint attempt even though it went on to fail")
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the failed repoint attempt")
+	assert.Equal(t, "", objectStore.deletedKey, "scratch object must not be cleaned up when the repoint fails")
 }
 
 func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {
@@ -382,6 +390,7 @@ func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, org)
 	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts)
+	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the shared-key repoint once the retry succeeds")
 	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must still be cleaned up once a retry succeeds")
 }
 

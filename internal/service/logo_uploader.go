@@ -143,8 +143,21 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
 	}
 
-	url := o.objectStore.VersionedURL(key)
-	org, err := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: url}, ifMatch)
+	// Update is called with the scratch object's URL first, not key's — the
+	// scratch object already exists (Put above just completed), so whatever
+	// this call publishes always resolves to real bytes immediately. This is
+	// what determines the race winner, via the same optimistic-concurrency
+	// check as before; only after it succeeds does promotion to the prettier
+	// shared key happen, and only a second Update — once that promotion has
+	// actually succeeded — repoints Salesforce there. Publishing key's URL
+	// before its bytes were guaranteed to exist left a gap where a reader
+	// could hit a fresh ?v= URL between this call returning and the Copy
+	// below completing, get a cache-miss (404 or stale bytes), and have the
+	// CDN pin that miss under the new querystring for its full TTL even
+	// though promotion later succeeded (see the LFXV2-2016 lfx-reviewer
+	// finding on PR #87, logo_uploader.go:147).
+	scratchURL := o.objectStore.VersionedURL(scratchKey)
+	org, err := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: scratchURL}, ifMatch)
 	if err != nil {
 		if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
 			slog.WarnContext(ctx, "failed to clean up scratch logo object after a failed update",
@@ -153,11 +166,14 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, err
 	}
 
-	// This attempt has won and Salesforce already points at url: promote the
-	// already-uploaded scratch bytes to key via a server-side copy (not a
-	// fresh Put from data) and retry a few times. If every retry is
-	// exhausted, repointToScratch below keeps Salesforce from naming a key
-	// with no matching object (see the LFXV2-2016 Copilot review on PR #87).
+	// This attempt has won and Salesforce already durably points at the
+	// scratch object's URL, which exists. Promote those bytes to the shared
+	// key via a server-side copy (not a fresh Put from data) and retry a few
+	// times. If every retry is exhausted, org is simply left pointing at the
+	// scratch object — already a normal, correct-looking Logo_URL__c value,
+	// not a broken reference to repair — and the next upload for this org
+	// promotes a fresh scratch object to key as usual, making this one an
+	// ordinary orphan for that promotion to replace.
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
 		if commitErr = o.objectStore.Copy(ctx, scratchKey, key); commitErr == nil {
@@ -168,46 +184,34 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		}
 	}
 	if commitErr != nil {
-		slog.ErrorContext(ctx, "failed to promote logo to its shared key after the b2b org update already committed; repointing to the scratch object instead",
+		slog.ErrorContext(ctx, "failed to promote logo to its shared key after the b2b org update already committed; leaving it pointed at the scratch object",
 			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
-		return o.repointToScratch(ctx, uid, org, scratchKey, commitErr)
+		return org, nil
+	}
+
+	// Promotion succeeded: repoint Salesforce at the shared key's URL. A
+	// failure here (etag computation or the Update call itself) leaves org
+	// pointing at the scratch object, which — same as the Copy-failure case
+	// above — is already a valid, resolvable URL, so this is logged and
+	// tolerated rather than surfaced as an upload failure.
+	repointIfMatch, etagErr := etag.LFXEtag(org)
+	if etagErr != nil {
+		slog.ErrorContext(ctx, "failed to compute etag to repoint logo to its shared key after a successful promotion; leaving it pointed at the scratch object",
+			"b2b_org_uid", uid, "error", etagErr)
+		return org, nil
+	}
+	keyURL := o.objectStore.VersionedURL(key)
+	repointed, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: keyURL}, repointIfMatch)
+	if updateErr != nil {
+		slog.ErrorContext(ctx, "failed to repoint b2b org logo to its shared key after a successful promotion; leaving it pointed at the scratch object",
+			"b2b_org_uid", uid, "key", key, "error", updateErr)
+		return org, nil
 	}
 
 	if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
-		slog.WarnContext(ctx, "failed to clean up scratch logo object after a successful update",
+		slog.WarnContext(ctx, "failed to clean up scratch logo object after repointing to the shared key",
 			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
 	}
 
-	return org, nil
-}
-
-// repointToScratch runs once every promotion retry has been exhausted: org's
-// Logo_URL__c already names key, but key itself has no matching object (or
-// stale bytes). Rather than leave that broken reference until this org
-// happens to get another logo uploaded, immediately re-point Logo_URL__c at
-// the scratch object instead — it's already uploaded and known-good, just not
-// at the pretty deterministic key. The scratch object is deliberately not
-// cleaned up on this path, since it's now the object Salesforce names; the
-// next successful upload for this org promotes a fresh scratch object to key
-// as normal, and this one becomes an ordinary orphan for that promotion to
-// replace.
-func (o *logoUploaderOrchestrator) repointToScratch(ctx context.Context, uid string, org *model.B2BOrg, scratchKey string, commitErr error) (*model.B2BOrg, error) {
-	repointIfMatch, etagErr := etag.LFXEtag(org)
-	if etagErr != nil {
-		slog.ErrorContext(ctx, "failed to compute etag for scratch-object repoint after a failed logo promotion",
-			"b2b_org_uid", uid, "error", etagErr)
-		return nil, fmt.Errorf("committing logo for b2b org %s: %w", uid, commitErr)
-	}
-
-	scratchURL := o.objectStore.VersionedURL(scratchKey)
-	repointed, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: scratchURL}, repointIfMatch)
-	if updateErr != nil {
-		slog.ErrorContext(ctx, "failed to repoint b2b org logo to its scratch object after a failed promotion; logo URL is durably broken until next upload",
-			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", updateErr)
-		return nil, fmt.Errorf("committing logo for b2b org %s: %w (repoint also failed: %v)", uid, commitErr, updateErr)
-	}
-
-	slog.WarnContext(ctx, "repointed b2b org logo to its scratch object after the shared-key promotion failed; next upload will re-promote to the deterministic key",
-		"b2b_org_uid", uid, "scratch_key", scratchKey)
 	return repointed, nil
 }
