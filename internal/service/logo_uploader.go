@@ -9,6 +9,8 @@ import (
 	"io"
 	"mime"
 
+	"github.com/google/uuid"
+
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
@@ -59,7 +61,19 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, pkgerrors.NewValidation("logo upload body is empty")
 	}
 
-	key := fmt.Sprintf("b2b_org_logos/%s%s", uid, ext)
+	// Validate the org exists and, if ifMatch is set, that it's still current —
+	// before uploading any bytes. Uploading first (against a deterministic key)
+	// let a request that later failed this check still overwrite storage; see
+	// the LFXV2-2016 Copilot review on PR #87.
+	if err := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, ifMatch); err != nil {
+		return nil, err
+	}
+
+	// Each attempt gets its own immutable key rather than the deterministic
+	// {uid}.{ext} — so a racing upload, or one whose subsequent Update fails,
+	// can never clobber bytes another upload (in flight or already committed)
+	// depends on.
+	key := fmt.Sprintf("b2b_org_logos/%s/%s%s", uid, uuid.NewString(), ext)
 	url, err := o.objectStore.Put(ctx, key, contentType, data)
 	if err != nil {
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)

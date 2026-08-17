@@ -134,6 +134,7 @@ func (c *Client) UpdateB2bOrg(ctx context.Context, p *UpdateB2bOrgPayload) (res 
 // UploadB2bOrgLogo calls the "upload-b2b-org-logo" endpoint of the
 // "membership-service" service.
 // UploadB2bOrgLogo may return the following errors:
+//   - "NotImplemented" (type *goa.ServiceError): Endpoint not implemented
 //   - "NotFound" (type *goa.ServiceError): Resource not found
 //   - "BadRequest" (type *goa.ServiceError): Bad request (unsupported content type or file too large)
 //   - "PreconditionFailed" (type *goa.ServiceError): Precondition failed

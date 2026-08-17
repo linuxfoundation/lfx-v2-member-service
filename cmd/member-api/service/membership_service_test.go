@@ -38,6 +38,9 @@ func (s stubB2BOrgWriterUC) Create(_ context.Context, _ string) (*model.B2BOrg, 
 func (s stubB2BOrgWriterUC) Update(_ context.Context, _ string, _ model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
 	return s.org, s.err
 }
+func (s stubB2BOrgWriterUC) ValidatePrecondition(_ context.Context, _, _ string) error {
+	return s.err
+}
 
 type stubLogoUploaderUC struct {
 	org *model.B2BOrg

@@ -630,6 +630,25 @@ type UpdateB2bOrgServiceUnavailableResponseBody struct {
 	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
 }
 
+// UploadB2bOrgLogoNotImplementedResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "NotImplemented" error.
+type UploadB2bOrgLogoNotImplementedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
 // UploadB2bOrgLogoNotFoundResponseBody is the type of the "membership-service"
 // service "upload-b2b-org-logo" endpoint HTTP response body for the "NotFound"
 // error.
@@ -3545,6 +3564,21 @@ func NewUploadB2bOrgLogoResultOK(body *UploadB2bOrgLogoResponseBody, etag *strin
 	return res
 }
 
+// NewUploadB2bOrgLogoNotImplemented builds a membership-service service
+// upload-b2b-org-logo endpoint NotImplemented error.
+func NewUploadB2bOrgLogoNotImplemented(body *UploadB2bOrgLogoNotImplementedResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
 // NewUploadB2bOrgLogoNotFound builds a membership-service service
 // upload-b2b-org-logo endpoint NotFound error.
 func NewUploadB2bOrgLogoNotFound(body *UploadB2bOrgLogoNotFoundResponseBody) *goa.ServiceError {
@@ -6448,6 +6482,30 @@ func ValidateUpdateB2bOrgInternalServerErrorResponseBody(body *UpdateB2bOrgInter
 // ValidateUpdateB2bOrgServiceUnavailableResponseBody runs the validations
 // defined on update-b2b-org_ServiceUnavailable_response_body
 func ValidateUpdateB2bOrgServiceUnavailableResponseBody(body *UpdateB2bOrgServiceUnavailableResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateUploadB2bOrgLogoNotImplementedResponseBody runs the validations
+// defined on upload-b2b-org-logo_NotImplemented_response_body
+func ValidateUploadB2bOrgLogoNotImplementedResponseBody(body *UploadB2bOrgLogoNotImplementedResponseBody) (err error) {
 	if body.Name == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
 	}

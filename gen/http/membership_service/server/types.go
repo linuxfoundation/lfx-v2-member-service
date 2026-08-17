@@ -630,6 +630,25 @@ type UpdateB2bOrgServiceUnavailableResponseBody struct {
 	Fault bool `form:"fault" json:"fault" xml:"fault"`
 }
 
+// UploadB2bOrgLogoNotImplementedResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "NotImplemented" error.
+type UploadB2bOrgLogoNotImplementedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
 // UploadB2bOrgLogoNotFoundResponseBody is the type of the "membership-service"
 // service "upload-b2b-org-logo" endpoint HTTP response body for the "NotFound"
 // error.
@@ -3713,6 +3732,21 @@ func NewUpdateB2bOrgInternalServerErrorResponseBody(res *goa.ServiceError) *Upda
 // service.
 func NewUpdateB2bOrgServiceUnavailableResponseBody(res *goa.ServiceError) *UpdateB2bOrgServiceUnavailableResponseBody {
 	body := &UpdateB2bOrgServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoNotImplementedResponseBody builds the HTTP response body
+// from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoNotImplementedResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoNotImplementedResponseBody {
+	body := &UploadB2bOrgLogoNotImplementedResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,

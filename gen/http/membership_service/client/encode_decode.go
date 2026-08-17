@@ -686,6 +686,7 @@ func EncodeUploadB2bOrgLogoRequest(encoder func(*http.Request) goahttp.Encoder) 
 // the membership-service upload-b2b-org-logo endpoint. restoreBody controls
 // whether the response body should be restored after having been read.
 // DecodeUploadB2bOrgLogoResponse may return the following errors:
+//   - "NotImplemented" (type *goa.ServiceError): http.StatusNotImplemented
 //   - "NotFound" (type *goa.ServiceError): http.StatusNotFound
 //   - "BadRequest" (type *goa.ServiceError): http.StatusBadRequest
 //   - "PreconditionFailed" (type *goa.ServiceError): http.StatusPreconditionFailed
@@ -734,6 +735,20 @@ func DecodeUploadB2bOrgLogoResponse(decoder func(*http.Response) goahttp.Decoder
 			}
 			res := NewUploadB2bOrgLogoResultOK(&body, etag, lastModified)
 			return res, nil
+		case http.StatusNotImplemented:
+			var (
+				body UploadB2bOrgLogoNotImplementedResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "upload-b2b-org-logo", err)
+			}
+			err = ValidateUploadB2bOrgLogoNotImplementedResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "upload-b2b-org-logo", err)
+			}
+			return nil, NewUploadB2bOrgLogoNotImplemented(&body)
 		case http.StatusNotFound:
 			var (
 				body UploadB2bOrgLogoNotFoundResponseBody

@@ -194,6 +194,7 @@ var _ = dsl.Service("membership-service", func() {
 			dsl.Required("b2b_org")
 		})
 
+		dsl.Error("NotImplemented", dsl.ErrorResult, "Endpoint not implemented")
 		dsl.Error("NotFound", dsl.ErrorResult, "Resource not found")
 		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request (unsupported content type or file too large)")
 		dsl.Error("PreconditionFailed", dsl.ErrorResult, "Precondition failed")
@@ -214,6 +215,7 @@ var _ = dsl.Service("membership-service", func() {
 				dsl.Header("last_modified:Last-Modified")
 				dsl.Body("b2b_org")
 			})
+			dsl.Response("NotImplemented", dsl.StatusNotImplemented)
 			dsl.Response("NotFound", dsl.StatusNotFound)
 			dsl.Response("BadRequest", dsl.StatusBadRequest)
 			dsl.Response("PreconditionFailed", dsl.StatusPreconditionFailed)

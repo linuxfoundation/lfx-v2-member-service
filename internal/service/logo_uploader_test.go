@@ -6,6 +6,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,6 +16,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// logoKeyPattern matches the immutable per-attempt key format
+// b2b_org_logos/{uid}/{uuid}{ext} — never the deterministic {uid}{ext}.
+var logoKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/[0-9a-f-]{36}\.png$`)
 
 // stubObjectStore captures the Put call and returns a canned URL/error.
 type stubObjectStore struct {
@@ -32,15 +37,24 @@ func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data [
 	return s.url, s.err
 }
 
-// stubLogoOrgWriter records the Update call's input.
+// stubLogoOrgWriter records the Update call's input. validateErr controls
+// ValidatePrecondition's return value independently of err (Update's), so
+// tests can simulate a precondition failure without ever reaching Update.
 type stubLogoOrgWriter struct {
-	org      *model.B2BOrg
-	err      error
-	gotInput model.B2BOrgInput
+	org         *model.B2BOrg
+	err         error
+	validateErr error
+	gotInput    model.B2BOrgInput
+	validated   bool
 }
 
 func (w *stubLogoOrgWriter) Create(_ context.Context, _ string) (*model.B2BOrg, error) {
 	return w.org, w.err
+}
+
+func (w *stubLogoOrgWriter) ValidatePrecondition(_ context.Context, _, _ string) error {
+	w.validated = true
+	return w.validateErr
 }
 
 func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
@@ -58,10 +72,11 @@ func TestLogoUploader_Happy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, org)
 	assert.Equal(t, "uid-1", org.UID)
-	assert.Equal(t, "b2b_org_logos/uid-1.png", objectStore.gotKey)
+	assert.Regexp(t, logoKeyPattern, objectStore.gotKey, "key must be b2b_org_logos/{uid}/{unique}.png, never the deterministic {uid}.png")
 	assert.Equal(t, "image/png", objectStore.gotType)
 	assert.Equal(t, len("fake-png-bytes"), objectStore.gotDataLen)
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
+	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
 }
 
 func TestLogoUploader_ContentTypeWithParameters(t *testing.T) {
@@ -124,6 +139,10 @@ func TestLogoUploader_ObjectStoreError(t *testing.T) {
 }
 
 func TestLogoUploader_OrgWriterError(t *testing.T) {
+	// Precondition passes, but the final Update call itself fails (e.g. the
+	// org was deleted or modified in the narrow window between the preflight
+	// check and this write) — a genuine race, not the ordering bug the
+	// preflight check exists to close.
 	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
 	orgWriter := &stubLogoOrgWriter{err: pkgerrors.NewNotFound("b2b org not found")}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
@@ -132,7 +151,32 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
-	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL, "object store must still be called before the org writer")
+	assert.True(t, orgWriter.validated, "precondition must have been checked (and passed) before this call")
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL, "object store must still be called once the precondition check passes")
+}
+
+func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/should-not-be-used"}
+	orgWriter := &stubLogoOrgWriter{validateErr: pkgerrors.NewPreconditionFailed("b2b org has been modified since last read")}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "\"stale-etag\"")
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsPreconditionFailed(err), "expected precondition-failed error, got %T: %v", err, err)
+	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the precondition check fails")
+}
+
+func TestLogoUploader_OrgNotFoundPreventsUpload(t *testing.T) {
+	objectStore := &stubObjectStore{}
+	orgWriter := &stubLogoOrgWriter{validateErr: pkgerrors.NewNotFound("b2b org not found")}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader("fake-png-bytes"), "")
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
+	assert.Equal(t, "", objectStore.gotKey, "object store must not be called when the org does not exist")
 }
 
 // errReader always fails on Read, simulating a client disconnect mid-upload.
