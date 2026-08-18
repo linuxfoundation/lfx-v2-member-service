@@ -204,6 +204,93 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	return nil
 }
 
+// revokeKeyContactGrantIfUnregistered revokes the grant recorded for a key
+// contact whose current email now produces a definitive "no registered
+// account" result, and clears the index entry once the revoke is confirmed
+// delivered. Callers (the key-contact writer, the CDC consumer, and the
+// backfill runner) invoke this only from their existing lookup's
+// pkgerrors.IsNotFound(err) branch — a transport-level failure MUST NOT reach
+// this function.
+//
+// A contact with no recorded grant, or one whose recorded pair is already
+// empty, produces no publish — there is nothing to revoke.
+func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string) {
+	if idx == nil || uid == "" {
+		return
+	}
+	stored, found, err := idx.Get(ctx, uid)
+	if err != nil {
+		slog.WarnContext(ctx, "key_contact grant index read failed — cannot check for a stale grant to revoke on unregistered email",
+			"uid", uid, "error", err)
+		return
+	}
+	if !found || stored.MembershipUID == "" || stored.Username == "" {
+		return
+	}
+
+	msg := BuildKeyContactFGARemoveMessage(stored.MembershipUID, stored.Username)
+	if err := p.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg); err != nil {
+		slog.ErrorContext(ctx, "key_contact grant revoke publish failed on unregistered email — grant retained in index for retry",
+			"uid", uid, "membership_uid", stored.MembershipUID,
+			"error", err, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
+	if flushErr := p.Flush(ctx); flushErr != nil {
+		slog.ErrorContext(ctx, "key_contact grant revoke flush failed on unregistered email — delivery indeterminate, grant retained in index for retry",
+			"uid", uid, "membership_uid", stored.MembershipUID,
+			"error", flushErr, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
+	slog.InfoContext(ctx, "key_contact grant revoked — email resolved no registered account",
+		"uid", uid, "membership_uid", stored.MembershipUID)
+
+	clearRevokedGrant(ctx, idx, uid, stored)
+}
+
+// clearRevokedGrant removes the just-revoked, confirmed-delivered grant from
+// the index. If the entry still carries a PendingRevoke marker for an
+// unrelated, still-outstanding supersede, that marker's address is preserved
+// rather than discarded: the entry is rewritten with its live grant cleared
+// but the marker intact, instead of being deleted outright — the marker's own
+// confirmed revoke (revokeSupersededKeyContactGrant / clearPendingRevoke) is
+// what eventually clears it.
+//
+// The read-compare-write is revision-conditional, matching
+// recordKeyContactGrant: if a concurrent writer has already replaced this
+// pair (the email was corrected and a new grant published), that pair is left
+// untouched rather than discarded.
+func clearRevokedGrant(ctx context.Context, idx port.KeyContactGrantIndex, uid string, revoked port.KeyContactGrant) {
+	for attempt := 1; attempt <= maxGrantIndexAttempts; attempt++ {
+		current, found, err := idx.Get(ctx, uid)
+		if err != nil || !found {
+			return
+		}
+		if current.MembershipUID != revoked.MembershipUID || current.Username != revoked.Username {
+			return
+		}
+
+		var putErr error
+		if current.PendingRevoke != nil {
+			current.MembershipUID = ""
+			current.Username = ""
+			putErr = idx.Put(ctx, uid, current)
+		} else {
+			putErr = idx.Delete(ctx, uid, current.Revision)
+		}
+		if putErr == nil {
+			return
+		}
+		if !pkgerrors.IsConflict(putErr) {
+			slog.WarnContext(ctx, "key_contact grant index clear failed after confirmed revoke — confirmed-delivered grant left in index",
+				"uid", uid, "membership_uid", revoked.MembershipUID, "error", putErr)
+			return
+		}
+		// Conflict: re-read and retry against the new value.
+	}
+	slog.WarnContext(ctx, "key_contact grant index clear abandoned after repeated conflicts",
+		"uid", uid, "membership_uid", revoked.MembershipUID)
+}
+
 // clearPendingRevoke removes the PendingRevoke marker for superseded now that
 // its revoke is confirmed delivered. It is best-effort: leaving a
 // confirmed-delivered marker in place after this fails is stale but harmless

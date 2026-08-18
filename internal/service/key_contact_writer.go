@@ -306,9 +306,17 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 	}
 
 	// Resolve username, publish indexer, then FGA put.
-	kc.Username = o.resolveUsernameForContact(ctx, "", kc.Email)
+	var definitiveMiss bool
+	kc.Username, definitiveMiss = o.resolveUsernameForContact(ctx, "", kc.Email)
 	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionCreated)
 	PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, kc)
+	if definitiveMiss {
+		// The email never resolved to a registered account. There is nothing
+		// to revoke on a brand-new contact — no grant was ever published for
+		// it — but the index may still hold a stale entry from a prior,
+		// now-superseded contact at this membership+email pair.
+		revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, kc.UID)
+	}
 	o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
 
 	return kc, nil
@@ -365,7 +373,7 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 
 	if emailChanging {
 		// Paired FGA: put new username first (avoid no-access window), then remove old.
-		newKC.Username = o.resolveUsernameForContact(ctx, "", newKC.Email)
+		newKC.Username, _ = o.resolveUsernameForContact(ctx, "", newKC.Email)
 		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
 		// This revoke is intentionally unconditional, even though
 		// PublishKeyContactFGA's recordKeyContactGrant also revokes a superseded
@@ -380,7 +388,7 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		// the index, so it is also the only one that reproduces the legacy
 		// auth0|-prefix fallback in resolveUsernameForContact — it must run
 		// regardless of whether the index-driven path also ran.
-		oldUsername := o.resolveUsernameForContact(ctx, current.Username, current.Email)
+		oldUsername, _ := o.resolveUsernameForContact(ctx, current.Username, current.Email)
 		if oldUsername != newKC.Username {
 			if pubErr := o.publishFGARemove(ctx, newKC.MembershipUID, oldUsername); pubErr != nil {
 				// Log at error severity (dangling permission), but do not propagate — the
@@ -402,8 +410,15 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			newKC.Email = current.Email
 		}
 		newKC.Role = derefOrStr(in.Role, current.Role)
-		newKC.Username = o.resolveUsernameForContact(ctx, current.Username, newKC.Email)
+		var definitiveMiss bool
+		newKC.Username, definitiveMiss = o.resolveUsernameForContact(ctx, current.Username, newKC.Email)
 		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
+		if definitiveMiss {
+			// The email no longer resolves to any registered account (e.g. a
+			// rename or deregistration since the last successful grant).
+			// Revoke any grant still recorded for this contact.
+			revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, newKC.UID)
+		}
 		if in.Role != nil && *in.Role != current.Role {
 			o.remapOrgDashboardRole(ctx, newKC)
 		}
@@ -453,7 +468,7 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// FGA remove: propagate a publication failure — dangling permissions are not
 	// auto-repairable. Publication succeeding is not revocation succeeding; it
 	// only means fga-sync has been told, and it converges asynchronously.
-	username := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
+	username, _ := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
 
 	// Read the recorded grant once: it supplies a username fallback when live
 	// lookup comes up empty, and its revision (when the read succeeds) is what
@@ -536,24 +551,32 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 
 const legacyAuth0UsernamePrefix = "auth0|"
 
-func (o *keyContactWriterOrchestrator) resolveUsernameForContact(ctx context.Context, currentUsername, email string) string {
+// resolveUsernameForContact returns the resolved username and whether the
+// lookup produced a definitive "no registered account" miss (as opposed to a
+// transport-level failure, which is not evidence the email is unregistered
+// and must not trigger a grant revoke).
+func (o *keyContactWriterOrchestrator) resolveUsernameForContact(ctx context.Context, currentUsername, email string) (username string, definitiveMiss bool) {
 	if currentUsername != "" && !strings.HasPrefix(currentUsername, legacyAuth0UsernamePrefix) {
-		return currentUsername
+		return currentUsername, false
 	}
 	if email != "" {
-		username, err := o.userReader.UsernameByEmail(ctx, email)
+		resolved, err := o.userReader.UsernameByEmail(ctx, email)
 		if err != nil {
-			slog.WarnContext(ctx, "failed to resolve LFID username for key contact FGA",
-				"email", email, "error", err)
-		} else if username != "" {
-			return username
+			if pkgerrors.IsNotFound(err) {
+				definitiveMiss = true
+			} else {
+				slog.WarnContext(ctx, "failed to resolve LFID username for key contact FGA",
+					"email", email, "error", err)
+			}
+		} else if resolved != "" {
+			return resolved, false
 		}
 	}
 	// Fallback when lookup is unavailable: strip the legacy auth0| prefix from safe-slug identifiers.
 	if strings.HasPrefix(currentUsername, legacyAuth0UsernamePrefix) {
-		return strings.TrimPrefix(currentUsername, legacyAuth0UsernamePrefix)
+		return strings.TrimPrefix(currentUsername, legacyAuth0UsernamePrefix), definitiveMiss
 	}
-	return ""
+	return "", definitiveMiss
 }
 
 // getGrant returns the grant recorded for uid. found reports whether an entry

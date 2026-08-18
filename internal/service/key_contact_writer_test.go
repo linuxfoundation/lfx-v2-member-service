@@ -14,6 +14,7 @@ import (
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
@@ -1151,4 +1152,111 @@ func TestKeyContactWriter_Delete_IndexerDeliverySelectionUnchanged(t *testing.T)
 	assert.False(t, pub.indexerSync[0],
 		"the indexer keeps its own delivery selection, independent of the FGA contract")
 	assert.NotNil(t, pub.indexerMsgs[0], "indexer payload must still be built and published")
+}
+
+// ── Definitive-miss revoke wiring (LFXV2-2999) ────────────────────────────────
+
+// TestKeyContactWriter_Create_DefinitiveMiss_RevokesStaleRecordedGrant covers
+// a brand-new Create whose email resolves to no registered account: it must
+// still check for (and revoke) a stale grant already recorded in the index
+// for this contact UID — e.g. a re-created contact reusing a UID whose prior
+// grant was never cleared.
+func TestKeyContactWriter_Create_DefinitiveMiss_RevokesStaleRecordedGrant(t *testing.T) {
+	// MockKeyContactWriterWithOK.CreateKeyContact always assigns this fixed UID.
+	const createdUID = "00000000-0000-0000-0000-000000000099"
+	pmReader := &seededPMReader{pm: &model.ProjectMembership{UID: testMembershipUID, B2BOrgUID: "org-1", ProjectUID: "proj-1"}}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			createdUID: {MembershipUID: testMembershipUID, Username: "stale-alice", Revision: 1},
+		},
+	}
+
+	w := newKCWriterWithGrantIndex(newSeededStorage(), pmReader, pub, userReaderFunc(
+		func(_ context.Context, _ string) (string, error) { return "", pkgerrors.NewNotFound("no such user") }), grants)
+
+	_, err := w.Create(context.Background(), svc.KeyContactCreateInput{
+		MembershipUID: testMembershipUID,
+		FirstName:     "New",
+		LastName:      "Contact",
+		Email:         "unregistered@example.com",
+		Role:          "Technical Contact",
+	})
+	require.NoError(t, err)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "the stale grant recorded for this contact UID must be revoked")
+	assert.Equal(t, testMembershipUID, removes[0].UID)
+	assert.Equal(t, "stale-alice", removes[0].Username)
+	assert.Equal(t, []string{createdUID}, grants.Deletes, "the confirmed-revoked entry must be cleared")
+}
+
+// TestKeyContactWriter_Update_EmailUnchangedBranch_DefinitiveMiss_RevokesRecordedGrant
+// covers the email-unchanged Update branch: when the (unchanged) email now
+// resolves to no registered account — the account was renamed or
+// deregistered since the contact's last successful grant — any grant still
+// recorded for it must be revoked.
+func TestKeyContactWriter_Update_EmailUnchangedBranch_DefinitiveMiss_RevokesRecordedGrant(t *testing.T) {
+	current := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "renamed@example.com", Username: "auth0|old-alice",
+		Role: "role-a", Status: "Active", UpdatedAt: time.Now(),
+	}
+	storage := newSeededStorage(current)
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: testMembershipUID, Username: "old-alice", Revision: 1},
+		},
+	}
+
+	// Legacy auth0|-prefixed stored username forces a live lookup (see
+	// resolveUsernameForContact); the lookup comes back as a definitive miss.
+	w := newKCWriterWithGrantIndex(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(
+		func(_ context.Context, _ string) (string, error) { return "", pkgerrors.NewNotFound("no such user") }), grants)
+
+	newRole := "role-b"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID, Role: &newRole,
+	})
+	require.NoError(t, err)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "the recorded grant must be revoked on a definitive miss")
+	assert.Equal(t, testMembershipUID, removes[0].UID)
+	assert.Equal(t, "old-alice", removes[0].Username)
+	assert.Equal(t, []string{testKCUID}, grants.Deletes, "the confirmed-revoked entry must be cleared")
+}
+
+// TestKeyContactWriter_Update_EmailUnchangedBranch_TransientFailure_LeavesGrantUntouched
+// covers a transport-level lookup failure: it must not be treated as
+// evidence the email is unregistered, so a still-valid recorded grant must
+// survive.
+func TestKeyContactWriter_Update_EmailUnchangedBranch_TransientFailure_LeavesGrantUntouched(t *testing.T) {
+	current := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "alice@example.com", Username: "auth0|alice",
+		Role: "role-a", Status: "Active", UpdatedAt: time.Now(),
+	}
+	storage := newSeededStorage(current)
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+
+	w := newKCWriterWithGrantIndex(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub, userReaderFunc(
+		func(_ context.Context, _ string) (string, error) {
+			return "", pkgerrors.NewUnexpected("auth-service unreachable", nil)
+		}), grants)
+
+	newRole := "role-b"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID, Role: &newRole,
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, removeMessages(t, pub), "a transient lookup failure must not revoke a still-valid grant")
+	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
 }

@@ -1236,11 +1236,17 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	// passive sync and must never send emails — provisioning is always silent.
 	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
 		if username, usernameErr := o.userReader.UsernameByEmail(ctx, kc.Email); usernameErr != nil {
-			if !pkgerrors.IsNotFound(usernameErr) {
+			if pkgerrors.IsNotFound(usernameErr) {
+				// A definitive miss: the email no longer resolves to any registered
+				// account (e.g. a rename or deregistration since the last time this
+				// contact was granted). Revoke any grant still recorded for it.
+				revokeKeyContactGrantIfUnregistered(ctx, o.publisher, o.grantIndex, kc.UID)
+			} else {
+				// Transport-level failure — not evidence the email is unregistered;
+				// leave Username empty and any existing grant untouched.
 				slog.WarnContext(ctx, "cdc: resolve LFID for key contact failed",
 					"uid", kc.UID, "error", usernameErr)
 			}
-			// NotFound is expected for unregistered emails — leave Username empty.
 		} else {
 			kc.Username = username
 		}
