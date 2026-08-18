@@ -1178,6 +1178,7 @@ func TestCDCConsumer_Asset_Undelete_TreatedAsUpsert(t *testing.T) {
 		pub,
 		"",
 		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
 	)
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
@@ -3657,6 +3658,47 @@ func TestCDCConsumer_Asset_Undelete_RebuildsKeyContactGrants(t *testing.T) {
 			assert.Equal(t, []byte("undel-pm"), replay.saved)
 		})
 	}
+
+	t.Run("batch fetches once and keeps contacts with their membership", func(t *testing.T) {
+		firstUID := sfid("pm-batch-one")
+		secondUID := sfid("pm-batch-two")
+		contacts := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+			{UID: sfid("kc-batch-one"), MembershipUID: firstUID, Username: "alice"},
+			{UID: sfid("kc-batch-two"), MembershipUID: secondUID, Username: "bob"},
+		}}
+		pub := &subjectCapturingPublisher{}
+		consumer := newTestCDCConsumer(
+			&fakeCDCSubscriber{events: []model.CDCEvent{{
+				Entity: "Asset", ChangeType: model.CDCChangeUndelete,
+				RecordIDs: []string{firstUID, secondUID}, ReplayID: []byte("batch-undel"),
+			}}},
+			&fakeB2BOrgReader{},
+			&mock.MockCacheInvalidator{},
+			pub,
+			"",
+			svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{
+				restoredMembership(firstUID),
+				restoredMembership(secondUID),
+			}}),
+			svc.WithCDCKeyContactGrantIndex(&mock.MockKeyContactGrantIndex{}),
+			svc.WithCDCKeyContactsByMembershipReader(contacts),
+		)
+
+		require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+		assert.Equal(t, 1, contacts.Calls, "all restored memberships must share one Salesforce contact fetch")
+		assert.ElementsMatch(t, []string{firstUID, secondUID}, contacts.AssetSFIDs)
+		restoredByUser := make(map[string]string)
+		for i, subject := range pub.access {
+			if subject != fgaconstants.GenericMemberPutSubject {
+				continue
+			}
+			msg := pub.accessMessages[i].(fgatypes.GenericFGAMessage)
+			data := msg.Data.(fgatypes.GenericMemberData)
+			restoredByUser[data.Username] = data.UID
+		}
+		assert.Equal(t, map[string]string{"alice": firstUID, "bob": secondUID}, restoredByUser)
+	})
 }
 
 func TestCDCConsumer_Asset_Undelete_ConfirmsStructuralRestoreWithoutContacts(t *testing.T) {
@@ -3997,6 +4039,8 @@ func TestCDCConsumer_Asset_Undelete_SalesforceReadFailureRestoresNothing(t *test
 
 	requireAuthorizationRetry(t, consumer, "/data/AssetChangeEvent", replay)
 
+	assert.Empty(t, pub.access,
+		"a batch source failure must happen before structural or contact restore publishes")
 	assert.False(t, pub.hasAccess(fgaconstants.GenericMemberPutSubject),
 		"an unreadable authoritative source restores nothing rather than falling back to stale index entries")
 	assert.False(t, pub.hasAccess(constants.FGASyncDeleteAccessSubject),

@@ -83,15 +83,33 @@ func (r *MockKeyContactBatchReader) FetchKeyContactsBySFIDs(_ context.Context, _
 // MockKeyContactsByMembershipReader is a test double for
 // port.KeyContactsByMembershipReader.
 type MockKeyContactsByMembershipReader struct {
-	Contacts []*model.KeyContact
-	Err      error
+	Contacts   []*model.KeyContact
+	Err        error
+	Calls      int
+	AssetSFIDs []string
 }
 
-func (r *MockKeyContactsByMembershipReader) FetchKeyContactsByAssetSFID(
+func (r *MockKeyContactsByMembershipReader) FetchKeyContactsByAssetSFIDs(
 	_ context.Context,
-	_ string,
-) ([]*model.KeyContact, error) {
-	return r.Contacts, r.Err
+	assetSFIDs []string,
+) (map[string][]*model.KeyContact, error) {
+	r.Calls++
+	r.AssetSFIDs = append(r.AssetSFIDs, assetSFIDs...)
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	requested := make(map[string]struct{}, len(assetSFIDs))
+	grouped := make(map[string][]*model.KeyContact, len(assetSFIDs))
+	for _, assetSFID := range assetSFIDs {
+		requested[assetSFID] = struct{}{}
+		grouped[assetSFID] = nil
+	}
+	for _, contact := range r.Contacts {
+		if _, ok := requested[contact.MembershipUID]; ok {
+			grouped[contact.MembershipUID] = append(grouped[contact.MembershipUID], contact)
+		}
+	}
+	return grouped, nil
 }
 
 // MockAccountBatchReader is a test double for port.AccountBatchReader that

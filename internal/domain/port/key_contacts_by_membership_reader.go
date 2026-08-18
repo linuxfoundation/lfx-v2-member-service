@@ -9,8 +9,11 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 )
 
-// KeyContactsByMembershipReader returns the current Salesforce key contacts
-// attached to a project membership.
+// KeyContactsByMembershipReader returns current Salesforce key contacts grouped
+// by project membership.
 type KeyContactsByMembershipReader interface {
-	FetchKeyContactsByAssetSFID(ctx context.Context, assetSFID string) ([]*model.KeyContact, error)
+	FetchKeyContactsByAssetSFIDs(
+		ctx context.Context,
+		assetSFIDs []string,
+	) (map[string][]*model.KeyContact, error)
 }

@@ -80,7 +80,7 @@ internal/
 │       ├── config.go        # Config struct and ConfigFromEnv()
 │       ├── helpers.go       # parseSOQLTime, parseSOQLDateTime, quoteSOQL
 │       ├── cache_invalidator.go # CacheInvalidator: evicts sObject cache entries (CDC use)
-│       ├── key_contact_repo.go  # FetchKeyContactsByAssetSFID, FetchKeyContactBySFID
+│       ├── key_contact_repo.go  # Single and batched key-contact queries by Asset/SFID
 │       ├── member_reader.go # MemberReader: Salesforce-first + KV cache
 │       ├── member_repo.go   # FetchAllMembers, FetchMemberBySFID
 │       ├── membership_repo.go  # FetchMembershipsByProjectSFID, etc.

@@ -915,6 +915,28 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		action = indexerConstants.ActionCreated
 	}
 
+	contactsByMembership := make(map[string][]*model.KeyContact)
+	if isRestore(changeType) && len(memberships) > 0 {
+		if o.keyContactsByMembership == nil {
+			slog.ErrorContext(ctx, "cdc: keyContactsByMembership reader not wired — restored contacts remain locked out",
+				"membership_count", len(memberships), "publish_failed_for_backfill_repair", true)
+			return errors.Join(errRestoreIncomplete,
+				errors.New("keyContactsByMembership reader not wired"))
+		}
+		membershipUIDs := make([]string, 0, len(memberships))
+		for _, pm := range memberships {
+			membershipUIDs = append(membershipUIDs, pm.UID)
+		}
+		contactsByMembership, err = o.keyContactsByMembership.FetchKeyContactsByAssetSFIDs(ctx, membershipUIDs)
+		if err != nil {
+			slog.ErrorContext(ctx, "cdc: failed to batch-read current key_contacts for restored memberships — contacts remain locked out",
+				"membership_count", len(membershipUIDs), "error", err,
+				"publish_failed_for_backfill_repair", true)
+			return errors.Join(errRestoreIncomplete,
+				fmt.Errorf("batch-read key_contacts for restored memberships: %w", err))
+		}
+	}
+
 	var restoreErr error
 	restorePublished := false
 	for _, pm := range memberships {
@@ -923,7 +945,7 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 			restorePublished = restorePublished || published
 			restoreErr = errors.Join(restoreErr, err)
 
-			published, err = o.restoreKeyContactGrants(ctx, pm.UID)
+			published, err = o.restoreKeyContactGrants(ctx, pm.UID, contactsByMembership[pm.UID])
 			restorePublished = restorePublished || published
 			restoreErr = errors.Join(restoreErr, err)
 			continue
@@ -1066,18 +1088,14 @@ func (o *CDCConsumer) restoreOrgAccess(
 // Salesforce is authoritative here. The grant index exists to address later
 // revokes and can be incomplete for grants created before that index existed.
 // Each successful member_put refreshes the index through PublishKeyContactFGA.
-// A source read failure restores nothing rather than guessing from stale data.
-func (o *CDCConsumer) restoreKeyContactGrants(ctx context.Context, membershipUID string) (bool, error) {
-	if o.keyContactsByMembership == nil {
-		return false, nil
-	}
-	contacts, err := o.keyContactsByMembership.FetchKeyContactsByAssetSFID(ctx, membershipUID)
-	if err != nil {
-		slog.ErrorContext(ctx, "cdc: failed to read current key_contacts for restored membership — contacts remain locked out",
-			"membership_uid", membershipUID, "error", err,
-			"publish_failed_for_backfill_repair", true)
-		return false, fmt.Errorf("read key_contacts for restored membership %s: %w", membershipUID, err)
-	}
+// The caller batch-fetches contacts for every restored membership before
+// publishing any restore message, so a source failure produces no partial
+// restore and one CDC event uses one batched Salesforce read.
+func (o *CDCConsumer) restoreKeyContactGrants(
+	ctx context.Context,
+	membershipUID string,
+	contacts []*model.KeyContact,
+) (bool, error) {
 	restored := 0
 	published := false
 	var restoreErr error
