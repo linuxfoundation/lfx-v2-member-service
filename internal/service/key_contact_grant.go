@@ -110,6 +110,13 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 		if found && stored.MembershipUID == membershipUID && stored.Username == username {
 			// An unchanged contact cannot prove that another key-contact record
 			// does not still justify the tuple named by PendingRevoke.
+			if stored.PendingRevoke != nil {
+				slog.ErrorContext(ctx, "key_contact pending revoke requires reference-aware manual recovery",
+					"uid", uid,
+					"membership_uid", stored.PendingRevoke.MembershipUID,
+					"fga_revoke_failed_dangling_tuple", true,
+					"manual_recovery_required", true)
+			}
 			return nil
 		}
 

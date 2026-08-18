@@ -689,9 +689,11 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	// If the cache is cold, GetB2BOrg returns the post-change record — in that
 	// case oldOrg == new org and no reparenting messages are emitted (safe).
 	oldOrgs := make(map[string]*model.B2BOrg, len(upsertIDs))
-	for _, id := range upsertIDs {
-		if current, err := o.b2bOrgReader.GetB2BOrg(ctx, id); err == nil {
-			oldOrgs[id] = current
+	if !isRestore(changeType) {
+		for _, id := range upsertIDs {
+			if current, err := o.b2bOrgReader.GetB2BOrg(ctx, id); err == nil {
+				oldOrgs[id] = current
+			}
 		}
 	}
 

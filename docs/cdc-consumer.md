@@ -179,6 +179,27 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 
 > **CDC never sends email.** It is a passive sync. `processKeyContact` provisions org-dashboard access with `SuppressNotification: true`, and the org-settings resend-in-place path honours that flag (it refreshes the pending entry without re-sending an invite).
 
+#### Pending key-contact revoke recovery
+
+A failed superseded `member_remove` remains durable in the `key-contact-grants`
+KV entry as `pending_revoke_membership_uid` and `pending_revoke_username`.
+When a redelivered restore sees the replacement grant already current, it emits
+`key_contact pending revoke requires reference-aware manual recovery` with
+`manual_recovery_required=true`; it does not blindly retry the remove because a
+different current key-contact record may still justify that shared
+`{membership_uid, username}` tuple.
+
+To recover, inspect `key_contact.<contact-sfid>` in the `key-contact-grants`
+bucket and read the pending pair. Query all current Salesforce
+`Project_Role__c` records for the pending Asset using the same strict
+primary-email path as restore, then resolve their LFIDs. If any current contact
+still resolves to the pending username, retain the tuple and clear only the
+pending marker with a revision-conditional KV update. Otherwise publish the
+pending pair's `member_remove`, flush it, and then clear the marker with the
+same revision check. Any Salesforce, identity, publish, flush, or KV conflict is
+inconclusive: leave the marker intact and retry the manual procedure. This
+recovery is tracked by [LFXV2-2999](https://linuxfoundation.atlassian.net/browse/LFXV2-2999).
+
 ---
 
 ## `project_uid` Resolution Parity
@@ -335,7 +356,8 @@ The consumer continues after ordinary repairable failures and uses `/admin/reind
 |---|---|---|
 | `publish_failed_for_backfill_repair=true` | A publish/fetch failed (or was quota-skipped); the record may be missing/stale downstream. | `POST /admin/reindex` for the affected type/record. |
 | `cdc: skipping … indexer publish; project_uid unresolved` | Resolver could not map slug→UID; indexer skipped, OpenFGA still published (ERROR). | Next CDC event or `/admin/reindex` to repair the indexer doc. |
-| `fga_revoke_failed_dangling_tuple=true` | A `key_contact` DELETE could not revoke its FGA tuple — a dangling grant. | **Not** repairable via reindex; needs a targeted FGA sync / manual re-send of the remove message. |
+| `fga_revoke_failed_dangling_tuple=true` on a `key_contact` DELETE without `manual_recovery_required=true` | The delete could not address or deliver its FGA revoke — a dangling grant. | **Not** repairable via reindex; needs a targeted FGA sync / manual re-send of the remove message. |
+| `manual_recovery_required=true` / `key_contact pending revoke requires reference-aware manual recovery` | A failed superseded revoke remains durable in `key-contact-grants`; replay cannot safely remove the shared tuple without checking current contacts. | Do **not** blindly re-send the remove; follow [Pending key-contact revoke recovery](#pending-key-contact-revoke-recovery). |
 | `cdc: GAP event received` | Salesforce could not deliver granular events. | Handled as upsert; cross-check `/admin/reindex` if needed. |
 | `cdc: skipping record with non-normalizable SFID` | A malformed record ID was dropped. | Investigate the source event; reindex if the record is legitimate. |
 | `cdc: <reader> not wired` | A batch reader dependency is missing (misconfiguration). | Fix wiring; `/admin/reindex` to repair the gap. |

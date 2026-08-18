@@ -140,10 +140,12 @@ type fakeB2BOrgReader struct {
 	orgErr         error
 	childMap       map[string][]string
 	batchErr       error
+	getCallCount   atomic.Int32
 	batchCallCount atomic.Int32
 }
 
 func (r *fakeB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg, error) {
+	r.getCallCount.Add(1)
 	return r.org, r.orgErr
 }
 func (r *fakeB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) ([]string, error) {
@@ -3227,15 +3229,16 @@ func TestCDCConsumer_Account_Undelete_RebuildsCompleteManagedAccess(t *testing.T
 	}, 1)
 	pub := &subjectCapturingPublisher{}
 	replay := &fakeReplayStore{}
+	reader := &fakeB2BOrgReader{org: org, childMap: map[string][]string{
+		orgUID:    {childUID},
+		parentUID: {orgUID, siblingUID},
+	}}
 	consumer := newTestCDCConsumer(
 		&fakeCDCSubscriber{events: []model.CDCEvent{{
 			Entity: "Account", ChangeType: model.CDCChangeUndelete,
 			RecordIDs: []string{orgUID}, ReplayID: []byte("full-restore"),
 		}}},
-		&fakeB2BOrgReader{org: org, childMap: map[string][]string{
-			orgUID:    {childUID},
-			parentUID: {orgUID, siblingUID},
-		}},
+		reader,
 		&mock.MockCacheInvalidator{},
 		pub,
 		"",
@@ -3270,6 +3273,7 @@ func TestCDCConsumer_Account_Undelete_RebuildsCompleteManagedAccess(t *testing.T
 	})
 	assert.Equal(t, 1, pub.flushCount)
 	assert.Equal(t, []byte("full-restore"), replay.saved)
+	assert.Zero(t, reader.getCallCount.Load(), "restore must not perform unused per-record old-state reads")
 }
 
 func TestCDCConsumer_Account_Undelete_RetriesOwnChildPublishFailure(t *testing.T) {
