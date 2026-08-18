@@ -1226,6 +1226,9 @@ func TestKeyContactWriter_Update_EmailUnchangedBranch_DefinitiveMiss_RevokesReco
 	assert.Equal(t, testMembershipUID, removes[0].UID)
 	assert.Equal(t, "old-alice", removes[0].Username)
 	assert.Equal(t, []string{testKCUID}, grants.Deletes, "the confirmed-revoked entry must be cleared")
+	assert.Len(t, pub.accessMsgs, 1,
+		"only the revoke's remove must be published — a put for the stripped legacy fallback "+
+			"username would reassert access for an account just confirmed unregistered")
 }
 
 // TestKeyContactWriter_Update_EmailUnchangedBranch_TransientFailure_LeavesGrantUntouched

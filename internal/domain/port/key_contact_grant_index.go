@@ -70,6 +70,11 @@ type KeyContactGrantIndex interface {
 	// only if no entry exists, non-zero writes only if the stored revision still
 	// matches. Either mismatch returns a Conflict error so the caller can
 	// re-read and re-evaluate rather than clobbering a concurrent write.
+	//
+	// grant must carry either a live pair (non-empty MembershipUID and
+	// Username) or a non-nil PendingRevoke (a marker-only entry, once the live
+	// pair it used to carry has been revoked and cleared) — an entry with
+	// neither addresses nothing and implementations must reject it.
 	Put(ctx context.Context, uid string, grant KeyContactGrant) error
 
 	// Delete removes the entry for uid, conditional on revision: the entry is

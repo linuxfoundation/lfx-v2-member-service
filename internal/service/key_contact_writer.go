@@ -412,12 +412,16 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		newKC.Role = derefOrStr(in.Role, current.Role)
 		var definitiveMiss bool
 		newKC.Username, definitiveMiss = o.resolveUsernameForContact(ctx, current.Username, newKC.Email)
-		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
 		if definitiveMiss {
 			// The email no longer resolves to any registered account (e.g. a
 			// rename or deregistration since the last successful grant).
-			// Revoke any grant still recorded for this contact.
+			// newKC.Username here is only the stripped legacy auth0| fallback
+			// (see resolveUsernameForContact) — publishing it would reassert FGA
+			// access for an account just confirmed unregistered. Skip the put
+			// and revoke any grant still recorded for this contact instead.
 			revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, newKC.UID)
+		} else {
+			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
 		}
 		if in.Role != nil && *in.Role != current.Role {
 			o.remapOrgDashboardRole(ctx, newKC)

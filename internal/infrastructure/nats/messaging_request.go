@@ -41,9 +41,9 @@ func (u *userReader) UsernameByEmail(ctx context.Context, email string) (string,
 }
 
 // parseUsernameByEmailResponse parses the auth-service email_to_username reply body. Mirrors
-// parseUserMetadataResponse below: a genuine "no such user" miss (see isUserMissError) → NotFound;
-// an absent/empty body, a non-miss error envelope, or malformed/unparseable JSON → Unexpected
-// (auth-service's documented miss shape is always a JSON envelope, so an empty body is
+// parseUserMetadataResponse below: a genuine "no such user" miss envelope (see isUserMissError) →
+// NotFound; an absent/empty body, a non-miss error envelope, or malformed/unparseable JSON →
+// Unexpected (auth-service's documented miss shape is always a JSON envelope, so an empty body is
 // inconclusive, not a confirmed miss); otherwise the body is the plain-text username.
 func parseUsernameByEmailResponse(email string, data []byte) (string, error) {
 	body := strings.TrimSpace(string(data))

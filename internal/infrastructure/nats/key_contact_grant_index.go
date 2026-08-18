@@ -124,11 +124,13 @@ func (s *KeyContactGrantIndex) Put(ctx context.Context, uid string, grant port.K
 	if uid == "" {
 		return errs.NewValidation("key-contact-grants: uid is required")
 	}
-	if grant.MembershipUID == "" || grant.Username == "" {
-		// An entry without both halves cannot address a revoke, and no grant is
-		// ever published without both.
+	if (grant.MembershipUID == "" || grant.Username == "") && grant.PendingRevoke == nil {
+		// An entry without a live pair addresses nothing unless it is a
+		// marker-only entry carrying a PendingRevoke — the live pair it used to
+		// carry was already revoked and cleared, but an unrelated, still-
+		// outstanding PendingRevoke on the same key must survive.
 		return errs.NewValidation(
-			fmt.Sprintf("key-contact-grants: membership_uid and username are required for %s", uid))
+			fmt.Sprintf("key-contact-grants: membership_uid and username are required for %s unless a PendingRevoke marker is set", uid))
 	}
 	kv, err := s.kv()
 	if err != nil {

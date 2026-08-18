@@ -273,6 +273,11 @@ func (i *MockKeyContactGrantIndex) Put(_ context.Context, uid string, grant port
 	if i.PutErr != nil {
 		return i.PutErr
 	}
+	if (grant.MembershipUID == "" || grant.Username == "") && grant.PendingRevoke == nil {
+		// Mirror the adapter: an entry must carry a live pair or a PendingRevoke
+		// marker — never neither.
+		return errs.NewValidation(fmt.Sprintf("key-contact-grants: membership_uid and username are required for %s unless a PendingRevoke marker is set", uid))
+	}
 	stored, exists := i.Entries[uid]
 	// Mirror the adapter: revision 0 means create-only, non-zero means the
 	// stored revision must still match.
