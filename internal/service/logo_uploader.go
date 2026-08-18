@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,11 +42,6 @@ const (
 	CommitPromoteAttempts   = 3
 	commitPromoteRetryDelay = 200 * time.Millisecond
 )
-
-// generationTiebreak breaks ties between promotion attempts whose org.UpdatedAt
-// values land in the same Salesforce-reported millisecond — see its use in
-// UploadB2BOrgLogo. Process-lifetime monotonic; never resets.
-var generationTiebreak atomic.Int64
 
 // LogoUploader uploads a B2B org logo to object storage and writes the
 // resulting URL to the org's Salesforce Logo_URL__c field via B2BOrgWriter —
@@ -255,18 +249,22 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// as usual, making this one an ordinary orphan for that promotion to
 	// replace.
 	//
-	// org.UpdatedAt.UnixNano() alone is not always strictly increasing:
-	// Salesforce's LastModifiedDate is reported at millisecond precision, so
-	// two successful updates landing in the same millisecond produce an
-	// identical generation, and CopyIfNewer's tie rule (existingGen >=
-	// generation) then wrongly treats the later, legitimate promotion as
-	// stale (lfx-reviewer finding on PR #87, 2026-08-18). generationTiebreak
-	// adds a small offset bounded to [0, 1_000_000) — strictly inside that
-	// millisecond's own nanosecond range — so it breaks same-millisecond ties
-	// without ever pushing this attempt's generation into the next
-	// millisecond's range and inverting real ordering against an attempt that
-	// actually has a later org.UpdatedAt.
-	generation := org.UpdatedAt.UnixNano() + generationTiebreak.Add(1)%1_000_000
+	// org.UpdatedAt.UnixNano() is not always strictly increasing across
+	// distinct attempts: Salesforce's LastModifiedDate is reported at
+	// millisecond precision, so two genuinely concurrent commits to the same
+	// org can land in the same millisecond and produce an identical
+	// generation. An earlier revision of this fix tried to break that tie
+	// with a process-local monotonic counter, but the API chart runs
+	// multiple replicas with no shared counter between them, so it could
+	// invert real ordering instead of fixing it — a later-stalled attempt on
+	// one replica could still receive a larger offset than an
+	// already-promoted attempt on another (copilot-pull-request-reviewer
+	// finding on PR #87, 2026-08-18). There is no signal available here that
+	// can order two same-millisecond commits correctly across replicas, so
+	// this no longer tries: CopyIfNewer treats an equal generation as not
+	// stale and lets whichever attempt's copy physically reaches S3 first
+	// win, same as it always has for any other tie.
+	generation := org.UpdatedAt.UnixNano()
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
 		commitErr = o.objectStore.CopyIfNewer(ctx, scratchKey, key, generation)

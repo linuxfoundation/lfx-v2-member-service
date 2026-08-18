@@ -520,36 +520,7 @@ func TestLogoUploader_PromotionGenerationDerivedFromOrgUpdatedAt(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, objectStore.copyCalls, 1)
-	generation := objectStore.copyCalls[0].generation
-	assert.GreaterOrEqual(t, generation, committedAt.UnixNano(), "promotion generation must be derived from org.UpdatedAt, not a local wall-clock read")
-	assert.Less(t, generation, committedAt.UnixNano()+1_000_000, "the tiebreak offset must stay within org.UpdatedAt's own millisecond")
-}
-
-func TestLogoUploader_PromotionGenerationBreaksTiesWithinSameMillisecond(t *testing.T) {
-	// Salesforce's LastModifiedDate is millisecond-precision, so two
-	// successive promotions can report an identical org.UpdatedAt. Without a
-	// tiebreaker, the second promotion's generation would be numerically
-	// equal to the first's, and CopyIfNewer's tie rule (existingGen >=
-	// generation) would then wrongly reject the second, legitimate promotion
-	// as stale (lfx-reviewer finding on PR #87, 2026-08-18).
-	committedAt := time.Date(2026, 8, 18, 7, 42, 39, 0, time.UTC)
-
-	store1 := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
-	orgWriter1 := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1", UpdatedAt: committedAt}}
-	uploader1 := svc.NewLogoUploader(store1, orgWriter1)
-	_, err := uploader1.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
-	require.NoError(t, err)
-	require.Len(t, store1.copyCalls, 1)
-
-	store2 := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=2"}
-	orgWriter2 := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1", UpdatedAt: committedAt}}
-	uploader2 := svc.NewLogoUploader(store2, orgWriter2)
-	_, err = uploader2.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
-	require.NoError(t, err)
-	require.Len(t, store2.copyCalls, 1)
-
-	assert.Greater(t, store2.copyCalls[0].generation, store1.copyCalls[0].generation, "a later promotion with the same org.UpdatedAt must still get a strictly greater generation")
-	assert.Less(t, store2.copyCalls[0].generation, committedAt.UnixNano()+1_000_000, "the tiebreak must stay within the same millisecond, not roll into the next one")
+	assert.Equal(t, committedAt.UnixNano(), objectStore.copyCalls[0].generation, "promotion generation must be derived from org.UpdatedAt, not a local wall-clock read")
 }
 
 func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {

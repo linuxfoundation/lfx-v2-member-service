@@ -161,12 +161,23 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 // both HeadObject the same starting ETag, and whichever's CopyObject reaches
 // S3 first wins the write regardless of generation. So a conflict re-reads
 // dstKey's freshest stamped generation and only surfaces
-// port.ErrStalePromotion once that generation is actually >= ours; otherwise
-// the writer that beat us here was itself older, and this retries against
-// the fresh ETag instead of wrongly abandoning a promotion it should still
-// win (LFXV2-2016 lfx-reviewer finding on PR #87). The promotion directive
-// replaces metadata rather than copying it, so dstKey's stored generation
-// always reflects this attempt, not whatever srcKey happened to carry.
+// port.ErrStalePromotion once that generation is strictly greater than ours;
+// otherwise the writer that beat us here was itself older or exactly
+// concurrent, and this retries against the fresh ETag instead of wrongly
+// abandoning a promotion it should still win (LFXV2-2016 lfx-reviewer finding
+// on PR #87). The strict (not >=) comparison matters: generation is derived
+// from Salesforce's millisecond-precision LastModifiedDate, so two genuinely
+// concurrent commits to the same org can land in the same millisecond and
+// produce an identical generation — there is no ordering signal that can
+// break that tie correctly across replicas, so an equal generation is not
+// treated as stale; whichever attempt's CopyObject physically reaches S3
+// first wins, the same way an ETag conflict would resolve if there were no
+// generation involved at all (copilot-pull-request-reviewer finding on PR
+// #87, 2026-08-18, on an earlier per-process tiebreak that tried to order
+// same-millisecond ties and could not, since it wasn't shared across the API
+// chart's replicas). The promotion directive replaces metadata rather than
+// copying it, so dstKey's stored generation always reflects this attempt,
+// not whatever srcKey happened to carry.
 func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generation int64) error {
 	source := fmt.Sprintf("%s/%s", c.bucket, srcKey)
 
@@ -189,7 +200,7 @@ func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generat
 		switch {
 		case headErr == nil:
 			if existing, ok := head.Metadata[promotionGenerationMetadataKey]; ok {
-				if existingGen, parseErr := strconv.ParseInt(existing, 10, 64); parseErr == nil && existingGen >= generation {
+				if existingGen, parseErr := strconv.ParseInt(existing, 10, 64); parseErr == nil && existingGen > generation {
 					return port.ErrStalePromotion
 				}
 			}

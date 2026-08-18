@@ -217,6 +217,28 @@ func TestClient_CopyIfNewer_StaleGenerationCaughtByHeadObject(t *testing.T) {
 	assert.Equal(t, 0, copyCalls, "a newer generation already recorded on the destination must be caught before ever attempting CopyObject")
 }
 
+func TestClient_CopyIfNewer_EqualGenerationIsNotStale(t *testing.T) {
+	// generation is derived from Salesforce's millisecond-precision
+	// LastModifiedDate, so two genuinely concurrent promotions for the same
+	// org can carry an identical generation. There is no signal available
+	// here that can order them correctly across the API chart's replicas, so
+	// an equal (not just lesser) existing generation must not be treated as
+	// stale -- otherwise a legitimate, later promotion is wrongly rejected
+	// (LFXV2-2016 copilot-pull-request-reviewer finding on PR #87,
+	// 2026-08-18, on an earlier revision that tried to break same-millisecond
+	// ties with a process-local counter and could not do so correctly across
+	// replicas).
+	copyCalls := 0
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, map[string]string{"Promoted-At": "1000"}, http.StatusOK, &copyCalls)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", "b2b_org_logos/uid-1", 1000)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, copyCalls, "an equal generation must be let through, not rejected as stale")
+}
+
 func TestClient_CopyIfNewer_StaleGenerationCaughtByConditionalCopy(t *testing.T) {
 	// Simulates the race CopyIfNewer exists to close: HeadObject observes no
 	// generation, but a concurrent writer commits a newer one before this
