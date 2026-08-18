@@ -358,9 +358,13 @@ func ObjectStoreWriterImpl(ctx context.Context) port.ObjectStoreWriter {
 	}
 }
 
-// EnsureObjectStoreReady blocks until the logo bucket is reachable (retrying
-// per objectstore.Client.EnsureBucket), so the API does not accept traffic
-// before it can serve logo uploads. No-op in mock mode. Must be called after
+// EnsureObjectStoreReady retries (per objectstore.Client.EnsureBucket) until
+// the logo bucket is reachable, or returns the last error once retries are
+// exhausted. Callers must not gate the HTTP server's own startup on this --
+// its retry loop can run for tens of seconds, and a logo-bucket outage is
+// meant to degrade only the logo-upload feature (LFXV2-2016 lfx-reviewer/
+// Copilot finding on PR #87) -- so main.go runs it in the background and only
+// logs the outcome. No-op in mock mode. Must be called after
 // ObjectStoreWriterImpl (directly or via LogoUploaderUseCase) has already run
 // at least once, since it relies on the package-level singleton they populate.
 func EnsureObjectStoreReady(ctx context.Context) error {

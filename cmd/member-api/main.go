@@ -142,10 +142,16 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 
 	// A transient logo-bucket outage only degrades the logo-upload feature; it
 	// must not take down the rest of the API, which /readyz already treats as
-	// feature-local (LFXV2-2016 lfx-reviewer finding on PR #87).
-	if err := service.EnsureObjectStoreReady(ctx); err != nil {
-		slog.WarnContext(ctx, "logo object store unreachable at startup; logo upload degraded, rest of service unaffected", "error", err)
-	}
+	// feature-local, and it must not delay the HTTP server binding either --
+	// EnsureBucket's own retry loop can block for ~30s, long enough on its own
+	// to trip the chart's startup probe (failureThreshold 30 x periodSeconds 1)
+	// before the server ever starts listening (LFXV2-2016 lfx-reviewer/Copilot
+	// finding on PR #87). Run it in the background instead of gating startup.
+	go func() {
+		if err := service.EnsureObjectStoreReady(ctx); err != nil {
+			slog.WarnContext(ctx, "logo object store unreachable at startup; logo upload degraded, rest of service unaffected", "error", err)
+		}
+	}()
 
 	// Wrap the services in endpoints.
 	membershipServiceEndpoints := membershipservice.NewEndpoints(membershipServiceSvc)
