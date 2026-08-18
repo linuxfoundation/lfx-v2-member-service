@@ -167,7 +167,7 @@ func TestPublishKeyContactFGA_RetriesIndexWriteOnConflict(t *testing.T) {
 }
 
 // TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant covers a
-// Copilot review finding: if recording the replacement fails, the previous
+// If recording the replacement fails, the previous
 // grant must not have already been revoked — otherwise the index is left
 // pointing at a pair that was just revoked while the replacement it should
 // describe was never recorded, and a later delete revokes the stale pair
@@ -194,7 +194,7 @@ func TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant(t *testing
 }
 
 // TestPublishKeyContactFGA_SupersededRevokePublishFailure_PreservesPendingRevoke
-// covers an lfx-reviewer finding: Access only hands the superseded revoke to
+// Access only hands the superseded revoke to
 // the local NATS connection. The replacement Put (which commits durably on
 // return) has already committed by this point, so if publish fails outright
 // the old pair's address must survive as PendingRevoke in the index — losing
@@ -360,7 +360,7 @@ func TestKeyContactWriter_Delete_FallsBackToRecordedUsername(t *testing.T) {
 }
 
 // TestKeyContactWriter_Delete_RevokesStaleIndexedPairDistinctFromLive covers a
-// review finding: the index can describe a different pair than the contact's
+// The index can describe a different pair than the contact's
 // current live membership when an earlier recordKeyContactGrant Put failed
 // (e.g. mid Salesforce reparent) — the replacement's member_put succeeded but
 // the swallowed Put failure left the index still pointing at the old pair,
@@ -415,7 +415,7 @@ func (p *failOnMembershipRemovePublisher) Access(ctx context.Context, subject st
 }
 
 // TestKeyContactWriter_Delete_StaleIndexedPairRevokeFailure_PreservesEntry
-// covers a review finding: if the distinct stale-indexed-pair revoke fails to
+// If the distinct stale-indexed-pair revoke fails to
 // publish, the index entry must not be cleared afterward — clearing it anyway
 // would erase the only remaining record that pair's grant was ever made,
 // leaving it live with nothing left to revoke it by.

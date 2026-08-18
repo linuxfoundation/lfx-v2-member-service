@@ -921,6 +921,7 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// single IN-clause query per CDC event (~4–6× fewer REST calls).
 		usecaseSvc.WithCDCMembershipBatchReader(cdcMembershipRepo),
 		usecaseSvc.WithCDCKeyContactBatchReader(cdcKeyContactRepo),
+		usecaseSvc.WithCDCKeyContactsByMembershipReader(cdcKeyContactRepo),
 		usecaseSvc.WithCDCAccountBatchReader(cdcAccountRepo),
 		// Quota guard — skips upsert fetches when the shared daily REST API
 		// quota approaches exhaustion; /admin/reindex repairs skipped records.
@@ -931,6 +932,10 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// Durable grant record — lets a key_contact delete, which carries only the
 		// contact's own SFID after the Salesforce record is gone, address the revoke.
 		usecaseSvc.WithCDCKeyContactGrantIndex(nats.NewKeyContactGrantIndex(natsClient)),
+		// Authoritative source for per-user writer/auditor grants, rebuilt when
+		// Salesforce restores a deleted org (delete_access withdrew the tuples;
+		// this KV record survived).
+		usecaseSvc.WithCDCB2BOrgSettingsReader(B2BOrgSettingsReaderImpl(ctx)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),

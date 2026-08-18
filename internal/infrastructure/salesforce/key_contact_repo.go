@@ -221,7 +221,10 @@ func (r *KeyContactRepo) FetchKeyContactsBySFIDs(ctx context.Context, sfids []st
 }
 
 // Ensure KeyContactRepo satisfies the port at compile time.
-var _ port.KeyContactBatchReader = (*KeyContactRepo)(nil)
+var (
+	_ port.KeyContactBatchReader         = (*KeyContactRepo)(nil)
+	_ port.KeyContactsByMembershipReader = (*KeyContactRepo)(nil)
+)
 
 // fetchPrimaryEmails fetches the primary alternate email address for each of the
 // given contact IDs. Returns a map of contactID → email address. Requests are

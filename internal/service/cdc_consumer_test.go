@@ -155,6 +155,11 @@ type subjectCapturingPublisher struct {
 	flushCount      int      // upserts never flush; key_contact delete/supersede and genuine-delete purges do (see flushErr)
 	flushErr        error    // returned by every Flush call when set
 	accessErr       error    // returned by every Access call when set; the call is still recorded
+
+	// beforeAccess, when set, runs at the top of Access and its error is
+	// returned instead of accessErr. Use it to fail a specific subject or a
+	// specific call in a sequence rather than every one.
+	beforeAccess func(subject string) error
 }
 
 func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, msg any, _ bool) error {
@@ -169,6 +174,9 @@ func (p *subjectCapturingPublisher) Access(_ context.Context, subject string, ms
 	defer p.mu.Unlock()
 	p.access = append(p.access, subject)
 	p.accessMessages = append(p.accessMessages, msg)
+	if p.beforeAccess != nil {
+		return p.beforeAccess(subject)
+	}
 	return p.accessErr
 }
 
@@ -675,8 +683,8 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 		"delivery must be confirmed before the only recorded address is cleared")
 }
 
-// TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry covers
-// an lfx-reviewer finding: Access only hands the revoke to the local NATS
+// TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry verifies
+// that Access only hands the revoke to the local NATS
 // connection, it does not confirm the broker received it. Deleting the index
 // entry immediately after a nil Access error — without confirming delivery —
 // would create a crash/disconnect window where the member_remove is lost and
@@ -715,8 +723,8 @@ func TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry(t *test
 	assert.True(t, found, "the entry must survive so a retry can still address the revoke")
 }
 
-// TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries covers
-// a review finding: a grant-index read failure must not be collapsed into an
+// TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries verifies
+// that a grant-index read failure must not be collapsed into an
 // ordinary miss on the first try — the index may still hold the exact address
 // needed to revoke this grant, and once this handler returns, the replay
 // cursor advances with no other chance to retry a deleted contact. A bounded
@@ -1258,7 +1266,7 @@ func TestCDCConsumer_Account_OrgNotFound_AdvancesReplay(t *testing.T) {
 	assert.Equal(t, []byte("r12"), replay.saved, "replay must advance even when org not found")
 }
 
-// ── LFID resolution + silent provisioning (Task 8) ───────────────────────────
+// ── LFID resolution + silent provisioning ────────────────────────────────────
 
 // fakeUserReader implements port.UserReader for CDC consumer tests.
 type fakeUserReader struct {
@@ -2396,7 +2404,7 @@ func TestCDCConsumer_Account_Reparent_CleansUpOldParentChildList(t *testing.T) {
 	assert.True(t, oldParentCleanup, "reparent must re-publish the old parent's child list without the moved org")
 }
 
-// ── delete_access purge on genuine CDC deletes (LFXV2-3034) ──────────────────
+// ── delete_access purge on genuine CDC deletes ───────────────────────────────
 
 // deleteAccessUIDs returns the UIDs carried by every delete_access message
 // published for the given object type. Filtering on the subject rather than the
@@ -2568,9 +2576,9 @@ func TestCDCConsumer_Asset_Delete_StillPublishesIndexerDelete(t *testing.T) {
 	assert.Equal(t, sfid("pm-idx"), data)
 }
 
-// ── Absence must never withdraw access (LFXV2-3034) ──────────────────────────
+// ── Absence must never withdraw access ───────────────────────────────────────
 //
-// These are the tests the feature exists to make non-vacuous. Before the purge
+// These tests make the delete/absence distinction non-vacuous. Before the purge
 // was added they would all pass trivially. They assert the constraint that a
 // record merely missing from the periodic query — an org whose membership
 // lapsed, a membership whose Product2.Family flipped off — keeps every tuple.
@@ -2786,6 +2794,75 @@ func TestCDCConsumer_AssetDelete_PublishFailureRecordsRepairMarker(t *testing.T)
 	assert.Equal(t, id, repair.Puts[0].SFID)
 }
 
+// flakyRepairStore fails a fixed number of leading PutPending attempts, then
+// delegates to the mock.
+type flakyRepairStore struct {
+	*mock.MockCDCRepairStore
+	failFirst int
+	attempts  int
+}
+
+func (s *flakyRepairStore) PutPending(ctx context.Context, reindexType, sfid string) error {
+	s.attempts++
+	if s.attempts <= s.failFirst {
+		return errors.New("kv: transient write failure")
+	}
+	return s.MockCDCRepairStore.PutPending(ctx, reindexType, sfid)
+}
+
+// TestCDCConsumer_Delete_MarkerWriteRetriesTransientFailure covers the way the
+// marker is most plausibly lost: a single blip against the KV store. The purge
+// cannot
+// be retried later, so a transient failure that one more immediate attempt
+// would have ridden out must not become an unrecorded revocation. Bounded, on
+// the same reasoning as maxGrantIndexReadAttempts.
+func TestCDCConsumer_Delete_MarkerWriteRetriesTransientFailure(t *testing.T) {
+	id := sfid("org-transient")
+	base := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	repair := &flakyRepairStore{MockCDCRepairStore: &mock.MockCDCRepairStore{}, failFirst: 2}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{id}, ReplayID: []byte("transient")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		base,
+		"",
+		svc.WithCDCRepairStore(repair),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 3, repair.attempts, "two transient failures must be retried, not accepted")
+	require.Len(t, repair.Puts, 1, "the marker must land on the surviving attempt")
+	assert.Equal(t, id, repair.Puts[0].SFID)
+}
+
+// TestCDCConsumer_Delete_MarkerWriteRetryIsBounded confirms a permanently
+// broken KV store cannot spin the handler: the retry gives up after
+// maxDeleteAccessMarkerAttempts and the original error still propagates.
+func TestCDCConsumer_Delete_MarkerWriteRetryIsBounded(t *testing.T) {
+	base := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	repair := &flakyRepairStore{MockCDCRepairStore: &mock.MockCDCRepairStore{}, failFirst: 1000}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("org-kvdown")}, ReplayID: []byte("kvdown")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		base,
+		"",
+		svc.WithCDCRepairStore(repair),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 3, repair.attempts, "the retry must be bounded")
+	assert.Empty(t, repair.Puts)
+}
+
 // TestCDCConsumer_Delete_FlushFailureRecordsRepairMarker covers the failure
 // mode a publish error cannot: Access queues on the local connection and
 // returns nil, so an unreachable broker drops the purge with no error at all.
@@ -2918,4 +2995,449 @@ func TestCDCConsumer_ProjectRole_Delete_PublishesNoDeleteAccess(t *testing.T) {
 
 	assert.False(t, pub.hasAccess(constants.FGASyncDeleteAccessSubject),
 		"key contacts are revoked by a targeted member_remove, never by a whole-object purge")
+}
+
+// ── Lost purges hold the cursor; restores rebuild grants ─────────────────────
+
+// deadRepairStore fails every PutPending, standing in for a KV store that is
+// unavailable for the whole handler including its retries.
+func deadRepairStore() *flakyRepairStore {
+	return &flakyRepairStore{MockCDCRepairStore: &mock.MockCDCRepairStore{}, failFirst: 1000}
+}
+
+// TestCDCConsumer_Delete_UnrecordedPurgeHoldsReplayCursor verifies that a purge
+// that reached neither the broker nor the
+// repair bucket has no repair route: the Salesforce record is gone, so no later
+// event and no /admin/reindex will ever produce it again. Redelivery is the only
+// remaining chance, and redelivery requires the cursor to stay where it is.
+//
+// Both entity types are covered because the review raised them as separate
+// findings; they share a mechanism, but a regression could plausibly reach only
+// one path.
+func TestCDCConsumer_Delete_UnrecordedPurgeHoldsReplayCursor(t *testing.T) {
+	for _, tc := range []struct{ entity, channel string }{
+		{"Account", "/data/AccountChangeEvent"},
+		{"Asset", "/data/AssetChangeEvent"},
+	} {
+		t.Run(tc.entity, func(t *testing.T) {
+			pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+			repair := deadRepairStore()
+			replay := &fakeReplayStore{}
+
+			consumer := newTestCDCConsumer(
+				&fakeCDCSubscriber{events: []model.CDCEvent{
+					{Entity: tc.entity, ChangeType: model.CDCChangeDelete,
+						RecordIDs: []string{sfid("purge-lost")}, ReplayID: []byte("lost")},
+				}},
+				&fakeB2BOrgReader{},
+				&mock.MockCacheInvalidator{},
+				pub,
+				"",
+				svc.WithCDCRepairStore(repair),
+			)
+
+			require.NoError(t, consumer.Run(context.Background(), tc.channel, replay))
+
+			assert.Empty(t, replay.savedAll,
+				"a purge lost with no recovery marker must not be passed over — holding the cursor is its only remaining chance")
+		})
+	}
+}
+
+// TestCDCConsumer_Delete_RecordedPurgeStillAdvancesReplayCursor guards the other
+// side of the rule. Holding the cursor is a heavy remedy — it stalls every later
+// commit in the run — so it must fire only when the purge is genuinely
+// unrecoverable. A failed purge whose marker landed is already durably captured
+// and an operator can replay it from the repair bucket, so the stream must not
+// stall on it.
+func TestCDCConsumer_Delete_RecordedPurgeStillAdvancesReplayCursor(t *testing.T) {
+	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	repair := &mock.MockCDCRepairStore{}
+	replay := &fakeReplayStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete,
+				RecordIDs: []string{sfid("purge-recorded")}, ReplayID: []byte("recorded")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCRepairStore(repair),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", replay))
+
+	require.Len(t, repair.Puts, 1, "precondition: the recovery marker must have landed")
+	assert.Len(t, replay.savedAll, 1,
+		"a failed purge that IS durably recorded needs no redelivery, so it must not stall the stream")
+}
+
+// TestCDCConsumer_Delete_CursorHoldPersistsAcrossLaterEvents covers the reason
+// the hold is a run-scoped latch rather than a single skipped save. The replay
+// cursor is one position per channel, so committing any later event would carry
+// it past the lost purge and silently void the guarantee the first test asserts.
+func TestCDCConsumer_Delete_CursorHoldPersistsAcrossLaterEvents(t *testing.T) {
+	org := &model.B2BOrg{UID: sfid("org-after")}
+	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	replay := &fakeReplayStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete,
+				RecordIDs: []string{sfid("purge-lost")}, ReplayID: []byte("lost")},
+			// A later event that handles cleanly and would otherwise commit.
+			{Entity: "Account", ChangeType: model.CDCChangeUpdate,
+				RecordIDs: []string{sfid("org-after")}, ReplayID: []byte("after")},
+		}},
+		&fakeB2BOrgReader{org: org},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCRepairStore(deadRepairStore()),
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{org}}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", replay))
+
+	assert.Empty(t, replay.savedAll,
+		"once a purge is lost, no later event may carry the cursor past it")
+}
+
+// TestCDCConsumer_Delete_RedeliveredPurgeIsHarmless is what makes holding the
+// cursor safe at all. The hold exists to force redelivery, so if replaying a
+// purge were not idempotent the remedy would be worse than the fault. This is
+// asserted rather than assumed because the whole cursor-hold design rests on it.
+func TestCDCConsumer_Delete_RedeliveredPurgeIsHarmless(t *testing.T) {
+	id := sfid("org-replayed")
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{id}, ReplayID: []byte("p1")},
+			{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{id}, ReplayID: []byte("p1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []string{id, id}, pub.deleteAccessUIDs(t, "b2b_org"),
+		"a redelivered purge re-publishes the same withdrawal for the same UID — repeating it changes nothing")
+}
+
+// acceptedUser builds an accepted settings principal — the only kind that
+// carries an FGA tuple, and therefore the only kind a restore may rebuild.
+func acceptedUser(username, invitedAs string) model.B2BOrgUser {
+	return model.B2BOrgUser{
+		Email:        username + "@example.com",
+		Username:     username,
+		InvitedAs:    invitedAs,
+		InviteStatus: model.InviteStatusAccepted,
+	}
+}
+
+// b2bOrgUpdateAccess returns the access data of every b2b_org update_access
+// message captured, in order.
+func (p *subjectCapturingPublisher) b2bOrgUpdateAccess(t *testing.T) []fgatypes.GenericAccessData {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var out []fgatypes.GenericAccessData
+	for _, raw := range p.accessMessages {
+		msg, ok := raw.(fgatypes.GenericFGAMessage)
+		if !ok || msg.ObjectType != "b2b_org" || msg.Operation != "update_access" {
+			continue
+		}
+		data, ok := msg.Data.(fgatypes.GenericAccessData)
+		require.True(t, ok, "update_access must carry GenericAccessData")
+		out = append(out, data)
+	}
+	return out
+}
+
+// undeletedOrgConsumer wires a consumer for an org UNDELETE with the given
+// settings record, which may be nil to represent no record at all.
+func undeletedOrgConsumer(pub *subjectCapturingPublisher, org *model.B2BOrg,
+	settings *mock.MockB2BOrgSettings) *svc.CDCConsumer {
+	opts := []svc.CDCConsumerOption{
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{org}}),
+	}
+	if settings != nil {
+		opts = append(opts, svc.WithCDCB2BOrgSettingsReader(settings))
+	}
+	return newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeUndelete,
+				RecordIDs: []string{org.UID}, ReplayID: []byte("undel")},
+		}},
+		&fakeB2BOrgReader{org: org},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		opts...,
+	)
+}
+
+// TestCDCConsumer_Account_Undelete_RebuildsWriterAndAuditorGrants covers review
+// finding 3 for orgs. The ordinary upsert passes nil for both relations, which
+// preserves whatever tuples exist — correct for a normal update, but after a
+// purge there is nothing left to preserve, so the administrators stay locked
+// out. The settings record survives the purge (delete_access withdraws FGA
+// tuples, not KV records) and is the authoritative source for rebuilding them.
+func TestCDCConsumer_Account_Undelete_RebuildsWriterAndAuditorGrants(t *testing.T) {
+	id := sfid("org-restored")
+	org := &model.B2BOrg{UID: id}
+	settings := mock.NewMockB2BOrgSettings()
+	settings.Seed(id, &model.B2BOrgSettings{
+		UID:      id,
+		Writers:  []model.B2BOrgUser{acceptedUser("wuser", "writer")},
+		Auditors: []model.B2BOrgUser{acceptedUser("auser", "auditor")},
+	}, 1)
+
+	pub := &subjectCapturingPublisher{}
+	consumer := undeletedOrgConsumer(pub, org, settings)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	var restored *fgatypes.GenericAccessData
+	for i, data := range pub.b2bOrgUpdateAccess(t) {
+		if len(data.Relations["writer"]) > 0 {
+			restored = &pub.b2bOrgUpdateAccess(t)[i]
+			break
+		}
+	}
+	require.NotNil(t, restored, "an undeleted org must republish its per-user grants")
+
+	assert.Equal(t, []string{"wuser"}, restored.Relations["writer"])
+	assert.Equal(t, []string{"auser"}, restored.Relations["auditor"])
+	assert.NotContains(t, restored.ExcludeRelations, "writer",
+		"writer must be full-synced, not excluded — an excluded relation preserves nothing after a purge")
+	assert.NotContains(t, restored.ExcludeRelations, "auditor")
+}
+
+// TestCDCConsumer_Account_Undelete_NeverReapsGrants is the safety half of the
+// same change, and the reason only non-empty lists are sent. A non-nil empty
+// list means "replace with nothing", so an UNDELETE that followed no purge — a
+// record deleted before this consumer was subscribed, then restored — would
+// revoke grants that are still legitimate. Restoring never needs to reap.
+func TestCDCConsumer_Account_Undelete_NeverReapsGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings *model.B2BOrgSettings
+	}{
+		{"no settings record", nil},
+		{"only pending and revoked principals", &model.B2BOrgSettings{
+			Writers: []model.B2BOrgUser{
+				{Email: "p@example.com", InvitedAs: "writer", InviteStatus: model.InviteStatusPending},
+				{Email: "r@example.com", Username: "ruser", InvitedAs: "writer", InviteStatus: model.InviteStatusRevoked},
+			},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := sfid("org-noreap")
+			org := &model.B2BOrg{UID: id}
+			store := mock.NewMockB2BOrgSettings()
+			if tc.settings != nil {
+				store.Seed(id, tc.settings, 1)
+			}
+
+			pub := &subjectCapturingPublisher{}
+			consumer := undeletedOrgConsumer(pub, org, store)
+			require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+			for _, data := range pub.b2bOrgUpdateAccess(t) {
+				assert.Empty(t, data.Relations["writer"],
+					"a restore with no active principals must not publish an empty writer set — that would revoke, not restore")
+				assert.Contains(t, data.ExcludeRelations, "writer",
+					"writer must stay excluded so existing tuples are preserved")
+			}
+		})
+	}
+}
+
+type fakeKeyContactsByMembershipReader struct {
+	contacts []*model.KeyContact
+	err      error
+}
+
+func (r *fakeKeyContactsByMembershipReader) FetchKeyContactsByAssetSFID(
+	_ context.Context,
+	_ string,
+) ([]*model.KeyContact, error) {
+	return r.contacts, r.err
+}
+
+// TestCDCConsumer_Asset_Undelete_RebuildsKeyContactGrants verifies membership
+// restoration. Salesforce is authoritative for current key contacts; the
+// grant index can be incomplete for grants created before the index existed.
+func TestCDCConsumer_Asset_Undelete_RebuildsKeyContactGrants(t *testing.T) {
+	membershipUID := sfid("pm-restored")
+	pm := &model.ProjectMembership{UID: membershipUID}
+	contacts := &fakeKeyContactsByMembershipReader{contacts: []*model.KeyContact{
+		{UID: sfid("kc-one"), MembershipUID: membershipUID, Username: "alice"},
+		{UID: sfid("kc-two"), MembershipUID: membershipUID, Username: "bob"},
+		{UID: sfid("kc-three"), MembershipUID: membershipUID, Username: "carol"},
+	}}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		sfid("kc-one"): {MembershipUID: membershipUID, Username: "alice", Revision: 1},
+		sfid("kc-two"): {MembershipUID: membershipUID, Username: "bob", Revision: 1},
+	}}
+
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUndelete,
+				RecordIDs: []string{membershipUID}, ReplayID: []byte("undel-pm")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(contacts),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	var restored []string
+	for i, subject := range pub.access {
+		if subject != fgaconstants.GenericMemberPutSubject {
+			continue
+		}
+		msg, ok := pub.accessMessages[i].(fgatypes.GenericFGAMessage)
+		require.True(t, ok, "member_put payload must be a GenericFGAMessage")
+		data, ok := msg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok, "member_put must carry GenericMemberData")
+		restored = append(restored, data.Username)
+	}
+
+	assert.ElementsMatch(t, []string{"alice", "bob", "carol"}, restored,
+		"every current Salesforce key contact must be restored even when the grant index is incomplete")
+}
+
+// TestCDCConsumer_Asset_Undelete_PartialContactFailureRestoresRest keeps one
+// unreachable contact from locking out the others: a contact that cannot be
+// restored is a smaller failure than a membership that restores nobody.
+func TestCDCConsumer_Asset_Undelete_PartialContactFailureRestoresRest(t *testing.T) {
+	membershipUID := sfid("pm-partial")
+	pm := &model.ProjectMembership{UID: membershipUID}
+	contacts := &fakeKeyContactsByMembershipReader{contacts: []*model.KeyContact{
+		{UID: sfid("kc-a"), MembershipUID: membershipUID, Username: "alice"},
+		{UID: sfid("kc-b"), MembershipUID: membershipUID, Username: "bob"},
+	}}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		sfid("kc-a"): {MembershipUID: membershipUID, Username: "alice", Revision: 1},
+		sfid("kc-b"): {MembershipUID: membershipUID, Username: "bob", Revision: 1},
+	}}
+
+	// Fail only the first member_put, leaving the second to succeed.
+	var puts int
+	pub := &subjectCapturingPublisher{}
+	pub.beforeAccess = func(subject string) error {
+		if subject != fgaconstants.GenericMemberPutSubject {
+			return nil
+		}
+		puts++
+		if puts == 1 {
+			return errors.New("nats: connection closed")
+		}
+		return nil
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUndelete,
+				RecordIDs: []string{membershipUID}, ReplayID: []byte("undel-partial")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(contacts),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 2, puts, "a failed contact must not abort the remaining restores")
+}
+
+// TestCDCConsumer_Asset_Undelete_SalesforceReadFailureRestoresNothing pins the
+// no-fallback policy: stale index entries must not be restored when the
+// authoritative current-contact query fails.
+func TestCDCConsumer_Asset_Undelete_SalesforceReadFailureRestoresNothing(t *testing.T) {
+	membershipUID := sfid("pm-listerr")
+	pm := &model.ProjectMembership{UID: membershipUID}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		sfid("kc-stale"): {MembershipUID: membershipUID, Username: "stale-user", Revision: 1},
+	}}
+	contacts := &fakeKeyContactsByMembershipReader{err: errors.New("salesforce: unavailable")}
+
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUndelete,
+				RecordIDs: []string{membershipUID}, ReplayID: []byte("undel-listerr")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(contacts),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.False(t, pub.hasAccess(fgaconstants.GenericMemberPutSubject),
+		"an unreadable authoritative source restores nothing rather than falling back to stale index entries")
+	assert.False(t, pub.hasAccess(constants.FGASyncDeleteAccessSubject),
+		"and it must never withdraw anything on a restore")
+}
+
+// TestCDCConsumer_Undelete_RedeliveredRestoreIsHarmless matches the purge
+// equivalent above. Holding the cursor makes replay more likely, not less, so
+// restoration has to be safe to repeat.
+func TestCDCConsumer_Undelete_RedeliveredRestoreIsHarmless(t *testing.T) {
+	id := sfid("org-restore2x")
+	org := &model.B2BOrg{UID: id}
+	settings := mock.NewMockB2BOrgSettings()
+	settings.Seed(id, &model.B2BOrgSettings{
+		UID:     id,
+		Writers: []model.B2BOrgUser{acceptedUser("wuser", "writer")},
+	}, 1)
+
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeUndelete, RecordIDs: []string{id}, ReplayID: []byte("u1")},
+			{Entity: "Account", ChangeType: model.CDCChangeUndelete, RecordIDs: []string{id}, ReplayID: []byte("u1")},
+		}},
+		&fakeB2BOrgReader{org: org},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{org}}),
+		svc.WithCDCB2BOrgSettingsReader(settings),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	var withWriters int
+	for _, data := range pub.b2bOrgUpdateAccess(t) {
+		if len(data.Relations["writer"]) > 0 {
+			withWriters++
+			assert.Equal(t, []string{"wuser"}, data.Relations["writer"],
+				"each replay publishes the identical grant set — a full-sync of the same members is idempotent")
+		}
+	}
+	assert.Equal(t, 2, withWriters, "both deliveries restore, and both restore the same thing")
 }

@@ -222,7 +222,7 @@ func TestInviteAcceptedService_Handle_NonBizOrgType_IsNoOp(t *testing.T) {
 	assert.Equal(t, 0, inner.calls, "non-b2b_org event must be dropped without calling Update")
 }
 
-// ── Key-contact FGA resolution on invite acceptance (Task 7) ─────────────────
+// ── Key-contact FGA resolution on invite acceptance ──────────────────────────
 
 // stubKCOrgReader implements keyContactOrgReader (unexported; use svc.WithInviteAcceptedKeyContactReader).
 type stubKCOrgReader struct {

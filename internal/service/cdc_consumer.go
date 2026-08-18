@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -68,23 +69,25 @@ const repairLogIDChunk = 100
 //  4. Present records are published via indexer + FGA fan-out messages.
 //  5. On DELETE: publishes a delete indexer event; no re-fetch.
 type CDCConsumer struct {
-	subscriber             port.CDCSubscriber
-	resolver               port.ProjectResolver
-	b2bOrgReader           port.B2BOrgReader
-	membershipBatch        port.MembershipBatchReader
-	keyContactBatch        port.KeyContactBatchReader
-	accountBatch           port.AccountBatchReader
-	cacheInvalidator       port.CacheInvalidator
-	publisher              port.MemberPublisher
-	quotaGauge             port.SalesforceQuotaGauge
-	quotaSkipThreshold     float64
-	quotaRefreshStaleAfter time.Duration
-	repairStore            port.CDCRepairStore
-	grantIndex             port.KeyContactGrantIndex
-	globalOrgAdminTeamUID  string
-	b2bOrgAuditorTeams     []string
-	userReader             port.UserReader
-	orgSettings            OrgSettingsPrincipalWriter
+	subscriber              port.CDCSubscriber
+	resolver                port.ProjectResolver
+	b2bOrgReader            port.B2BOrgReader
+	membershipBatch         port.MembershipBatchReader
+	keyContactBatch         port.KeyContactBatchReader
+	keyContactsByMembership port.KeyContactsByMembershipReader
+	accountBatch            port.AccountBatchReader
+	cacheInvalidator        port.CacheInvalidator
+	publisher               port.MemberPublisher
+	quotaGauge              port.SalesforceQuotaGauge
+	quotaSkipThreshold      float64
+	quotaRefreshStaleAfter  time.Duration
+	repairStore             port.CDCRepairStore
+	grantIndex              port.KeyContactGrantIndex
+	globalOrgAdminTeamUID   string
+	b2bOrgAuditorTeams      []string
+	userReader              port.UserReader
+	orgSettings             OrgSettingsPrincipalWriter
+	settingsReader          port.B2BOrgSettingsReader
 
 	// refreshMu guards lastRefreshAttemptAt so failed/attempted refreshes are
 	// throttled to at most once per staleness window even under concurrent calls.
@@ -119,6 +122,10 @@ func WithCDCKeyContactBatchReader(r port.KeyContactBatchReader) CDCConsumerOptio
 	return func(o *CDCConsumer) { o.keyContactBatch = r }
 }
 
+func WithCDCKeyContactsByMembershipReader(r port.KeyContactsByMembershipReader) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.keyContactsByMembership = r }
+}
+
 func WithCDCAccountBatchReader(r port.AccountBatchReader) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.accountBatch = r }
 }
@@ -149,6 +156,15 @@ func WithCDCRepairStore(s port.CDCRepairStore) CDCConsumerOption {
 // key_contact FGA grants. When set, upserts record the grant they publish and
 // deletes use it to address the revoke; when nil, a delete falls back to the
 // unaddressable remove that predates the index.
+// WithCDCB2BOrgSettingsReader injects the org-settings reader used to rebuild
+// per-user writer and auditor grants when Salesforce restores a deleted org.
+// The settings record is the authoritative source for those principals and is
+// untouched by delete_access, which withdraws FGA tuples, not KV records. When
+// nil (mock mode), an UNDELETE restores only the team grants, as before.
+func WithCDCB2BOrgSettingsReader(r port.B2BOrgSettingsReader) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.settingsReader = r }
+}
+
 func WithCDCKeyContactGrantIndex(i port.KeyContactGrantIndex) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.grantIndex = i }
 }
@@ -214,6 +230,10 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 		return err
 	}
 
+	// Latched once a delete_access purge is lost with no recovery marker; see
+	// the replay-cursor comment below.
+	cursorHeld := false
+
 	for event := range eventCh {
 		// Wrap the handler in a closure so that defers guarantee span.End()
 		// and handleCancel() run even if o.handle panics. Both defers run
@@ -254,11 +274,42 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 				"record_ids", event.RecordIDs,
 				"error", handleErr,
 			)
+			if !cursorHeld && errors.Is(handleErr, errPurgeUnrecorded) {
+				cursorHeld = true
+				slog.ErrorContext(ctx, "cdc: delete_access purge lost with no recovery marker — holding replay cursor so it is redelivered",
+					"entity", event.Entity,
+					"record_ids", event.RecordIDs,
+					"error", handleErr,
+				)
+			}
 		}
 
 		// Commit-after-process: persist cursor regardless of handler error so
 		// a transient failure doesn't block the stream indefinitely.
 		//
+		// The exception is a purge that reached neither the broker nor the
+		// repair bucket. /admin/reindex cannot rebuild it — the record is gone,
+		// so a reindex resolves it as not-found — which leaves redelivery as the
+		// only remaining chance, and redelivery requires the cursor to stay put.
+		//
+		// The hold latches for the rest of the run rather than skipping this one
+		// save, because the cursor is a single position per channel: committing
+		// any later event would carry it past the lost purge and void the
+		// guarantee. Processing continues so a persistent KV outage degrades the
+		// commit rather than becoming a crash loop; the events replayed on the
+		// next restart are upserts and purges, both idempotent.
+		//
+		// The latch does not clear when the KV store recovers — clearing it
+		// would advance the cursor past the purge that is still unrecorded,
+		// which is the whole guarantee. So the replay window grows until the
+		// process restarts, not until the fault ends: the ERROR above is an
+		// actionable signal to restart once the store is healthy, and letting
+		// the held position age out of Salesforce's replay retention degrades
+		// exactly as any prolonged consumer outage does.
+		if cursorHeld {
+			continue
+		}
+
 		// Use a short-lived background context for the Save so that a
 		// graceful shutdown (which cancels ctx) does not prevent the last
 		// replay cursor from being committed. Without this the final event
@@ -442,6 +493,31 @@ func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string,
 	}
 }
 
+// errPurgeUnrecorded marks the one CDC failure that must not be forgotten: a
+// delete_access purge that was neither delivered nor recorded for recovery.
+//
+// Every other handler failure is logged and skipped, because /admin/reindex can
+// repair it from the live Salesforce record. A purge cannot be repaired that
+// way — the record is gone, so a reindex resolves it as not-found and clears
+// any marker without re-emitting the purge — and the tuples it should have
+// withdrawn outlive the object that justified them. When the recovery marker
+// also fails to write, redelivery is the only remaining chance, so this error
+// is carried up to the replay-cursor decision instead of being swallowed.
+var errPurgeUnrecorded = errors.New("delete_access purge lost with no recovery marker")
+
+// deleteAccessMarkerTimeout bounds the detached recovery-marker write in
+// recordFailedDeleteAccess. It matches the replay-cursor Save timeout in Run
+// because both must still complete while the handler context is being
+// cancelled during a graceful shutdown.
+const deleteAccessMarkerTimeout = 5 * time.Second
+
+// maxDeleteAccessMarkerAttempts bounds the immediate retry of that write, on
+// the same reasoning as maxGrantIndexReadAttempts: the caller commits the
+// replay cursor regardless of outcome, and a purge has no other chance to be
+// retried, so a transient blip that one more attempt would have ridden out
+// must not become a permanently unrecorded revocation.
+const maxDeleteAccessMarkerAttempts = 3
+
 // recordFailedDeleteAccess durably records a delete_access that was not
 // confirmed delivered — either the publish failed or the flush that confirms
 // broker receipt did — so an operator can find and manually re-purge it later. This is deliberately
@@ -450,18 +526,61 @@ func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string,
 // purge — the record is gone, so the fetch reports outcomeNotFound and no
 // delete_access is re-emitted (see ReindexTypeB2BOrgDeleteAccess). The marker
 // exists purely so ListPending(ctx, reindexType, ...) surfaces the exact
-// (type, uid) pairs that need a manual delete_access republish; the caller
-// still returns the original publish error regardless of whether this
-// best-effort write succeeds.
-func (o *CDCConsumer) recordFailedDeleteAccess(ctx context.Context, reindexType, uid string) {
+// (type, uid) pairs that need a manual delete_access republish.
+//
+// It reports whether the marker landed. That is what separates a purge that
+// failed but is durably recorded — recoverable, so the stream may move on —
+// from one that is not recorded at all, where redelivery is the only remaining
+// chance and the caller must hold the replay cursor.
+//
+// The write is detached from ctx and retried because a marker lost here loses
+// the purge permanently — see deleteAccessMarkerTimeout and
+// maxDeleteAccessMarkerAttempts.
+//
+// A nil repairStore (mock mode) reports success: there is no store to record
+// into, so holding the cursor would stall the stream forever rather than
+// preserve anything.
+func (o *CDCConsumer) recordFailedDeleteAccess(ctx context.Context, reindexType, uid string) error {
 	if o.repairStore == nil {
-		return
+		return nil
 	}
-	if err := o.repairStore.PutPending(ctx, reindexType, uid); err != nil {
-		slog.ErrorContext(ctx, "cdc: failed to record delete_access failure for manual recovery — recover from this ID",
-			"reindex_type", reindexType, "uid", uid, "error", err,
-			"publish_failed_for_backfill_repair", true)
+
+	// Run already hands handlers a context detached from shutdown, so a
+	// cancelled caller cannot reach here. What can is that context's 30 s
+	// deadline: a handler close to it would fail this write on an expired
+	// deadline, and the replay cursor advances regardless, so the purge would
+	// be lost with nothing recorded. Dropping the inherited deadline and
+	// taking a fresh one removes that dependency on how long the rest of the
+	// handler took. WithoutCancel rather than Background so trace and log
+	// correlation values survive.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteAccessMarkerTimeout)
+	defer cancel()
+
+	var lastErr error
+	for attempt := 1; attempt <= maxDeleteAccessMarkerAttempts; attempt++ {
+		lastErr = o.repairStore.PutPending(writeCtx, reindexType, uid)
+		if lastErr == nil {
+			return nil
+		}
 	}
+
+	slog.ErrorContext(ctx, "cdc: failed to record delete_access failure for manual recovery — holding replay cursor",
+		"reindex_type", reindexType, "uid", uid, "error", lastErr,
+		"attempts", maxDeleteAccessMarkerAttempts,
+		"publish_failed_for_backfill_repair", true)
+	return lastErr
+}
+
+// purgeFailure builds the error a delete path returns when a purge was not
+// delivered, tagging it with errPurgeUnrecorded only when the recovery marker
+// also failed to write. markerErr nil means the failure is durably captured and
+// the stream may advance; non-nil means redelivery is the last chance.
+func purgeFailure(reindexType, uid string, publishErr, markerErr error) error {
+	if markerErr == nil {
+		return fmt.Errorf("cdc: %s delete_access failed for uid %s: %w", reindexType, uid, publishErr)
+	}
+	return fmt.Errorf("cdc: %s delete_access failed for uid %s: %w",
+		reindexType, uid, errors.Join(publishErr, errPurgeUnrecorded))
 }
 
 // confirmDeleteAccessDelivery blocks until the broker acknowledges the purge
@@ -477,8 +596,7 @@ func (o *CDCConsumer) recordFailedDeleteAccess(ctx context.Context, reindexType,
 // tuples outlive the object they authorized.
 func (o *CDCConsumer) confirmDeleteAccessDelivery(ctx context.Context, reindexType, uid string) error {
 	if err := o.publisher.Flush(ctx); err != nil {
-		o.recordFailedDeleteAccess(ctx, reindexType, uid)
-		return err
+		return purgeFailure(reindexType, uid, err, o.recordFailedDeleteAccess(ctx, reindexType, uid))
 	}
 	return nil
 }
@@ -508,16 +626,27 @@ func partitionRecordIDs(ctx context.Context, entity string, event model.CDCEvent
 // dispatchEntity normalizes and partitions event record IDs, runs each delete
 // ID through deleteHandler (logging failures), and returns the upsert IDs for
 // the caller to batch-process. Shared by all three entity top-level handlers.
+//
+// Every delete failure is logged and the loop continues, so one bad ID never
+// costs the rest of the batch. Only errPurgeUnrecorded is also returned: a
+// purge that reached neither the broker nor the repair bucket has no repair
+// route left except redelivery, which requires the replay cursor to stop. Any
+// other failure stays logged-and-continue as before, so a repairable error
+// cannot stall the stream.
 func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event model.CDCEvent,
-	deleteHandler func(context.Context, string) error) []string {
+	deleteHandler func(context.Context, string) error) ([]string, error) {
 	deleteIDs, upsertIDs := partitionRecordIDs(ctx, entity, event)
+	var unrecorded error
 	for _, id := range deleteIDs {
 		if err := deleteHandler(ctx, id); err != nil {
 			slog.ErrorContext(ctx, "cdc: handler failed",
 				"entity", entity, "uid", id, "change_type", event.ChangeType, "error", err)
+			if errors.Is(err, errPurgeUnrecorded) {
+				unrecorded = errors.Join(unrecorded, err)
+			}
 		}
 	}
-	return upsertIDs
+	return upsertIDs, unrecorded
 }
 
 // logBatchFetchError logs a handler failure for each ID in a batch when the
@@ -532,10 +661,13 @@ func logBatchFetchError(ctx context.Context, entity string, ids []string, change
 // ── Account (b2b_org) ─────────────────────────────────────────────────────────
 
 func (o *CDCConsumer) handleAccount(ctx context.Context, event model.CDCEvent) error {
-	if upsertIDs := o.dispatchEntity(ctx, "Account", event, o.handleAccountDelete); len(upsertIDs) > 0 {
+	// The upserts run before the error is returned: a lost purge on one ID must
+	// not suppress unrelated work carried in the same event.
+	upsertIDs, err := o.dispatchEntity(ctx, "Account", event, o.handleAccountDelete)
+	if len(upsertIDs) > 0 {
 		o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType)
 	}
-	return nil
+	return err
 }
 
 func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) {
@@ -615,6 +747,9 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		// reparent double-emitting the new parent tuple is safe.
 		if org.ParentUID != "" {
 			PublishB2BOrgParentFGA(ctx, o.publisher, org, childMap[org.ParentUID])
+		}
+		if changeType == model.CDCChangeUndelete {
+			o.restoreOrgPrincipalGrants(ctx, org)
 		}
 	}
 
@@ -702,25 +837,25 @@ func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, r
 	// port.MemberPublisher) requires this, and /admin/reindex cannot repair a
 	// dropped purge anyway — a genuinely deleted record reindexes as
 	// outcomeNotFound, which clears any repair marker without re-emitting
-	// delete_access. dispatchEntity already logs this and continues to the
-	// next ID, so no other record in the batch is affected by propagating.
+	// delete_access. dispatchEntity continues to the next ID either way, so no
+	// other record in the batch is affected; only an unrecorded purge travels
+	// further, up to the replay-cursor decision in Run.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildB2BOrgDeleteAccessMessage(uid)); err != nil {
-		o.recordFailedDeleteAccess(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
-		return fmt.Errorf("cdc: b2b_org delete_access publish failed for uid %s: %w", uid, err)
+		return purgeFailure(constants.ReindexTypeB2BOrgDeleteAccess, uid, err,
+			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid))
 	}
-	if err := o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid); err != nil {
-		return fmt.Errorf("cdc: b2b_org delete_access delivery unconfirmed for uid %s: %w", uid, err)
-	}
-	return nil
+	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
 }
 
 // ── Asset (project_membership) ────────────────────────────────────────────────
 
 func (o *CDCConsumer) handleAsset(ctx context.Context, event model.CDCEvent) error {
-	if upsertIDs := o.dispatchEntity(ctx, "Asset", event, o.handleAssetDelete); len(upsertIDs) > 0 {
+	// See handleAccount: upserts run before the error is returned.
+	upsertIDs, err := o.dispatchEntity(ctx, "Asset", event, o.handleAssetDelete)
+	if len(upsertIDs) > 0 {
 		o.handleAssetUpsertBatch(ctx, upsertIDs, event.ChangeType)
 	}
-	return nil
+	return err
 }
 
 func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) {
@@ -776,11 +911,109 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
 			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
 		}
+		if changeType == model.CDCChangeUndelete {
+			o.restoreKeyContactGrants(ctx, pm.UID)
+		}
 	}
 
 	slog.InfoContext(ctx, "cdc: asset batch published",
 		"upsert_count", len(memberships),
 		"absent_delete_count", len(upsertIDs)-len(returned))
+}
+
+// restoreOrgPrincipalGrants rebuilds the per-user writer and auditor tuples of
+// an org Salesforce has just restored.
+//
+// The ordinary upsert cannot do it: it passes nil for both relations, which
+// tells fga-sync to preserve whatever exists (see BuildB2BOrgFGAMessage) —
+// correct for a normal update, since CDC has no business reaping grants it does
+// not manage, but after a delete_access purge there is nothing left to
+// preserve. The settings record is the authoritative source and survives the
+// purge, which withdraws FGA tuples rather than KV records.
+//
+// Only non-empty lists are sent. A non-nil empty list would mean "replace with
+// nothing", which on an UNDELETE that followed no purge — a restore of a record
+// deleted before this consumer was subscribed, say — would reap grants that are
+// still legitimate. Restoring never needs to reap, because the purge already
+// removed everything, so the safe direction is strictly additive.
+func (o *CDCConsumer) restoreOrgPrincipalGrants(ctx context.Context, org *model.B2BOrg) {
+	if o.settingsReader == nil {
+		return
+	}
+	settings, _, err := o.settingsReader.GetSettings(ctx, org.UID)
+	if err != nil {
+		slog.ErrorContext(ctx, "cdc: failed to read org settings for restored org — principals remain locked out",
+			"uid", org.UID, "error", err, "publish_failed_for_backfill_repair", true)
+		return
+	}
+	// Nil-safe on a missing settings record: GetSettings reports (nil, 0, nil).
+	writers := settings.ActiveWriterUsernames()
+	auditors := settings.ActiveAuditorUsernames()
+	if len(writers) == 0 && len(auditors) == 0 {
+		return
+	}
+
+	msg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
+		GlobalOrgAdminTeamUID: o.globalOrgAdminTeamUID,
+		AuditorTeams:          o.b2bOrgAuditorTeams,
+		Writers:               writers,
+		Auditors:              auditors,
+	})
+	if pubErr := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
+		slog.ErrorContext(ctx, "cdc: failed to restore org principal grants on undeleted org",
+			"uid", org.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
+		return
+	}
+	slog.InfoContext(ctx, "cdc: restored org principal grants for undeleted org",
+		"uid", org.UID, "writers", len(writers), "auditors", len(auditors))
+}
+
+// restoreKeyContactGrants re-publishes the current key_contact grants of a
+// membership that Salesforce has just restored.
+//
+// A delete_access purge withdraws every tuple on the object, key_contact
+// included, and the ordinary upsert republish cannot bring those back: both
+// project_membership builders exclude the key_contact relation unconditionally
+// (see buildProjectMembershipFGAMessage), because a membership upsert has no
+// knowledge of the contacts granted on it. Without this, a restored membership
+// comes back with its contacts locked out.
+//
+// Salesforce is authoritative here. The grant index exists to address later
+// revokes and can be incomplete for grants created before that index existed.
+// Each successful member_put refreshes the index through PublishKeyContactFGA.
+// A source read failure restores nothing rather than guessing from stale data.
+func (o *CDCConsumer) restoreKeyContactGrants(ctx context.Context, membershipUID string) {
+	if o.keyContactsByMembership == nil {
+		return
+	}
+	contacts, err := o.keyContactsByMembership.FetchKeyContactsByAssetSFID(ctx, membershipUID)
+	if err != nil {
+		slog.ErrorContext(ctx, "cdc: failed to read current key_contacts for restored membership — contacts remain locked out",
+			"membership_uid", membershipUID, "error", err,
+			"publish_failed_for_backfill_repair", true)
+		return
+	}
+	restored := 0
+	for _, contact := range contacts {
+		if contact.Username == "" && contact.Email != "" && o.userReader != nil {
+			username, usernameErr := o.userReader.UsernameByEmail(ctx, contact.Email)
+			if usernameErr != nil {
+				if !pkgerrors.IsNotFound(usernameErr) {
+					slog.WarnContext(ctx, "cdc: resolve LFID for restored key_contact failed",
+						"uid", contact.UID, "error", usernameErr)
+				}
+			} else {
+				contact.Username = username
+			}
+		}
+		if contact.Username == "" {
+			continue
+		}
+		PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact)
+		restored++
+	}
+	slog.InfoContext(ctx, "cdc: restored key_contact grants for undeleted membership",
+		"membership_uid", membershipUID, "restored", restored, "current", len(contacts))
 }
 
 // handleAssetDelete handles an Asset genuinely deleted in Salesforce.
@@ -817,22 +1050,23 @@ func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, rea
 	// See handleAccountDeleteImpl for why this is propagated rather than
 	// swallowed.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
-		o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
-		return fmt.Errorf("cdc: project_membership delete_access publish failed for uid %s: %w", uid, err)
+		return purgeFailure(constants.ReindexTypeProjectMembershipDeleteAccess, uid, err,
+			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid))
 	}
-	if err := o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid); err != nil {
-		return fmt.Errorf("cdc: project_membership delete_access delivery unconfirmed for uid %s: %w", uid, err)
-	}
-	return nil
+	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
 }
 
 // ── Project_Role__c (key_contact) ─────────────────────────────────────────────
 
 func (o *CDCConsumer) handleProjectRole(ctx context.Context, event model.CDCEvent) error {
-	if upsertIDs := o.dispatchEntity(ctx, "Project_Role__c", event, o.handleProjectRoleDelete); len(upsertIDs) > 0 {
+	// See handleAccount: upserts run before the error is returned. This entity
+	// publishes no delete_access, so the error is always nil today; returning it
+	// keeps the three handlers uniform rather than silently diverging.
+	upsertIDs, err := o.dispatchEntity(ctx, "Project_Role__c", event, o.handleProjectRoleDelete)
+	if len(upsertIDs) > 0 {
 		o.handleProjectRoleUpsertBatch(ctx, upsertIDs, event.ChangeType)
 	}
-	return nil
+	return err
 }
 
 func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) {

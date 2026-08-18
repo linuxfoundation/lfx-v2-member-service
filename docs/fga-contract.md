@@ -91,6 +91,10 @@ There is no relation or exclusion field, so the message cannot be scoped to part
 
 **A purge that is not confirmed delivered propagates and is durably recorded.** The CDC delete handlers return the publish error rather than swallowing it (`dispatchEntity` in `internal/service/cdc_consumer.go` logs it and moves on to the next ID, so the batch is unaffected), and they flush afterwards so that a broker that never received the purge is treated as a failure rather than as success. On either failure, the UID is written to the CDC repair KV bucket under a delete-specific reindex type (`ReindexTypeB2BOrgDeleteAccess` / `ReindexTypeProjectMembershipDeleteAccess`) so an operator can find and manually re-purge it. This is deliberately not wired into `/admin/reindex`'s automated drain: that path re-fetches and re-upserts the *live* Salesforce record, which cannot repair a purge — the record is gone, so the fetch reports "not found" and no `delete_access` is re-emitted.
 
+**If that marker write also fails, the replay cursor is held** so the deletion is redelivered — the only remaining route once a purge has been neither delivered nor recorded. The hold latches for the rest of the consumer run and requires an operator restart; see [Held replay cursor](./cdc-consumer.md#held-replay-cursor-unrecorded-purges).
+
+**A restored record rebuilds the grants the purge withdrew.** Because `delete_access` withdraws per-user tuples that an ordinary upsert does not manage — `b2b_org` upserts pass `nil` writers/auditors to *preserve* existing tuples, and membership upserts exclude `key_contact` unconditionally — a Salesforce `UNDELETE` would otherwise restore the record with its administrators and key contacts still locked out. On `UNDELETE` the consumer republishes writers/auditors from `org-settings` and key contacts from the current Salesforce `Project_Role__c` records attached to the Asset. `key-contact-grants` is refreshed by successful publishes but is not used as restoration truth because it can be incomplete for historical grants. The restore is strictly additive and never publishes an empty relation set, so it can never revoke a grant it did not place. See [Grant restoration on UNDELETE](./cdc-consumer.md#grant-restoration-on-undelete).
+
 ---
 
 ## Project Membership
@@ -150,12 +154,14 @@ Workspace CRUD operations (`POST/PUT/DELETE /b2b_orgs/{uid}/workspaces/…`) and
 | Reparent B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Up to 3 messages: org's own `parent`, old parent's `child` list, new parent's `child` list |
 | Delete B2B org | `b2b_org` | `lfx.fga-sync.delete_access` | Stub org (uid only). Withdraws the org's tuples; `team:`-subject grants survive by design |
 | CDC `AccountChangeEvent` (delete) | `b2b_org` | `lfx.fga-sync.delete_access` | Same as delete. `DELETE` and `GAP_DELETE` only |
+| CDC `AccountChangeEvent` (`UNDELETE`) | `b2b_org` | `lfx.fga-sync.update_access` | Full-sync of accepted writers/auditors read from `org-settings`, rebuilding what the purge withdrew. Additive only — never published empty |
 | CDC `AccountChangeEvent` (absent from SOQL) | `b2b_org` | *(none)* | Index tombstone only. The org may still exist — see [Delete](#delete) |
 | Update org settings (`PUT /settings`) | `b2b_org` | `lfx.fga-sync.update_access` | `writer`/`auditor` relations; nil param = preserve existing tuples, explicit (even `[]`) = replace. Also carries the auditor team references |
 | Add/update/delete settings user | `b2b_org` | `lfx.fga-sync.update_access` | Emitted by `AddPrincipal`, `UpdatePrincipalRole`, `DeletePrincipal` and `invite_accepted` promotion — all share the settings publish path, so all carry the auditor team references |
 | Update project membership | `project_membership` | `lfx.fga-sync.update_access` | Sets `b2b_org` + `project` refs; excludes `key_contact` |
 | CDC `AssetChangeEvent` | `project_membership` | `lfx.fga-sync.update_access` | Same as update |
 | CDC `AssetChangeEvent` (delete) | `project_membership` | `lfx.fga-sync.delete_access` | Withdraws the membership's tuples. `DELETE` and `GAP_DELETE` only |
+| CDC `AssetChangeEvent` (`UNDELETE`) | `project_membership` | `lfx.fga-sync.member_put` | One per current Salesforce key contact with a resolved LFID; successful publishes refresh `key-contact-grants` |
 | CDC `AssetChangeEvent` (absent from SOQL) | `project_membership` | *(none)* | Index tombstone only. `Product2.Family` may simply have flipped off "Membership" |
 | Create key contact | `project_membership` | `lfx.fga-sync.member_put` | Only when contact has a resolved LFID username |
 | Update key contact (username change) | `project_membership` | `lfx.fga-sync.member_put` + `lfx.fga-sync.member_remove` | Grants the new username before revoking the old one, so no window leaves the contact without access. Skipped entirely when the username resolves unchanged |

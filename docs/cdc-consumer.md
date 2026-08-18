@@ -62,6 +62,7 @@ pubsub.Client  (internal/infrastructure/salesforce/pubsub)      ── implement
         ▼
 CDCConsumer.Run  (internal/service/cdc_consumer.go)
   • one event at a time; commit replay cursor after each
+    (except after an unrecorded purge — see Held replay cursor)
   • dispatch by Entity → per-entity handler
         │
         ├── Account          → handleAccount        → b2b_org
@@ -102,7 +103,7 @@ Change types (`model.CDCChangeType`):
 |---|---|---|
 | `CREATE` | upsert | Indexer action `created`. |
 | `UPDATE` | upsert | Indexer action `updated`. |
-| `UNDELETE` | upsert | Treated as upsert (`isDelete` uses exact equality so `UNDELETE` is **not** matched as a delete). |
+| `UNDELETE` | upsert **+ grant restore** | Treated as an upsert (`isDelete` uses exact equality so `UNDELETE` is **not** matched as a delete), and additionally rebuilds the per-user grants a prior `delete_access` withdrew — see [Grant restoration on UNDELETE](#grant-restoration-on-undelete). |
 | `DELETE` | delete | Publishes a delete indexer event; no re-fetch. |
 | `GAP_DELETE` | delete | Delete during a CDC overflow gap. |
 | `GAP_OVERFLOW` / other `GAP_*` | upsert | Granular delivery was interrupted — re-fetch as upsert and log a WARN. |
@@ -270,8 +271,38 @@ Every record in a skipped upsert batch is durably recorded so `/admin/reindex {c
 When a genuine-delete's `delete_access` publish fails, or the subsequent flush cannot confirm the broker received it (see the Account → `b2b_org` / Asset → `project_membership` rows under [Per-Entity Handling](#per-entity-handling) above), `recordFailedDeleteAccess` writes the UID to the `cdc-repair` bucket under `ReindexTypeB2BOrgDeleteAccess` or `ReindexTypeProjectMembershipDeleteAccess` (`pkg/constants/reindex_types.go`). This reuses the same `PutPending`/`ListPending` store as the quota-skip queue above, but is a **manual-recovery marker, not an automated retry**:
 
 - `/admin/reindex {cdc_repair:true}` never drains these two types — its targeted repair re-fetches and re-upserts the *live* Salesforce record, which cannot repair a purge (the record is gone, so the fetch reports "not found" and no `delete_access` is re-emitted).
-- The marker write itself is also best-effort: on write failure, `recordFailedDeleteAccess` logs at ERROR (`cdc: failed to record delete_access failure for manual recovery`) and the caller still returns the original publish error; the replay cursor advances regardless, matching every other CDC handler failure.
+- The marker write is retried and deadline-independent, unlike the quota-skip queue write above. It runs on a context detached from the handler's 30 s deadline (`deleteAccessMarkerTimeout`) so a handler that has already spent most of that budget cannot fail it, and it retries up to `maxDeleteAccessMarkerAttempts` times — the same reasoning as `maxGrantIndexReadAttempts`, since a purge has no later chance to be retried. Only after those attempts are exhausted does it log at ERROR (`cdc: failed to record delete_access failure for manual recovery`, with `attempts`).
+- **If the marker write also fails, the replay cursor is held** so the deletion is redelivered — see [Held replay cursor](#held-replay-cursor-unrecorded-purges) below. That is the one case where a purge has neither been delivered nor recorded, and therefore the one case with no recovery route but redelivery.
 - **Manual recovery today** (no `/admin/reindex` support): inspect the `cdc-repair` bucket directly for keys matching `pending.b2b_org_delete_access.*` / `pending.project_membership_delete_access.*` (e.g. via `nats kv` against the bucket), then manually re-publish `delete_access` for each listed UID and remove its marker once confirmed.
+
+#### Held replay cursor (unrecorded purges)
+
+Commit-after-process advances the replay cursor regardless of handler errors — with exactly one exception. When a genuine-delete's `delete_access` is neither confirmed delivered **nor** recorded in `cdc-repair`, the purge has no repair route at all: the Salesforce record is gone, so no later CDC event and no `/admin/reindex` will re-emit it, and the FGA tuples outlive the object they authorised. `Run` therefore stops committing the cursor so the deletion is redelivered.
+
+- **Scope.** Only this condition holds the cursor. Every other handler failure — including a failed purge whose marker *did* land — keeps the existing log-and-continue behaviour, so a repairable error can never stall the stream. The signal is `errPurgeUnrecorded`, propagated from the delete handler through `dispatchEntity` (which discards all other delete errors after logging them) to `Run`.
+- **It latches for the rest of the run.** The cursor is one position per channel, so committing any *later* event would carry it past the lost purge and void the guarantee. Processing continues — a persistent KV outage degrades the commit rather than becoming a crash loop — but nothing is committed again until restart.
+- **The latch does not clear when the KV store recovers**, because clearing it would advance past the still-unrecorded purge. The replay window therefore grows until the process restarts, not until the fault ends.
+- **Operator action.** `cdc: delete_access purge lost with no recovery marker — holding replay cursor so it is redelivered` is actionable, not informational: restart the consumer once the KV write path is healthy. Redelivered events are upserts and purges, both idempotent. Leaving it unattended until the held position ages out of Salesforce's CDC replay retention degrades exactly as any prolonged consumer outage does.
+
+#### Grant restoration on UNDELETE
+
+A Salesforce `UNDELETE` restores the record, but re-upserting it does **not** restore the FGA tuples a prior `delete_access` withdrew, because neither upsert path manages the relevant relations:
+
+- A `b2b_org` upsert passes `nil` for `Writers` and `Auditors`, which means "not managing this relation, preserve existing tuples". After a purge there are no existing tuples to preserve, so the org's administrators would stay locked out of an org that looks restored.
+- A `project_membership` upsert excludes `key_contact` unconditionally, because the upsert has no knowledge of which contacts hold a grant on it.
+
+So the consumer restores them explicitly, from sources that survive the purge (`delete_access` withdraws FGA tuples, not KV records):
+
+| Entity | Source of truth | What is republished |
+|---|---|---|
+| `Account` → `b2b_org` | `org-settings` KV via `B2BOrgSettingsReader` | A full-sync carrying the **accepted** writers and auditors that have a known LFID username (`restoreOrgPrincipalGrants`) |
+| `Asset` → `project_membership` | Current Salesforce `Project_Role__c` records via `KeyContactRepo.FetchKeyContactsByAssetSFID` | Resolve each contact's LFID and publish one `member_put`; successful publishes refresh `key-contact-grants` (`restoreKeyContactGrants`) |
+
+Restoration is **strictly additive** — it never publishes an empty relation set. A non-nil empty list would mean "replace with nothing", which would revoke live grants on an `UNDELETE` that followed no purge (a record deleted before this consumer was subscribed, then restored). With no active principals and no recorded grants, nothing is published at all.
+
+Per-principal failures are isolated: one contact that cannot be republished is logged and the rest still restore. If the *source* cannot be read, nothing is restored and — importantly — nothing is withdrawn. The consumer never falls back to `key-contact-grants`: that bucket addresses later revokes but can be incomplete for contacts granted before the index existed.
+
+**Not covered.** `GAP_UNDELETE` follows the generic `GAP_*` upsert path and does not restore grants; the `membership` relation on `b2b_org` is not managed by this service (`MembershipUIDs` is never populated); and a restore publish that fails has no repair marker, so it relies on redelivery or a later upsert.
 
 ### Absent-from-SOQL → delete convergence
 
@@ -306,7 +337,10 @@ The consumer is resilient by design — a single bad event never halts the strea
 | `cdc: no repair target mapping for entity — skipped records not queued` | A skipped entity has no `reindexTypeForCDCEntity` mapping (should not occur — every dispatched entity is mapped). | Investigate; treat as a bug if seen. |
 | `cdc: repair-queue write failed for skipped records — recover from these IDs` | `PutPending` failed for some skipped IDs; the cursor advanced anyway (durability of the queue is best-effort). | Manually re-drive the listed `failed_ids` via a targeted `/admin/reindex` for the logged `reindex_type` once the KV write path is healthy. |
 | `cdc: b2b_org delete_access publish failed for uid …` / `cdc: project_membership delete_access publish failed for uid …` | A genuine-delete's `delete_access` publish failed; the UID was queued to `cdc-repair` under the delete-specific type (or logged separately if that write also failed — see below). | Manually re-publish `delete_access` for the UID — see [Delete_access failure marker](#delete_access-failure-marker). Not repairable via `/admin/reindex`. |
-| `cdc: failed to record delete_access failure for manual recovery — recover from this ID` | The delete-specific repair marker write itself failed; the UID has no durable record at all. | Recover the UID directly from this log line and manually re-publish `delete_access` for it. |
+| `cdc: failed to record delete_access failure for manual recovery — holding replay cursor` | The delete-specific repair marker write itself failed after all retries; the UID has no durable record at all. | Recover the UID directly from this log line and manually re-publish `delete_access` for it. The cursor is held (next row). |
+| `cdc: delete_access purge lost with no recovery marker — holding replay cursor so it is redelivered` | A purge reached neither the broker nor the repair bucket. The consumer has stopped committing the replay cursor **for the rest of the run** so the deletion is redelivered. | **Actionable.** Confirm the NATS KV write path is healthy, then restart the consumer to replay from the held position. Until it restarts, no cursor progress is recorded. See [Held replay cursor](#held-replay-cursor-unrecorded-purges). |
+| `cdc: failed to read org settings for restored org — principals remain locked out` / `cdc: failed to read current key_contacts for restored membership — contacts remain locked out` | The **source** of the restore could not be read, so no grants were rebuilt (and none were withdrawn). | Every user on the restored record may lack access. Check the `org-settings` KV or Salesforce key-contact query path, then re-trigger an update on the record. See [Grant restoration on UNDELETE](#grant-restoration-on-undelete). |
+| `cdc: failed to restore org principal grants on undeleted org` / `cdc: failed to restore key_contact grant on undeleted membership` | The source was read but the republish failed. The key_contact variant is per-contact — the remaining contacts still restore. | Republish the grant, or re-trigger an update on the record. |
 
 ---
 
