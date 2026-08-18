@@ -6,16 +6,13 @@
 # OpenFGA tuples measured by the LFXV2-3265 investigation: a `key_contact`
 # tuple on a LIVE project_membership whose underlying key-contact record no
 # longer exists. Each one confers `auditor` on the membership and, via
-# `key_contact from membership`, on the parent b2b_org. See
-# docs/exclude-docs/investigation-LFXV2-3265-dangling-key-contact-grants.md.
+# `key_contact from membership`, on the parent b2b_org. Tracked by LFXV2-3265.
 #
 # This talks to the OpenFGA HTTP API directly — not the fga-sync/NATS
 # member_remove path — because this is a single one-off remediation of a
 # closed legacy population (LFXV2-2907 fixed the write path; nothing has
 # leaked since 2026-08-07), and per-tuple synchronous success/failure is
-# exactly what the audit record below needs. See specs/040-lfxv2-3265-
-# revoke-dangling-key-contact-grants/plan.md § Complexity Tracking for the
-# full justification against Principle II of the platform constitution.
+# exactly what the audit record below needs.
 #
 # Freshness revalidation: the input TSV is a snapshot, and a legitimate
 # key-contact create/update can re-establish the exact same {membership_uid,
@@ -24,7 +21,7 @@
 # tuple-presence check alone cannot tell "still dangling" apart from "was
 # just re-legitimised" — both look identical. So before treating a present
 # tuple as dangling, each pair is revalidated against OpenSearch's
-# key_contact index — the same authoritative source
+# key_contact index — the same operational snapshot source
 # scripts/export-key-contact-grants-from-opensearch.sh reads, populated by
 # the same PublishKeyContactIndexer call that runs alongside the FGA
 # member_put. A live match there means the pair is presently legitimate and
@@ -50,18 +47,17 @@
 # Unlike scripts/revoke-lf-teams-auditor-openfga.sh (which deletes a blanket
 # team grant and only needs a total count), this remediation must attribute
 # an outcome to each of the 872 individual {membership_uid, username} pairs,
-# so it cannot use that script's batched on_missing:ignore delete — a batch
-# response cannot tell you *which* member of the batch was already absent.
-# Instead each pair gets its own pre-check read, then (in --live mode) its
-# own delete, so the outcome is directly attributable per pair.
+# so it cannot use that script's batched delete — a batch response cannot tell
+# you *which* member of the batch was already absent. Instead each pair gets
+# its own pre-check read, then an idempotent on_missing:ignore delete in
+# --live mode, so the outcome is directly attributable per pair.
 #
 # Rollback: this script has no automated undo. If a revoked grant is later
 # found to have been wrongly measured, the JSONL run record's
 # {membership_uid, username, relation} for that row is sufficient for an
 # engineer to manually re-grant it via the normal key-contact write path
 # (member_put) — see docs/fga-contract.md § Key contact relation. This is a
-# deliberate manual step, not a button to press (spec.md § Clarifications,
-# 2026-08-17).
+# deliberate manual step, not a button to press.
 #
 # Prerequisites:
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
@@ -69,13 +65,11 @@
 #   curl, jq installed
 #
 # Usage:
-#   ./scripts/revoke-dangling-key-contact-grants.sh <store-id> <input_tsv> [--dry-run|--live] [--yes]
+#   ./scripts/revoke-dangling-key-contact-grants.sh <store-id> <input_tsv> [--live] [--yes]
 #
-# <input_tsv>: TSV of `membership_uid<TAB>username` pairs, one per line — the
-#   investigation's full-dangling.tsv (see docs/exclude-docs/
-#   LFXV2-3265-sweep-scripts/investigation-LFXV2-3265-dangling-key-contact-grants.md).
+# <input_tsv>: TSV of `membership_uid<TAB>username` pairs, one per line.
 #
-# Without --dry-run (the default) nothing is mutated: each pair is read-
+# By default nothing is mutated: each pair is read-
 # checked against live OpenFGA state and reported, grouped by affected user
 # and by affected organization. --live performs the actual deletes and
 # prompts for confirmation unless --yes is also given.
@@ -94,7 +88,7 @@
 # Exit status is nonzero if any pair's outcome was "failed", in either mode.
 #
 # Examples:
-#   ./scripts/revoke-dangling-key-contact-grants.sh 01K3S60BS505DDR3VF9RAZDVHG full-dangling.tsv --dry-run
+#   ./scripts/revoke-dangling-key-contact-grants.sh 01K3S60BS505DDR3VF9RAZDVHG full-dangling.tsv
 #   ./scripts/revoke-dangling-key-contact-grants.sh 01K3S60BS505DDR3VF9RAZDVHG full-dangling.tsv --live
 
 set -euo pipefail
@@ -116,7 +110,7 @@ ASSUME_YES=false
 OUT_DIR="${OUT_DIR:-/tmp/lfxv2-3265-revoke}"
 PARALLELISM="${PARALLELISM:-10}"
 
-USAGE="$0 <store-id> <input_tsv> [--dry-run|--live] [--yes]"
+USAGE="$0 <store-id> <input_tsv> [--live] [--yes]"
 
 fga_require_store_id "${1:-}" "$USAGE"
 STORE_ID="$1"
@@ -132,7 +126,6 @@ shift
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--dry-run) DRY_RUN=true ;;
 	--live) DRY_RUN=false ;;
 	--yes) ASSUME_YES=true ;;
 	-h | --help)
@@ -147,6 +140,15 @@ while [[ $# -gt 0 ]]; do
 	esac
 	shift
 done
+if [[ "$DRY_RUN" == true && "$ASSUME_YES" == true ]]; then
+	echo "ERROR: --yes is valid only with --live." >&2
+	echo "Usage: $USAGE" >&2
+	exit 1
+fi
+if [[ ! "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
+	echo "ERROR: PARALLELISM must be a positive integer, got: $PARALLELISM" >&2
+	exit 1
+fi
 
 # --- preconditions -----------------------------------------------------
 
@@ -158,14 +160,23 @@ if [[ ! -s "$INPUT_TSV" ]]; then
 	echo "ERROR: input file is empty: $INPUT_TSV" >&2
 	exit 1
 fi
+if ! awk -F'\t' '
+	{ sub(/\r$/, "", $2) }
+	NF != 2 || $1 == "" || $2 == "" {
+		printf "ERROR: malformed TSV row %d; expected non-empty membership_uid<TAB>username\n", NR > "/dev/stderr"
+		invalid = 1
+	}
+	END { exit invalid }
+' "$INPUT_TSV"; then
+	exit 1
+fi
 for bin in curl jq; do
 	if ! command -v "$bin" >/dev/null 2>&1; then
 		echo "ERROR: required command not found on PATH: $bin" >&2
 		exit 1
 	fi
 done
-# Fail before processing any row rather than partway through, per
-# contracts/openfga-revoke-contract.md § Failure modes.
+# Fail before processing any row rather than partway through.
 if ! curl -sf -m 5 "${BASE_URL}/stores/${STORE_ID}" >/dev/null 2>&1; then
 	echo "ERROR: cannot reach OpenFGA store ${STORE_ID} at ${BASE_URL}." >&2
 	echo "       Is the port-forward running? See this script's header comment." >&2
@@ -174,6 +185,24 @@ fi
 if ! curl -sf -m 5 "${OPENSEARCH_URL}/${OPENSEARCH_INDEX}/_count" >/dev/null 2>&1; then
 	echo "ERROR: cannot reach OpenSearch index ${OPENSEARCH_INDEX} at ${OPENSEARCH_URL}." >&2
 	echo "       Is the port-forward running? See this script's header comment." >&2
+	exit 1
+fi
+mapping=$(curl -sf -m 5 "${OPENSEARCH_URL}/${OPENSEARCH_INDEX}/_mapping") || {
+	echo "ERROR: cannot read OpenSearch mapping for ${OPENSEARCH_INDEX}." >&2
+	exit 1
+}
+if ! echo "$mapping" | jq -e '
+	[.[] | {
+		object_type: .mappings.properties.object_type.type,
+		membership_uid: .mappings.properties.data.properties.membership_uid.type,
+		username: .mappings.properties.data.properties.username.type
+	}] | length > 0 and all(
+		.object_type == "keyword" and
+		.membership_uid == "keyword" and
+		.username == "keyword"
+	)
+' >/dev/null 2>&1; then
+	echo "ERROR: OpenSearch fields object_type, data.membership_uid, and data.username must be keyword-mapped; exact revalidation is unsafe." >&2
 	exit 1
 fi
 
@@ -185,7 +214,7 @@ mkdir -p "$RUN_DIR"
 RECORD_FILE="${RUN_DIR}/run-record.jsonl"
 FAILED_FILE="${RUN_DIR}/failed.tsv"
 
-TOTAL=$(wc -l <"$INPUT_TSV" | tr -d ' ')
+TOTAL=$(awk 'END { print NR }' "$INPUT_TSV")
 echo "Store:       $STORE_ID"
 echo "Base URL:    $BASE_URL"
 echo "Input:       $INPUT_TSV ($TOTAL rows)"
@@ -215,7 +244,7 @@ fi
 
 # --- per-pair processing -------------------------------------------------
 
-export BASE_URL STORE_ID DRY_RUN RECORD_FILE OPENSEARCH_URL OPENSEARCH_INDEX
+export BASE_URL STORE_ID DRY_RUN OPENSEARCH_URL OPENSEARCH_INDEX
 # fga_curl is defined in the sourced lib; each pair runs in its own `xargs
 # -P`-spawned subshell, which only inherits functions exported into the
 # environment, not ones merely sourced into this shell.
@@ -226,7 +255,7 @@ now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 export -f now
 
 # tuple_present checks whether the specific key_contact tuple still exists.
-# contracts/openfga-revoke-contract.md § 1. Fails closed (return 2) on a 200
+# Fails closed (return 2) on a 200
 # response with a missing/malformed `tuples` array, rather than letting a
 # broken response silently read as absent (already_clear).
 tuple_present() {
@@ -257,26 +286,36 @@ currently_live() {
 		]}}}')
 	resp=$(curl -sf -m 10 -X POST "${OPENSEARCH_URL}/${OPENSEARCH_INDEX}/_search" \
 		-H "Content-Type: application/json" -d "$body") || return 2
-	if ! echo "$resp" | jq -e '(.hits.total.value // .hits.total) | type == "number"' >/dev/null 2>&1; then
+	if ! echo "$resp" | jq -e \
+		'(.timed_out == false) and
+		((._shards | type) == "object") and
+		((._shards.total | type) == "number") and
+		((._shards.successful | type) == "number") and
+		((._shards.skipped | type) == "number") and
+		((._shards.failed | type) == "number") and
+		(._shards.failed == 0) and
+		(._shards.successful + ._shards.failed == ._shards.total) and
+		((.hits.total.value | type) == "number")' \
+		>/dev/null 2>&1; then
 		return 2
 	fi
-	[[ "$(echo "$resp" | jq -r '.hits.total.value // .hits.total')" -gt 0 ]]
+	[[ "$(echo "$resp" | jq -r '.hits.total.value')" -gt 0 ]]
 }
 export -f currently_live
 
-# delete_tuple issues the single-tuple delete. contracts/openfga-revoke-contract.md § 2.
+# delete_tuple issues the single-tuple delete.
 delete_tuple() {
 	local pm="$1" user="$2"
 	local body
 	body=$(jq -n --arg pm "project_membership:${pm}" --arg user "user:${user}" \
-		'{"deletes": {"tuple_keys": [{"object": $pm, "relation": "key_contact", "user": $user}]}}')
+		'{"deletes": {"tuple_keys": [{"object": $pm, "relation": "key_contact", "user": $user}], "on_missing": "ignore"}}')
 	fga_curl "write" "$body" >/dev/null
 }
 export -f delete_tuple
 
 # org_for_membership resolves the b2b_org edge for preview grouping only
-# (contracts/openfga-revoke-contract.md § 3). Best-effort: preview grouping
-# degrading to "(unresolved)" must never fail the whole run.
+# and is best-effort: preview grouping degrading to "(unresolved)" must never
+# fail the whole run.
 org_for_membership() {
 	local pm="$1"
 	local body resp
@@ -306,6 +345,7 @@ export -f emit_record
 # process_pair handles one row end to end and prints its JSONL record line.
 process_pair() {
 	local pm="$1" user="$2"
+	local present live
 
 	if [[ -z "$pm" || -z "$user" ]]; then
 		emit_record "$pm" "$user" "failed" "malformed row: empty membership_uid or username"
@@ -358,16 +398,27 @@ export -f process_pair
 
 echo "Processing $TOTAL pairs ($PARALLELISM-way parallel)..."
 : >"$RECORD_FILE"
-# Single quotes below are deliberate: $0/$a/$b must expand inside the
-# xargs-spawned bash -c subshell, not this shell. The disable directive must
-# sit above the whole pipeline, not between the awk/xargs continuation lines
-# — shellcheck's parser cannot resolve a directive comment placed right after
-# a trailing `|` (SC1073/SC1126/SC1072).
+PROCESS_STATUS=0
+# $1/$2 expand in each xargs-spawned shell.
 # shellcheck disable=SC2016
-awk -F'\t' '{print $1"|"$2}' "$INPUT_TSV" |
-	xargs -P "$PARALLELISM" -I{} bash -c 'a=${0%%|*}; b=${0#*|}; process_pair "$a" "$b"' {} >>"$RECORD_FILE"
+while IFS=$'\t' read -r pm user || [[ -n "$pm$user" ]]; do
+	user=${user%$'\r'}
+	printf '%s\0%s\0' "$pm" "$user"
+done <"$INPUT_TSV" |
+	xargs -0 -P "$PARALLELISM" -n 2 bash -c 'process_pair "$1" "$2"' _ \
+		>>"$RECORD_FILE" || PROCESS_STATUS=$?
 
 # --- summary -------------------------------------------------------------
+
+RECORD_COUNT=$(awk 'END { print NR }' "$RECORD_FILE")
+if [[ "$RECORD_COUNT" -ne "$TOTAL" ]]; then
+	echo "ERROR: processed record count ${RECORD_COUNT} does not match input row count ${TOTAL}." >&2
+	PROCESS_STATUS=1
+fi
+if ! jq -se 'all(.[]; type == "object" and (.outcome | type) == "string")' "$RECORD_FILE" >/dev/null; then
+	echo "ERROR: run record is not valid JSONL; summary unavailable. Inspect $RECORD_FILE." >&2
+	exit 1
+fi
 
 REVOKED=$(jq -sr '[.[] | select(.outcome == "revoked")] | length' "$RECORD_FILE")
 ALREADY_CLEAR=$(jq -sr '[.[] | select(.outcome == "already_clear")] | length' "$RECORD_FILE")
@@ -381,7 +432,7 @@ if [[ "$DRY_RUN" == true ]]; then
 	echo "Would revoke:      $WOULD_REVOKE"
 	echo "Already clear:     $ALREADY_CLEAR"
 	echo "Skipped (currently live): $SKIPPED_LIVE"
-	echo "Failed pre-check:  $FAILED"
+	echo "Failed:            $FAILED"
 	echo ""
 	echo "=== Preview: affected users (top 10 by count) ==="
 	jq -sr '[.[] | select(.outcome == "would_revoke") | .username] | group_by(.) | map({user: .[0], count: length}) | sort_by(-.count) | .[:10][] | "\(.count)\t\(.user)"' "$RECORD_FILE"
@@ -397,18 +448,22 @@ else
 	echo "Failed:            $FAILED"
 	echo ""
 	echo "Run record: $RECORD_FILE"
-	if [[ "$FAILED" -gt 0 ]]; then
-		jq -sr '[.[] | select(.outcome == "failed")] | .[] | "\(.membership_uid)\t\(.username)"' "$RECORD_FILE" >"$FAILED_FILE"
-		echo "Failed pairs written to $FAILED_FILE — re-run this script with a TSV built from that file to retry."
-	fi
 	echo ""
-	echo "Next: run the LFXV2-3265 sweep (docs/exclude-docs/LFXV2-3265-sweep-scripts/step12.sh)"
-	echo "to confirm 0 dangling grants remain."
+	echo "Next: rerun the independent sweep used to produce the input TSV"
+	echo "and confirm that 0 dangling grants remain."
+fi
+
+if [[ "$FAILED" -gt 0 ]]; then
+	jq -sr '[.[] | select(.outcome == "failed")] | .[] | "\(.membership_uid)\t\(.username)"' "$RECORD_FILE" >"$FAILED_FILE"
+	echo "Failed pairs written to $FAILED_FILE — re-run this script with a TSV built from that file to retry."
+fi
+if [[ "$PROCESS_STATUS" -ne 0 ]]; then
+	echo "ERROR: one or more workers exited unexpectedly (xargs status ${PROCESS_STATUS}); inspect $RECORD_FILE." >&2
 fi
 
 # A "failed" outcome (in either mode) must not report success: it means an
 # API pre-check, revalidation, or delete could not be completed, which an
 # operator/runbook must not treat as a clean remediation.
-if [[ "$FAILED" -gt 0 ]]; then
+if [[ "$FAILED" -gt 0 || "$PROCESS_STATUS" -ne 0 ]]; then
 	exit 1
 fi
