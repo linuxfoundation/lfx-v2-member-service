@@ -24,12 +24,18 @@ import (
 // Full key form: "pending.{reindex_type}.{sfid}".
 const repairPendingPrefix = "pending."
 
-// repairReindexTypes is the fixed set of reindex targets the CDC quota guard can
-// produce. Both the writer (consumer) and the drain (API) validate against it.
+// repairReindexTypes is the fixed set of reindex targets the CDC quota guard
+// and the delete_access failure marker can produce. Both the writer
+// (consumer) and the drain (API) validate against it. The two
+// *DeleteAccess types are markers only — see
+// constants.ReindexTypeB2BOrgDeleteAccess — and are never passed to
+// reindexItem/the automated drain.
 var repairReindexTypes = map[string]struct{}{
-	constants.ReindexTypeB2BOrg:            {},
-	constants.ReindexTypeProjectMembership: {},
-	constants.ReindexTypeKeyContact:        {},
+	constants.ReindexTypeB2BOrg:                        {},
+	constants.ReindexTypeProjectMembership:             {},
+	constants.ReindexTypeKeyContact:                    {},
+	constants.ReindexTypeB2BOrgDeleteAccess:            {},
+	constants.ReindexTypeProjectMembershipDeleteAccess: {},
 }
 
 // repairMarkerValue is the minimal pending-marker payload. Only skipped_at is

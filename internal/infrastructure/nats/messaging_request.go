@@ -32,12 +32,12 @@ func NewUserReader(client *NATSClient) port.UserReader {
 func (u *userReader) UsernameByEmail(ctx context.Context, email string) (string, error) {
 	msg, err := requestWithSpan(ctx, u.client.Conn(), constants.AuthEmailToUsernameLookupSubject, []byte(email))
 	if err != nil {
-		return "", errors.NewNotFound(fmt.Sprintf("username not found for email: %s", email), err)
+		return "", usernameLookupRequestError(email, err)
 	}
 
 	body := strings.TrimSpace(string(msg.Data))
 	if body == "" {
-		return "", errors.NewNotFound(fmt.Sprintf("username not found for email: %s", email))
+		return "", errors.NewNotFound(fmt.Sprintf("username not found for email: %s", redaction.RedactEmail(email)))
 	}
 
 	// Auth-service error responses are JSON objects; success replies are plain-text usernames.
@@ -50,6 +50,13 @@ func (u *userReader) UsernameByEmail(ctx context.Context, email string) (string,
 	}
 
 	return body, nil
+}
+
+func usernameLookupRequestError(email string, err error) error {
+	return errors.NewUnexpected(
+		fmt.Sprintf("username lookup failed for email: %s", redaction.RedactEmail(email)),
+		err,
+	)
 }
 
 // UserMetadataByPrincipal resolves profile metadata via auth-service; an unsuccessful/absent body is a miss.

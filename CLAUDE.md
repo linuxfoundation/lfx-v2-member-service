@@ -80,7 +80,7 @@ internal/
 │       ├── config.go        # Config struct and ConfigFromEnv()
 │       ├── helpers.go       # parseSOQLTime, parseSOQLDateTime, quoteSOQL
 │       ├── cache_invalidator.go # CacheInvalidator: evicts sObject cache entries (CDC use)
-│       ├── key_contact_repo.go  # FetchKeyContactsByAssetSFID, FetchKeyContactBySFID
+│       ├── key_contact_repo.go  # Single and batched key-contact queries by Asset/SFID
 │       ├── member_reader.go # MemberReader: Salesforce-first + KV cache
 │       ├── member_repo.go   # FetchAllMembers, FetchMemberBySFID
 │       ├── membership_repo.go  # FetchMembershipsByProjectSFID, etc.
@@ -444,7 +444,9 @@ Implemented in `internal/infrastructure/nats/b2b_org_lookup_handler.go`. Validat
 Set `RUN_MODE=consumer` to run as a CDC consumer instead of the HTTP API. The consumer subscribes to Salesforce Pub/Sub gRPC, decodes Avro payloads → `model.CDCEvent`, and dispatches to per-entity handlers that invalidate the sObject cache, re-fetch from Salesforce, and publish indexer + FGA messages.
 
 **Non-obvious invariants:**
-- **GAP_DELETE**: `dispatchRecordIDs` checks `changeType == CDCChangeDelete || changeType == CDCChangeGapDelete` explicitly — `HasSuffix` was avoided because `UNDELETE` also ends with `"DELETE"` and would incorrectly route to the delete path.
+- **GAP_DELETE**: `dispatchRecordIDs` checks `changeType == CDCChangeDelete || changeType == CDCChangeGapDelete` explicitly — `HasSuffix` was avoided because `UNDELETE` also ends with `"DELETE"` and would incorrectly route to the delete path. Since LFXV2-3034 the delete path withdraws FGA tuples, so the blast radius of getting this wrong is a live restored object losing all its access, not just a spurious index tombstone.
+- **Real deletes only purge FGA**: the delete handlers are reached from two call sites — a genuine CDC delete, and `handleAbsentAsDelete` for records missing from the periodic SOQL query. Only the first may publish `delete_access`, because a record can be absent while still existing (a lapsed membership drops an org from the query). The two are separate entry points (`handleAccountDelete`/`handleAccountAbsent`, `handleAssetDelete`/`handleAssetAbsent`) so absence cannot reach the purge without someone changing a call site on purpose. Index convergence still runs on both paths — a tombstone is rebuilt by `/admin/reindex`, a revoked grant is not.
+- **A purge never leaves zero tuples**: fga-sync refuses to delete `team:`-subject tuples, so a deleted object keeps the staff-team reader grant from LFXV2-2937. Any test or audit asserting an empty tuple set for a deleted object will fail against a correct implementation.
 - **Replay cursor**: written on a fresh `context.Background()` after each event so a SIGTERM does not skip the final commit. Cursor survives pod restarts via `pubsub-state` NATS KV.
 - **Early exit → pod restart**: `defer cancel()` in the Run goroutine ensures that if the gRPC stream dies unrecoverably, `<-ctx.Done()` unblocks and the pod exits so Kubernetes restarts it.
 - **Liveness probe**: always returns 200 — K8s handles shutdown via SIGTERM, not probe failures.

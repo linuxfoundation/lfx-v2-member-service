@@ -4,12 +4,27 @@
 package nats
 
 import (
+	"context"
 	"testing"
 
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestUserReader_UsernameByEmail_TransportFailureIsUnexpected(t *testing.T) {
+	const email = "private@example.com"
+	reader := &userReader{client: &NATSClient{}}
+
+	username, err := reader.UsernameByEmail(context.Background(), email)
+
+	require.Error(t, err)
+	assert.Empty(t, username)
+	assert.False(t, pkgerrors.IsNotFound(err), "transport failure must not look like a definitive identity miss")
+	var unexpected pkgerrors.Unexpected
+	assert.ErrorAs(t, err, &unexpected)
+	assert.NotContains(t, err.Error(), email, "lookup errors must not expose the raw email")
+}
 
 func TestParseUserMetadataResponse(t *testing.T) {
 	tests := []struct {

@@ -11,6 +11,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -39,8 +40,14 @@ const maxGrantIndexAttempts = 3
 // recovered from any other source at revoke time. A nil idx skips both (mock
 // mode), leaving the publish behaviour unchanged.
 func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact) {
+	_, _ = publishKeyContactFGA(ctx, p, idx, kc)
+}
+
+// publishKeyContactFGA is the error-reporting form used by CDC restoration,
+// where any unrecorded or unconfirmed grant must hold the replay cursor.
+func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact) (bool, error) {
 	if kc.Username == "" || kc.MembershipUID == "" {
-		return
+		return false, nil
 	}
 	msg := BuildKeyContactFGAPutMessage(kc.MembershipUID, kc.Username)
 	if err := p.Access(ctx, fgaconstants.GenericMemberPutSubject, msg); err != nil {
@@ -50,13 +57,13 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 		// The index records grants that were published. Recording one that was
 		// not would make a later delete revoke a grant that never existed while
 		// hiding the one that does.
-		return
+		return false, fmt.Errorf("publish key_contact grant %s: %w", kc.UID, err)
 	}
 	slog.DebugContext(ctx, "key_contact FGA member_put published",
 		"uid", kc.UID, "membership_uid", kc.MembershipUID,
 		"subject", fgaconstants.GenericMemberPutSubject)
 
-	recordKeyContactGrant(ctx, p, idx, kc.UID, kc.MembershipUID, kc.Username)
+	return true, recordKeyContactGrant(ctx, p, idx, kc.UID, kc.MembershipUID, kc.Username)
 }
 
 // recordKeyContactGrant stores the grant just published for key contact uid and
@@ -85,12 +92,12 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 // with the revoke not yet even attempted. Carrying it means a crash in that
 // window still leaves the address recoverable from the index itself.
 //
-// Every failure is logged and swallowed. The grant itself is already published,
-// and failing the caller (a CDC event, a backfill page, an invite acceptance)
-// would cost more than the degraded delete path that a missing entry causes.
-func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid, membershipUID, username string) {
+// Every failure is logged and returned. The exported publish wrapper preserves
+// best-effort behavior for ordinary writers; CDC restoration uses the returned
+// error to hold replay until the grant and its future revoke address are safe.
+func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid, membershipUID, username string) error {
 	if idx == nil || uid == "" || membershipUID == "" || username == "" {
-		return
+		return nil
 	}
 
 	for attempt := 1; attempt <= maxGrantIndexAttempts; attempt++ {
@@ -98,12 +105,19 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 		if err != nil {
 			slog.WarnContext(ctx, "key_contact grant index read failed — delete may be unable to address the revoke",
 				"uid", uid, "membership_uid", membershipUID, "error", err)
-			return
+			return fmt.Errorf("read key_contact grant index for %s: %w", uid, err)
 		}
 		if found && stored.MembershipUID == membershipUID && stored.Username == username {
-			// Unchanged pair — any PendingRevoke already stored is from an
-			// earlier supersede and is untouched by this call.
-			return
+			// An unchanged contact cannot prove that another key-contact record
+			// does not still justify the tuple named by PendingRevoke.
+			if stored.PendingRevoke != nil {
+				slog.ErrorContext(ctx, "key_contact pending revoke requires reference-aware manual recovery",
+					"uid", uid,
+					"membership_uid", stored.PendingRevoke.MembershipUID,
+					"fga_revoke_failed_dangling_tuple", true,
+					"manual_recovery_required", true)
+			}
+			return nil
 		}
 
 		newGrant := port.KeyContactGrant{
@@ -130,14 +144,14 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 		putErr := idx.Put(ctx, uid, newGrant)
 		if putErr == nil {
 			if superseded != nil {
-				revokeSupersededKeyContactGrant(ctx, p, idx, uid, *superseded)
+				return revokeSupersededKeyContactGrant(ctx, p, idx, uid, *superseded)
 			}
-			return
+			return nil
 		}
 		if !pkgerrors.IsConflict(putErr) {
 			slog.WarnContext(ctx, "key_contact grant index write failed — delete may be unable to address the revoke",
 				"uid", uid, "membership_uid", membershipUID, "error", putErr)
-			return
+			return fmt.Errorf("write key_contact grant index for %s: %w", uid, putErr)
 		}
 		// Conflict: another writer changed the grant since Get. Loop back and
 		// re-read/re-evaluate against the new value — nothing was revoked for
@@ -146,6 +160,7 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 
 	slog.WarnContext(ctx, "key_contact grant index write abandoned after repeated conflicts — delete may be unable to address the revoke",
 		"uid", uid, "membership_uid", membershipUID, "attempts", maxGrantIndexAttempts)
+	return fmt.Errorf("write key_contact grant index for %s: conflicts exhausted", uid)
 }
 
 // revokeSupersededKeyContactGrant revokes a recorded grant that a newly
@@ -159,30 +174,34 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 // Access alone does not prove delivery — a nil error only means the message
 // was handed to the local NATS connection. Flush closes that window: only once
 // it confirms delivery is the PendingRevoke marker cleared. A crash or lost
-// flush between Access and Flush leaves the marker in place for the next
-// opportunity to retry, rather than losing the address the moment the message
-// was merely handed off.
-func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string, superseded port.KeyContactGrantRef) {
+// flush between Access and Flush leaves the address recorded rather than
+// falsely claiming the revoke completed. It is not blindly retried from an
+// unchanged contact because another contact may still justify the same tuple.
+func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string, superseded port.KeyContactGrantRef) error {
 	if superseded.MembershipUID == "" || superseded.Username == "" {
-		return
+		return nil
 	}
 	msg := BuildKeyContactFGARemoveMessage(superseded.MembershipUID, superseded.Username)
 	if err := p.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg); err != nil {
 		slog.ErrorContext(ctx, "key_contact superseded grant revoke publish failed — pending revoke retained in index for retry",
 			"uid", uid, "membership_uid", superseded.MembershipUID,
 			"error", err, "fga_revoke_failed_dangling_tuple", true)
-		return
+		return fmt.Errorf("publish pending key_contact revoke for %s: %w", uid, err)
 	}
 	if flushErr := p.Flush(ctx); flushErr != nil {
 		slog.ErrorContext(ctx, "key_contact superseded grant revoke flush failed — delivery indeterminate, pending revoke retained in index for retry",
 			"uid", uid, "membership_uid", superseded.MembershipUID,
 			"error", flushErr, "fga_revoke_failed_dangling_tuple", true)
-		return
+		return fmt.Errorf("flush pending key_contact revoke for %s: %w", uid, flushErr)
 	}
 	slog.InfoContext(ctx, "key_contact superseded grant revoked",
 		"uid", uid, "membership_uid", superseded.MembershipUID)
 
-	clearPendingRevoke(ctx, idx, uid, superseded)
+	if err := clearPendingRevoke(ctx, idx, uid, superseded); err != nil {
+		slog.WarnContext(ctx, "key_contact grant index pending-revoke marker clear failed — confirmed-delivered marker left in index",
+			"uid", uid, "membership_uid", superseded.MembershipUID, "error", err)
+	}
+	return nil
 }
 
 // clearPendingRevoke removes the PendingRevoke marker for superseded now that
@@ -190,32 +209,29 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 // confirmed-delivered marker in place after this fails is stale but harmless
 // (the grant it names really was revoked), unlike leaving it in place because
 // delivery was never confirmed.
-func clearPendingRevoke(ctx context.Context, idx port.KeyContactGrantIndex, uid string, superseded port.KeyContactGrantRef) {
+func clearPendingRevoke(ctx context.Context, idx port.KeyContactGrantIndex, uid string, superseded port.KeyContactGrantRef) error {
 	for attempt := 1; attempt <= maxGrantIndexAttempts; attempt++ {
 		current, found, err := idx.Get(ctx, uid)
-		if err != nil || !found {
-			// A read failure leaves the marker for a later successful
-			// read-modify-write to clear; an absent entry (delete raced this
-			// call) has nothing left to clear.
-			return
+		if err != nil {
+			return fmt.Errorf("read key_contact pending revoke for %s: %w", uid, err)
+		}
+		if !found {
+			return nil
 		}
 		if current.PendingRevoke == nil || *current.PendingRevoke != superseded {
 			// Already cleared, or superseded by a marker for a different
 			// grant — leave that one alone rather than clobbering it.
-			return
+			return nil
 		}
 		current.PendingRevoke = nil
 		putErr := idx.Put(ctx, uid, current)
 		if putErr == nil {
-			return
+			return nil
 		}
 		if !pkgerrors.IsConflict(putErr) {
-			slog.WarnContext(ctx, "key_contact grant index pending-revoke marker clear failed — confirmed-delivered marker left in index",
-				"uid", uid, "membership_uid", superseded.MembershipUID, "error", putErr)
-			return
+			return fmt.Errorf("clear key_contact pending revoke for %s: %w", uid, putErr)
 		}
 		// Conflict: re-read and retry against the new value.
 	}
-	slog.WarnContext(ctx, "key_contact grant index pending-revoke marker clear abandoned after repeated conflicts",
-		"uid", uid, "membership_uid", superseded.MembershipUID)
+	return fmt.Errorf("clear key_contact pending revoke for %s: conflicts exhausted", uid)
 }

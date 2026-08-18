@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -1057,4 +1058,73 @@ func TestPublishIndexer_CreateCarriesFullObject(t *testing.T) {
 			assert.IsType(t, map[string]any{}, msg.Data, tc.msg)
 		})
 	}
+}
+
+// TestBuildDeleteAccessMessages pins the exact wire payload of the delete_access
+// envelope against docs/fga-contract.md. The assertion is on serialized
+// JSON rather than the struct because the consumer is a separate service reading
+// the bytes — a field-name change would keep the struct assertions passing while
+// silently breaking the contract.
+func TestBuildDeleteAccessMessages(t *testing.T) {
+	cases := []struct {
+		name     string
+		build    func(string) fgatypes.GenericFGAMessage
+		uid      string
+		expected string
+	}{
+		{
+			name:     "b2b_org",
+			build:    BuildB2BOrgDeleteAccessMessage,
+			uid:      "0014100000Td9x0AAB",
+			expected: `{"object_type":"b2b_org","operation":"delete_access","data":{"uid":"0014100000Td9x0AAB"}}`,
+		},
+		{
+			name:     "project_membership",
+			build:    BuildProjectMembershipDeleteAccessMessage,
+			uid:      "a0H4100000XyZabEAF",
+			expected: `{"object_type":"project_membership","operation":"delete_access","data":{"uid":"a0H4100000XyZabEAF"}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := tc.build(tc.uid)
+
+			assert.Equal(t, "delete_access", msg.Operation,
+				"operation must be the literal the consumer switches on")
+			require.IsType(t, fgatypes.GenericDeleteData{}, msg.Data,
+				"delete_access must carry GenericDeleteData, not GenericAccessData")
+
+			got, err := json.Marshal(msg)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.expected, string(got))
+		})
+	}
+}
+
+// TestBuildDeleteAccessMessageCarriesNoRelations guards the property that makes
+// delete_access unscopeable: it has no relation or exclusion field to narrow it.
+// A future author tempted to add one should change the contract deliberately
+// rather than discover the omission by accident.
+func TestBuildDeleteAccessMessageCarriesNoRelations(t *testing.T) {
+	raw, err := json.Marshal(BuildB2BOrgDeleteAccessMessage("0014100000Td9x0AAB"))
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+
+	data, ok := decoded["data"].(map[string]any)
+	require.True(t, ok, "data must be an object")
+	assert.Equal(t, []string{"uid"}, mapKeys(data),
+		"delete_access data must carry uid and nothing else")
+}
+
+// mapKeys returns the sorted keys of m, so key-set assertions are order-stable.
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

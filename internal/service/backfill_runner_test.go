@@ -789,7 +789,7 @@ func indexerDataUsername(t *testing.T, p *subjectCapturingPublisher, i int) stri
 }
 
 // TestBackfillRunner_KeyContact_FullMode_IndexerReflectsResolvedUsername
-// covers a review finding: the full/filtered key_contact page published the
+// The full/filtered key_contact page published the
 // OpenSearch indexer document before resolving the LFID username, so the
 // indexed doc kept an empty username while the FGA/grant-index publish right
 // after it used the resolved one — inconsistent with the targeted reindex

@@ -13,7 +13,7 @@ import (
 // resolveProjectUID resolves the v2 project UID from its slug via the resolver.
 // It returns (uid, true) when the UID is already set, when there is nothing to
 // resolve (empty slug or nil resolver), or on a successful lookup. It returns
-// ("", false) only when the resolver returns an error — a transient failure.
+// ("", false) when the resolver returns an error.
 //
 // Publish-path callers (CDC consumer, backfill Runner) must skip only the indexer
 // publish when ok is false rather than publishing the empty UID: a full index
@@ -23,13 +23,22 @@ import (
 // project/b2b_org relations); key_contact FGA needs only Username/MembershipUID.
 // Skipped indexer docs are repaired by the next CDC event or POST /admin/reindex.
 func resolveProjectUID(ctx context.Context, resolver port.ProjectResolver, slug, current string) (string, bool) {
+	uid, err := resolveProjectUIDWithError(ctx, resolver, slug, current)
+	return uid, err == nil
+}
+
+func resolveProjectUIDWithError(
+	ctx context.Context,
+	resolver port.ProjectResolver,
+	slug, current string,
+) (string, error) {
 	if current != "" || slug == "" || resolver == nil {
-		return current, true
+		return current, nil
 	}
 	uid, err := resolver.UIDFromSlug(ctx, slug)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to resolve project UID", "slug", slug, "error", err)
-		return "", false
+		return "", err
 	}
-	return uid, true
+	return uid, nil
 }

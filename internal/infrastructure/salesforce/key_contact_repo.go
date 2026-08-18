@@ -5,6 +5,7 @@ package salesforce
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -45,6 +46,24 @@ SELECT
     Asset__r.Projects__r.Slug__c, Asset__r.Projects__r.Project_Logo__c
 FROM Project_Role__c
 WHERE Asset__c = %s
+    AND IsDeleted = false
+`
+
+// keyContactsByAssetsSOQL fetches Project_Role__c records for a batch of
+// membership Assets.
+const keyContactsByAssetsSOQL = `
+SELECT
+    Id, Asset__c, Contact__c, Role__c, Status__c,
+    BoardMember__c, PrimaryContact__c,
+    CreatedDate, SystemModstamp,
+    Contact__r.Id, Contact__r.FirstName, Contact__r.LastName, Contact__r.Title, Contact__r.Email,
+    Asset__r.Id, Asset__r.AccountId, Asset__r.Product2Id, Asset__r.Projects__c,
+    Asset__r.Account.Id, Asset__r.Account.Name,
+    Asset__r.Account.Logo_URL__c, Asset__r.Account.Website,
+    Asset__r.Projects__r.Id, Asset__r.Projects__r.Name,
+    Asset__r.Projects__r.Slug__c, Asset__r.Projects__r.Project_Logo__c
+FROM Project_Role__c
+WHERE Asset__c IN (%s)
     AND IsDeleted = false
 `
 
@@ -115,6 +134,63 @@ func (r *KeyContactRepo) FetchKeyContactsByAssetSFID(ctx context.Context, assetS
 	}
 
 	return contacts, nil
+}
+
+// FetchKeyContactsByAssetSFIDs fetches current key contacts for multiple
+// membership Assets and groups them by canonical membership UID.
+func (r *KeyContactRepo) FetchKeyContactsByAssetSFIDs(
+	ctx context.Context,
+	assetSFIDs []string,
+) (map[string][]*model.KeyContact, error) {
+	ids, err := canonicalUniqueSFIDs(assetSFIDs)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalizing asset IDs for key-contact batch: %w", err)
+	}
+	grouped := make(map[string][]*model.KeyContact, len(ids))
+	for _, id := range ids {
+		grouped[id] = nil
+	}
+	roles, err := r.fetchProjectRolesByAssetSFIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	emailMap, err := r.fetchPrimaryEmails(ctx, collectProjectRoleContactIDs(roles))
+	if err != nil {
+		return nil, fmt.Errorf("fetching authoritative emails for restored key contacts: %w", err)
+	}
+	for _, role := range roles {
+		contact, convertErr := convertSOQLToKeyContact(role, emailMap)
+		if convertErr != nil {
+			slog.WarnContext(ctx, "skipping batched asset key contact with invalid SFID",
+				"sfid", role.ID, "error", convertErr)
+			continue
+		}
+		if _, requested := grouped[contact.MembershipUID]; requested {
+			grouped[contact.MembershipUID] = append(grouped[contact.MembershipUID], contact)
+		}
+	}
+	return grouped, nil
+}
+
+func (r *KeyContactRepo) fetchProjectRolesByAssetSFIDs(
+	ctx context.Context,
+	assetSFIDs []string,
+) ([]soqlProjectRole, error) {
+	const batchSize = 200
+	var roles []soqlProjectRole
+	for start := 0; start < len(assetSFIDs); start += batchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("batch fetching asset key contacts: %w", err)
+		}
+		end := min(start+batchSize, len(assetSFIDs))
+		var chunk []soqlProjectRole
+		query := fmt.Sprintf(keyContactsByAssetsSOQL, buildSOQLInClause(assetSFIDs[start:end]))
+		if err := r.client.Query(query, &chunk); err != nil {
+			return nil, fmt.Errorf("batch fetching asset key contacts (chunk %d-%d): %w", start, end, err)
+		}
+		roles = append(roles, chunk...)
+	}
+	return roles, nil
 }
 
 // FetchKeyContactBySFID fetches a single key contact by its Salesforce
@@ -221,7 +297,30 @@ func (r *KeyContactRepo) FetchKeyContactsBySFIDs(ctx context.Context, sfids []st
 }
 
 // Ensure KeyContactRepo satisfies the port at compile time.
-var _ port.KeyContactBatchReader = (*KeyContactRepo)(nil)
+var (
+	_ port.KeyContactBatchReader         = (*KeyContactRepo)(nil)
+	_ port.KeyContactsByMembershipReader = (*KeyContactRepo)(nil)
+)
+
+func canonicalUniqueSFIDs(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			return nil, errors.New("empty SFID")
+		}
+		canonical, err := sfuuid.Normalize18(value)
+		if err != nil {
+			return nil, fmt.Errorf("normalizing SFID %q: %w", value, err)
+		}
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, canonical)
+	}
+	return result, nil
+}
 
 // fetchPrimaryEmails fetches the primary alternate email address for each of the
 // given contact IDs. Returns a map of contactID → email address. Requests are
