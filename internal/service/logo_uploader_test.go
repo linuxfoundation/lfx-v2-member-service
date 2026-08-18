@@ -15,6 +15,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,11 +134,17 @@ type stubLogoOrgWriter struct {
 	org         *model.B2BOrg
 	err         error
 	validateErr error
-	repointErr  error
-	gotInput    model.B2BOrgInput
-	updateCalls []model.B2BOrgInput
-	ifMatches   []string
-	validated   bool
+	// validateErrFromCall, if > 0, makes ValidatePrecondition return
+	// validateErr only from this 1-indexed call onward, leaving earlier calls
+	// to succeed -- lets tests simulate the initial preflight check passing
+	// but the later pre-promotion repoint precheck failing.
+	validateErrFromCall int
+	validateCallCount   int
+	repointErr          error
+	gotInput            model.B2BOrgInput
+	updateCalls         []model.B2BOrgInput
+	ifMatches           []string
+	validated           bool
 }
 
 func (w *stubLogoOrgWriter) Create(_ context.Context, _ string) (*model.B2BOrg, error) {
@@ -146,6 +153,10 @@ func (w *stubLogoOrgWriter) Create(_ context.Context, _ string) (*model.B2BOrg, 
 
 func (w *stubLogoOrgWriter) ValidatePrecondition(_ context.Context, _, _ string) error {
 	w.validated = true
+	w.validateCallCount++
+	if w.validateErrFromCall > 0 && w.validateCallCount < w.validateErrFromCall {
+		return nil
+	}
 	return w.validateErr
 }
 
@@ -420,6 +431,50 @@ func TestLogoUploader_KeyRepointFailsAfterSuccessfulPromotion(t *testing.T) {
 	require.NotNil(t, org)
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the failed repoint attempt")
 	assert.Equal(t, "", objectStore.deletedKey, "scratch object must not be cleaned up when the repoint fails")
+}
+
+func TestLogoUploader_RepointPrecheckAbandonsPromotionWhenOrgChangedSinceCommit(t *testing.T) {
+	// The initial precondition passes and the scratch-URL update commits, but
+	// before Copy promotes those bytes to the shared key, the org has
+	// changed again (e.g. a second, faster upload already won its own
+	// promotion). Copy must never run in that case -- otherwise this
+	// (older, losing) attempt could clobber the shared key with stale bytes
+	// even though its own repoint would later be correctly rejected.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:                 &model.B2BOrg{UID: "uid-1"},
+		validateErr:         pkgerrors.NewPreconditionFailed("b2b org has been modified since last read"),
+		validateErrFromCall: 2,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err, "abandoning the promotion is tolerated, not surfaced as an upload failure")
+	require.NotNil(t, org)
+	assert.Empty(t, objectStore.copyCalls, "Copy must never run once the pre-promotion precheck detects the org changed")
+	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
+}
+
+func TestLogoUploader_RepointEtagIgnoresParentFlag(t *testing.T) {
+	// org.IsParent is populated in place by the writer's publishEvents step
+	// after the first Update -- the plain reader behind the precondition
+	// check never sets it. The repoint if-match must be computed as though
+	// IsParent were unset, matching what that fresh read produces, or every
+	// repoint for a parent org would spuriously fail its precondition check.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1", IsParent: true}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.Len(t, orgWriter.ifMatches, 2)
+	unparented := *orgWriter.org
+	unparented.IsParent = false
+	wantEtag, etagErr := etag.LFXEtag(&unparented)
+	require.NoError(t, etagErr)
+	assert.Equal(t, wantEtag, orgWriter.ifMatches[1], "repoint if-match must be computed as though IsParent were unset")
 }
 
 func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {

@@ -18,12 +18,19 @@ import (
 	"golang.org/x/image/draw"
 )
 
-// maxDecodeDimensionPx bounds what ShrinkToMax will decode. image.DecodeConfig
-// reads only the header, so this check runs before the (memory-proportional-
-// to-pixel-count) full image.Decode — otherwise a small compressed file could
-// declare enormous pixel dimensions and exhaust memory on decode regardless
-// of the on-disk size cap already enforced by MaxB2BOrgLogoSizeBytes.
-const maxDecodeDimensionPx = 10_000
+// maxDecodeDimensionPx and maxDecodePixels together bound what ShrinkToMax
+// will decode. image.DecodeConfig reads only the header, so these checks run
+// before the (memory-proportional-to-pixel-count) full image.Decode —
+// otherwise a small compressed file could declare enormous pixel dimensions
+// and exhaust memory on decode regardless of the on-disk size cap already
+// enforced by MaxB2BOrgLogoSizeBytes. The per-axis check alone isn't enough:
+// a 10,000x10,000 image passes it but is still 100 million pixels (~400MB
+// decoded as RGBA), so maxDecodePixels bounds the total regardless of aspect
+// ratio (LFXV2-2016 lfx-reviewer finding on PR #87).
+const (
+	maxDecodeDimensionPx = 10_000
+	maxDecodePixels      = 40_000_000
+)
 
 // ShrinkToMax decodes data (already sniffed as mediaType — "image/png" or
 // "image/jpeg") and, if either dimension exceeds maxDim, downscales it to fit
@@ -37,6 +44,9 @@ func ShrinkToMax(data []byte, mediaType string, maxDim int) ([]byte, error) {
 	}
 	if cfg.Width > maxDecodeDimensionPx || cfg.Height > maxDecodeDimensionPx {
 		return nil, fmt.Errorf("imageresize: image dimensions %dx%d exceed the %dpx decode limit", cfg.Width, cfg.Height, maxDecodeDimensionPx)
+	}
+	if pixels := cfg.Width * cfg.Height; pixels > maxDecodePixels {
+		return nil, fmt.Errorf("imageresize: image dimensions %dx%d (%d px) exceed the %d px decode limit", cfg.Width, cfg.Height, pixels, maxDecodePixels)
 	}
 	if cfg.Width <= maxDim && cfg.Height <= maxDim {
 		return data, nil

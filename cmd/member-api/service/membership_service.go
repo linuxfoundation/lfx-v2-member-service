@@ -59,10 +59,13 @@ func (s *membershipServicesrvc) Readyz(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	// objectStoreClient is nil in mock mode (REPOSITORY_SOURCE=mock) — skip.
+	// A transient logo-bucket outage only degrades the logo-upload feature —
+	// it must not fail readiness for the whole pod and pull Salesforce
+	// sync/reads out of rotation over it, so this is logged, not returned as
+	// an error (LFXV2-2016 lfx-reviewer finding on PR #87).
 	if objectStoreClient != nil {
 		if err := objectStoreClient.Readyz(ctx); err != nil {
-			slog.ErrorContext(ctx, "service not ready: logo object store unreachable", "error", err)
-			return nil, err
+			slog.WarnContext(ctx, "logo object store unreachable; logo upload degraded, rest of service unaffected", "error", err)
 		}
 	}
 	return []byte("OK\n"), nil

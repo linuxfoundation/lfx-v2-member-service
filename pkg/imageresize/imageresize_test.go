@@ -148,6 +148,17 @@ func TestShrinkToMax_RejectsHugeDeclaredDimensions(t *testing.T) {
 	require.Error(t, err, "a header declaring dimensions past the decode-bomb ceiling must be rejected before a full decode is attempted")
 }
 
+func TestShrinkToMax_RejectsExcessiveTotalPixels(t *testing.T) {
+	// Each axis (8000) is within maxDecodeDimensionPx (10,000), but the total
+	// (64,000,000px) exceeds maxDecodePixels (40,000,000) — a per-axis-only
+	// check would let this through.
+	data := pngHeaderOnly(t, 8_000, 8_000)
+
+	_, err := imageresize.ShrinkToMax(data, "image/png", 1024)
+
+	require.Error(t, err, "total pixel count past the decode-bomb ceiling must be rejected even when each axis is individually within bounds")
+}
+
 func TestShrinkToMax_RejectsUndecodableData(t *testing.T) {
 	_, err := imageresize.ShrinkToMax([]byte("not an image"), "image/png", 1024)
 

@@ -179,6 +179,46 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, err
 	}
 
+	// Compute the repoint precondition now, before promoting any bytes.
+	//
+	// org.IsParent was populated in place by the first Update's publishEvents
+	// call (b2b_org_writer.go) — a writer-only derived field that the plain
+	// reader behind validateForUpdate's precondition check never sets. Left
+	// as-is, that asymmetry alone makes etag.LFXEtag's JSON marshal disagree
+	// with the fresh read the repoint check below compares against (`omitempty`
+	// drops IsParent only when false), so every repoint for a parent org would
+	// fail its precondition check even though nothing else changed. Clear it
+	// before hashing so this etag reflects the same shape GetB2BOrg returns
+	// (LFXV2-2016 lfx-reviewer finding on PR #87).
+	orgForEtag := *org
+	orgForEtag.IsParent = false
+	repointIfMatch, etagErr := etag.LFXEtag(&orgForEtag)
+	if etagErr != nil {
+		slog.ErrorContext(ctx, "failed to compute etag to repoint logo to its shared key after a successful update; leaving it pointed at the scratch object",
+			"b2b_org_uid", uid, "error", etagErr)
+		return org, nil
+	}
+
+	// Re-check that this attempt's scratch URL is still the org's current
+	// logo pointer before physically overwriting the shared key with Copy
+	// below. Without this, a Copy delayed by the retry loop's sleeps could
+	// land after a second, faster upload has already promoted and
+	// repointed — clobbering key with this (older, losing) attempt's bytes
+	// even though the repoint Update at the end of this function would
+	// correctly reject the stale record write via its own ETag check. That
+	// later check alone leaves the shared key's *bytes* wrong regardless of
+	// whether the record update is rejected — checking here, before Copy,
+	// keeps that window to a single fetch instead of up to
+	// CommitPromoteAttempts retries (LFXV2-2016 lfx-reviewer finding on PR
+	// #87). It doesn't fully close the window — that needs a conditional/CAS
+	// write on the shared key — but it narrows the specific delayed-copy
+	// scenario flagged.
+	if precheckErr := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, repointIfMatch); precheckErr != nil {
+		slog.WarnContext(ctx, "b2b org changed since this logo upload committed; abandoning promotion to shared key to avoid overwriting a newer upload",
+			"b2b_org_uid", uid, "error", precheckErr)
+		return org, nil
+	}
+
 	// This attempt has won and Salesforce already durably points at the
 	// scratch object's URL, which exists. Promote those bytes to the shared
 	// key via a server-side copy (not a fresh Put from data) and retry a few
@@ -203,16 +243,10 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	}
 
 	// Promotion succeeded: repoint Salesforce at the shared key's URL. A
-	// failure here (etag computation or the Update call itself) leaves org
-	// pointing at the scratch object, which — same as the Copy-failure case
-	// above — is already a valid, resolvable URL, so this is logged and
-	// tolerated rather than surfaced as an upload failure.
-	repointIfMatch, etagErr := etag.LFXEtag(org)
-	if etagErr != nil {
-		slog.ErrorContext(ctx, "failed to compute etag to repoint logo to its shared key after a successful promotion; leaving it pointed at the scratch object",
-			"b2b_org_uid", uid, "error", etagErr)
-		return org, nil
-	}
+	// failure here leaves org pointing at the scratch object, which — same
+	// as the Copy-failure case above — is already a valid, resolvable URL,
+	// so this is logged and tolerated rather than surfaced as an upload
+	// failure.
 	keyURL := o.objectStore.VersionedURL(key)
 	repointed, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: keyURL}, repointIfMatch)
 	if updateErr != nil {
