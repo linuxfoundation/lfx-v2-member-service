@@ -294,7 +294,7 @@ currently_live() {
 		((._shards.skipped | type) == "number") and
 		((._shards.failed | type) == "number") and
 		(._shards.failed == 0) and
-		(._shards.successful + ._shards.failed == ._shards.total) and
+		(._shards.successful + ._shards.failed + ._shards.skipped == ._shards.total) and
 		((.hits.total.value | type) == "number")' \
 		>/dev/null 2>&1; then
 		return 2
