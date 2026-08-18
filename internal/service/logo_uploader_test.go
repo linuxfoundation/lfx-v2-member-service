@@ -22,8 +22,10 @@ import (
 )
 
 // scratchKeyPattern matches the per-attempt scratch key format
-// b2b_org_logos/{uid}/tmp-{uuid}{ext} — never the deterministic {uid}{ext}.
-var scratchKeyPattern = regexp.MustCompile(`^b2b_org_logos/uid-1/tmp-[0-9a-f-]{36}\.png$`)
+// b2b_org_logo_scratch/{uid}/{uuid}{ext} — a top-level prefix distinct from
+// the deterministic b2b_org_logos/{uid} key, so an S3 lifecycle rule can
+// target scratch objects by prefix alone.
+var scratchKeyPattern = regexp.MustCompile(`^b2b_org_logo_scratch/uid-1/[0-9a-f-]{36}\.png$`)
 
 // deterministicLogoKey is the stable, reused-every-upload key for uid-1 —
 // what makes a copy of a superseded logo URL converge to current bytes

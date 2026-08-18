@@ -150,7 +150,11 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// B2BOrgWriter caller that also writes shared object-storage bytes — that
 	// this attempt actually won.
 	key := fmt.Sprintf("b2b_org_logos/%s", uid)
-	scratchKey := fmt.Sprintf("b2b_org_logos/%s/tmp-%s%s", uid, uuid.NewString(), ext)
+	// A distinct top-level prefix (not nested under key's own path) lets an S3
+	// lifecycle rule expire abandoned scratch objects by prefix alone, with no
+	// risk of ever matching the deterministic shared key above (LFXV2-2016
+	// lfx-reviewer finding on PR #87).
+	scratchKey := fmt.Sprintf("b2b_org_logo_scratch/%s/%s%s", uid, uuid.NewString(), ext)
 
 	if _, err := o.objectStore.Put(ctx, scratchKey, contentType, data); err != nil {
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
