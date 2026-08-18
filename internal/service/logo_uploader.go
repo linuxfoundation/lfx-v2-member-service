@@ -186,6 +186,27 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, err
 	}
 
+	// Update's PATCH is conditioned on ifMatch (If-Unmodified-Since), so it
+	// only ever succeeds for the attempt that actually wins the race — but the
+	// record it returns comes from an unconditional re-fetch afterward (see
+	// salesforce/b2b_org_writer.go's UpdateB2BOrg), and a concurrent logo
+	// upload's own PATCH can land in the gap between this attempt's PATCH and
+	// that re-fetch. When that happens, org describes the other upload's
+	// commit, not this one's: its UpdatedAt, ETag, and LogoURL all belong to a
+	// write this attempt never made. Using it as proof this attempt won would
+	// compute the repoint precondition and promotion generation from someone
+	// else's state and could promote this attempt's (older) bytes over that
+	// upload's newer ones (copilot-pull-request-reviewer finding on PR #87,
+	// 2026-08-18). This attempt's own PATCH already durably committed
+	// LogoURL: scratchURL at some point regardless of what the re-fetch shows,
+	// so if org.LogoURL is anything else, a later upload has already
+	// superseded it and there is nothing left for this attempt to promote.
+	if org.LogoURL != scratchURL {
+		slog.WarnContext(ctx, "a concurrent logo upload committed between this attempt's update and its re-fetch; abandoning this attempt",
+			"b2b_org_uid", uid, "scratch_key", scratchKey)
+		return org, nil
+	}
+
 	// Compute the repoint precondition now, before promoting any bytes.
 	//
 	// org.IsParent was populated in place by the first Update's publishEvents
@@ -259,11 +280,18 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// invert real ordering instead of fixing it — a later-stalled attempt on
 	// one replica could still receive a larger offset than an
 	// already-promoted attempt on another (copilot-pull-request-reviewer
-	// finding on PR #87, 2026-08-18). There is no signal available here that
-	// can order two same-millisecond commits correctly across replicas, so
-	// this no longer tries: CopyIfNewer treats an equal generation as not
-	// stale and lets whichever attempt's copy physically reaches S3 first
-	// win, same as it always has for any other tie.
+	// finding on PR #87, 2026-08-18). A second revision tried treating an
+	// equal generation as harmless — reasoning that an unbreakable tie may as
+	// well let whichever copy reaches S3 first win — but that let a delayed
+	// attempt sharing a generation with an already-promoted one overwrite it
+	// later, a live regression rather than a missed optimization
+	// (copilot-pull-request-reviewer finding on PR #87, 2026-08-18). There is
+	// no signal available here that can order two same-millisecond commits
+	// correctly across replicas, so this no longer tries to order them at
+	// all: CopyIfNewer treats an equal generation as stale, same as a
+	// strictly greater one, so the first attempt to actually promote for a
+	// given generation wins and every later same-generation attempt is
+	// safely dropped rather than risking an overwrite.
 	generation := org.UpdatedAt.UnixNano()
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {

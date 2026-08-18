@@ -147,10 +147,16 @@ type stubLogoOrgWriter struct {
 	validateErrFromCall int
 	validateCallCount   int
 	repointErr          error
-	gotInput            model.B2BOrgInput
-	updateCalls         []model.B2BOrgInput
-	ifMatches           []string
-	validated           bool
+	// racedLogoURL, if set, is what the first Update call returns as
+	// org.LogoURL instead of the input's own LogoURL -- simulating a
+	// concurrent logo upload's PATCH landing between this attempt's PATCH and
+	// its own unconditional re-fetch, so the record handed back describes
+	// that other upload's commit, not this one's.
+	racedLogoURL string
+	gotInput     model.B2BOrgInput
+	updateCalls  []model.B2BOrgInput
+	ifMatches    []string
+	validated    bool
 }
 
 func (w *stubLogoOrgWriter) Create(_ context.Context, _ string) (*model.B2BOrg, error) {
@@ -170,6 +176,13 @@ func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BO
 	w.gotInput = input
 	w.updateCalls = append(w.updateCalls, input)
 	w.ifMatches = append(w.ifMatches, ifMatch)
+	if w.org != nil {
+		if len(w.updateCalls) == 1 && w.racedLogoURL != "" {
+			w.org.LogoURL = w.racedLogoURL
+		} else {
+			w.org.LogoURL = input.LogoURL
+		}
+	}
 	if len(w.updateCalls) >= 2 && w.repointErr != nil {
 		return nil, w.repointErr
 	}
@@ -387,6 +400,31 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 	require.Len(t, objectStore.putKeys, 1, "a losing/failing Update must never reach the shared deterministic key")
 	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "the only write attempted must be the scratch one")
 	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "the scratch object must still be cleaned up after a failed update")
+}
+
+func TestLogoUploader_AbandonsWhenConcurrentUploadRacesTheReFetch(t *testing.T) {
+	// Update's PATCH is conditioned on ifMatch, so it only ever succeeds for
+	// the attempt that actually wins the race -- but the record it returns
+	// comes from an unconditional re-fetch afterward, and a concurrent logo
+	// upload's own PATCH can land in the gap between this attempt's PATCH and
+	// that re-fetch. When that happens, the returned org describes the other
+	// upload's commit, not this one's, and must not be treated as proof this
+	// attempt won (copilot-pull-request-reviewer finding on PR #87,
+	// 2026-08-18).
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:          &model.B2BOrg{UID: "uid-1"},
+		racedLogoURL: "https://cdn.example.com/org-logos-public-scratch/uid-1/other-attempt.png?v=99",
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err, "abandoning this attempt is tolerated, not surfaced as an upload failure")
+	require.NotNil(t, org)
+	assert.Equal(t, "https://cdn.example.com/org-logos-public-scratch/uid-1/other-attempt.png?v=99", org.LogoURL, "the returned org belongs to the concurrent commit, not this attempt")
+	assert.Empty(t, objectStore.copyCalls, "promotion must never run once the re-fetch is known to belong to another upload")
+	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
 }
 
 func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
