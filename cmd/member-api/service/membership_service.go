@@ -188,7 +188,15 @@ func (s *membershipServicesrvc) UploadB2bOrgLogo(ctx context.Context, p *members
 		return nil, wrapError(ctx, err)
 	}
 
-	etagVal, etagErr := etag.LFXEtag(org)
+	// org.IsParent was populated in place by Update's publishEvents call
+	// (b2b_org_writer.go), which the plain reader behind GetB2bOrg and every
+	// future If-Match check never sets. Hashing it as-is here would return an
+	// etag a parent org's own next request can never satisfy. Clear it first
+	// so this response's etag matches the same shape GetB2bOrg computes
+	// (LFXV2-2016 lfx-reviewer finding on PR #87).
+	orgForEtag := *org
+	orgForEtag.IsParent = false
+	etagVal, etagErr := etag.LFXEtag(&orgForEtag)
 	if etagErr != nil {
 		slog.WarnContext(ctx, "failed to compute etag for b2b org", "uid", p.UID, "error", etagErr)
 	}

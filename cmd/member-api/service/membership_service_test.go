@@ -20,6 +20,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	goa "goa.design/goa/v3/pkg"
@@ -259,6 +260,32 @@ func TestUploadB2bOrgLogo_ValidationError(t *testing.T) {
 	var serviceErr *goa.ServiceError
 	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
 	assert.Equal(t, "BadRequest", serviceErr.Name)
+}
+
+func TestUploadB2bOrgLogo_EtagIgnoresWriterEnrichedIsParent(t *testing.T) {
+	// The logo uploader's underlying Update call runs publishEvents, which
+	// populates IsParent in place — a derived field the plain reader behind
+	// GetB2bOrg/If-Match checks never sets. If the response etag hashed this
+	// enriched shape as-is, a parent org's own upload response would carry an
+	// etag its next request could never satisfy.
+	orgWithChildren := *sampleB2BOrg
+	orgWithChildren.IsParent = true
+	svc := newTestSvc(withLogoUploaderUC(stubLogoUploaderUC{org: &orgWithChildren}))
+
+	body := io.NopCloser(strings.NewReader("fake-png-bytes"))
+	result, err := svc.UploadB2bOrgLogo(context.Background(), &membershipservice.UploadB2bOrgLogoPayload{
+		UID:         "lf-uid-001",
+		ContentType: "image/png",
+	}, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result.Etag)
+
+	unenriched := orgWithChildren
+	unenriched.IsParent = false
+	wantEtag, etagErr := etag.LFXEtag(&unenriched)
+	require.NoError(t, etagErr)
+	assert.Equal(t, wantEtag, *result.Etag, "response etag must match the shape GetB2bOrg computes (IsParent unset)")
 }
 
 // ─── GetProjectMembership handler tests ───────────────────────────────────────
