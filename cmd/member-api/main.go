@@ -140,9 +140,11 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.BackfillRunnerImpl(ctx),
 	)
 
+	// A transient logo-bucket outage only degrades the logo-upload feature; it
+	// must not take down the rest of the API, which /readyz already treats as
+	// feature-local (LFXV2-2016 lfx-reviewer finding on PR #87).
 	if err := service.EnsureObjectStoreReady(ctx); err != nil {
-		slog.ErrorContext(ctx, "logo object store not reachable", "error", err)
-		os.Exit(1)
+		slog.WarnContext(ctx, "logo object store unreachable at startup; logo upload degraded, rest of service unaffected", "error", err)
 	}
 
 	// Wrap the services in endpoints.

@@ -120,7 +120,7 @@ func (c *Client) Put(ctx context.Context, key string, contentType string, data [
 
 // VersionedURL implements port.ObjectStoreWriter.
 func (c *Client) VersionedURL(key string) string {
-	return fmt.Sprintf("%s/%s?v=%d", c.cdn, key, nowUnix())
+	return fmt.Sprintf("%s/%s?v=%d", c.cdn, key, nowUnixNano())
 }
 
 // Delete implements port.ObjectStoreWriter.
@@ -151,5 +151,10 @@ func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
 	return nil
 }
 
-// nowUnix is a var so tests can override it deterministically.
-var nowUnix = func() int64 { return time.Now().Unix() }
+// nowUnixNano is a var so tests can override it deterministically. Nanosecond
+// resolution (not Unix seconds) is required: two successful logo promotions
+// for the same org within the same second would otherwise mint identical
+// ?v= cache-busting tokens, letting a CDN edge that already cached the first
+// response serve it back for the second upload's URL too (LFXV2-2016
+// lfx-reviewer finding on PR #87).
+var nowUnixNano = func() int64 { return time.Now().UnixNano() }

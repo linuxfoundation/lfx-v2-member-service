@@ -101,14 +101,14 @@ func TestClient_Put_ReturnsVersionedCDNURL(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
-	origNowUnix := nowUnix
-	nowUnix = func() int64 { return 1700000000 }
-	defer func() { nowUnix = origNowUnix }()
+	origNowUnixNano := nowUnixNano
+	nowUnixNano = func() int64 { return 1700000000000000000 }
+	defer func() { nowUnixNano = origNowUnixNano }()
 
 	url, err := client.Put(context.Background(), "b2b_org_logos/uid-1.png", "image/png", []byte("fake-png-bytes"))
 
 	require.NoError(t, err)
-	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1700000000", url)
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1700000000000000000", url)
 }
 
 func TestClient_Put_UploadError(t *testing.T) {
@@ -127,13 +127,13 @@ func TestClient_VersionedURL_NoUpload(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
-	origNowUnix := nowUnix
-	nowUnix = func() int64 { return 1700000000 }
-	defer func() { nowUnix = origNowUnix }()
+	origNowUnixNano := nowUnixNano
+	nowUnixNano = func() int64 { return 1700000000000000000 }
+	defer func() { nowUnixNano = origNowUnixNano }()
 
 	url := client.VersionedURL("b2b_org_logos/uid-1.png")
 
-	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1700000000", url)
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1700000000000000000", url)
 }
 
 func TestClient_Delete_Success(t *testing.T) {

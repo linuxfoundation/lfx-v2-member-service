@@ -191,7 +191,7 @@ func TestLogoUploader_Happy(t *testing.T) {
 	assert.Equal(t, len(validPNGBytes), objectStore.gotDataLen)
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
 	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
-	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must be cleaned up once the promotion succeeds")
+	assert.Equal(t, "", objectStore.deletedKey, "scratch key must not be synchronously deleted once published -- cleanup is deferred to the object store's own lifecycle rule so any in-flight propagation of the scratch URL isn't raced")
 
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update (determines the race winner), then the shared-key repoint (only after Copy promotes the bytes there)")
 	require.Len(t, objectStore.versionedURLKeys, 2)
@@ -497,7 +497,7 @@ func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {
 	require.NotNil(t, org)
 	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts)
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the shared-key repoint once the retry succeeds")
-	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "scratch key must still be cleaned up once a retry succeeds")
+	assert.Equal(t, "", objectStore.deletedKey, "scratch key must not be synchronously deleted once a retry succeeds -- cleanup is deferred to the object store's own lifecycle rule")
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {

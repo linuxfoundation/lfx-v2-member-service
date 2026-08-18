@@ -259,10 +259,17 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return org, nil
 	}
 
-	if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
-		slog.WarnContext(ctx, "failed to clean up scratch logo object after repointing to the shared key",
-			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
-	}
-
+	// Deliberately not deleted here. This scratch object was already published
+	// as Logo_URL__c by the first Update above (before Copy even ran), which
+	// fired an async indexer publish — a reader that resolved that message (or
+	// a CDN edge that cached the scratch URL) before this repoint could still
+	// be mid-flight against the scratch key's bytes. Deleting it immediately
+	// would race that propagation lag and turn a cached/in-flight reference
+	// into a broken image with nothing to self-heal it, since the object would
+	// be gone. Cleanup is deferred to the object store's own scratch-prefix
+	// lifecycle rule (b2b_org_logo_scratch/, 2-day expiration — see
+	// object-store-definitions.yaml in lfx-v2-opentofu), which gives that
+	// window ample time to close before removal (LFXV2-2016 lfx-reviewer
+	// finding on PR #87).
 	return repointed, nil
 }
