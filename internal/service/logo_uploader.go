@@ -227,13 +227,26 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// upload has already promoted, physically clobbering key with this
 	// (older, losing) attempt's bytes even though that upload's own repoint
 	// Update already succeeded (LFXV2-2016 lfx-reviewer finding on PR #87).
+	//
+	// It is org.UpdatedAt — Salesforce's LastModifiedDate for the very Update
+	// call that just won this attempt's race, fixed the instant that write
+	// committed — not a local time.Now() read taken here. A wall-clock read at
+	// this point is not ordered by the Salesforce commits it's supposed to
+	// protect: attempt A could pass the precheck above and then stall (GC,
+	// scheduler, anything) before reaching this line; attempt B could fully
+	// commit and promote in the meantime; A would then sample a timestamp
+	// larger than B's and be allowed to clobber B's already-promoted bytes
+	// even though A is the older, losing attempt (LFXV2-2016 lfx-reviewer
+	// finding on PR #87). Keying off org.UpdatedAt instead fixes each
+	// attempt's generation at the moment its own winning Update landed, so a
+	// later stall in this goroutine can no longer change it.
 	// If every retry is exhausted, or a newer promotion has already won, org
 	// is simply left pointing at the scratch object — already a normal,
 	// correct-looking Logo_URL__c value, not a broken reference to repair —
 	// and the next upload for this org promotes a fresh scratch object to key
 	// as usual, making this one an ordinary orphan for that promotion to
 	// replace.
-	generation := time.Now().UnixNano()
+	generation := org.UpdatedAt.UnixNano()
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
 		commitErr = o.objectStore.CopyIfNewer(ctx, scratchKey, key, generation)

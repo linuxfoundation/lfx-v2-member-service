@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -501,6 +502,25 @@ func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {
 	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts)
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the shared-key repoint once the retry succeeds")
 	assert.Equal(t, "", objectStore.deletedKey, "scratch key must not be synchronously deleted once a retry succeeds -- cleanup is deferred to the object store's own lifecycle rule")
+}
+
+func TestLogoUploader_PromotionGenerationDerivedFromOrgUpdatedAt(t *testing.T) {
+	// generation must be tied to Salesforce's own commit order (org.UpdatedAt,
+	// i.e. LastModifiedDate) rather than a local wall-clock read taken after
+	// the pre-promotion precheck -- otherwise an arbitrary scheduling delay
+	// between the precheck and this line could let an older, losing attempt's
+	// sampled timestamp outrank a competitor that fully committed and
+	// promoted in between (LFXV2-2016 lfx-reviewer finding on PR #87).
+	committedAt := time.Date(2026, 8, 18, 7, 42, 39, 0, time.UTC)
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1", UpdatedAt: committedAt}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.Len(t, objectStore.copyCalls, 1)
+	assert.Equal(t, committedAt.UnixNano(), objectStore.copyCalls[0].generation, "promotion generation must be org.UpdatedAt, not a local wall-clock read")
 }
 
 func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -40,18 +41,29 @@ func fakeS3ServerWithDelete(t *testing.T, headStatus, putStatus, deleteStatus in
 	}))
 }
 
-// fakeS3ServerWithPromote stubs HeadObject (headStatus, plus headMetadata
-// echoed as x-amz-meta-* response headers so CopyIfNewer's stale-generation
-// check can be exercised) and CopyObject (copyStatus), for testing
-// Client.CopyIfNewer's HeadObject-then-conditional-CopyObject sequence.
-// copyCalls, if non-nil, is incremented each time a CopyObject request
-// actually reaches the server, so tests can assert it was skipped entirely
-// (e.g. HeadObject alone already proved the promotion is stale).
-func fakeS3ServerWithPromote(t *testing.T, headStatus int, headMetadata map[string]string, copyStatus int, copyCalls *int) *httptest.Server {
+// fakeS3ServerWithPromote stubs HeadObject for dstKey (headStatus, plus
+// headMetadata echoed as x-amz-meta-* response headers so CopyIfNewer's
+// stale-generation check can be exercised) and CopyObject (copyStatus), for
+// testing Client.CopyIfNewer's HeadObject-then-conditional-CopyObject
+// sequence. A HeadObject for any other path -- i.e. srcKey, which CopyIfNewer
+// also reads to preserve Content-Type/Cache-Control across the promotion
+// copy -- always succeeds with a stub Content-Type/Cache-Control, since in
+// the real flow the scratch object was already durably Put before promotion
+// is ever attempted. copyCalls, if non-nil, is incremented each time a
+// CopyObject request actually reaches the server, so tests can assert it was
+// skipped entirely (e.g. HeadObject alone already proved the promotion is
+// stale).
+func fakeS3ServerWithPromote(t *testing.T, dstKey string, headStatus int, headMetadata map[string]string, copyStatus int, copyCalls *int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodHead:
+			if !strings.Contains(r.URL.Path, dstKey) {
+				w.Header().Set("Content-Type", "image/png")
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			for k, v := range headMetadata {
 				w.Header().Set("X-Amz-Meta-"+k, v)
 			}
@@ -171,7 +183,7 @@ func TestClient_Delete_Error(t *testing.T) {
 
 func TestClient_CopyIfNewer_DestinationMissing_Success(t *testing.T) {
 	copyCalls := 0
-	server := fakeS3ServerWithPromote(t, http.StatusNotFound, nil, http.StatusOK, &copyCalls)
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusNotFound, nil, http.StatusOK, &copyCalls)
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
@@ -183,7 +195,7 @@ func TestClient_CopyIfNewer_DestinationMissing_Success(t *testing.T) {
 
 func TestClient_CopyIfNewer_DestinationExists_Success(t *testing.T) {
 	copyCalls := 0
-	server := fakeS3ServerWithPromote(t, http.StatusOK, nil, http.StatusOK, &copyCalls)
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, nil, http.StatusOK, &copyCalls)
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
@@ -195,7 +207,7 @@ func TestClient_CopyIfNewer_DestinationExists_Success(t *testing.T) {
 
 func TestClient_CopyIfNewer_StaleGenerationCaughtByHeadObject(t *testing.T) {
 	copyCalls := 0
-	server := fakeS3ServerWithPromote(t, http.StatusOK, map[string]string{"Promoted-At": "999999999999999999"}, http.StatusOK, &copyCalls)
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, map[string]string{"Promoted-At": "999999999999999999"}, http.StatusOK, &copyCalls)
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
@@ -210,7 +222,7 @@ func TestClient_CopyIfNewer_StaleGenerationCaughtByConditionalCopy(t *testing.T)
 	// (or an older) generation, but a concurrent writer commits a newer one
 	// before this CopyObject lands, so S3 itself rejects it with 412.
 	copyCalls := 0
-	server := fakeS3ServerWithPromote(t, http.StatusOK, nil, http.StatusPreconditionFailed, &copyCalls)
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, nil, http.StatusPreconditionFailed, &copyCalls)
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
@@ -221,7 +233,7 @@ func TestClient_CopyIfNewer_StaleGenerationCaughtByConditionalCopy(t *testing.T)
 }
 
 func TestClient_CopyIfNewer_CopyObjectError(t *testing.T) {
-	server := fakeS3ServerWithPromote(t, http.StatusOK, nil, http.StatusInternalServerError, nil)
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, nil, http.StatusInternalServerError, nil)
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
@@ -233,7 +245,67 @@ func TestClient_CopyIfNewer_CopyObjectError(t *testing.T) {
 }
 
 func TestClient_CopyIfNewer_HeadObjectError(t *testing.T) {
-	server := fakeS3ServerWithPromote(t, http.StatusForbidden, nil, http.StatusOK, nil)
+	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusForbidden, nil, http.StatusOK, nil)
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", "b2b_org_logos/uid-1", 1)
+
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, port.ErrStalePromotion))
+	assert.Contains(t, err.Error(), "test-bucket")
+}
+
+// TestClient_CopyIfNewer_PreservesContentTypeAndCacheControl guards against a
+// regression where MetadataDirectiveReplace (needed to stamp the generation)
+// silently dropped the promoted object's Content-Type and Cache-Control,
+// since S3 does not merge REPLACE metadata with the source object's --
+// anything not explicitly restated in the CopyObject request is lost
+// (LFXV2-2016 lfx-reviewer finding on PR #87).
+func TestClient_CopyIfNewer_PreservesContentTypeAndCacheControl(t *testing.T) {
+	dstKey := "b2b_org_logos/uid-1"
+	var gotContentType, gotCacheControl string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead && strings.Contains(r.URL.Path, dstKey):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodHead:
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+			gotContentType = r.Header.Get("Content-Type")
+			gotCacheControl = r.Header.Get("Cache-Control")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"fake-etag"</ETag></CopyObjectResult>`))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", dstKey, 1)
+
+	require.NoError(t, err)
+	assert.Equal(t, "image/png", gotContentType, "promotion must preserve the scratch object's Content-Type instead of defaulting to application/octet-stream")
+	assert.Equal(t, "public, max-age=86400", gotCacheControl, "promotion must preserve the scratch object's Cache-Control instead of dropping it")
+}
+
+func TestClient_CopyIfNewer_SourceHeadObjectError(t *testing.T) {
+	// dstKey missing (so CopyIfNewer proceeds past the destination check), but
+	// the srcKey HeadObject it now performs to read Content-Type/Cache-Control
+	// fails -- must surface as an error, not silently promote without them.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead && strings.Contains(r.URL.Path, "b2b_org_logos/uid-1"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 

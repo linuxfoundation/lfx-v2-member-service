@@ -157,9 +157,9 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 // carry.
 func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generation int64) error {
 	source := fmt.Sprintf("%s/%s", c.bucket, srcKey)
-	metadata := map[string]string{promotionGenerationMetadataKey: strconv.FormatInt(generation, 10)}
 
 	head, headErr := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &c.bucket, Key: &dstKey})
+	var ifMatch, ifNoneMatch *string
 	var notFound *types.NotFound
 	switch {
 	case headErr == nil:
@@ -168,28 +168,37 @@ func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generat
 				return port.ErrStalePromotion
 			}
 		}
-		_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
-			Bucket:            &c.bucket,
-			Key:               &dstKey,
-			CopySource:        &source,
-			IfMatch:           head.ETag,
-			Metadata:          metadata,
-			MetadataDirective: types.MetadataDirectiveReplace,
-		})
-		return classifyPromoteCopyErr(srcKey, dstKey, c.bucket, copyErr)
+		ifMatch = head.ETag
 	case errors.As(headErr, &notFound):
-		_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
-			Bucket:            &c.bucket,
-			Key:               &dstKey,
-			CopySource:        &source,
-			IfNoneMatch:       aws.String("*"),
-			Metadata:          metadata,
-			MetadataDirective: types.MetadataDirectiveReplace,
-		})
-		return classifyPromoteCopyErr(srcKey, dstKey, c.bucket, copyErr)
+		ifNoneMatch = aws.String("*")
 	default:
 		return fmt.Errorf("checking existing object %s in bucket %s before promotion: %w", dstKey, c.bucket, headErr)
 	}
+
+	// MetadataDirectiveReplace (needed below to stamp the generation) makes S3
+	// discard every system/user metadata field not explicitly restated in this
+	// request — it does not selectively merge with srcKey's own metadata. Read
+	// srcKey's Content-Type and Cache-Control here so the promoted object keeps
+	// them; without this the shared key would silently become
+	// application/octet-stream with no cache policy (LFXV2-2016 lfx-reviewer
+	// finding on PR #87).
+	srcHead, srcHeadErr := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &c.bucket, Key: &srcKey})
+	if srcHeadErr != nil {
+		return fmt.Errorf("reading source object %s in bucket %s before promotion: %w", srcKey, c.bucket, srcHeadErr)
+	}
+
+	_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:            &c.bucket,
+		Key:               &dstKey,
+		CopySource:        &source,
+		IfMatch:           ifMatch,
+		IfNoneMatch:       ifNoneMatch,
+		ContentType:       srcHead.ContentType,
+		CacheControl:      srcHead.CacheControl,
+		Metadata:          map[string]string{promotionGenerationMetadataKey: strconv.FormatInt(generation, 10)},
+		MetadataDirective: types.MetadataDirectiveReplace,
+	})
+	return classifyPromoteCopyErr(srcKey, dstKey, c.bucket, copyErr)
 }
 
 // classifyPromoteCopyErr maps a conditional CopyObject failure (412
