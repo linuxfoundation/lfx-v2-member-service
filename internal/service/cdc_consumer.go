@@ -511,11 +511,10 @@ var errRestoreIncomplete = errors.New("authorization restore incomplete")
 // cancelled during a graceful shutdown.
 const deleteAccessMarkerTimeout = 5 * time.Second
 
-// maxDeleteAccessMarkerAttempts bounds the immediate retry of that write, on
-// the same reasoning as maxGrantIndexReadAttempts: the caller commits the
-// replay cursor regardless of outcome, and a purge has no other chance to be
-// retried, so a transient blip that one more attempt would have ridden out
-// must not become a permanently unrecorded revocation.
+// maxDeleteAccessMarkerAttempts bounds the immediate retry of that write. The
+// attempts intentionally share one short detached timeout; if all fail, the
+// event-level authorization retry applies its capped exponential backoff before
+// trying the whole idempotent purge again.
 const maxDeleteAccessMarkerAttempts = 3
 
 // recordFailedDeleteAccess durably records a delete_access that was not
@@ -590,7 +589,7 @@ func purgeFailure(reindexType, uid string, publishErr, markerErr error) error {
 // returns nil for a purge the broker never received — a crash or disconnect in
 // that window drops the revocation with no error to propagate and nothing to
 // mark. The key_contact delete path flushes for the same reason before it
-// erases its grant-index entry (see handleKeyContactDeleteImpl). A purge is
+// erases its grant-index entry (see handleProjectRoleDelete). A purge is
 // the one message with no second chance: the Salesforce record is gone, so
 // neither the next CDC event nor /admin/reindex will re-emit it, and the
 // tuples outlive the object they authorized.
@@ -800,7 +799,7 @@ func makeReturnedSet[T any](items []T, uid func(T) string, seenButFailed []strin
 // absent from the SOQL result (soft-deleted or no longer qualifying) to the
 // provided handler for index convergence. Callers pass the *Absent entry point
 // rather than the *Delete one: absence does not prove deletion, so this path
-// must not withdraw FGA tuples. See handleAccountDeleteImpl.
+// must not withdraw FGA tuples.
 func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, upsertIDs []string, returned map[string]struct{}, deleteHandler func(context.Context, string) error) {
 	for _, id := range upsertIDs {
 		if _, found := returned[id]; !found {
@@ -816,42 +815,7 @@ func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, u
 
 // handleAccountDelete handles an Account genuinely deleted in Salesforce.
 func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error {
-	return o.handleAccountDeleteImpl(ctx, uid, true)
-}
-
-// handleAccountAbsent handles an Account that was requested in a batch upsert
-// but did not come back from SOQL. Absence is not deletion: an org that still
-// exists but no longer holds a qualifying membership lands here too, which is
-// why this entry point exists separately rather than sharing the delete one.
-func (o *CDCConsumer) handleAccountAbsent(ctx context.Context, uid string) error {
-	return o.handleAccountDeleteImpl(ctx, uid, false)
-}
-
-// handleAccountDeleteImpl converges a b2b_org that is either gone or absent.
-// realDelete distinguishes the two: only a genuine Salesforce delete may
-// withdraw authorization, because only then is it certain no live org is
-// affected.
-func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, realDelete bool) error {
-	if err := o.cacheInvalidator.InvalidateB2BOrg(ctx, uid); err != nil {
-		slog.WarnContext(ctx, "cdc: b2b_org cache invalidation failed on delete",
-			"uid", uid, "error", err)
-	}
-
-	stubOrg := &model.B2BOrg{UID: uid}
-	PublishB2BOrgIndexer(ctx, o.publisher, stubOrg, indexerConstants.ActionDeleted)
-
-	// Only a genuine Salesforce delete withdraws authorization. An org that is
-	// merely absent from the periodic query may still exist — a lapsed
-	// membership is enough to drop it — and purging that org's tuples would
-	// lock live administrators out of an account that is still theirs.
-	//
-	// The index tombstone above is published on both paths because it is
-	// cheaply rebuilt by /admin/reindex. Authorization is not: the writer and
-	// auditor grants live in the org's settings record, so a wrong purge is
-	// recovered only by an operator re-applying them.
-	if !realDelete {
-		return nil
-	}
+	o.publishAccountDeleteIndex(ctx, uid)
 
 	// A surviving "team:" subject is expected rather than a failure. fga-sync
 	// declines to delete team-subject tuples, so a deleted org keeps the staff
@@ -869,6 +833,29 @@ func (o *CDCConsumer) handleAccountDeleteImpl(ctx context.Context, uid string, r
 			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid))
 	}
 	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
+}
+
+// handleAccountAbsent handles an Account that was requested in a batch upsert
+// but did not come back from SOQL. Absence is not deletion: an org that still
+// exists but no longer holds a qualifying membership lands here too, which is
+// why this entry point exists separately rather than sharing the delete one.
+func (o *CDCConsumer) handleAccountAbsent(ctx context.Context, uid string) error {
+	o.publishAccountDeleteIndex(ctx, uid)
+	return nil
+}
+
+// publishAccountDeleteIndex converges the search state shared by both a genuine
+// delete and a record that is merely absent from the qualifying SOQL query.
+// Authorization cleanup deliberately remains in handleAccountDelete so the
+// absent path cannot reach it through a boolean mode flag.
+func (o *CDCConsumer) publishAccountDeleteIndex(ctx context.Context, uid string) {
+	if err := o.cacheInvalidator.InvalidateB2BOrg(ctx, uid); err != nil {
+		slog.WarnContext(ctx, "cdc: b2b_org cache invalidation failed on delete",
+			"uid", uid, "error", err)
+	}
+
+	stubOrg := &model.B2BOrg{UID: uid}
+	PublishB2BOrgIndexer(ctx, o.publisher, stubOrg, indexerConstants.ActionDeleted)
 }
 
 // ── Asset (project_membership) ────────────────────────────────────────────────
@@ -1133,7 +1120,15 @@ func (o *CDCConsumer) restoreKeyContactGrants(ctx context.Context, membershipUID
 
 // handleAssetDelete handles an Asset genuinely deleted in Salesforce.
 func (o *CDCConsumer) handleAssetDelete(ctx context.Context, uid string) error {
-	return o.handleAssetDeleteImpl(ctx, uid, true)
+	o.publishAssetDeleteIndex(ctx, uid)
+
+	// Propagate unrecorded delivery failures for the same reason as
+	// handleAccountDelete: no later upsert can rebuild a deleted membership.
+	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
+		return purgeFailure(constants.ReindexTypeProjectMembershipDeleteAccess, uid, err,
+			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid))
+	}
+	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
 }
 
 // handleAssetAbsent handles an Asset that was requested in a batch upsert but
@@ -1141,12 +1136,14 @@ func (o *CDCConsumer) handleAssetDelete(ctx context.Context, uid string) error {
 // Product2.Family flipped off Membership. The second case is a live record, so
 // this path must not withdraw authorization.
 func (o *CDCConsumer) handleAssetAbsent(ctx context.Context, uid string) error {
-	return o.handleAssetDeleteImpl(ctx, uid, false)
+	o.publishAssetDeleteIndex(ctx, uid)
+	return nil
 }
 
-// handleAssetDeleteImpl converges a project_membership that is either gone or
-// absent. See handleAccountDeleteImpl for what realDelete governs.
-func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, realDelete bool) error {
+// publishAssetDeleteIndex converges the search state shared by both a genuine
+// delete and a record that no longer qualifies for the membership query.
+// Authorization cleanup deliberately remains in handleAssetDelete.
+func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
 	if err := o.cacheInvalidator.InvalidateProjectMembership(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed on delete",
 			"uid", uid, "error", err)
@@ -1154,21 +1151,6 @@ func (o *CDCConsumer) handleAssetDeleteImpl(ctx context.Context, uid string, rea
 
 	stubPM := &model.ProjectMembership{UID: uid}
 	PublishProjectMembershipIndexer(ctx, o.publisher, stubPM, indexerConstants.ActionDeleted)
-
-	// See handleAccountDeleteImpl: absence is not deletion. A membership can
-	// drop out of the periodic query because Product2.Family flipped off
-	// Membership, which leaves a live record whose auditor cascade must survive.
-	if !realDelete {
-		return nil
-	}
-
-	// See handleAccountDeleteImpl for why this is propagated rather than
-	// swallowed.
-	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
-		return purgeFailure(constants.ReindexTypeProjectMembershipDeleteAccess, uid, err,
-			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid))
-	}
-	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
 }
 
 // ── Project_Role__c (key_contact) ─────────────────────────────────────────────

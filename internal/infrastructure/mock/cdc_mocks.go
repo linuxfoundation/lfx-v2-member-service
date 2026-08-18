@@ -15,13 +15,14 @@ import (
 
 // compile-time interface checks.
 var (
-	_ port.CacheInvalidator      = (*MockCacheInvalidator)(nil)
-	_ port.MembershipBatchReader = (*MockMembershipBatchReader)(nil)
-	_ port.KeyContactBatchReader = (*MockKeyContactBatchReader)(nil)
-	_ port.AccountBatchReader    = (*MockAccountBatchReader)(nil)
-	_ port.SalesforceQuotaGauge  = (*MockSalesforceQuotaGauge)(nil)
-	_ port.CDCRepairStore        = (*MockCDCRepairStore)(nil)
-	_ port.KeyContactGrantIndex  = (*MockKeyContactGrantIndex)(nil)
+	_ port.CacheInvalidator              = (*MockCacheInvalidator)(nil)
+	_ port.MembershipBatchReader         = (*MockMembershipBatchReader)(nil)
+	_ port.KeyContactBatchReader         = (*MockKeyContactBatchReader)(nil)
+	_ port.KeyContactsByMembershipReader = (*MockKeyContactsByMembershipReader)(nil)
+	_ port.AccountBatchReader            = (*MockAccountBatchReader)(nil)
+	_ port.SalesforceQuotaGauge          = (*MockSalesforceQuotaGauge)(nil)
+	_ port.CDCRepairStore                = (*MockCDCRepairStore)(nil)
+	_ port.KeyContactGrantIndex          = (*MockKeyContactGrantIndex)(nil)
 )
 
 // MockCacheInvalidator is a test double for port.CacheInvalidator that counts
@@ -77,6 +78,20 @@ type MockKeyContactBatchReader struct {
 
 func (r *MockKeyContactBatchReader) FetchKeyContactsBySFIDs(_ context.Context, _ []string) ([]*model.KeyContact, []string, error) {
 	return r.Contacts, r.ConvErrSFIDs, r.Err
+}
+
+// MockKeyContactsByMembershipReader is a test double for
+// port.KeyContactsByMembershipReader.
+type MockKeyContactsByMembershipReader struct {
+	Contacts []*model.KeyContact
+	Err      error
+}
+
+func (r *MockKeyContactsByMembershipReader) FetchKeyContactsByAssetSFID(
+	_ context.Context,
+	_ string,
+) ([]*model.KeyContact, error) {
+	return r.Contacts, r.Err
 }
 
 // MockAccountBatchReader is a test double for port.AccountBatchReader that
