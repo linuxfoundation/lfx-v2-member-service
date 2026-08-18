@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	indexerConstants "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/constants"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
@@ -230,85 +231,9 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 		return err
 	}
 
-	// Latched once an authorization change has no durable retry path; see the
-	// replay-cursor comment below.
-	cursorHeld := false
-
 	for event := range eventCh {
-		// Wrap the handler in a closure so that defers guarantee span.End()
-		// and handleCancel() run even if o.handle panics. Both defers run
-		// before the closure returns, so neither is included in the
-		// replay-cursor save that follows. span.End() fires first because it
-		// is deferred after handleCancel() (LIFO order).
-		handleErr := func(event model.CDCEvent) error {
-			// Give each handler a short-lived background context so that an
-			// in-flight Salesforce fetch or NATS cache write is not aborted by a
-			// concurrent graceful shutdown. 30 s matches the graceful-shutdown
-			// window; any handler that runs longer than that is already a problem.
-			handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer handleCancel()
-			handleCtx, span := cdcTracer.Start(handleCtx, "salesforce.cdc.process",
-				trace.WithSpanKind(trace.SpanKindConsumer),
-				trace.WithAttributes(
-					attribute.String("messaging.system", "salesforce"),
-					attribute.String("messaging.destination.name", channel),
-					attribute.String("messaging.operation.type", "process"),
-					attribute.String("cdc.entity", event.Entity),
-					attribute.String("cdc.change_type", string(event.ChangeType)),
-					attribute.Int("cdc.record_count", len(event.RecordIDs)),
-				),
-			)
-			defer span.End()
-			err := o.handle(handleCtx, event)
-			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			}
+		if err := o.processWithAuthorizationRetry(ctx, channel, event); err != nil {
 			return err
-		}(event)
-		if handleErr != nil {
-			// Log and continue processing; the cursor decision below separates
-			// repairable errors from authorization changes that require replay.
-			slog.ErrorContext(ctx, "cdc: event handling failed, continuing",
-				"entity", event.Entity,
-				"change_type", event.ChangeType,
-				"record_ids", event.RecordIDs,
-				"error", handleErr,
-			)
-			if !cursorHeld &&
-				(errors.Is(handleErr, errPurgeUnrecorded) || errors.Is(handleErr, errRestoreIncomplete)) {
-				cursorHeld = true
-				slog.ErrorContext(ctx, "cdc: authorization change incomplete — holding replay cursor so it is redelivered",
-					"entity", event.Entity,
-					"record_ids", event.RecordIDs,
-					"error", handleErr,
-				)
-			}
-		}
-
-		// Commit-after-process: persist cursor regardless of handler error so
-		// a transient failure doesn't block the stream indefinitely.
-		//
-		// The exceptions are a purge that reached neither the broker nor the
-		// repair bucket, and an incomplete grant restore. /admin/reindex cannot
-		// repair either relation set, so redelivery is the only remaining chance.
-		//
-		// The hold latches for the rest of the run rather than skipping this one
-		// save, because the cursor is a single position per channel: committing
-		// any later event would carry it past the incomplete mutation and void the
-		// guarantee. Processing continues so a persistent dependency outage
-		// degrades the commit rather than becoming a crash loop; the events
-		// replayed on the next restart are upserts, purges, and restores, all
-		// idempotent.
-		//
-		// The latch does not clear when the dependency recovers — clearing it
-		// would advance the cursor past the incomplete mutation. The replay
-		// window grows until the process restarts, not until the fault ends:
-		// the ERROR above is an actionable signal to restart once the dependency
-		// is healthy, and letting the held position age out of Salesforce's
-		// replay retention degrades exactly as any prolonged consumer outage.
-		if cursorHeld {
-			continue
 		}
 
 		// Use a short-lived background context for the Save so that a
@@ -325,6 +250,69 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 	}
 
 	return ctx.Err()
+}
+
+const (
+	authorizationRetryInitialDelay = 100 * time.Millisecond
+	authorizationRetryMaxDelay     = 30 * time.Second
+)
+
+func (o *CDCConsumer) processWithAuthorizationRetry(
+	ctx context.Context,
+	channel string,
+	event model.CDCEvent,
+) error {
+	retryDelay := authorizationRetryInitialDelay
+	for {
+		handleErr := o.processEvent(channel, event)
+		if handleErr != nil {
+			slog.ErrorContext(ctx, "cdc: event handling failed",
+				"entity", event.Entity,
+				"change_type", event.ChangeType,
+				"record_ids", event.RecordIDs,
+				"error", handleErr,
+			)
+		}
+		if !errors.Is(handleErr, errPurgeUnrecorded) && !errors.Is(handleErr, errRestoreIncomplete) {
+			return nil
+		}
+
+		slog.ErrorContext(ctx, "cdc: authorization change incomplete — retrying event before advancing",
+			"entity", event.Entity,
+			"record_ids", event.RecordIDs,
+			"error", handleErr,
+		)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryDelay):
+		}
+		retryDelay = min(retryDelay*2, authorizationRetryMaxDelay)
+	}
+}
+
+func (o *CDCConsumer) processEvent(channel string, event model.CDCEvent) error {
+	handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer handleCancel()
+	handleCtx, span := cdcTracer.Start(handleCtx, "salesforce.cdc.process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "salesforce"),
+			attribute.String("messaging.destination.name", channel),
+			attribute.String("messaging.operation.type", "process"),
+			attribute.String("cdc.entity", event.Entity),
+			attribute.String("cdc.change_type", string(event.ChangeType)),
+			attribute.Int("cdc.record_count", len(event.RecordIDs)),
+		),
+	)
+	defer span.End()
+
+	err := o.handle(handleCtx, event)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // handle dispatches a single CDCEvent to the correct entity handler.
@@ -759,22 +747,26 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 
 	// CDC always passes globalOrgAdminTeamUID (not create-only like the writer).
 	var restoreErr error
+	if isRestore(changeType) && childMapErr != nil {
+		restoreErr = fmt.Errorf("read org hierarchy for restore: %w", childMapErr)
+	}
 	restorePublished := false
 	for _, org := range orgs {
+		if isRestore(changeType) {
+			PublishB2BOrgIndexer(ctx, o.publisher, org, indexerConstants.ActionUpdated)
+			published, err := o.restoreOrgAccess(
+				ctx, org, childMap[org.UID], childMap[org.ParentUID], childMapErr == nil)
+			restorePublished = restorePublished || published
+			restoreErr = errors.Join(restoreErr, err)
+			continue
+		}
+
 		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
 		// CDC-created child org gets its parent + child-list tuples even when no
-		// reparent was detected. publishB2BOrgUpsertEvents only emits reparenting
-		// messages on a parent *change* (nil on a cold-cache create); this closes
-		// that gap. Both are idempotent update_access upserts, so a genuine
-		// reparent double-emitting the new parent tuple is safe.
+		// reparent was detected.
 		if org.ParentUID != "" {
 			PublishB2BOrgParentFGA(ctx, o.publisher, org, childMap[org.ParentUID])
-		}
-		if isRestore(changeType) {
-			published, err := o.restoreOrgPrincipalGrants(ctx, org)
-			restorePublished = restorePublished || published
-			restoreErr = errors.Join(restoreErr, err)
 		}
 	}
 	if restorePublished {
@@ -939,6 +931,17 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	var restoreErr error
 	restorePublished := false
 	for _, pm := range memberships {
+		if isRestore(changeType) {
+			published, err := o.publishRestoredProjectMembership(ctx, pm, action)
+			restorePublished = restorePublished || published
+			restoreErr = errors.Join(restoreErr, err)
+
+			published, err = o.restoreKeyContactGrants(ctx, pm.UID)
+			restorePublished = restorePublished || published
+			restoreErr = errors.Join(restoreErr, err)
+			continue
+		}
+
 		// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so
 		// the indexer doc carries the project_uid tag + parent_ref. On a transient
 		// resolver failure, skip only the indexer publish and still emit OpenFGA so
@@ -954,11 +957,6 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
 			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
 		}
-		if isRestore(changeType) {
-			published, err := o.restoreKeyContactGrants(ctx, pm.UID)
-			restorePublished = restorePublished || published
-			restoreErr = errors.Join(restoreErr, err)
-		}
 	}
 	if restorePublished {
 		restoreErr = errors.Join(restoreErr, o.publisher.Flush(ctx))
@@ -973,54 +971,99 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	return nil
 }
 
-// restoreOrgPrincipalGrants rebuilds the per-user writer and auditor tuples of
-// an org Salesforce has just restored.
-//
-// The ordinary upsert cannot do it: it passes nil for both relations, which
-// tells fga-sync to preserve whatever exists (see BuildB2BOrgFGAMessage) —
-// correct for a normal update, since CDC has no business reaping grants it does
-// not manage, but after a delete_access purge there is nothing left to
-// preserve. The settings record is the authoritative source and survives the
-// purge, which withdraws FGA tuples rather than KV records.
-//
-// Only non-empty lists are sent. A non-nil empty list would mean "replace with
-// nothing", which on an UNDELETE that followed no purge — a restore of a record
-// deleted before this consumer was subscribed, say — would reap grants that are
-// still legitimate. Restoring never needs to reap, because the purge already
-// removed everything, so the safe direction is strictly additive.
-func (o *CDCConsumer) restoreOrgPrincipalGrants(ctx context.Context, org *model.B2BOrg) (bool, error) {
-	if o.settingsReader == nil {
-		return false, nil
-	}
-	settings, _, err := o.settingsReader.GetSettings(ctx, org.UID)
-	if err != nil {
-		slog.ErrorContext(ctx, "cdc: failed to read org settings for restored org — principals remain locked out",
-			"uid", org.UID, "error", err, "publish_failed_for_backfill_repair", true)
-		return false, fmt.Errorf("read settings for restored org %s: %w", org.UID, err)
-	}
-	if settings == nil {
-		return false, nil
-	}
-	writers := settings.ActiveWriterUsernames()
-	auditors := settings.ActiveAuditorUsernames()
-	if len(writers) == 0 && len(auditors) == 0 {
-		return false, nil
+func (o *CDCConsumer) publishRestoredProjectMembership(
+	ctx context.Context,
+	pm *model.ProjectMembership,
+	action indexerConstants.MessageAction,
+) (bool, error) {
+	uid, resolveErr := resolveProjectUIDWithError(ctx, o.resolver, pm.ProjectSlug, pm.ProjectUID)
+	resolved := resolveErr == nil
+	if resolved {
+		pm.ProjectUID = uid
+		PublishProjectMembershipIndexer(ctx, o.publisher, pm, action)
 	}
 
-	msg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
+	var restoreErr error
+	if resolveErr != nil && !pkgerrors.IsNotFound(resolveErr) {
+		restoreErr = fmt.Errorf(
+			"resolve project reference for restored project_membership %s: %w",
+			pm.UID,
+			resolveErr,
+		)
+	}
+	missingB2BOrg := pm.B2BOrgUID == ""
+	missingProject := pm.ProjectUID == ""
+	if missingB2BOrg || missingProject {
+		slog.ErrorContext(ctx, "cdc: restored project_membership has no authoritative structural reference",
+			"uid", pm.UID,
+			"missing_b2b_org", missingB2BOrg,
+			"missing_project", missingProject,
+			"retryable", restoreErr != nil,
+			"publish_failed_for_backfill_repair", true,
+		)
+	}
+
+	msg := BuildProjectMembershipFGAMessage(pm)
+	if missingB2BOrg || missingProject {
+		msg = BuildProjectMembershipFGAMessagePreserveMissingRefs(pm)
+	}
+	if err := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); err != nil {
+		return false, errors.Join(restoreErr,
+			fmt.Errorf("publish structural restore for project_membership %s: %w", pm.UID, err))
+	}
+	return true, restoreErr
+}
+
+// restoreOrgAccess rebuilds every b2b_org tuple this service manages and that
+// delete_access removed: configured teams, direct principals, parent, and child.
+func (o *CDCConsumer) restoreOrgAccess(
+	ctx context.Context,
+	org *model.B2BOrg,
+	children, parentChildren []string,
+	hierarchyReady bool,
+) (bool, error) {
+	var writers, auditors []string
+	if o.settingsReader != nil {
+		settings, _, err := o.settingsReader.GetSettings(ctx, org.UID)
+		if err != nil {
+			return false, fmt.Errorf("read settings for restored org %s: %w", org.UID, err)
+		}
+		if settings != nil {
+			writers = settings.ActiveWriterUsernames()
+			auditors = settings.ActiveAuditorUsernames()
+		}
+	}
+
+	messages := []fgatypes.GenericFGAMessage{BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
 		GlobalOrgAdminTeamUID: o.globalOrgAdminTeamUID,
 		AuditorTeams:          o.b2bOrgAuditorTeams,
 		Writers:               writers,
 		Auditors:              auditors,
-	})
-	if pubErr := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
-		slog.ErrorContext(ctx, "cdc: failed to restore org principal grants on undeleted org",
-			"uid", org.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
-		return false, fmt.Errorf("publish principal restore for org %s: %w", org.UID, pubErr)
+	})}
+	if hierarchyReady && org.ParentUID != "" {
+		if parentChildren == nil {
+			parentChildren = []string{}
+		}
+		messages = append(messages,
+			BuildB2BOrgReparentingMessages(&model.B2BOrg{UID: org.UID}, org, nil, parentChildren)...)
 	}
-	slog.InfoContext(ctx, "cdc: restored org principal grants for undeleted org",
-		"uid", org.UID, "writers", len(writers), "auditors", len(auditors))
-	return true, nil
+	if hierarchyReady {
+		if children == nil {
+			children = []string{}
+		}
+		messages = append(messages, BuildChildListMessage(org.UID, children))
+	}
+
+	published := false
+	var restoreErr error
+	for _, msg := range messages {
+		if err := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); err != nil {
+			restoreErr = errors.Join(restoreErr, err)
+			continue
+		}
+		published = true
+	}
+	return published, restoreErr
 }
 
 // restoreKeyContactGrants re-publishes the current key_contact grants of a
