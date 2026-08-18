@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +43,11 @@ const (
 	CommitPromoteAttempts   = 3
 	commitPromoteRetryDelay = 200 * time.Millisecond
 )
+
+// generationTiebreak breaks ties between promotion attempts whose org.UpdatedAt
+// values land in the same Salesforce-reported millisecond — see its use in
+// UploadB2BOrgLogo. Process-lifetime monotonic; never resets.
+var generationTiebreak atomic.Int64
 
 // LogoUploader uploads a B2B org logo to object storage and writes the
 // resulting URL to the org's Salesforce Logo_URL__c field via B2BOrgWriter —
@@ -248,7 +254,19 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// and the next upload for this org promotes a fresh scratch object to key
 	// as usual, making this one an ordinary orphan for that promotion to
 	// replace.
-	generation := org.UpdatedAt.UnixNano()
+	//
+	// org.UpdatedAt.UnixNano() alone is not always strictly increasing:
+	// Salesforce's LastModifiedDate is reported at millisecond precision, so
+	// two successful updates landing in the same millisecond produce an
+	// identical generation, and CopyIfNewer's tie rule (existingGen >=
+	// generation) then wrongly treats the later, legitimate promotion as
+	// stale (lfx-reviewer finding on PR #87, 2026-08-18). generationTiebreak
+	// adds a small offset bounded to [0, 1_000_000) — strictly inside that
+	// millisecond's own nanosecond range — so it breaks same-millisecond ties
+	// without ever pushing this attempt's generation into the next
+	// millisecond's range and inverting real ordering against an attempt that
+	// actually has a later org.UpdatedAt.
+	generation := org.UpdatedAt.UnixNano() + generationTiebreak.Add(1)%1_000_000
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
 		commitErr = o.objectStore.CopyIfNewer(ctx, scratchKey, key, generation)

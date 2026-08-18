@@ -247,15 +247,26 @@ func skipElement(dec *xml.Decoder) error {
 // href/xlink:href when — and only when — it's a same-document "#fragment"
 // reference. Every xmlns declaration is dropped here; the root's is re-added
 // by the caller.
+//
+// encoding/xml reports both the unprefixed "href" and the legacy "xlink:href"
+// with Name.Local == "href" (they differ only in Name.Space), so an element
+// carrying both would otherwise emit two "href" attributes on one output tag
+// — a duplicate, malformed attribute (Copilot/lfx-reviewer finding on PR #87,
+// 2026-08-18). At most one href survives: the unprefixed form wins if present
+// and valid, otherwise the xlink:href form is kept.
 func filterAttrs(attrs []xml.Attr) []xml.Attr {
 	var out []xml.Attr
+	var href *xml.Attr
 	for _, a := range attrs {
 		switch {
 		case a.Name.Local == "xmlns" || a.Name.Space == "xmlns":
 			continue
 		case a.Name.Local == "href":
-			if isFragmentRef(a.Value) {
-				out = append(out, xml.Attr{Name: xml.Name{Local: "href"}, Value: a.Value})
+			if !isFragmentRef(a.Value) {
+				continue
+			}
+			if href == nil || a.Name.Space == "" {
+				href = &a
 			}
 		case paintAttributes[a.Name.Local]:
 			if isSafePaintValue(a.Value) {
@@ -264,6 +275,9 @@ func filterAttrs(attrs []xml.Attr) []xml.Attr {
 		case allowedAttributes[a.Name.Local]:
 			out = append(out, xml.Attr{Name: xml.Name{Local: a.Name.Local}, Value: a.Value})
 		}
+	}
+	if href != nil {
+		out = append(out, xml.Attr{Name: xml.Name{Local: "href"}, Value: href.Value})
 	}
 	return out
 }

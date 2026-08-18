@@ -105,6 +105,38 @@ func TestSanitize_DropsNonFragmentHref(t *testing.T) {
 	assert.Contains(t, got, `href="#local"`)
 }
 
+func TestSanitize_DedupesHrefAndXlinkHrefOnSameElement(t *testing.T) {
+	// encoding/xml reports both "href" and "xlink:href" with Name.Local ==
+	// "href" (they differ only by namespace), so an element carrying both
+	// would otherwise round-trip as two "href" attributes on one output tag
+	// -- a duplicate, malformed attribute (Copilot/lfx-reviewer finding on PR
+	// #87, 2026-08-18). The unprefixed form must win when both are present.
+	in := `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+		<use xlink:href="#legacy" href="#modern"/>
+	</svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	assert.Equal(t, 1, strings.Count(got, "href="), "at most one href attribute must survive on the element")
+	assert.Contains(t, got, `href="#modern"`)
+	assert.NotContains(t, got, "#legacy")
+}
+
+func TestSanitize_FallsBackToXlinkHrefWhenUnprefixedAbsent(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+		<use xlink:href="#legacy"/>
+	</svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	assert.Equal(t, 1, strings.Count(got, "href="))
+	assert.Contains(t, got, `href="#legacy"`)
+}
+
 func TestSanitize_DropsNonFragmentPaintURL(t *testing.T) {
 	in := `<svg xmlns="http://www.w3.org/2000/svg">
 		<linearGradient id="g"/>
