@@ -104,6 +104,17 @@ func TestShrinkToMax_NoOpAtExactlyMaxDim(t *testing.T) {
 	assert.Equal(t, data, out, "exactly maxDim in both dimensions must not be treated as over the limit")
 }
 
+func TestShrinkToMax_RejectsTruncatedDataOnNoOpPath(t *testing.T) {
+	// Declared dimensions are within maxDim, so this would take the no-op
+	// early-return path if ShrinkToMax only trusted DecodeConfig — but there
+	// is no IDAT/IEND, so a full decode must fail it.
+	data := pngHeaderOnly(t, 500, 300)
+
+	_, err := imageresize.ShrinkToMax(data, "image/png", 1024)
+
+	require.Error(t, err, "a header-only file within bounds must still fail full decode, not be returned unchanged")
+}
+
 func TestShrinkToMax_DownscalesPreservingAspectRatio_PNG(t *testing.T) {
 	data := encodePNG(t, 2048, 1024)
 

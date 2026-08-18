@@ -48,13 +48,20 @@ func ShrinkToMax(data []byte, mediaType string, maxDim int) ([]byte, error) {
 	if pixels := cfg.Width * cfg.Height; pixels > maxDecodePixels {
 		return nil, fmt.Errorf("imageresize: image dimensions %dx%d (%d px) exceed the %d px decode limit", cfg.Width, cfg.Height, pixels, maxDecodePixels)
 	}
-	if cfg.Width <= maxDim && cfg.Height <= maxDim {
-		return data, nil
-	}
 
+	// DecodeConfig only parses the header, so a truncated/corrupt file with a
+	// valid header (no IDAT/IEND, cut-off JPEG scan data, ...) passes every
+	// check above. Fully decode before deciding whether a resize is needed —
+	// otherwise the no-op path below would return that corrupt data as-is and
+	// it would be uploaded and served as a valid logo (LFXV2-2016 lfx-reviewer
+	// finding on PR #87).
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("imageresize: decoding image: %w", err)
+	}
+
+	if cfg.Width <= maxDim && cfg.Height <= maxDim {
+		return data, nil
 	}
 
 	scale := float64(maxDim) / math.Max(float64(cfg.Width), float64(cfg.Height))

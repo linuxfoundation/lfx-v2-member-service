@@ -58,16 +58,15 @@ func (s *membershipServicesrvc) Readyz(ctx context.Context) ([]byte, error) {
 		slog.ErrorContext(ctx, "service not ready", "error", err)
 		return nil, err
 	}
-	// objectStoreClient is nil in mock mode (REPOSITORY_SOURCE=mock) — skip.
-	// A transient logo-bucket outage only degrades the logo-upload feature —
-	// it must not fail readiness for the whole pod and pull Salesforce
-	// sync/reads out of rotation over it, so this is logged, not returned as
-	// an error (LFXV2-2016 lfx-reviewer finding on PR #87).
-	if objectStoreClient != nil {
-		if err := objectStoreClient.Readyz(ctx); err != nil {
-			slog.WarnContext(ctx, "logo object store unreachable; logo upload degraded, rest of service unaffected", "error", err)
-		}
-	}
+	// The logo bucket is deliberately NOT probed here. Its error was already
+	// discarded (logged, not returned) rather than failing the whole pod's
+	// readiness — but a synchronous HeadBucket still sat in the request path,
+	// so a DNS/network stall against S3 could itself time out this handler
+	// (chart leaves the probe's timeoutSeconds at Kubernetes' 1s default),
+	// taking every unrelated route out of rotation over a check whose result
+	// was going to be ignored anyway. Startup connectivity is still checked
+	// once, out-of-band, by the background goroutine in main.go
+	// (LFXV2-2016 lfx-reviewer finding on PR #87).
 	return []byte("OK\n"), nil
 }
 
