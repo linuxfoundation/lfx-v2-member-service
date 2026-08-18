@@ -14,9 +14,10 @@ import (
 	"testing"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
-	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,12 +60,13 @@ const validSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 1
 // rather than merely validates well-formedness.
 const maliciousSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(document.cookie)</script><circle cx="5" cy="5" r="4"/></svg>`
 
-// stubObjectStore captures every Put/Copy/Delete call in order. commitErr
-// controls the promotion Copy call (which retries commitPromoteAttempts
-// times before giving up) independently of err (the scratch Put's error), so
-// tests can simulate the scratch write succeeding while the promotion fails,
-// or vice versa. commitErrCount, if nonzero, makes Copy fail only that many
-// times before succeeding, to exercise the retry loop itself.
+// stubObjectStore captures every Put/CopyIfNewer/Delete call in order.
+// commitErr controls the promotion CopyIfNewer call (which retries
+// commitPromoteAttempts times before giving up) independently of err (the
+// scratch Put's error), so tests can simulate the scratch write succeeding
+// while the promotion fails, or vice versa. commitErrCount, if nonzero, makes
+// CopyIfNewer fail only that many times before succeeding, to exercise the
+// retry loop itself.
 type stubObjectStore struct {
 	url              string
 	err              error
@@ -81,7 +83,8 @@ type stubObjectStore struct {
 }
 
 type copyCall struct {
-	src, dst string
+	src, dst   string
+	generation int64
 }
 
 func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data []byte) (string, error) {
@@ -105,8 +108,8 @@ func (s *stubObjectStore) Delete(_ context.Context, key string) error {
 	return s.deleteErr
 }
 
-func (s *stubObjectStore) Copy(_ context.Context, src, dst string) error {
-	s.copyCalls = append(s.copyCalls, copyCall{src: src, dst: dst})
+func (s *stubObjectStore) CopyIfNewer(_ context.Context, src, dst string, generation int64) error {
+	s.copyCalls = append(s.copyCalls, copyCall{src: src, dst: dst, generation: generation})
 	if s.commitErr == nil {
 		return nil
 	}
@@ -498,6 +501,27 @@ func TestLogoUploader_CommitWriteRetriesThenSucceeds(t *testing.T) {
 	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts)
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the shared-key repoint once the retry succeeds")
 	assert.Equal(t, "", objectStore.deletedKey, "scratch key must not be synchronously deleted once a retry succeeds -- cleanup is deferred to the object store's own lifecycle rule")
+}
+
+func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {
+	// CopyIfNewer itself (not the precheck) is what detects the race here: a
+	// second, faster upload has already promoted a newer generation to the
+	// shared key by the time this attempt's copy runs. The retry loop must
+	// stop immediately rather than burn through every attempt, and must
+	// tolerate it the same way every other "abandon promotion" path does.
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: port.ErrStalePromotion,
+	}
+	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err, "abandoning the promotion is tolerated, not surfaced as an upload failure")
+	require.NotNil(t, org)
+	require.Len(t, objectStore.copyCalls, 1, "must not retry once a newer promotion is detected")
+	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {

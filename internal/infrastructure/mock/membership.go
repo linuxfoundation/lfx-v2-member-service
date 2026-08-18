@@ -414,8 +414,8 @@ func (m *MockObjectStoreWriter) Delete(_ context.Context, _ string) error {
 	return errors.NewNotImplemented("delete-b2b-org-logo not implemented in mock")
 }
 
-// Copy always returns not-implemented.
-func (m *MockObjectStoreWriter) Copy(_ context.Context, _, _ string) error {
+// CopyIfNewer always returns not-implemented.
+func (m *MockObjectStoreWriter) CopyIfNewer(_ context.Context, _, _ string, _ int64) error {
 	return errors.NewNotImplemented("copy-b2b-org-logo not implemented in mock")
 }
 

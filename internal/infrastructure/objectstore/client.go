@@ -9,15 +9,26 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 )
+
+// promotionGenerationMetadataKey stores each CopyIfNewer promotion's
+// caller-supplied generation as S3 object metadata (surfaced by AWS as the
+// x-amz-meta-promoted-at header), so a later HeadObject can tell whether a
+// newer promotion has already won without needing any state outside S3
+// itself.
+const promotionGenerationMetadataKey = "promoted-at"
 
 const (
 	ensureBucketAttempts = 10
@@ -135,20 +146,69 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Copy implements port.ObjectStoreWriter. It relies on S3's default COPY
-// metadata directive, so dstKey ends up with the same Content-Type and
-// Cache-Control srcKey was uploaded with.
-func (c *Client) Copy(ctx context.Context, srcKey, dstKey string) error {
+// CopyIfNewer implements port.ObjectStoreWriter. It HeadObjects dstKey to
+// decide which conditional CopyObject to issue: IfNoneMatch: "*" (create-only)
+// if dstKey does not exist yet, or IfMatch pinned to the ETag just read if it
+// does — either way S3 itself rejects the write with 412/409 if dstKey
+// changed between the HeadObject and the CopyObject, which is what actually
+// closes the promotion race (see the port doc comment). The promotion
+// directive replaces metadata rather than copying it, so dstKey's stored
+// generation always reflects this attempt, not whatever srcKey happened to
+// carry.
+func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generation int64) error {
 	source := fmt.Sprintf("%s/%s", c.bucket, srcKey)
-	_, err := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:     &c.bucket,
-		Key:        &dstKey,
-		CopySource: &source,
-	})
-	if err != nil {
-		return fmt.Errorf("copying object %s to %s in bucket %s: %w", srcKey, dstKey, c.bucket, err)
+	metadata := map[string]string{promotionGenerationMetadataKey: strconv.FormatInt(generation, 10)}
+
+	head, headErr := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &c.bucket, Key: &dstKey})
+	var notFound *types.NotFound
+	switch {
+	case headErr == nil:
+		if existing, ok := head.Metadata[promotionGenerationMetadataKey]; ok {
+			if existingGen, parseErr := strconv.ParseInt(existing, 10, 64); parseErr == nil && existingGen >= generation {
+				return port.ErrStalePromotion
+			}
+		}
+		_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
+			Bucket:            &c.bucket,
+			Key:               &dstKey,
+			CopySource:        &source,
+			IfMatch:           head.ETag,
+			Metadata:          metadata,
+			MetadataDirective: types.MetadataDirectiveReplace,
+		})
+		return classifyPromoteCopyErr(srcKey, dstKey, c.bucket, copyErr)
+	case errors.As(headErr, &notFound):
+		_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
+			Bucket:            &c.bucket,
+			Key:               &dstKey,
+			CopySource:        &source,
+			IfNoneMatch:       aws.String("*"),
+			Metadata:          metadata,
+			MetadataDirective: types.MetadataDirectiveReplace,
+		})
+		return classifyPromoteCopyErr(srcKey, dstKey, c.bucket, copyErr)
+	default:
+		return fmt.Errorf("checking existing object %s in bucket %s before promotion: %w", dstKey, c.bucket, headErr)
 	}
-	return nil
+}
+
+// classifyPromoteCopyErr maps a conditional CopyObject failure (412
+// Precondition Failed for IfMatch, 409 Conflict for IfNoneMatch — both mean a
+// concurrent writer changed dstKey between CopyIfNewer's HeadObject and this
+// Copy) to port.ErrStalePromotion, so the caller can tell that apart from a
+// genuine transient/infra error worth retrying.
+func classifyPromoteCopyErr(srcKey, dstKey, bucket string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) {
+		switch respErr.HTTPStatusCode() {
+		case http.StatusPreconditionFailed, http.StatusConflict:
+			return port.ErrStalePromotion
+		}
+	}
+	return fmt.Errorf("copying object %s to %s in bucket %s: %w", srcKey, dstKey, bucket, err)
 }
 
 // nowUnixNano is a var so tests can override it deterministically. Nanosecond

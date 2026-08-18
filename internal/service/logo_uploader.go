@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -204,19 +205,11 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	}
 
 	// Re-check that this attempt's scratch URL is still the org's current
-	// logo pointer before physically overwriting the shared key with Copy
-	// below. Without this, a Copy delayed by the retry loop's sleeps could
-	// land after a second, faster upload has already promoted and
-	// repointed — clobbering key with this (older, losing) attempt's bytes
-	// even though the repoint Update at the end of this function would
-	// correctly reject the stale record write via its own ETag check. That
-	// later check alone leaves the shared key's *bytes* wrong regardless of
-	// whether the record update is rejected — checking here, before Copy,
-	// keeps that window to a single fetch instead of up to
-	// CommitPromoteAttempts retries (LFXV2-2016 lfx-reviewer finding on PR
-	// #87). It doesn't fully close the window — that needs a conditional/CAS
-	// write on the shared key — but it narrows the specific delayed-copy
-	// scenario flagged.
+	// logo pointer before attempting to promote it to the shared key below.
+	// This is a cheap early exit that avoids even trying S3 calls once this
+	// attempt is already known stale — it is not what makes promotion
+	// race-safe; CopyIfNewer's generation token below is what closes that
+	// window (LFXV2-2016 lfx-reviewer finding on PR #87).
 	if precheckErr := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, repointIfMatch); precheckErr != nil {
 		slog.WarnContext(ctx, "b2b org changed since this logo upload committed; abandoning promotion to shared key to avoid overwriting a newer upload",
 			"b2b_org_uid", uid, "error", precheckErr)
@@ -225,16 +218,32 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 
 	// This attempt has won and Salesforce already durably points at the
 	// scratch object's URL, which exists. Promote those bytes to the shared
-	// key via a server-side copy (not a fresh Put from data) and retry a few
-	// times. If every retry is exhausted, org is simply left pointing at the
-	// scratch object — already a normal, correct-looking Logo_URL__c value,
-	// not a broken reference to repair — and the next upload for this org
-	// promotes a fresh scratch object to key as usual, making this one an
-	// ordinary orphan for that promotion to replace.
+	// key via a server-side conditional copy (not a fresh Put from data) and
+	// retry a few times. generation orders this promotion against any other
+	// concurrent attempt's: CopyIfNewer refuses to let an older generation's
+	// copy land once a newer one has already committed to key, which is what
+	// actually closes the race the precheck above only narrows — without it,
+	// a copy delayed by this loop's sleeps could land after a second, faster
+	// upload has already promoted, physically clobbering key with this
+	// (older, losing) attempt's bytes even though that upload's own repoint
+	// Update already succeeded (LFXV2-2016 lfx-reviewer finding on PR #87).
+	// If every retry is exhausted, or a newer promotion has already won, org
+	// is simply left pointing at the scratch object — already a normal,
+	// correct-looking Logo_URL__c value, not a broken reference to repair —
+	// and the next upload for this org promotes a fresh scratch object to key
+	// as usual, making this one an ordinary orphan for that promotion to
+	// replace.
+	generation := time.Now().UnixNano()
 	var commitErr error
 	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
-		if commitErr = o.objectStore.Copy(ctx, scratchKey, key); commitErr == nil {
+		commitErr = o.objectStore.CopyIfNewer(ctx, scratchKey, key, generation)
+		if commitErr == nil {
 			break
+		}
+		if errors.Is(commitErr, port.ErrStalePromotion) {
+			slog.WarnContext(ctx, "a newer logo upload already promoted to the shared key; abandoning this older promotion",
+				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "error", commitErr)
+			return org, nil
 		}
 		if attempt < CommitPromoteAttempts {
 			time.Sleep(commitPromoteRetryDelay)
