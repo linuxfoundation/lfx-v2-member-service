@@ -251,6 +251,34 @@ func TestPublishKeyContactFGA_SupersededRevokeFlushFailure_PreservesPendingRevok
 	assert.Equal(t, "asset-old", entry.PendingRevoke.MembershipUID)
 }
 
+func TestPublishKeyContactFGA_UnchangedGrantDoesNotRetryPendingRevoke(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {
+				MembershipUID: "asset-new",
+				Username:      "alice",
+				Revision:      4,
+				PendingRevoke: &port.KeyContactGrantRef{
+					MembershipUID: "asset-old",
+					Username:      "alice",
+				},
+			},
+		},
+	}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "alice",
+	})
+
+	assert.Empty(t, removeMessages(t, pub),
+		"the tuple address may still be justified by another key-contact record and must not be retried blindly")
+	assert.NotNil(t, grants.Entries["kc-1"].PendingRevoke,
+		"an unchanged publish cannot prove the pending tuple is safe to revoke")
+}
+
 func TestPublishKeyContactFGA_NilIndexPublishesUnchanged(t *testing.T) {
 	pub := &accessPayloadPublisher{}
 
@@ -488,9 +516,8 @@ func TestKeyContactWriter_Delete_ClearsGrantWithNoUsernameAnywhere(t *testing.T)
 }
 
 // TestKeyContactWriter_Delete_ColdReadRevisionZero_DoesNotTombstoneConcurrentGrant
-// covers the case a Copilot review caught after the previous fix round: a
-// cold-read revision of 0 must never reach the store as an unconditional
-// delete. nats.go's jetstream KV Delete only sets the expected-sequence
+// verifies that a cold-read revision of 0 never reaches the store as an
+// unconditional delete. nats.go's jetstream KV Delete only sets the expected-sequence
 // header when revision != 0 (jetstream/kv.go); LastRevision(0) is otherwise a
 // silent no-op on that check, not "delete only if absent". This simulates a
 // grant written by another writer after Delete's own read found nothing (a

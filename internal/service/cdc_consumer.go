@@ -230,8 +230,8 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 		return err
 	}
 
-	// Latched once a delete_access purge is lost with no recovery marker; see
-	// the replay-cursor comment below.
+	// Latched once an authorization change has no durable retry path; see the
+	// replay-cursor comment below.
 	cursorHeld := false
 
 	for event := range eventCh {
@@ -267,16 +267,18 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 			return err
 		}(event)
 		if handleErr != nil {
-			// Log and continue — /admin/reindex is the backstop for missed events.
+			// Log and continue processing; the cursor decision below separates
+			// repairable errors from authorization changes that require replay.
 			slog.ErrorContext(ctx, "cdc: event handling failed, continuing",
 				"entity", event.Entity,
 				"change_type", event.ChangeType,
 				"record_ids", event.RecordIDs,
 				"error", handleErr,
 			)
-			if !cursorHeld && errors.Is(handleErr, errPurgeUnrecorded) {
+			if !cursorHeld &&
+				(errors.Is(handleErr, errPurgeUnrecorded) || errors.Is(handleErr, errRestoreIncomplete)) {
 				cursorHeld = true
-				slog.ErrorContext(ctx, "cdc: delete_access purge lost with no recovery marker — holding replay cursor so it is redelivered",
+				slog.ErrorContext(ctx, "cdc: authorization change incomplete — holding replay cursor so it is redelivered",
 					"entity", event.Entity,
 					"record_ids", event.RecordIDs,
 					"error", handleErr,
@@ -287,25 +289,24 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 		// Commit-after-process: persist cursor regardless of handler error so
 		// a transient failure doesn't block the stream indefinitely.
 		//
-		// The exception is a purge that reached neither the broker nor the
-		// repair bucket. /admin/reindex cannot rebuild it — the record is gone,
-		// so a reindex resolves it as not-found — which leaves redelivery as the
-		// only remaining chance, and redelivery requires the cursor to stay put.
+		// The exceptions are a purge that reached neither the broker nor the
+		// repair bucket, and an incomplete grant restore. /admin/reindex cannot
+		// repair either relation set, so redelivery is the only remaining chance.
 		//
 		// The hold latches for the rest of the run rather than skipping this one
 		// save, because the cursor is a single position per channel: committing
-		// any later event would carry it past the lost purge and void the
-		// guarantee. Processing continues so a persistent KV outage degrades the
-		// commit rather than becoming a crash loop; the events replayed on the
-		// next restart are upserts and purges, both idempotent.
+		// any later event would carry it past the incomplete mutation and void the
+		// guarantee. Processing continues so a persistent dependency outage
+		// degrades the commit rather than becoming a crash loop; the events
+		// replayed on the next restart are upserts, purges, and restores, all
+		// idempotent.
 		//
-		// The latch does not clear when the KV store recovers — clearing it
-		// would advance the cursor past the purge that is still unrecorded,
-		// which is the whole guarantee. So the replay window grows until the
-		// process restarts, not until the fault ends: the ERROR above is an
-		// actionable signal to restart once the store is healthy, and letting
-		// the held position age out of Salesforce's replay retention degrades
-		// exactly as any prolonged consumer outage does.
+		// The latch does not clear when the dependency recovers — clearing it
+		// would advance the cursor past the incomplete mutation. The replay
+		// window grows until the process restarts, not until the fault ends:
+		// the ERROR above is an actionable signal to restart once the dependency
+		// is healthy, and letting the held position age out of Salesforce's
+		// replay retention degrades exactly as any prolonged consumer outage.
 		if cursorHeld {
 			continue
 		}
@@ -358,6 +359,12 @@ func (o *CDCConsumer) handle(ctx context.Context, event model.CDCEvent) error {
 // on "DELETE" would incorrectly catch).
 func isDelete(ct model.CDCChangeType) bool {
 	return ct == model.CDCChangeDelete || ct == model.CDCChangeGapDelete
+}
+
+// isRestore reports whether Salesforce says a deleted record was restored.
+// Exact equality avoids treating unrelated GAP_* events as restores.
+func isRestore(ct model.CDCChangeType) bool {
+	return ct == model.CDCChangeUndelete || ct == model.CDCChangeGapUndelete
 }
 
 // quotaExceeded reports whether the Salesforce REST API quota has been consumed
@@ -504,6 +511,11 @@ func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string,
 // also fails to write, redelivery is the only remaining chance, so this error
 // is carried up to the replay-cursor decision instead of being swallowed.
 var errPurgeUnrecorded = errors.New("delete_access purge lost with no recovery marker")
+
+// errRestoreIncomplete marks a restored authorization set that was not rebuilt
+// from authoritative state and confirmed delivered. Unlike ordinary upserts,
+// /admin/reindex does not rebuild these per-user relations, so replay must stop.
+var errRestoreIncomplete = errors.New("authorization restore incomplete")
 
 // deleteAccessMarkerTimeout bounds the detached recovery-marker write in
 // recordFailedDeleteAccess. It matches the replay-cursor Save timeout in Run
@@ -665,19 +677,25 @@ func (o *CDCConsumer) handleAccount(ctx context.Context, event model.CDCEvent) e
 	// not suppress unrelated work carried in the same event.
 	upsertIDs, err := o.dispatchEntity(ctx, "Account", event, o.handleAccountDelete)
 	if len(upsertIDs) > 0 {
-		o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType)
+		err = errors.Join(err, o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType))
 	}
 	return err
 }
 
-func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) {
+func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) error {
 	if o.accountBatch == nil {
 		slog.WarnContext(ctx, "cdc: accountBatch reader not wired — skipping Account upsert; use /admin/reindex to repair",
 			"record_count", len(upsertIDs), "publish_failed_for_backfill_repair", true)
-		return
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("account batch reader not wired"))
+		}
+		return nil
 	}
 	if o.quotaExceeded(ctx, "Account", upsertIDs) {
-		return
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("account restore skipped by Salesforce quota guard"))
+		}
+		return nil
 	}
 
 	// Capture old record state BEFORE cache eviction for reparenting diff.
@@ -700,7 +718,10 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	orgs, convErrSFIDs, err := o.accountBatch.FetchAccountsBySFIDs(ctx, upsertIDs)
 	if err != nil {
 		logBatchFetchError(ctx, "Account", upsertIDs, changeType, err)
-		return
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, err)
+		}
+		return nil
 	}
 
 	// SFIDs absent from the SOQL result are soft-deleted or no longer hold a
@@ -737,6 +758,8 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	}
 
 	// CDC always passes globalOrgAdminTeamUID (not create-only like the writer).
+	var restoreErr error
+	restorePublished := false
 	for _, org := range orgs {
 		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
@@ -748,14 +771,23 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		if org.ParentUID != "" {
 			PublishB2BOrgParentFGA(ctx, o.publisher, org, childMap[org.ParentUID])
 		}
-		if changeType == model.CDCChangeUndelete {
-			o.restoreOrgPrincipalGrants(ctx, org)
+		if isRestore(changeType) {
+			published, err := o.restoreOrgPrincipalGrants(ctx, org)
+			restorePublished = restorePublished || published
+			restoreErr = errors.Join(restoreErr, err)
 		}
+	}
+	if restorePublished {
+		restoreErr = errors.Join(restoreErr, o.publisher.Flush(ctx))
 	}
 
 	slog.InfoContext(ctx, "cdc: account batch published",
 		"upsert_count", len(orgs),
 		"absent_delete_count", len(upsertIDs)-len(returned))
+	if restoreErr != nil {
+		return errors.Join(errRestoreIncomplete, restoreErr)
+	}
+	return nil
 }
 
 // makeReturnedSet builds a set of UIDs from a batch-fetch result. Items in
@@ -853,19 +885,25 @@ func (o *CDCConsumer) handleAsset(ctx context.Context, event model.CDCEvent) err
 	// See handleAccount: upserts run before the error is returned.
 	upsertIDs, err := o.dispatchEntity(ctx, "Asset", event, o.handleAssetDelete)
 	if len(upsertIDs) > 0 {
-		o.handleAssetUpsertBatch(ctx, upsertIDs, event.ChangeType)
+		err = errors.Join(err, o.handleAssetUpsertBatch(ctx, upsertIDs, event.ChangeType))
 	}
 	return err
 }
 
-func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) {
+func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) error {
 	if o.membershipBatch == nil {
 		slog.WarnContext(ctx, "cdc: membershipBatch reader not wired — skipping Asset upsert; use /admin/reindex to repair",
 			"record_count", len(upsertIDs), "publish_failed_for_backfill_repair", true)
-		return
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("membership batch reader not wired"))
+		}
+		return nil
 	}
 	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
-		return
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
+		}
+		return nil
 	}
 
 	// Evict the sObject cache entry for each ID so subsequent re-fetch goes to
@@ -880,7 +918,10 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	memberships, convErrSFIDs, err := o.membershipBatch.FetchMembershipsBySFIDs(ctx, upsertIDs)
 	if err != nil {
 		logBatchFetchError(ctx, "Asset", upsertIDs, changeType, err)
-		return
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, err)
+		}
+		return nil
 	}
 
 	// IDs absent from the SOQL result are soft-deleted or no longer qualify
@@ -895,6 +936,8 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		action = indexerConstants.ActionCreated
 	}
 
+	var restoreErr error
+	restorePublished := false
 	for _, pm := range memberships {
 		// Resolve ProjectUID from the slug (parity with backfill/HTTP paths) so
 		// the indexer doc carries the project_uid tag + parent_ref. On a transient
@@ -911,14 +954,23 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 				"uid", pm.UID, "slug", pm.ProjectSlug, "publish_failed_for_backfill_repair", true)
 			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
 		}
-		if changeType == model.CDCChangeUndelete {
-			o.restoreKeyContactGrants(ctx, pm.UID)
+		if isRestore(changeType) {
+			published, err := o.restoreKeyContactGrants(ctx, pm.UID)
+			restorePublished = restorePublished || published
+			restoreErr = errors.Join(restoreErr, err)
 		}
+	}
+	if restorePublished {
+		restoreErr = errors.Join(restoreErr, o.publisher.Flush(ctx))
 	}
 
 	slog.InfoContext(ctx, "cdc: asset batch published",
 		"upsert_count", len(memberships),
 		"absent_delete_count", len(upsertIDs)-len(returned))
+	if restoreErr != nil {
+		return errors.Join(errRestoreIncomplete, restoreErr)
+	}
+	return nil
 }
 
 // restoreOrgPrincipalGrants rebuilds the per-user writer and auditor tuples of
@@ -936,21 +988,23 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 // deleted before this consumer was subscribed, say — would reap grants that are
 // still legitimate. Restoring never needs to reap, because the purge already
 // removed everything, so the safe direction is strictly additive.
-func (o *CDCConsumer) restoreOrgPrincipalGrants(ctx context.Context, org *model.B2BOrg) {
+func (o *CDCConsumer) restoreOrgPrincipalGrants(ctx context.Context, org *model.B2BOrg) (bool, error) {
 	if o.settingsReader == nil {
-		return
+		return false, nil
 	}
 	settings, _, err := o.settingsReader.GetSettings(ctx, org.UID)
 	if err != nil {
 		slog.ErrorContext(ctx, "cdc: failed to read org settings for restored org — principals remain locked out",
 			"uid", org.UID, "error", err, "publish_failed_for_backfill_repair", true)
-		return
+		return false, fmt.Errorf("read settings for restored org %s: %w", org.UID, err)
 	}
-	// Nil-safe on a missing settings record: GetSettings reports (nil, 0, nil).
+	if settings == nil {
+		return false, nil
+	}
 	writers := settings.ActiveWriterUsernames()
 	auditors := settings.ActiveAuditorUsernames()
 	if len(writers) == 0 && len(auditors) == 0 {
-		return
+		return false, nil
 	}
 
 	msg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
@@ -962,10 +1016,11 @@ func (o *CDCConsumer) restoreOrgPrincipalGrants(ctx context.Context, org *model.
 	if pubErr := o.publisher.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 		slog.ErrorContext(ctx, "cdc: failed to restore org principal grants on undeleted org",
 			"uid", org.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
-		return
+		return false, fmt.Errorf("publish principal restore for org %s: %w", org.UID, pubErr)
 	}
 	slog.InfoContext(ctx, "cdc: restored org principal grants for undeleted org",
 		"uid", org.UID, "writers", len(writers), "auditors", len(auditors))
+	return true, nil
 }
 
 // restoreKeyContactGrants re-publishes the current key_contact grants of a
@@ -982,25 +1037,34 @@ func (o *CDCConsumer) restoreOrgPrincipalGrants(ctx context.Context, org *model.
 // revokes and can be incomplete for grants created before that index existed.
 // Each successful member_put refreshes the index through PublishKeyContactFGA.
 // A source read failure restores nothing rather than guessing from stale data.
-func (o *CDCConsumer) restoreKeyContactGrants(ctx context.Context, membershipUID string) {
+func (o *CDCConsumer) restoreKeyContactGrants(ctx context.Context, membershipUID string) (bool, error) {
 	if o.keyContactsByMembership == nil {
-		return
+		return false, nil
 	}
 	contacts, err := o.keyContactsByMembership.FetchKeyContactsByAssetSFID(ctx, membershipUID)
 	if err != nil {
 		slog.ErrorContext(ctx, "cdc: failed to read current key_contacts for restored membership — contacts remain locked out",
 			"membership_uid", membershipUID, "error", err,
 			"publish_failed_for_backfill_repair", true)
-		return
+		return false, fmt.Errorf("read key_contacts for restored membership %s: %w", membershipUID, err)
 	}
 	restored := 0
+	published := false
+	var restoreErr error
 	for _, contact := range contacts {
-		if contact.Username == "" && contact.Email != "" && o.userReader != nil {
+		if contact.Username == "" && contact.Email != "" {
+			if o.userReader == nil {
+				restoreErr = errors.Join(restoreErr,
+					fmt.Errorf("resolve LFID for restored key_contact %s: user reader not wired", contact.UID))
+				continue
+			}
 			username, usernameErr := o.userReader.UsernameByEmail(ctx, contact.Email)
 			if usernameErr != nil {
 				if !pkgerrors.IsNotFound(usernameErr) {
 					slog.WarnContext(ctx, "cdc: resolve LFID for restored key_contact failed",
 						"uid", contact.UID, "error", usernameErr)
+					restoreErr = errors.Join(restoreErr,
+						fmt.Errorf("resolve LFID for restored key_contact %s: %w", contact.UID, usernameErr))
 				}
 			} else {
 				contact.Username = username
@@ -1009,11 +1073,19 @@ func (o *CDCConsumer) restoreKeyContactGrants(ctx context.Context, membershipUID
 		if contact.Username == "" {
 			continue
 		}
-		PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact)
-		restored++
+		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact)
+		published = published || contactPublished
+		if contactErr != nil {
+			restoreErr = errors.Join(restoreErr, contactErr)
+			continue
+		}
+		if contactPublished {
+			restored++
+		}
 	}
 	slog.InfoContext(ctx, "cdc: restored key_contact grants for undeleted membership",
 		"membership_uid", membershipUID, "restored", restored, "current", len(contacts))
+	return published, restoreErr
 }
 
 // handleAssetDelete handles an Asset genuinely deleted in Salesforce.
