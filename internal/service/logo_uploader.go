@@ -154,8 +154,10 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// A distinct top-level prefix (not nested under key's own path) lets an S3
 	// lifecycle rule expire abandoned scratch objects by prefix alone, with no
 	// risk of ever matching the deterministic shared key above (LFXV2-2016
-	// lfx-reviewer finding on PR #87).
-	scratchKey := fmt.Sprintf("b2b_org_logo_scratch/%s/%s%s", uid, uuid.NewString(), ext)
+	// lfx-reviewer finding on PR #87). Named after the object-storage
+	// definition's own key (org-logos-public), not the domain model, per
+	// Antonia's naming question on lfx-v2-opentofu#246.
+	scratchKey := fmt.Sprintf("org-logos-public-scratch/%s/%s%s", uid, uuid.NewString(), ext)
 
 	if _, err := o.objectStore.Put(ctx, scratchKey, contentType, data); err != nil {
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
@@ -289,7 +291,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// would race that propagation lag and turn a cached/in-flight reference
 	// into a broken image with nothing to self-heal it, since the object would
 	// be gone. Cleanup is deferred to the object store's own scratch-prefix
-	// lifecycle rule (b2b_org_logo_scratch/, 2-day expiration — see
+	// lifecycle rule (org-logos-public-scratch/, 2-day expiration — see
 	// object-store-definitions.yaml in lfx-v2-opentofu), which gives that
 	// window ample time to close before removal (LFXV2-2016 lfx-reviewer
 	// finding on PR #87).
