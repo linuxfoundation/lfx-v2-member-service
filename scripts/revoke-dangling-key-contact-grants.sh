@@ -255,7 +255,8 @@ now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 export -f now
 
 # tuple_present checks whether the specific key_contact tuple still exists.
-# Fails closed (return 2) on a 200
+# Returns 0 when present, 1 when absent, and 2 on an infrastructure or
+# response-validation error. Fails closed (return 2) on a 200
 # response with a missing/malformed `tuples` array, rather than letting a
 # broken response silently read as absent (already_clear).
 tuple_present() {
@@ -273,8 +274,9 @@ export -f tuple_present
 
 # currently_live checks whether {pm, user} is presently backed by a live
 # key_contact record in OpenSearch — see the freshness-revalidation header
-# comment. Fails closed (return 2) on an unreachable host or malformed
-# response, same reasoning as tuple_present.
+# comment. Returns 0 when live, 1 when not live, and 2 on an infrastructure
+# or response-validation error. Fails closed on return 2, same reasoning as
+# tuple_present.
 currently_live() {
 	local pm="$1" user="$2"
 	local body resp
