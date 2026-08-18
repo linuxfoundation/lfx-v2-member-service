@@ -80,6 +80,28 @@ func TestKeyContactRepo_FetchKeyContactsByAssetSFIDs(t *testing.T) {
 		assert.Equal(t, 2, transport.queryCalls)
 	})
 
+	t.Run("fails when authoritative email lookup fails", func(t *testing.T) {
+		assetSFID, err := sfuuid.Normalize18("02i000000000005")
+		require.NoError(t, err)
+		transport := &seqQueryTransport{
+			responses: []string{
+				fmt.Sprintf(
+					`{"totalSize":1,"done":true,"records":[{"Id":"a0F000000000005","Asset__c":%q,"Contact__c":"003000000000005","Contact__r":{"Id":"003000000000005","Email":"fallback@example.com"}}]}`,
+					assetSFID,
+				),
+				`[{"message":"temporarily unavailable","errorCode":"SERVER_UNAVAILABLE"}]`,
+			},
+			queryStatuses: []int{200, 500},
+		}
+		repo := NewKeyContactRepo(fakeSalesforce(t, transport))
+
+		grouped, err := repo.FetchKeyContactsByAssetSFIDs(context.Background(), []string{assetSFID})
+
+		require.Error(t, err)
+		assert.Nil(t, grouped)
+		assert.Equal(t, 2, transport.queryCalls)
+	})
+
 	for name, assetSFID := range map[string]string{
 		"malformed": "not-an-sfid",
 		"empty":     "",

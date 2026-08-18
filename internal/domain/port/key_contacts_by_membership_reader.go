@@ -10,7 +10,8 @@ import (
 )
 
 // KeyContactsByMembershipReader returns current Salesforce key contacts grouped
-// by project membership.
+// by project membership. Implementations must propagate identity-source failures:
+// authorization restoration must not substitute a fallback email.
 type KeyContactsByMembershipReader interface {
 	FetchKeyContactsByAssetSFIDs(
 		ctx context.Context,

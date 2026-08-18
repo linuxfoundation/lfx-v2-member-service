@@ -156,8 +156,7 @@ func (r *KeyContactRepo) FetchKeyContactsByAssetSFIDs(
 	}
 	emailMap, err := r.fetchPrimaryEmails(ctx, collectProjectRoleContactIDs(roles))
 	if err != nil {
-		slog.WarnContext(ctx, "failed to fetch primary emails for batched asset key contacts", "error", err)
-		emailMap = make(map[string]string)
+		return nil, fmt.Errorf("fetching authoritative emails for restored key contacts: %w", err)
 	}
 	for _, role := range roles {
 		contact, convertErr := convertSOQLToKeyContact(role, emailMap)

@@ -22,10 +22,11 @@ import (
 // queue is exhausted it returns an empty-records response so tests don't have
 // to account for trailing calls.
 type seqQueryTransport struct {
-	mu         sync.Mutex
-	responses  []string // JSON response bodies, consumed in order
-	pos        int
-	queryCalls int
+	mu            sync.Mutex
+	responses     []string // JSON response bodies, consumed in order
+	queryStatuses []int    // optional HTTP status codes aligned with responses
+	pos           int
+	queryCalls    int
 }
 
 func (t *seqQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -37,11 +38,15 @@ func (t *seqQueryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// All other calls are SOQL /query requests.
 	t.queryCalls++
 	body := `{"totalSize":0,"done":true,"records":[]}`
+	status := http.StatusOK
 	if t.pos < len(t.responses) {
 		body = t.responses[t.pos]
+		if t.pos < len(t.queryStatuses) && t.queryStatuses[t.pos] != 0 {
+			status = t.queryStatuses[t.pos]
+		}
 		t.pos++
 	}
-	return fakeResponse(http.StatusOK, body, nil), nil
+	return fakeResponse(status, body, nil), nil
 }
 
 // soqlParentChildJSON builds a single-record SOQL response with one ParentId/Id pair.
