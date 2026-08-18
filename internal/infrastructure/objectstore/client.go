@@ -35,6 +35,12 @@ const (
 	ensureBucketDelay    = 3 * time.Second
 )
 
+// copyIfNewerCASAttempts bounds CopyIfNewer's internal compare-and-swap retry
+// loop (see the method doc comment) — a conflicting writer that turns out to
+// be older than the caller is not fatal, just a reason to retry against the
+// freshest ETag, but that must not spin forever.
+const copyIfNewerCASAttempts = 5
+
 // Client is an S3-backed port.ObjectStoreWriter.
 type Client struct {
 	s3     *s3.Client
@@ -150,30 +156,19 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 // decide which conditional CopyObject to issue: IfNoneMatch: "*" (create-only)
 // if dstKey does not exist yet, or IfMatch pinned to the ETag just read if it
 // does — either way S3 itself rejects the write with 412/409 if dstKey
-// changed between the HeadObject and the CopyObject, which is what actually
-// closes the promotion race (see the port doc comment). The promotion
-// directive replaces metadata rather than copying it, so dstKey's stored
-// generation always reflects this attempt, not whatever srcKey happened to
-// carry.
+// changed between the HeadObject and the CopyObject. That conflict only
+// proves *someone* wrote first, not that they were newer: two attempts can
+// both HeadObject the same starting ETag, and whichever's CopyObject reaches
+// S3 first wins the write regardless of generation. So a conflict re-reads
+// dstKey's freshest stamped generation and only surfaces
+// port.ErrStalePromotion once that generation is actually >= ours; otherwise
+// the writer that beat us here was itself older, and this retries against
+// the fresh ETag instead of wrongly abandoning a promotion it should still
+// win (LFXV2-2016 lfx-reviewer finding on PR #87). The promotion directive
+// replaces metadata rather than copying it, so dstKey's stored generation
+// always reflects this attempt, not whatever srcKey happened to carry.
 func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generation int64) error {
 	source := fmt.Sprintf("%s/%s", c.bucket, srcKey)
-
-	head, headErr := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &c.bucket, Key: &dstKey})
-	var ifMatch, ifNoneMatch *string
-	var notFound *types.NotFound
-	switch {
-	case headErr == nil:
-		if existing, ok := head.Metadata[promotionGenerationMetadataKey]; ok {
-			if existingGen, parseErr := strconv.ParseInt(existing, 10, 64); parseErr == nil && existingGen >= generation {
-				return port.ErrStalePromotion
-			}
-		}
-		ifMatch = head.ETag
-	case errors.As(headErr, &notFound):
-		ifNoneMatch = aws.String("*")
-	default:
-		return fmt.Errorf("checking existing object %s in bucket %s before promotion: %w", dstKey, c.bucket, headErr)
-	}
 
 	// MetadataDirectiveReplace (needed below to stamp the generation) makes S3
 	// discard every system/user metadata field not explicitly restated in this
@@ -187,37 +182,62 @@ func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generat
 		return fmt.Errorf("reading source object %s in bucket %s before promotion: %w", srcKey, c.bucket, srcHeadErr)
 	}
 
-	_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:            &c.bucket,
-		Key:               &dstKey,
-		CopySource:        &source,
-		IfMatch:           ifMatch,
-		IfNoneMatch:       ifNoneMatch,
-		ContentType:       srcHead.ContentType,
-		CacheControl:      srcHead.CacheControl,
-		Metadata:          map[string]string{promotionGenerationMetadataKey: strconv.FormatInt(generation, 10)},
-		MetadataDirective: types.MetadataDirectiveReplace,
-	})
-	return classifyPromoteCopyErr(srcKey, dstKey, c.bucket, copyErr)
+	for attempt := 1; attempt <= copyIfNewerCASAttempts; attempt++ {
+		head, headErr := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &c.bucket, Key: &dstKey})
+		var ifMatch, ifNoneMatch *string
+		var notFound *types.NotFound
+		switch {
+		case headErr == nil:
+			if existing, ok := head.Metadata[promotionGenerationMetadataKey]; ok {
+				if existingGen, parseErr := strconv.ParseInt(existing, 10, 64); parseErr == nil && existingGen >= generation {
+					return port.ErrStalePromotion
+				}
+			}
+			ifMatch = head.ETag
+		case errors.As(headErr, &notFound):
+			ifNoneMatch = aws.String("*")
+		default:
+			return fmt.Errorf("checking existing object %s in bucket %s before promotion: %w", dstKey, c.bucket, headErr)
+		}
+
+		_, copyErr := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
+			Bucket:            &c.bucket,
+			Key:               &dstKey,
+			CopySource:        &source,
+			IfMatch:           ifMatch,
+			IfNoneMatch:       ifNoneMatch,
+			ContentType:       srcHead.ContentType,
+			CacheControl:      srcHead.CacheControl,
+			Metadata:          map[string]string{promotionGenerationMetadataKey: strconv.FormatInt(generation, 10)},
+			MetadataDirective: types.MetadataDirectiveReplace,
+		})
+		if copyErr == nil {
+			return nil
+		}
+		if !isPreconditionConflict(copyErr) {
+			return fmt.Errorf("copying object %s to %s in bucket %s: %w", srcKey, dstKey, c.bucket, copyErr)
+		}
+		// Conflict: loop back and re-HeadObject dstKey. If it's now stamped
+		// with a generation >= ours, the top of the loop returns
+		// ErrStalePromotion; otherwise we retry the copy against the fresh
+		// ETag.
+	}
+	return fmt.Errorf("promoting object %s to %s in bucket %s: exhausted %d attempts against conflicting writers", srcKey, dstKey, c.bucket, copyIfNewerCASAttempts)
 }
 
-// classifyPromoteCopyErr maps a conditional CopyObject failure (412
-// Precondition Failed for IfMatch, 409 Conflict for IfNoneMatch — both mean a
-// concurrent writer changed dstKey between CopyIfNewer's HeadObject and this
-// Copy) to port.ErrStalePromotion, so the caller can tell that apart from a
-// genuine transient/infra error worth retrying.
-func classifyPromoteCopyErr(srcKey, dstKey, bucket string, err error) error {
-	if err == nil {
-		return nil
-	}
+// isPreconditionConflict reports whether err is a conditional CopyObject
+// rejection (412 Precondition Failed for IfMatch, 409 Conflict for
+// IfNoneMatch) — either means a concurrent writer changed dstKey between the
+// HeadObject and this Copy, distinct from a genuine transient/infra error.
+func isPreconditionConflict(err error) bool {
 	var respErr *smithyhttp.ResponseError
 	if errors.As(err, &respErr) {
 		switch respErr.HTTPStatusCode() {
 		case http.StatusPreconditionFailed, http.StatusConflict:
-			return port.ErrStalePromotion
+			return true
 		}
 	}
-	return fmt.Errorf("copying object %s to %s in bucket %s: %w", srcKey, dstKey, bucket, err)
+	return false
 }
 
 // nowUnixNano is a var so tests can override it deterministically. Nanosecond

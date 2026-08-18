@@ -219,17 +219,114 @@ func TestClient_CopyIfNewer_StaleGenerationCaughtByHeadObject(t *testing.T) {
 
 func TestClient_CopyIfNewer_StaleGenerationCaughtByConditionalCopy(t *testing.T) {
 	// Simulates the race CopyIfNewer exists to close: HeadObject observes no
-	// (or an older) generation, but a concurrent writer commits a newer one
-	// before this CopyObject lands, so S3 itself rejects it with 412.
+	// generation, but a concurrent writer commits a newer one before this
+	// CopyObject lands, so S3 itself rejects it with 412. The re-check after
+	// the conflict must confirm that writer's generation is actually >= ours
+	// before giving up -- a bare 412 alone doesn't prove that.
+	dstKey := "b2b_org_logos/uid-1"
+	headCalls := 0
 	copyCalls := 0
-	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, nil, http.StatusPreconditionFailed, &copyCalls)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead && strings.Contains(r.URL.Path, dstKey):
+			headCalls++
+			if headCalls > 1 {
+				w.Header().Set("X-Amz-Meta-Promoted-At", "999999999999999999")
+			}
+			w.Header().Set("ETag", `"dst-etag"`)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodHead:
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+			copyCalls++
+			w.WriteHeader(http.StatusPreconditionFailed)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
 	defer server.Close()
 	client := newTestClient(t, server.URL)
 
-	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", "b2b_org_logos/uid-1", 1)
+	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", dstKey, 1)
 
 	require.ErrorIs(t, err, port.ErrStalePromotion)
-	assert.Equal(t, 1, copyCalls, "the conditional CopyObject must still be attempted -- HeadObject alone can't see a writer that commits after it")
+	assert.Equal(t, 1, copyCalls, "the re-check after one conflict must catch the now-confirmed-newer generation before attempting another copy")
+}
+
+func TestClient_CopyIfNewer_ConflictFromOlderWriterRetriesAndWins(t *testing.T) {
+	// A conditional-copy 412 only proves dstKey changed, not that whoever
+	// changed it was newer than us. If the re-check shows their stamped
+	// generation is still older than ours, this must retry against the fresh
+	// ETag and win, instead of wrongly abandoning a promotion it should still
+	// complete (LFXV2-2016 lfx-reviewer finding on PR #87).
+	dstKey := "b2b_org_logos/uid-1"
+	headCalls := 0
+	copyCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead && strings.Contains(r.URL.Path, dstKey):
+			headCalls++
+			if headCalls > 1 {
+				w.Header().Set("X-Amz-Meta-Promoted-At", "1")
+				w.Header().Set("ETag", `"dst-etag-2"`)
+			} else {
+				w.Header().Set("ETag", `"dst-etag-1"`)
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodHead:
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+			copyCalls++
+			if r.Header.Get("If-Match") == `"dst-etag-1"` {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"fake-etag"</ETag></CopyObjectResult>`))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", dstKey, 2)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, copyCalls, "must retry against the fresh ETag once the re-check shows the conflicting writer was actually older")
+}
+
+func TestClient_CopyIfNewer_ExhaustsCASAttempts(t *testing.T) {
+	dstKey := "b2b_org_logos/uid-1"
+	copyCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead && strings.Contains(r.URL.Path, dstKey):
+			w.Header().Set("ETag", `"dst-etag"`)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodHead:
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+			copyCalls++
+			w.WriteHeader(http.StatusPreconditionFailed)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", dstKey, 1)
+
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, port.ErrStalePromotion), "an unresolvable conflict is a real error, not a confirmed loss")
+	assert.Equal(t, copyIfNewerCASAttempts, copyCalls)
 }
 
 func TestClient_CopyIfNewer_CopyObjectError(t *testing.T) {
