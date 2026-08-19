@@ -40,8 +40,8 @@ spec:
               value: {{ .Values.app.logLevel }}
             - name: LOG_ADD_SOURCE
               value: {{ .Values.app.logAddSource | quote }}
-            - name: GLOBAL_ORG_ADMIN_TEAM_UID
-              value: {{ .Values.app.globalOrgAdminTeamUID | quote }}
+            - name: GLOBAL_ORG_ADMIN_TEAM_NAME
+              value: {{ .Values.app.globalOrgAdminTeamName | trim | quote }}
             - name: LF_STAFF_TEAM_NAME
               value: {{ .Values.app.lfStaffTeamName | quote }}
             - name: SF_PUBSUB_ENDPOINT

@@ -88,19 +88,19 @@ var errQuotaStop = errors.New("salesforce quota threshold reached; backfill stop
 // because targeted reindex publishes only idempotent projections and the
 // revision-conditional marker delete is the sole race guard.
 type Runner struct {
-	iter                  BackfillIterator
-	b2bReader             port.B2BOrgReader
-	pmReader              port.ProjectMembershipReader
-	kcReader              KeyContactSObjectReader
-	settingsReader        port.B2BOrgSettingsReader
-	settingsWriter        port.B2BOrgSettingsWriter
-	userReader            port.UserReader
-	publisher             port.MemberPublisher
-	natsClient            *natspkg.NATSClient
-	globalOrgAdminTeamUID string
-	b2bOrgAuditorTeams    []string
-	resolver              port.ProjectResolver
-	grantIndex            port.KeyContactGrantIndex
+	iter                   BackfillIterator
+	b2bReader              port.B2BOrgReader
+	pmReader               port.ProjectMembershipReader
+	kcReader               KeyContactSObjectReader
+	settingsReader         port.B2BOrgSettingsReader
+	settingsWriter         port.B2BOrgSettingsWriter
+	userReader             port.UserReader
+	publisher              port.MemberPublisher
+	natsClient             *natspkg.NATSClient
+	globalOrgAdminTeamName string
+	b2bOrgAuditorTeams     []string
+	resolver               port.ProjectResolver
+	grantIndex             port.KeyContactGrantIndex
 
 	// cdc_repair collaborators (optional; only the repair path uses them).
 	repairStore          port.CDCRepairStore
@@ -185,21 +185,21 @@ func NewRunner(
 	settingsReader port.B2BOrgSettingsReader,
 	publisher port.MemberPublisher,
 	natsClient *natspkg.NATSClient,
-	globalOrgAdminTeamUID string,
+	globalOrgAdminTeamName string,
 	resolver port.ProjectResolver,
 	opts ...RunnerOption,
 ) *Runner {
 	r := &Runner{
-		iter:                  iter,
-		b2bReader:             b2bReader,
-		pmReader:              pmReader,
-		kcReader:              kcReader,
-		settingsReader:        settingsReader,
-		publisher:             publisher,
-		natsClient:            natsClient,
-		globalOrgAdminTeamUID: globalOrgAdminTeamUID,
-		resolver:              resolver,
-		repairQuotaThreshold:  defaultAdminReindexQuotaThreshold,
+		iter:                   iter,
+		b2bReader:              b2bReader,
+		pmReader:               pmReader,
+		kcReader:               kcReader,
+		settingsReader:         settingsReader,
+		publisher:              publisher,
+		natsClient:             natsClient,
+		globalOrgAdminTeamName: globalOrgAdminTeamName,
+		resolver:               resolver,
+		repairQuotaThreshold:   defaultAdminReindexQuotaThreshold,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -360,7 +360,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						org.IsParent = len(children) > 0
 					}
 					PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
-					PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID, r.b2bOrgAuditorTeams)
+					PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamName, r.b2bOrgAuditorTeams)
 					if org.ParentUID != "" {
 						if children, ok := orgChildrenCache[org.ParentUID]; ok {
 							PublishB2BOrgParentFGA(ctx, r.publisher, org, children)
@@ -655,7 +655,7 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		}
 		org.IsParent = len(childUIDs) > 0
 		PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
-		PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamUID, r.b2bOrgAuditorTeams)
+		PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamName, r.b2bOrgAuditorTeams)
 		if org.ParentUID != "" {
 			PublishB2BOrgParentFGA(ctx, r.publisher, org, parentChildren)
 		}

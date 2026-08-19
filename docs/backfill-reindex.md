@@ -91,7 +91,7 @@ In-scope types (`allBackfillTypes`): `b2b_org`, `project_membership`, `key_conta
 
 `POST /admin/reindex` — handler `AdminReindex` (`cmd/member-api/service/membership_service.go`).
 
-**Authorization:** `member` on `team:{globalOrgAdminTeamUID}` (Heimdall ruleset).
+**Authorization:** `member` on `team:{globalOrgAdminTeamName}` (Heimdall ruleset).
 
 **Payload** (`AdminReindexPayload`, `cmd/member-api/design/type.go`):
 

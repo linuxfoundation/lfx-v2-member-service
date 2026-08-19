@@ -39,6 +39,7 @@ echo "→ Output dir: ${OUT_DIR}"
 echo ""
 
 python3 - "$OPENSEARCH_URL" "$INDEX" "$SCROLL_TTL" "$PAGE_SIZE" "$JSONL" "$SUMMARY" <<'PY'
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -213,6 +214,9 @@ with open(jsonl_path + ".tmp", "w", encoding="utf-8") as f:
         f.write(json.dumps({"uid": uid}) + "\n")
 
 with open(summary_path + ".tmp", "w", encoding="utf-8") as f:
+    f.write(f"captured_at={datetime.now(timezone.utc).isoformat()}\n")
+    f.write(f"opensearch_url={base.rstrip('/')}\n")
+    f.write(f"index={index}\n")
     f.write(f"raw_hits={raw_hits}\n")
     f.write(f"unique_uids={len(ordered)}\n")
     f.write(f"duplicates_dropped={duplicates}\n")
@@ -227,8 +231,8 @@ if duplicates:
 PY
 
 echo ""
-echo "Compare the unique count against the number of global_org_admin grants in the target store."
-echo "The gap measures the orgs an FGA-based enumeration would have missed."
+echo "Compare unique_uids with the independent Salesforce Membership Asset account count."
+echo "Review captured_at and the target URL/index before approving any difference."
 echo ""
-echo "Next: dry-run the grant script"
-echo "  ./scripts/grant-lf-teams-auditor-openfga.sh <store-id> ${OUT_DIR} --dry-run"
+echo "Next: run the global org-admin migration plan with"
+echo "  --census-file ${OUT_DIR}/b2b-org-uids.jsonl"

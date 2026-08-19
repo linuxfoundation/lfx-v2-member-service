@@ -235,7 +235,7 @@ For an org with a non-empty `ParentUID`, `handleAccountUpsertBatch` emits the pa
 
 ```407:418:internal/service/cdc_consumer.go
 	for _, org := range orgs {
-		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID, o.b2bOrgAuditorTeams)
+		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamName, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
 		// CDC-created child org gets its parent + child-list tuples even when no
 		// reparent was detected. publishB2BOrgUpsertEvents only emits reparenting
@@ -395,7 +395,7 @@ Consumer-mode environment variables (read only when `RUN_MODE=consumer`):
 | `SF_CDC_CHANNEL` | CDC channel/topic to subscribe to | `/data/ChangeEvents` | No |
 | `CDC_QUOTA_SKIP_THRESHOLD` | Fraction of daily Salesforce REST quota (0–1) at which upsert re-fetches are skipped | `0.95` | No |
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the guard issues an active `/limits` refresh (also the refresh-attempt throttle window). `0` disables active refresh (passive header updates only). | `5m` | No |
-| `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the platform org-admin team | `_null` | No |
+| `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable platform org-admin team name | `global_org_admin` | No |
 
 Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `SF_USERNAME`, `SF_PASSWORD`, `SF_SECURITY_TOKEN`, `SF_CONSUMER_RSA_PEM`) and NATS settings are shared with API mode — see the main [README](../README.md) / [CLAUDE.md](../CLAUDE.md).
 

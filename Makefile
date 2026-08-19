@@ -112,9 +112,13 @@ fmt:
 	@gofmt -s -w $(GO_FILES)
 
 .PHONY: test
-test: ## Run tests
+test: test-scripts ## Run tests
 	@echo "Running tests..."
 	go test -v -race -coverprofile=coverage.out ./...
+
+.PHONY: test-scripts
+test-scripts: ## Run shell migration tests
+	@bash scripts/test-global-org-admin-team-migration.sh
 
 .PHONY: build
 build: ## Build the application for local OS

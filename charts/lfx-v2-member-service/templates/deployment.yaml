@@ -50,8 +50,8 @@ spec:
               value: {{ .Values.app.audience }}
             - name: JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL
               value: {{ .Values.app.jwtAuthDisabledMockLocalPrincipal }}
-            - name: GLOBAL_ORG_ADMIN_TEAM_UID
-              value: {{ .Values.app.globalOrgAdminTeamUID | quote }}
+            - name: GLOBAL_ORG_ADMIN_TEAM_NAME
+              value: {{ .Values.app.globalOrgAdminTeamName | trim | quote }}
             - name: LF_STAFF_TEAM_NAME
               value: {{ .Values.app.lfStaffTeamName | quote }}
             - name: LFX_SELF_SERVE_BASE_URL

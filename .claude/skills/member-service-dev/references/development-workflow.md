@@ -90,20 +90,18 @@ service (authoritative source: `charts/lfx-v2-member-service/templates/ruleset.y
 - `POST /b2b_orgs/{uid}/settings/users` and PUT/DELETE
   `/b2b_orgs/{uid}/settings/users/{email}` (per-principal settings users):
   `writer` on `b2b_org:{uid}`.
-- `POST /b2b_orgs`: `member` on `team:{globalOrgAdminTeamUID}` (machine
-  callers only; the team UID is `.Values.app.globalOrgAdminTeamUID`).
+- `POST /b2b_orgs`: `member` on `team:{globalOrgAdminTeamName}` (machine
+  callers only; the stable team name is `.Values.app.globalOrgAdminTeamName`).
 - `GET /project_memberships/{uid}`: `auditor` on `project_membership:{uid}`.
 - `GET/POST/PUT/DELETE /project_memberships/{membership_uid}/key_contacts[/{uid}]`:
   reads require `auditor`, mutations `writer`, on
   `project_membership:{membership_uid}`. The POST rule also runs the
   `json_content_type` platform authorizer.
-- `POST /admin/reindex`: `member` on `team:{globalOrgAdminTeamUID}`.
+- `POST /admin/reindex`: `member` on `team:{globalOrgAdminTeamName}`.
 - `GET /_memberships/openapi*`: `allow_all`.
 
 When OpenFGA is disabled (local dev only), every rule falls through to
-`allow_all`. The `globalOrgAdminTeamUID` value defaults to the `"_null"`
-sentinel so an unset deploy fails closed rather than rendering an empty
-`team:` object.
+`allow_all`. The `globalOrgAdminTeamName` value defaults to `global_org_admin`.
 
 ## Docker and CI
 

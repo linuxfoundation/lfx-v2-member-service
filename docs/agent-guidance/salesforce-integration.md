@@ -25,7 +25,7 @@ records and the project-UID-to-Salesforce-ID resolver are documented in
 | `AUDIENCE` | JWT audience | `lfx-v2-member-service` | No |
 | `JWT_AUTH_DISABLED_MOCK_LOCAL_PRINCIPAL` | Mock auth for local dev | `""` | No |
 | `REPOSITORY_SOURCE` | Reader backend (`salesforce` or `mock`) | `salesforce` | No |
-| `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the global org-admin team (FGA `global_org_admin` reference on b2b_org create) | `""` | Yes (deploy) |
+| `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable global org-admin team name (FGA `global_org_admin` reference on b2b_org create) | `global_org_admin` | Yes (deploy) |
 | `RUN_MODE` | `server` (HTTP API) or `consumer` (Salesforce Pub/Sub CDC consumer) | `server` | No |
 | `SF_PUBSUB_ENDPOINT` | Salesforce Pub/Sub gRPC endpoint (e.g. `api.pubsub.salesforce.com:7443`) | `""` | Consumer mode |
 | `SF_ORG_ID` | Salesforce org ID for the Pub/Sub tenant | `""` | Consumer mode |

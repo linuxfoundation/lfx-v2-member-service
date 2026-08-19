@@ -24,11 +24,11 @@ type B2BOrgWriter interface {
 }
 
 type b2bOrgWriterOrchestrator struct {
-	b2bOrgReader          port.B2BOrgReader
-	b2bOrgWriter          port.B2BOrgWriter
-	memberPublisher       port.MemberPublisher
-	globalOrgAdminTeamUID string
-	auditorTeams          []string
+	b2bOrgReader           port.B2BOrgReader
+	b2bOrgWriter           port.B2BOrgWriter
+	memberPublisher        port.MemberPublisher
+	globalOrgAdminTeamName string
+	auditorTeams           []string
 }
 
 // B2BOrgWriterOption configures a b2bOrgWriterOrchestrator.
@@ -46,8 +46,8 @@ func WithB2BOrgPublisher(p port.MemberPublisher) B2BOrgWriterOption {
 	return func(o *b2bOrgWriterOrchestrator) { o.memberPublisher = p }
 }
 
-func WithGlobalOrgAdminTeamUID(uid string) B2BOrgWriterOption {
-	return func(o *b2bOrgWriterOrchestrator) { o.globalOrgAdminTeamUID = uid }
+func WithGlobalOrgAdminTeamName(name string) B2BOrgWriterOption {
+	return func(o *b2bOrgWriterOrchestrator) { o.globalOrgAdminTeamName = name }
 }
 
 // WithB2BOrgAuditorTeams sets the LF team names granted blanket auditor access
@@ -66,7 +66,7 @@ func NewB2BOrgWriter(opts ...B2BOrgWriterOption) B2BOrgWriter {
 }
 
 // Create creates a new B2BOrg from the given Salesforce Account SFID and
-// publishes the indexer + FGA fan-out. orgAdminTeamUID is included in the
+// publishes the indexer + FGA fan-out. orgAdminTeamName is included in the
 // Create FGA body only.
 func (o *b2bOrgWriterOrchestrator) Create(ctx context.Context, sfid string) (*model.B2BOrg, error) {
 	org, err := o.b2bOrgWriter.CreateB2BOrg(ctx, sfid, model.B2BOrgInput{})
@@ -122,19 +122,19 @@ func (o *b2bOrgWriterOrchestrator) publishEvents(ctx context.Context, current, o
 		org.IsParent = len(childUIDs) > 0
 	}
 
-	orgAdminTeamUID := ""
+	orgAdminTeamName := ""
 	if action == indexerConstants.ActionCreated {
-		orgAdminTeamUID = o.globalOrgAdminTeamUID
+		orgAdminTeamName = o.globalOrgAdminTeamName
 	}
 	// auditorTeams is deliberately not gated on ActionCreated the way
-	// orgAdminTeamUID is: the grant is required on update too, so an org that
+	// orgAdminTeamName is: the grant is required on update too, so an org that
 	// existed before this change picks it up on its next write.
-	publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.memberPublisher, current, org, action, orgAdminTeamUID, o.auditorTeams)
+	publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.memberPublisher, current, org, action, orgAdminTeamName, o.auditorTeams)
 }
 
 // publishB2BOrgUpsertEvents fans out an indexer message (sequential) then an
 // FGA errgroup (update_access + reparenting child-list messages). It is shared
-// by the writer orchestrator and the CDC consumer. orgAdminTeamUID controls
+// by the writer orchestrator and the CDC consumer. orgAdminTeamName controls
 // whether the global org-admin team relation is included in the FGA message
 // (writers pass it only on ActionCreated; CDC always passes it for ActionUpdated).
 // auditorTeams, by contrast, is passed unconditionally by both callers — the
@@ -151,15 +151,15 @@ func publishB2BOrgUpsertEvents(
 	publisher port.MemberPublisher,
 	current, org *model.B2BOrg,
 	action indexerConstants.MessageAction,
-	orgAdminTeamUID string,
+	orgAdminTeamName string,
 	auditorTeams []string,
 ) {
 	// Indexer first — must be sequential (before the errgroup).
 	PublishB2BOrgIndexer(ctx, publisher, org, action)
 
 	fgaMsg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
-		GlobalOrgAdminTeamUID: orgAdminTeamUID,
-		AuditorTeams:          auditorTeams,
+		GlobalOrgAdminTeamName: orgAdminTeamName,
+		AuditorTeams:           auditorTeams,
 	})
 
 	// Pre-fetch child lists before starting the errgroup (immutable inputs).

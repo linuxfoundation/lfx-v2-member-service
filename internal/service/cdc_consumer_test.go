@@ -268,7 +268,7 @@ func newTestCDCConsumer(
 	orgReader *fakeB2BOrgReader,
 	invalidator *mock.MockCacheInvalidator,
 	pub *subjectCapturingPublisher,
-	globalOrgAdminTeamUID string,
+	globalOrgAdminTeamName string,
 	extraOpts ...svc.CDCConsumerOption,
 ) *svc.CDCConsumer {
 	opts := []svc.CDCConsumerOption{
@@ -276,7 +276,7 @@ func newTestCDCConsumer(
 		svc.WithCDCB2BOrgReader(orgReader),
 		svc.WithCDCCacheInvalidator(invalidator),
 		svc.WithCDCPublisher(pub),
-		svc.WithCDCGlobalOrgAdminTeamUID(globalOrgAdminTeamUID),
+		svc.WithCDCGlobalOrgAdminTeamName(globalOrgAdminTeamName),
 	}
 	return svc.NewCDCConsumer(append(opts, extraOpts...)...)
 }
@@ -428,8 +428,8 @@ func TestCDCConsumer_Account_Upsert_PublishesIndexerAndFGA(t *testing.T) {
 	assert.Equal(t, []byte("r1"), replay.saved, "replay cursor must be committed")
 }
 
-func TestCDCConsumer_Account_Upsert_PassesGlobalOrgAdminTeamUID(t *testing.T) {
-	// globalOrgAdminTeamUID must reach BuildB2BOrgFGAMessage — verified indirectly:
+func TestCDCConsumer_Account_Upsert_PassesGlobalOrgAdminTeamName(t *testing.T) {
+	// globalOrgAdminTeamName must reach BuildB2BOrgFGAMessage — verified indirectly:
 	// if it were "" the FGA subject is still emitted; this test ensures the field
 	// is wired at all (non-empty UID → message contains non-empty team reference).
 	org := &model.B2BOrg{UID: sfid("org-uid-1")}
@@ -1024,7 +1024,7 @@ func TestCDCConsumer_Account_Reparenting_EmitsMoreFGAAccessCalls(t *testing.T) {
 		svc.WithCDCB2BOrgReader(reparentReader),
 		svc.WithCDCCacheInvalidator(&mock.MockCacheInvalidator{}),
 		svc.WithCDCPublisher(reparentPub),
-		svc.WithCDCGlobalOrgAdminTeamUID(""),
+		svc.WithCDCGlobalOrgAdminTeamName(""),
 		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{postOrg}}),
 	)
 
@@ -1036,7 +1036,7 @@ func TestCDCConsumer_Account_Reparenting_EmitsMoreFGAAccessCalls(t *testing.T) {
 		svc.WithCDCB2BOrgReader(sameReader),
 		svc.WithCDCCacheInvalidator(&mock.MockCacheInvalidator{}),
 		svc.WithCDCPublisher(samePub),
-		svc.WithCDCGlobalOrgAdminTeamUID(""),
+		svc.WithCDCGlobalOrgAdminTeamName(""),
 		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{sameOrg}}),
 	)
 
@@ -2408,7 +2408,7 @@ func TestCDCConsumer_Account_Reparent_CleansUpOldParentChildList(t *testing.T) {
 		svc.WithCDCB2BOrgReader(reader),
 		svc.WithCDCCacheInvalidator(&mock.MockCacheInvalidator{}),
 		svc.WithCDCPublisher(pub),
-		svc.WithCDCGlobalOrgAdminTeamUID(""),
+		svc.WithCDCGlobalOrgAdminTeamName(""),
 		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{postOrg}}),
 	)
 
@@ -3244,7 +3244,7 @@ func TestCDCConsumer_Account_Undelete_RebuildsCompleteManagedAccess(t *testing.T
 		"",
 		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{org}}),
 		svc.WithCDCB2BOrgSettingsReader(settings),
-		svc.WithCDCGlobalOrgAdminTeamUID("global-admin"),
+		svc.WithCDCGlobalOrgAdminTeamName("global_org_admin"),
 		svc.WithCDCB2BOrgAuditorTeams([]string{"org-auditors"}),
 	)
 
@@ -3257,7 +3257,7 @@ func TestCDCConsumer_Account_Undelete_RebuildsCompleteManagedAccess(t *testing.T
 	assert.Contains(t, byUID[orgUID], fgatypes.GenericAccessData{
 		UID: orgUID,
 		References: map[string][]string{
-			"global_org_admin": {"team:global-admin#member"},
+			"global_org_admin": {"team:global_org_admin#member"},
 			"auditor":          {"team:org-auditors#member"},
 		},
 		Relations:        map[string][]string{"writer": {"wuser"}, "auditor": {"auser"}},

@@ -167,7 +167,7 @@ Key contacts are nested under their membership. GET/PUT/DELETE return 404 (not 4
 
 | Method | Path                       | Description                                         | OpenFGA Check                              |
 |--------|----------------------------|-----------------------------------------------------|--------------------------------------------|
-| POST   | `/b2b_orgs`                | Create a B2B org from a Salesforce Account SFID     | `member` on `team:{globalOrgAdminTeamUID}` |
+| POST   | `/b2b_orgs`                | Create a B2B org from a Salesforce Account SFID     | `member` on `team:{globalOrgAdminTeamName}` |
 | PUT    | `/b2b_orgs/{uid}`          | Partial update of a B2B org                         | `writer` on `b2b_org:{uid}`                |
 | GET    | `/b2b_orgs/{uid}`          | Get a B2B org                                       | `auditor` on `b2b_org:{uid}`               |
 | GET    | `/b2b_orgs/{uid}/settings`                    | Get org access-control settings (writers, auditors) | `auditor` on `b2b_org:{uid}`               |
@@ -188,7 +188,7 @@ FGA is published before the indexer so access tuples land before the doc is sear
 
 | Method | Path             | Description                                                              | OpenFGA Check                              |
 |--------|------------------|--------------------------------------------------------------------------|--------------------------------------------|
-| POST   | `/admin/reindex` | Trigger a full or incremental reindex of cached entities into OpenSearch | `member` on `team:{globalOrgAdminTeamUID}` |
+| POST   | `/admin/reindex` | Trigger a full or incremental reindex of cached entities into OpenSearch | `member` on `team:{globalOrgAdminTeamName}` |
 
 Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or `{ "run_id": "<uuid>", "selected_count": <n> }` for `cdc_repair` runs. The `run_id` is for log correlation only — search slog for `run_id=<uuid>` to track progress. Requires a single `type` (one of `b2b_org`, `project_membership`, `key_contact`, `b2b_org_settings` — no all-types shortcut), and layers on one of `since` (RFC 3339 with explicit zone for incremental), `until` (RFC 3339 inclusive upper bound; **requires `since`**, rejects `since > until`; together they define a bounded `[since, until]` window sized to fit quota), `items` (array of `{uid}` objects, all of `type`, max 100, for targeted surgical reindex), or `cdc_repair` (bool; drains the CDC quota-repair queue for `type` — see [Quota-Repair Drain](./docs/backfill-reindex.md#cdc-quota-repair-drain), `b2b_org_settings` unsupported); plus `dry_run` (count only, no publish; not applicable to `cdc_repair`).
 
@@ -515,7 +515,7 @@ type project_membership
 
 Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/templates/ruleset.yaml`):
 - **GET `/b2b_orgs/:uid`** — `auditor` on `b2b_org:{uid}`
-- **POST `/b2b_orgs`** — `member` on `team:{globalOrgAdminTeamUID}`
+- **POST `/b2b_orgs`** — `member` on `team:{globalOrgAdminTeamName}`
 - **PUT `/b2b_orgs/:uid`** — `writer` on `b2b_org:{uid}`
 - **GET `/b2b_orgs/:uid/settings`** — `auditor` on `b2b_org:{uid}` (auditor, not writer, so trusted principals can see the pending-invite list)
 - **PUT `/b2b_orgs/:uid/settings`** — `writer` on `b2b_org:{uid}`
@@ -523,7 +523,7 @@ Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/template
 - **GET `/project_memberships/:uid`** — `auditor` on `project_membership:{uid}`
 - **GET `/project_memberships/:membership_uid/key_contacts/:uid`** — `auditor` on `project_membership:{membership_uid}`
 - **POST/PUT/DELETE `/project_memberships/:membership_uid/key_contacts...`** — `writer` on `project_membership:{membership_uid}` (POST also runs `json_content_type`)
-- **POST `/admin/reindex`** — `member` on `team:{globalOrgAdminTeamUID}`
+- **POST `/admin/reindex`** — `member` on `team:{globalOrgAdminTeamName}`
 - **GET `/_memberships/openapi*`** — `allow_all` passthrough
 
 When `openfga.enabled` is false (local dev), every rule falls back to `allow_all`. There are no `/projects/{project_id}/*`, `/members/*`, or `/memberships/*` rules.
@@ -585,7 +585,7 @@ before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end witho
 | `SF_ORG_ID`           | Salesforce 18-char Org ID injected as `tenantid` gRPC metadata header      | — (fatal if empty)                   | Yes      |
 | `SF_CDC_CHANNEL`      | CDC channel to subscribe to                                                 | `/data/ChangeEvents`                 | No       |
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the quota guard issues an active `/limits` refresh. `0` disables active refresh. | `5m` | No |
-| `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the platform org-admin team (same as API mode)            | `_null`                              | No       |
+| `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable platform org-admin team name (same as API mode)              | `global_org_admin`                   | No       |
 | `LF_STAFF_TEAM_NAME`  | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `""` (chart sets `lf-staff`) | No       |
 
 ### Salesforce Credentials

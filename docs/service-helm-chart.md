@@ -28,8 +28,8 @@ ExternalSecret, IRSA role, region, and chart pins live in `lfx-v2-argocd`.
 - **Heimdall auth** (`templates/ruleset.yaml`): per-object `auditor`/`writer`
   checks on `b2b_org:{uid}` and `project_membership:{membership_uid}`;
   `POST /b2b_orgs` and `POST /admin/reindex` check `member` on
-  `team:{{ .Values.app.globalOrgAdminTeamUID }}`. The team UID defaults to the
-  `"_null"` sentinel so an unset deploy fails closed.
+  `team:{{ .Values.app.globalOrgAdminTeamName }}`. The team name defaults to
+  `global_org_admin` and is consistent across environments.
 - **Salesforce secret**: the chart references the pre-existing Kubernetes
   Secret named by `values.yaml` at `salesforce.secrets.name`
   (`lfx-v2-member-service-salesforce` by default). The chart does not create

@@ -84,7 +84,7 @@ type CDCConsumer struct {
 	quotaRefreshStaleAfter  time.Duration
 	repairStore             port.CDCRepairStore
 	grantIndex              port.KeyContactGrantIndex
-	globalOrgAdminTeamUID   string
+	globalOrgAdminTeamName  string
 	b2bOrgAuditorTeams      []string
 	userReader              port.UserReader
 	orgSettings             OrgSettingsPrincipalWriter
@@ -170,8 +170,8 @@ func WithCDCKeyContactGrantIndex(i port.KeyContactGrantIndex) CDCConsumerOption 
 	return func(o *CDCConsumer) { o.grantIndex = i }
 }
 
-func WithCDCGlobalOrgAdminTeamUID(uid string) CDCConsumerOption {
-	return func(o *CDCConsumer) { o.globalOrgAdminTeamUID = uid }
+func WithCDCGlobalOrgAdminTeamName(name string) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.globalOrgAdminTeamName = name }
 }
 
 // WithCDCB2BOrgAuditorTeams sets the LF team names granted blanket auditor
@@ -746,7 +746,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		org.IsParent = len(childMap[org.UID]) > 0
 	}
 
-	// CDC always passes globalOrgAdminTeamUID (not create-only like the writer).
+	// CDC always passes globalOrgAdminTeamName (not create-only like the writer).
 	var restoreErr error
 	if isRestore(changeType) && childMapErr != nil {
 		restoreErr = fmt.Errorf("read org hierarchy for restore: %w", childMapErr)
@@ -762,7 +762,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 			continue
 		}
 
-		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamUID, o.b2bOrgAuditorTeams)
+		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamName, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
 		// CDC-created child org gets its parent + child-list tuples even when no
 		// reparent was detected.
@@ -1046,10 +1046,10 @@ func (o *CDCConsumer) restoreOrgAccess(
 	}
 
 	messages := []fgatypes.GenericFGAMessage{BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
-		GlobalOrgAdminTeamUID: o.globalOrgAdminTeamUID,
-		AuditorTeams:          o.b2bOrgAuditorTeams,
-		Writers:               writers,
-		Auditors:              auditors,
+		GlobalOrgAdminTeamName: o.globalOrgAdminTeamName,
+		AuditorTeams:           o.b2bOrgAuditorTeams,
+		Writers:                writers,
+		Auditors:               auditors,
 	})}
 	if hierarchyReady && org.ParentUID != "" {
 		if parentChildren == nil {

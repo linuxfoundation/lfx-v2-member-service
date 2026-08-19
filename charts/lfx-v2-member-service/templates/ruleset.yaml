@@ -79,7 +79,7 @@ spec:
           config:
             values:
               relation: member
-              object: "team:{{ .Values.app.globalOrgAdminTeamUID }}"
+              object: "team:{{ .Values.app.globalOrgAdminTeamName | trim }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests.
@@ -657,7 +657,7 @@ spec:
           config:
             values:
               relation: member
-              object: "team:{{ .Values.app.globalOrgAdminTeamUID }}"
+              object: "team:{{ .Values.app.globalOrgAdminTeamName | trim }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests.
