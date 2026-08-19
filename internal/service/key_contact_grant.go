@@ -117,6 +117,21 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 					"fga_revoke_failed_dangling_tuple", true,
 					"manual_recovery_required", true)
 			}
+			// Re-confirming an unchanged pair still advances the index
+			// revision: revokeKeyContactGrantIfUnregistered claims the entry
+			// (a CAS rewrite conditional on the revision it read) before
+			// publishing a revoke, specifically to detect a concurrent
+			// same-pair re-grant like this one. Without this touch, an
+			// unchanged pair would never move the revision, so that claim
+			// would see the same stale revision and could not tell a fresh
+			// reconfirmation apart from no concurrent activity at all,
+			// letting a stale revoke through. A conflict here just means
+			// another writer already touched or replaced the entry — this
+			// call's job (confirming the pair is live) is already done.
+			if putErr := idx.Put(ctx, uid, stored); putErr != nil && !pkgerrors.IsConflict(putErr) {
+				slog.WarnContext(ctx, "key_contact grant index touch failed on unchanged pair — a concurrent revoke may not detect this reconfirmation",
+					"uid", uid, "membership_uid", membershipUID, "error", putErr)
+			}
 			return nil
 		}
 
@@ -214,6 +229,16 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 //
 // A contact with no recorded grant, or one whose recorded pair is already
 // empty, produces no publish — there is nothing to revoke.
+//
+// Before publishing, this claims the entry with a revision-conditional
+// rewrite of the exact pair it just read. A concurrent writer that reasserts
+// the same pair (recordKeyContactGrant's unchanged-pair branch, above) always
+// advances the revision on its own confirmation, so the claim's CAS fails —
+// and the revoke is aborted — if that happened between this function's read
+// and the claim. Without it, a stale read could still publish a
+// member_remove for a pair a concurrent writer just reconfirmed as live; the
+// revision check on the later clear only protects the index entry, not the
+// message already sent.
 func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string) {
 	if idx == nil || uid == "" {
 		return
@@ -225,6 +250,17 @@ func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPubli
 		return
 	}
 	if !found || stored.MembershipUID == "" || stored.Username == "" {
+		return
+	}
+
+	if claimErr := idx.Put(ctx, uid, stored); claimErr != nil {
+		if pkgerrors.IsConflict(claimErr) {
+			slog.WarnContext(ctx, "key_contact grant changed concurrently — skipping revoke to avoid denying a possibly-reasserted grant",
+				"uid", uid, "membership_uid", stored.MembershipUID)
+		} else {
+			slog.WarnContext(ctx, "key_contact grant index claim failed — cannot safely revoke",
+				"uid", uid, "membership_uid", stored.MembershipUID, "error", claimErr)
+		}
 		return
 	}
 
@@ -244,7 +280,18 @@ func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPubli
 	slog.InfoContext(ctx, "key_contact grant revoked — email resolved no registered account",
 		"uid", uid, "membership_uid", stored.MembershipUID)
 
-	clearRevokedGrant(ctx, idx, uid, stored)
+	// Re-read for the revision the claim above advanced to (Put does not
+	// return it). If the pair no longer matches what was just revoked,
+	// something else has already taken over this entry — leave it alone
+	// rather than clearing based on data that no longer describes it.
+	current, found, err := idx.Get(ctx, uid)
+	if err != nil || !found {
+		return
+	}
+	if current.MembershipUID != stored.MembershipUID || current.Username != stored.Username {
+		return
+	}
+	clearRevokedGrant(ctx, idx, uid, current)
 }
 
 // clearRevokedGrant removes the just-revoked, confirmed-delivered grant from
