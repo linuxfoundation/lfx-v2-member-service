@@ -137,27 +137,25 @@ func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *
 // covers a concurrent writer that already replaced this pair (e.g. the email
 // was corrected and a new grant published) between this call's read and its
 // confirmed revoke: the replacement must not be discarded — the
-// CAS-conditional clear must be a no-op against the new value.
+// revision-conditional clear must be a no-op, not a delete, against the
+// entry a concurrent writer has since moved on.
 func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_LeavesNewPairUntouched(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
+	original := port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1}
 	grants := &mock.MockKeyContactGrantIndex{
-		Entries: map[string]port.KeyContactGrant{
-			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
-		},
+		Entries: map[string]port.KeyContactGrant{"kc-1": original},
 	}
-	// Simulate a concurrent writer replacing the pair between this call's
-	// initial Get and its post-revoke clear attempt: the clear's own Get sees
-	// a different pair than the one just revoked.
-	reads := 0
+	// Simulate a concurrent writer replacing the pair immediately after this
+	// call's initial Get (revision 1): by the time the clear's revision-
+	// conditional Delete(uid, 1) runs, the stored entry is already at
+	// revision 2 with a different pair.
 	grants.GetFn = func(_ context.Context, uid string) (port.KeyContactGrant, bool, error) {
-		reads++
-		if reads == 1 {
-			return port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1}, true, nil
-		}
-		return port.KeyContactGrant{MembershipUID: "asset-new", Username: "bob", Revision: 2}, true, nil
+		grants.Entries[uid] = port.KeyContactGrant{MembershipUID: "asset-new", Username: "bob", Revision: 2}
+		return original, true, nil
 	}
 
 	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
 
-	assert.Empty(t, grants.Deletes, "a pair that no longer matches what was revoked must not be cleared")
+	assert.Equal(t, "asset-new", grants.Entries["kc-1"].MembershipUID, "the newer pair must not be discarded")
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes, "a delete attempt is made but must be rejected as a stale-revision conflict")
 }

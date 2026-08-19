@@ -248,47 +248,47 @@ func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPubli
 }
 
 // clearRevokedGrant removes the just-revoked, confirmed-delivered grant from
-// the index. If the entry still carries a PendingRevoke marker for an
-// unrelated, still-outstanding supersede, that marker's address is preserved
-// rather than discarded: the entry is rewritten with its live grant cleared
-// but the marker intact, instead of being deleted outright — the marker's own
-// confirmed revoke (revokeSupersededKeyContactGrant / clearPendingRevoke) is
-// what eventually clears it.
+// the index. If revoked (the entry as read before the revoke was published)
+// still carried a PendingRevoke marker for an unrelated, still-outstanding
+// supersede, that marker's address is preserved rather than discarded: the
+// entry is rewritten with its live grant cleared but the marker intact,
+// instead of being deleted outright — the marker's own confirmed revoke
+// (revokeSupersededKeyContactGrant / clearPendingRevoke) is what eventually
+// clears it.
 //
-// The read-compare-write is revision-conditional, matching
-// recordKeyContactGrant: if a concurrent writer has already replaced this
-// pair (the email was corrected and a new grant published), that pair is left
-// untouched rather than discarded.
+// The write is conditional on revoked.Revision — the revision observed
+// before the revoke was published and flushed — with no retry on conflict.
+// A retry that re-reads and compares by value (MembershipUID/Username) alone
+// cannot tell "still my original entry" apart from a different generation
+// that happens to carry the same pair: a writer can republish the identical
+// {membership_uid, username} for this uid between this call's confirmed
+// revoke and its clear (e.g. the contact becomes reachable again and a fresh
+// member_put lands), which reasserts the live tuple. Retrying against that
+// reread value would delete the index's only address for a tuple another
+// writer just made live again, leaving a future delete unable to revoke it.
+// A conflict here always means some other writer touched this key after our
+// revoke was confirmed delivered, so it is left for that writer's own
+// generation to manage.
 func clearRevokedGrant(ctx context.Context, idx port.KeyContactGrantIndex, uid string, revoked port.KeyContactGrant) {
-	for attempt := 1; attempt <= maxGrantIndexAttempts; attempt++ {
-		current, found, err := idx.Get(ctx, uid)
-		if err != nil || !found {
-			return
-		}
-		if current.MembershipUID != revoked.MembershipUID || current.Username != revoked.Username {
-			return
-		}
-
-		var putErr error
-		if current.PendingRevoke != nil {
-			current.MembershipUID = ""
-			current.Username = ""
-			putErr = idx.Put(ctx, uid, current)
-		} else {
-			putErr = idx.Delete(ctx, uid, current.Revision)
-		}
-		if putErr == nil {
-			return
-		}
-		if !pkgerrors.IsConflict(putErr) {
-			slog.WarnContext(ctx, "key_contact grant index clear failed after confirmed revoke — confirmed-delivered grant left in index",
-				"uid", uid, "membership_uid", revoked.MembershipUID, "error", putErr)
-			return
-		}
-		// Conflict: re-read and retry against the new value.
+	var putErr error
+	if revoked.PendingRevoke != nil {
+		cleared := revoked
+		cleared.MembershipUID = ""
+		cleared.Username = ""
+		putErr = idx.Put(ctx, uid, cleared)
+	} else {
+		putErr = idx.Delete(ctx, uid, revoked.Revision)
 	}
-	slog.WarnContext(ctx, "key_contact grant index clear abandoned after repeated conflicts",
-		"uid", uid, "membership_uid", revoked.MembershipUID)
+	if putErr == nil {
+		return
+	}
+	if pkgerrors.IsConflict(putErr) {
+		slog.WarnContext(ctx, "key_contact grant index clear skipped — entry changed since confirmed revoke",
+			"uid", uid, "membership_uid", revoked.MembershipUID)
+		return
+	}
+	slog.WarnContext(ctx, "key_contact grant index clear failed after confirmed revoke — confirmed-delivered grant left in index",
+		"uid", uid, "membership_uid", revoked.MembershipUID, "error", putErr)
 }
 
 // clearPendingRevoke removes the PendingRevoke marker for superseded now that
