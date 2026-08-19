@@ -141,7 +141,16 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 			Revision:      stored.Revision,
 		}
 		var superseded *port.KeyContactGrantRef
-		if found {
+		if found && stored.MembershipUID == "" && stored.Username == "" {
+			// Marker-only entry (its live pair was already revoked and
+			// cleared; only a still-outstanding PendingRevoke for a
+			// different, unrelated pair remains). There is no live pair
+			// here for this new grant to supersede — carry the marker
+			// forward untouched rather than manufacturing a superseded ref
+			// from the empty pair, which would overwrite the only address
+			// for that still-outstanding revoke with an empty one.
+			newGrant.PendingRevoke = stored.PendingRevoke
+		} else if found {
 			superseded = &port.KeyContactGrantRef{MembershipUID: stored.MembershipUID, Username: stored.Username}
 			if stored.PendingRevoke != nil {
 				// The previous supersede's revoke was never confirmed
@@ -357,8 +366,19 @@ func clearPendingRevoke(ctx context.Context, idx port.KeyContactGrantIndex, uid 
 			// grant — leave that one alone rather than clobbering it.
 			return nil
 		}
-		current.PendingRevoke = nil
-		putErr := idx.Put(ctx, uid, current)
+
+		var putErr error
+		if current.MembershipUID == "" && current.Username == "" {
+			// Marker-only entry (clearRevokedGrant left it after revoking
+			// its own live pair — see the marker-only Put there): clearing
+			// this, its only marker, leaves neither a live pair nor a
+			// PendingRevoke, which Put rejects as addressing nothing.
+			// Delete the entry outright instead.
+			putErr = idx.Delete(ctx, uid, current.Revision)
+		} else {
+			current.PendingRevoke = nil
+			putErr = idx.Put(ctx, uid, current)
+		}
 		if putErr == nil {
 			return nil
 		}

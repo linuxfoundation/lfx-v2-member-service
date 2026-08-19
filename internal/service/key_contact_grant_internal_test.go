@@ -213,3 +213,54 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 	_, found := grants.Entries["kc-1"]
 	assert.False(t, found, "the entry must be fully cleared once the clear's CAS uses the claim's advanced revision")
 }
+
+// TestClearPendingRevoke_MarkerOnlyEntry_Deletes covers a marker-only entry
+// (its live pair was already revoked and cleared by clearRevokedGrant,
+// leaving only a PendingRevoke for a different, unrelated pair) whose own
+// revoke now confirms delivered. Clearing the marker would otherwise leave an
+// entry with neither a live pair nor a PendingRevoke — which Put rejects as
+// addressing nothing — so this must delete the entry outright instead.
+func TestClearPendingRevoke_MarkerOnlyEntry_Deletes(t *testing.T) {
+	superseded := port.KeyContactGrantRef{MembershipUID: "asset-superseded", Username: "carol"}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {PendingRevoke: &superseded, Revision: 5},
+		},
+	}
+
+	err := clearPendingRevoke(context.Background(), grants, "kc-1", superseded)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes, "a marker-only entry must be deleted, not rewritten as empty")
+	_, found := grants.Entries["kc-1"]
+	assert.False(t, found, "the entry must be gone once its only marker is cleared")
+}
+
+// TestRecordKeyContactGrant_MarkerOnlyEntry_CarriesPendingRevokeForward
+// covers a new grant arriving for a contact whose entry is currently
+// marker-only. There is no live pair here for the new grant to supersede;
+// treating the empty pair as "superseded" would overwrite the real,
+// still-outstanding PendingRevoke with an empty reference that serialization
+// then drops, stranding the only address for that other revoke. The marker
+// must instead be carried forward untouched alongside the new live pair, and
+// no supersede-revoke fires since nothing live was actually replaced.
+func TestRecordKeyContactGrant_MarkerOnlyEntry_CarriesPendingRevokeForward(t *testing.T) {
+	pending := port.KeyContactGrantRef{MembershipUID: "asset-superseded", Username: "carol"}
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {PendingRevoke: &pending, Revision: 5},
+		},
+	}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, "kc-1", "asset-new", "bob")
+
+	require.NoError(t, err)
+	assert.Nil(t, pub.LastAccessData, "nothing live existed to supersede, so no revoke must fire")
+	entry, found := grants.Entries["kc-1"]
+	require.True(t, found)
+	assert.Equal(t, "asset-new", entry.MembershipUID)
+	assert.Equal(t, "bob", entry.Username)
+	require.NotNil(t, entry.PendingRevoke, "the real marker must survive, not be overwritten by an empty superseded ref")
+	assert.Equal(t, pending, *entry.PendingRevoke)
+}
