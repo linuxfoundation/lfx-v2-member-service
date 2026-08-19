@@ -16,6 +16,7 @@ approved change window and an explicit store ID.
 - `apply` and `cleanup` require either `--dry-run` or `--confirm`.
 - Writes and deletes use batches of at most 100 and ignore duplicates or already-missing tuples.
 - Plan copies grants only for current, non-deleted organizations in the OpenSearch census.
+- Each plan records the snapshot manifest hash; a newer snapshot invalidates the old plan.
 - Any OpenSearch-to-Salesforce count difference blocks writes until explicitly approved.
 - Cleanup requires a matching verification checkpoint, completed API and CDC rollouts, and no
   old-team tuples absent from the pre-cutover snapshot. Immediately before deletion it also

@@ -26,6 +26,47 @@ assert_eq() {
 	[[ "$got" == "$want" ]] || fail "$message: want=$want got=$got"
 }
 
+write_plan_summary_fixture() {
+	local dir="$1"
+	jq -n --arg manifest "$(fga_hash_file "$dir/manifest.json")" \
+		--arg roster "$(fga_hash_file "$dir/stable-roster-plan.jsonl")" \
+		--arg grants "$(fga_hash_file "$dir/live-grants.jsonl")" \
+		'{census_approved:true,snapshot_manifest_sha256:$manifest,
+		  stable_roster_sha256:$roster,live_grants_sha256:$grants}' \
+		>"$dir/summary.json"
+}
+
+test_fga_request_streams_body_over_stdin() {
+	local dir body status=0
+	dir=$(mktemp -d)
+	trap 'rm -rf "$dir"' RETURN
+	body='{"user":"user:fixture-admin","relation":"writer","object":"b2b_org:fixture-org"}'
+	cat >"$dir/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$FGA_TEST_ARGV"
+input=$(dd 2>/dev/null)
+printf '%s' "$input" >"$FGA_TEST_STDIN"
+[[ "${FGA_TEST_CURL_FAIL:-false}" == true ]] && exit 22
+printf '%s\n' '{}'
+EOF
+	chmod +x "$dir/curl"
+	export FGA_TEST_ARGV="$dir/argv" FGA_TEST_STDIN="$dir/stdin"
+	BASE_URL=http://openfga.invalid STORE_ID=fixture-store \
+		PATH="$dir:$PATH" fga_request write "$body" >/dev/null
+	if grep -Fq "$body" "$FGA_TEST_ARGV"; then
+		fail "OpenFGA request JSON must not be present in curl argv"
+	fi
+	assert_eq "--data-binary" "$(awk '/^--data-binary$/ { print; exit }' "$FGA_TEST_ARGV")" \
+		"OpenFGA requests must stream the body with --data-binary"
+	assert_eq "@-" "$(awk '/^@-$/ { print; exit }' "$FGA_TEST_ARGV")" \
+		"OpenFGA requests must read the body from stdin"
+	assert_eq "$body" "$(<"$FGA_TEST_STDIN")" \
+		"curl stdin must contain the exact OpenFGA request JSON"
+	FGA_TEST_CURL_FAIL=true BASE_URL=http://openfga.invalid STORE_ID=fixture-store \
+		PATH="$dir:$PATH" fga_request write "$body" >/dev/null 2>&1 || status=$?
+	assert_eq "5" "$status" "curl failures must propagate as OpenFGA request failures"
+}
+
 test_validate_team_name() {
 	fga_validate_team_name "legacy-id"
 	if fga_validate_team_name "team:legacy-id" 2>/dev/null; then
@@ -168,14 +209,15 @@ test_apply_records_migrated_count() {
 	printf '%s\n' \
 		'{"user":"team:global_org_admin#member","relation":"global_org_admin","object":"b2b_org:one"}' \
 		>"$dir/live-grants.jsonl"
-	jq -n --arg roster "$(fga_hash_file "$dir/stable-roster-plan.jsonl")" \
-		--arg grants "$(fga_hash_file "$dir/live-grants.jsonl")" \
-		'{census_approved:true,stable_roster_sha256:$roster,live_grants_sha256:$grants}' \
-		>"$dir/summary.json"
+	printf '%s\n' '{"store_id":"store","old_team":"old"}' >"$dir/manifest.json"
+	write_plan_summary_fixture "$dir"
 	fga_request() { printf '%s\n' '{}'; }
 	migration_apply "$dir" false true
 	assert_eq "1" "$(jq -r '.migrated_count' "$dir/summary.json")" \
 		"confirmed apply must record migrated grant count"
+	assert_eq "$(fga_hash_file "$dir/manifest.json")" \
+		"$(jq -r '.snapshot_manifest_sha256' "$dir/summary.json")" \
+		"apply summary updates must preserve the snapshot binding"
 }
 
 test_execution_mode_is_exclusive() {
@@ -262,6 +304,26 @@ test_plan_rejects_empty_census() {
 		>"$dir/legacy-grants.jsonl"
 	migration_plan "$dir" "$census" 0 false >/dev/null 2>&1 || status=$?
 	assert_eq "4" "$status" "an empty live-organization census must block planning"
+}
+
+test_changed_snapshot_manifest_invalidates_existing_plan() {
+	local dir status=0
+	dir=$(mktemp -d)
+	trap 'rm -rf "$dir"' RETURN
+	printf '%s\n' '{"store_id":"store","captured_at":"first"}' >"$dir/manifest.json"
+	printf '%s\n' '{"user":"user:admin"}' >"$dir/stable-roster-plan.jsonl"
+	printf '%s\n' '{"object":"b2b_org:fixture-org"}' >"$dir/live-grants.jsonl"
+	write_plan_summary_fixture "$dir"
+	assert_eq "$(fga_hash_file "$dir/manifest.json")" \
+		"$(jq -r '.snapshot_manifest_sha256' "$dir/summary.json")" \
+		"plan summary must bind the current snapshot manifest"
+
+	printf '%s\n' '{"store_id":"store","captured_at":"second"}' >"$dir/manifest.json"
+	migration_validate_plan_hashes "$dir" >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "a new snapshot must invalidate old plan artifacts"
+	status=0
+	migration_apply "$dir" true false >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "apply must reject a plan from an earlier snapshot"
 }
 
 test_cleanup_blocks_old_write_increase() {
@@ -353,10 +415,7 @@ write_cleanup_fixture() {
 	printf '%s\n' \
 		'{"allowed_user":"fixture-admin","denied_user":"fixture-denied","sample_org":"fixture-org","allowed_result":true,"denied_result":false}' \
 		>"$dir/baseline-checks.json"
-	jq -n --arg roster "$(fga_hash_file "$dir/stable-roster-plan.jsonl")" \
-		--arg grants "$(fga_hash_file "$dir/live-grants.jsonl")" \
-		'{census_approved:true,stable_roster_sha256:$roster,live_grants_sha256:$grants}' \
-		>"$dir/summary.json"
+	write_plan_summary_fixture "$dir"
 	fga_write_checkpoint "$dir"
 }
 
@@ -743,10 +802,7 @@ test_verify_accepts_equivalent_tuple_sets() {
 	printf '%s\n' \
 		'{"allowed_user":"admin","denied_user":"nonadmin","sample_org":"one","allowed_result":true,"denied_result":false}' \
 		>"$dir/baseline-checks.json"
-	jq -n --arg roster "$(fga_hash_file "$dir/stable-roster-plan.jsonl")" \
-		--arg grants "$(fga_hash_file "$dir/live-grants.jsonl")" \
-		'{census_approved:true,stable_roster_sha256:$roster,live_grants_sha256:$grants}' \
-		>"$dir/summary.json"
+	write_plan_summary_fixture "$dir"
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_verify.
 	fga_read_all() {
 		printf '%s' "$1" | jq -c '.' >>"$call_log"
@@ -776,6 +832,9 @@ test_verify_accepts_equivalent_tuple_sets() {
 		"verification must re-read both legacy and stable teams"
 	assert_eq "1" "$(jq -r '.post_cutover_extra_stable_grant_count' "$dir/summary.json")" \
 		"verification must record post-cutover stable grants"
+	assert_eq "$(fga_hash_file "$dir/manifest.json")" \
+		"$(jq -r '.snapshot_manifest_sha256' "$dir/summary.json")" \
+		"verification summary updates must preserve the snapshot binding"
 	: >"$dir/live-grants.jsonl"
 	if migration_verify "$dir" admin nonadmin one >/dev/null 2>&1; then
 		fail "verify must reject plan files changed after approval"
@@ -797,6 +856,7 @@ test_snapshot_records_dry_run() {
 		"snapshot dry-run must be recorded in the manifest"
 }
 
+test_fga_request_streams_body_over_stdin
 test_validate_team_name
 test_pagination
 test_malformed_response_fails
@@ -813,6 +873,7 @@ test_cleanup_requires_checkpoint
 test_cleanup_requires_authorization_controls
 test_plan_classifies_grants
 test_plan_rejects_empty_census
+test_changed_snapshot_manifest_invalidates_existing_plan
 test_cleanup_blocks_old_write_increase
 test_cleanup_blocks_compensating_tuple_drift
 test_cleanup_revalidates_stable_plan_and_controls_before_deletes

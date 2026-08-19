@@ -181,22 +181,25 @@ migration_write_plan_summary() {
 	local missing_uids="$4"
 	local salesforce_count="$5"
 	local approve_difference="$6"
-	local census_count orphan_count missing_count difference approved roster_hash grants_hash
+	local census_count orphan_count missing_count difference approved manifest_hash roster_hash grants_hash
 	census_count=$(migration_line_count "$census_uids")
 	orphan_count=$(migration_line_count "$orphan_uids")
 	missing_count=$(migration_line_count "$missing_uids")
 	difference=$((census_count - salesforce_count))
 	approved=false
 	[[ "$difference" -eq 0 || "$approve_difference" == true ]] && approved=true
+	manifest_hash=$(fga_hash_file "$directory/manifest.json")
 	roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
 	grants_hash=$(fga_hash_file "$directory/live-grants.jsonl")
 	jq -n --argjson census_count "$census_count" --argjson salesforce_count "$salesforce_count" \
 		--argjson difference "$difference" --argjson orphan_count "$orphan_count" \
 		--argjson missing_source_count "$missing_count" --argjson census_approved "$approved" \
-		--arg roster_hash "$roster_hash" --arg grants_hash "$grants_hash" \
+		--arg manifest_hash "$manifest_hash" --arg roster_hash "$roster_hash" \
+		--arg grants_hash "$grants_hash" \
 		'{census_count:$census_count,salesforce_count:$salesforce_count,census_difference:$difference,
 		  census_approved:$census_approved,live_count:$census_count,orphan_count:$orphan_count,
-		  missing_source_count:$missing_source_count,stable_roster_sha256:$roster_hash,
+		  missing_source_count:$missing_source_count,snapshot_manifest_sha256:$manifest_hash,
+		  stable_roster_sha256:$roster_hash,
 		  live_grants_sha256:$grants_hash}' >"$directory/summary.json"
 	echo "Plan: $census_count live, $orphan_count orphan, $missing_count missing source"
 	if [[ "$approved" != true ]]; then
@@ -251,14 +254,17 @@ migration_plan() {
 
 migration_validate_plan_hashes() {
 	local directory="$1"
-	local expected_roster expected_grants actual_roster actual_grants
+	local expected_manifest expected_roster expected_grants actual_manifest actual_roster actual_grants
+	expected_manifest=$(jq -r '.snapshot_manifest_sha256 // ""' "$directory/summary.json")
 	expected_roster=$(jq -r '.stable_roster_sha256 // ""' "$directory/summary.json")
 	expected_grants=$(jq -r '.live_grants_sha256 // ""' "$directory/summary.json")
+	actual_manifest=$(fga_hash_file "$directory/manifest.json")
 	actual_roster=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
 	actual_grants=$(fga_hash_file "$directory/live-grants.jsonl")
-	if [[ -z "$expected_roster" || -z "$expected_grants" ||
+	if [[ -z "$expected_manifest" || -z "$expected_roster" || -z "$expected_grants" ||
+		"$expected_manifest" != "$actual_manifest" ||
 		"$expected_roster" != "$actual_roster" || "$expected_grants" != "$actual_grants" ]]; then
-		fga_error "approved tuple plan changed; rerun plan and review"
+		fga_error "approved plan or source snapshot changed; rerun plan and review"
 		return 6
 	fi
 }

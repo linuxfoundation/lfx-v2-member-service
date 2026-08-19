@@ -31,11 +31,11 @@ fga_request() {
 	local endpoint="$1"
 	local body="$2"
 	local response
-	if ! response=$(curl -sf --show-error -X POST \
+	if ! response=$(printf '%s' "$body" | curl -sf --show-error -X POST \
 		--connect-timeout 10 --max-time 120 \
 		"${BASE_URL}/stores/${STORE_ID}/${endpoint}" \
 		-H 'Content-Type: application/json' \
-		-d "$body" 2>&1); then
+		--data-binary @- 2>&1); then
 		fga_error "/$endpoint request failed: $response"
 		return 5
 	fi
