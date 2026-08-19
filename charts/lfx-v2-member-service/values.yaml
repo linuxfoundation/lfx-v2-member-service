@@ -45,16 +45,12 @@ app:
   jwtAuthDisabledMockLocalPrincipal: ""
   # use_oidc_contextualizer is a boolean to determine if the OIDC contextualizer should be used
   use_oidc_contextualizer: true
-  # globalOrgAdminTeamUID is the v2 UID of the platform org-admin team
-  # whose members (EasyCLA / LFX Enrollment client-IDs) are authorized to
-  # call POST /b2b_orgs and POST /admin/reindex. The placeholder _null
-  # never matches a real team UID; override per-environment.
-  globalOrgAdminTeamUID: "_null"
+  # Stable platform-wide OpenFGA team name for global organization admins.
+  # This is shared across environments, like lfStaffTeamName below.
+  globalOrgAdminTeamName: "global_org_admin"
   # lfStaffTeamName is the LDAP-backed OpenFGA team granted blanket auditor
-  # (read-only) access on every b2b_org. Unlike globalOrgAdminTeamUID this is a
-  # team *name*, not a UID: it is the same in every environment, so it is a real
-  # value here rather than a placeholder overridden per environment. This is the
-  # single authoritative copy — nothing else in the repo hardcodes it.
+  # (read-only) access on every b2b_org. It is the same in every environment,
+  # so it is a real value here rather than a per-environment identifier.
   #
   # Deploying is the cutover. Every write path asserts the reference, so orgs
   # begin acquiring the tuple as CDC events arrive; the backfill scripts only

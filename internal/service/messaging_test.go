@@ -278,16 +278,16 @@ func TestBuildB2BOrgFGAMessage_ExcludesParentChildAndMembership(t *testing.T) {
 	assert.Contains(t, data.ExcludeRelations, "child")
 	assert.Contains(t, data.ExcludeRelations, "membership")
 	assert.Contains(t, data.ExcludeRelations, "global_org_admin",
-		"empty globalOrgAdminTeamUID must exclude global_org_admin to preserve existing tuples")
+		"empty globalOrgAdminTeamName must exclude global_org_admin to preserve existing tuples")
 }
 
 func TestBuildB2BOrgFGAMessage_GlobalOrgAdminNotExcludedWhenSet(t *testing.T) {
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamUID: "global-admin-uid"})
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamName: "global-org-admin"})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
 	assert.NotContains(t, data.ExcludeRelations, "global_org_admin",
-		"non-empty globalOrgAdminTeamUID must not exclude global_org_admin — caller is setting it")
+		"non-empty globalOrgAdminTeamName must not exclude global_org_admin — caller is setting it")
 }
 
 func TestBuildB2BOrgFGAMessage_NilWritersAuditorsExcluded(t *testing.T) {
@@ -318,13 +318,13 @@ func TestBuildB2BOrgFGAMessage_ExplicitWritersAuditorsNotExcluded(t *testing.T) 
 func TestBuildB2BOrgFGAMessage_WithWritersAndAuditors(t *testing.T) {
 	writers := []string{"alice", "bob"}
 	auditors := []string{"viewer1"}
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamUID: "global-admin-uid", Writers: writers, Auditors: auditors})
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamName: "global_org_admin", Writers: writers, Auditors: auditors})
 
 	data, ok := msg.Data.(fgatypes.GenericAccessData)
 	require.True(t, ok)
 	assert.Equal(t, []string{"alice", "bob"}, data.Relations["writer"])
 	assert.Equal(t, []string{"viewer1"}, data.Relations["auditor"])
-	assert.Equal(t, []string{"team:global-admin-uid#member"}, data.References["global_org_admin"])
+	assert.Equal(t, []string{"team:global_org_admin#member"}, data.References["global_org_admin"])
 }
 
 func TestBuildB2BOrgFGAMessage_WithMembershipUIDs(t *testing.T) {
@@ -341,7 +341,7 @@ func TestBuildB2BOrgFGAMessage_WithMembershipUIDs(t *testing.T) {
 }
 
 func TestBuildB2BOrgFGAMessage_WithGlobalAdmin(t *testing.T) {
-	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamUID: "global-admin-team-uid"})
+	msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{GlobalOrgAdminTeamName: "global_org_admin"})
 
 	assert.Equal(t, "b2b_org", msg.ObjectType)
 	assert.Equal(t, "update_access", msg.Operation)
@@ -350,7 +350,7 @@ func TestBuildB2BOrgFGAMessage_WithGlobalAdmin(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "b2b-org-uid-001", data.UID)
 	require.Contains(t, data.References, "global_org_admin")
-	assert.Equal(t, []string{"team:global-admin-team-uid#member"}, data.References["global_org_admin"])
+	assert.Equal(t, []string{"team:global_org_admin#member"}, data.References["global_org_admin"])
 }
 
 func TestBuildB2BOrgFGAMessage_NoGlobalAdmin(t *testing.T) {
@@ -500,15 +500,15 @@ func TestBuildB2BOrgFGAMessage_AuditorTeams(t *testing.T) {
 func TestBuildB2BOrgFGAMessage_NoAuditorTeamsIsUnchanged(t *testing.T) {
 	for _, teams := range [][]string{nil, {}, {"", "  "}} {
 		msg := BuildB2BOrgFGAMessage(testB2BOrg, B2BOrgFGARefs{
-			GlobalOrgAdminTeamUID: "global-admin-uid",
-			AuditorTeams:          teams,
+			GlobalOrgAdminTeamName: "global_org_admin",
+			AuditorTeams:           teams,
 		})
 
 		data, ok := msg.Data.(fgatypes.GenericAccessData)
 		require.True(t, ok)
 		assert.NotContains(t, data.References, "auditor",
 			"no configured teams must leave References[auditor] absent, not empty")
-		assert.Equal(t, []string{"team:global-admin-uid#member"}, data.References["global_org_admin"])
+		assert.Equal(t, []string{"team:global_org_admin#member"}, data.References["global_org_admin"])
 		assert.Contains(t, data.ExcludeRelations, "auditor")
 	}
 }

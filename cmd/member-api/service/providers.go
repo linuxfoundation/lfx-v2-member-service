@@ -353,7 +353,7 @@ func messagingSource() string {
 //   - "nats" (default) — NATS JetStream publisher.
 //   - "mock"           — No-op publisher that logs published messages.
 //
-// When MESSAGING_SOURCE=mock and GLOBAL_ORG_ADMIN_TEAM_UID is empty, the
+// When MESSAGING_SOURCE=mock and GLOBAL_ORG_ADMIN_TEAM_NAME is empty, the
 // service still starts successfully — useful for local development.
 func MemberPublisherImpl(ctx context.Context) port.MemberPublisher {
 	switch messagingSource() {
@@ -399,11 +399,11 @@ func UserReaderImpl(ctx context.Context) port.UserReader {
 	}
 }
 
-// GlobalOrgAdminTeamUID reads the GLOBAL_ORG_ADMIN_TEAM_UID environment variable.
+// GlobalOrgAdminTeamName reads the GLOBAL_ORG_ADMIN_TEAM_NAME environment variable.
 // Returns empty string when not set (allowed in mock/messaging=mock mode; the
 // FGA message simply omits the global_org_admin reference).
-func GlobalOrgAdminTeamUID() string {
-	return os.Getenv("GLOBAL_ORG_ADMIN_TEAM_UID")
+func GlobalOrgAdminTeamName() string {
+	return strings.TrimSpace(os.Getenv("GLOBAL_ORG_ADMIN_TEAM_NAME"))
 }
 
 // B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
@@ -417,8 +417,7 @@ func GlobalOrgAdminTeamUID() string {
 //
 // Names are trimmed and blank or whitespace-only values are dropped, so no path
 // can produce a "team:#member" subject with an empty name — the trap
-// GLOBAL_ORG_ADMIN_TEAM_UID leaves open by guarding only on != "" while the
-// chart defaults it to the placeholder "_null".
+// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics.
 //
 // Clearing the variable stops new references being emitted but revokes nothing:
 // fga-sync never deletes a tuple whose subject begins with "team:" (that guard
@@ -584,7 +583,7 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		B2BOrgSettingsReaderImpl(ctx),
 		MemberPublisherImpl(ctx),
 		nc,
-		GlobalOrgAdminTeamUID(),
+		GlobalOrgAdminTeamName(),
 		ProjectResolverImpl(ctx),
 		opts...,
 	)
@@ -638,7 +637,7 @@ func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
 		usecaseSvc.WithB2BOrgReader(B2BOrgReaderImpl(ctx)),
 		usecaseSvc.WithB2BOrgWriter(B2BOrgWriterImpl(ctx)),
 		usecaseSvc.WithB2BOrgPublisher(MemberPublisherImpl(ctx)),
-		usecaseSvc.WithGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),
+		usecaseSvc.WithGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 	)
 }
@@ -938,7 +937,7 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		usecaseSvc.WithCDCB2BOrgSettingsReader(B2BOrgSettingsReaderImpl(ctx)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
-		usecaseSvc.WithCDCGlobalOrgAdminTeamUID(GlobalOrgAdminTeamUID()),
+		usecaseSvc.WithCDCGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithCDCB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 		usecaseSvc.WithCDCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithCDCOrgSettings(OrgSettingsWriterUseCase(ctx)),

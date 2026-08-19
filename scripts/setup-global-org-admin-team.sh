@@ -5,7 +5,7 @@
 # setup-global-org-admin-team.sh
 #
 # Seeds (or updates) the global org-admin team membership tuples in OpenFGA.
-# Each user in ADMIN_USERS gets a `member` relation on `team:<TEAM_UID>`,
+# Each user in ADMIN_USERS gets a `member` relation on `team:<TEAM_NAME>`,
 # which transitively grants `writer` and `auditor` access to every b2b_org.
 #
 # Prerequisites:
@@ -15,7 +15,7 @@
 #
 # Required env vars:
 #   OPENFGA_STORE_ID     — OpenFGA store ID for the target environment
-#   TEAM_UID             — the globalOrgAdminTeamUID for the environment
+#   TEAM_NAME            — stable global org-admin team name
 #   ADMIN_USERS          — comma-separated LFID usernames (e.g. "alice,bob")
 #
 # Optional env vars:
@@ -31,7 +31,7 @@
 #   kubectl -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #
 #   OPENFGA_STORE_ID=<store-id> \
-#   TEAM_UID=<team-uid> \
+#   TEAM_NAME=global_org_admin \
 #   ADMIN_USERS="alice,bob" \
 #   ./scripts/setup-global-org-admin-team.sh [--dry-run]
 #
@@ -40,9 +40,14 @@ set -euo pipefail
 
 BASE_URL="${OPENFGA_URL:-http://localhost:8080}"
 STORE_ID="${OPENFGA_STORE_ID:?OPENFGA_STORE_ID must be set}"
-TEAM_UID="${TEAM_UID:?TEAM_UID must be set}"
+TEAM_NAME="${TEAM_NAME:?TEAM_NAME must be set to the unqualified team name}"
 ADMIN_USERS="${ADMIN_USERS:?ADMIN_USERS must be set (comma-separated LFID usernames)}"
 DRY_RUN=false
+
+if [[ "$TEAM_NAME" != "global_org_admin" ]]; then
+	echo "TEAM_NAME must be exactly global_org_admin" >&2
+	exit 2
+fi
 
 for arg in "$@"; do
 	case "$arg" in
@@ -56,11 +61,11 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 echo "Store:    $STORE_ID"
-echo "Team UID: $TEAM_UID"
+echo "Team name: $TEAM_NAME"
 echo "Base URL: $BASE_URL"
 echo ""
 
-TEAM_OBJECT="team:${TEAM_UID}"
+TEAM_OBJECT="team:${TEAM_NAME}"
 
 # fga_read paginates through /read for a given tuple_key JSON fragment,
 # collecting all results into stdout as newline-separated user strings.
@@ -122,7 +127,7 @@ for raw_user in "${users[@]}"; do
 	[[ -z "$username" ]] && continue
 	fga_user="user:${username}"
 
-	if echo "$existing_users" | grep -qx "$fga_user"; then
+	if echo "$existing_users" | grep -qxF "$fga_user"; then
 		echo "  SKIP (already member): $fga_user"
 	else
 		echo "  WRITE: $fga_user -> member -> $TEAM_OBJECT"

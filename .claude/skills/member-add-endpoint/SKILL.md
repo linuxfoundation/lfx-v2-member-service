@@ -57,7 +57,7 @@ For the broader development reference (Makefile targets, JWT/Heimdall flow, Open
    - `GET /b2b_orgs/{uid}` and `GET /b2b_orgs/{uid}/settings` require `auditor` on `b2b_org:{uid}`.
    - `PUT /b2b_orgs/{uid}` and `PUT /b2b_orgs/{uid}/settings` require `writer` on `b2b_org:{uid}`.
    - `POST /b2b_orgs/{uid}/settings/users` and PUT/DELETE `/b2b_orgs/{uid}/settings/users/{email}` (per-principal settings users) require `writer` on `b2b_org:{uid}`.
-   - `POST /b2b_orgs` and `POST /admin/reindex` require `member` on `team:{{ .Values.app.globalOrgAdminTeamUID }}` (machine callers).
+   - `POST /b2b_orgs` and `POST /admin/reindex` require `member` on `team:{{ .Values.app.globalOrgAdminTeamName }}` (machine callers).
    - `GET /project_memberships/{uid}` requires `auditor` on `project_membership:{uid}`.
    - `GET/POST/PUT/DELETE /project_memberships/{membership_uid}/key_contacts[/{uid}]` require `auditor` (reads) / `writer` (mutations) on `project_membership:{membership_uid}`; the POST rule also runs the `json_content_type` platform authorizer.
 

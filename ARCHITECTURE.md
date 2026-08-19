@@ -48,7 +48,7 @@ The service exposes resource-rooted endpoints. The authoritative surface is the 
 | Method | Path | Description | FGA check |
 |--------|------|-------------|-----------|
 | GET | `/b2b_orgs/{uid}` | Get a b2b_org (sObject cache) | `auditor` on `b2b_org:{uid}` |
-| POST | `/b2b_orgs` | Create a b2b_org (machine callers) | `member` on `team:{globalOrgAdminTeamUID}` |
+| POST | `/b2b_orgs` | Create a b2b_org (machine callers) | `member` on `team:{globalOrgAdminTeamName}` |
 | PUT | `/b2b_orgs/{uid}` | Update a b2b_org | `writer` on `b2b_org:{uid}` |
 | GET | `/b2b_orgs/{uid}/settings` | Get org access-control settings | `auditor` on `b2b_org:{uid}` |
 | PUT | `/b2b_orgs/{uid}/settings` | Full-replace org writers/auditors | `writer` on `b2b_org:{uid}` |
@@ -60,7 +60,7 @@ The service exposes resource-rooted endpoints. The authoritative surface is the 
 | POST | `/project_memberships/{m_uid}/key_contacts` | Create a key contact | `writer` on `project_membership:{m_uid}` |
 | PUT | `/project_memberships/{m_uid}/key_contacts/{uid}` | Update a key contact | `writer` on `project_membership:{m_uid}` |
 | DELETE | `/project_memberships/{m_uid}/key_contacts/{uid}` | Delete a key contact | `writer` on `project_membership:{m_uid}` |
-| POST | `/admin/reindex` | Trigger an indexer/FGA backfill | `member` on `team:{globalOrgAdminTeamUID}` |
+| POST | `/admin/reindex` | Trigger an indexer/FGA backfill | `member` on `team:{globalOrgAdminTeamName}` |
 
 Authorization is checked by the Heimdall API gateway using the `b2b_org` and `project_membership`
 OpenFGA types per object. The earlier project-scoped drill-down paths and the interim `lfProjectUID`
@@ -844,7 +844,7 @@ The Heimdall RuleSet must be updated to:
    `/key_contacts/...`).
 3. **The `POST /b2b_orgs` and `POST /admin/reindex` rules** check team membership against the
    global org-admin team rather than a per-resource object. The team UID is injected as a static
-   chart value (`app.globalOrgAdminTeamUID`).
+   chart value (`app.globalOrgAdminTeamName`).
 4. **No write rules for `project_memberships`.** The only Heimdall rule needed for this path is
    a `GET` read rule. Membership lifecycle (creation, cancellation, auto-renewal) is handled by
    the LF Sales team in Salesforce; no direct-write HTTP rules are required.
@@ -863,7 +863,7 @@ Example rule sketch for `POST /b2b_orgs` (team membership check):
       config:
         values:
           relation: member
-          object: "team:{{ .Values.app.globalOrgAdminTeamUID }}"
+          object: "team:{{ .Values.app.globalOrgAdminTeamName }}"
     - finalizer: create_jwt
 ```
 
@@ -1234,7 +1234,7 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 | `SF_ORG_ID` | Salesforce org ID for the Pub/Sub tenant | Consumer mode only |
 | `SF_CDC_CHANNEL` | CDC channel to subscribe to (default `/data/ChangeEvents`) | No |
 | `RUN_MODE` | `server` (default, HTTP API) or `consumer` (CDC consumer) | No |
-| `GLOBAL_ORG_ADMIN_TEAM_UID` | v2 UID of the global org-admin team; written as `global_org_admin` on every `b2b_org` at creation | Yes |
+| `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable global org-admin team name; written as `global_org_admin` on every `b2b_org` at creation | Yes |
 | `NATS_URL` | NATS server URL | Yes |
 
 ---

@@ -99,12 +99,12 @@ func (p *capturingPublisher) getIndexerMessages() []any {
 	return out
 }
 
-func newB2BOrgWriter(orgReader port.B2BOrgReader, orgWriter port.B2BOrgWriter, pub port.MemberPublisher, globalOrgAdminTeamUID string) svc.B2BOrgWriter {
+func newB2BOrgWriter(orgReader port.B2BOrgReader, orgWriter port.B2BOrgWriter, pub port.MemberPublisher, globalOrgAdminTeamName string) svc.B2BOrgWriter {
 	return svc.NewB2BOrgWriter(
 		svc.WithB2BOrgReader(orgReader),
 		svc.WithB2BOrgWriter(orgWriter),
 		svc.WithB2BOrgPublisher(pub),
-		svc.WithGlobalOrgAdminTeamUID(globalOrgAdminTeamUID),
+		svc.WithGlobalOrgAdminTeamName(globalOrgAdminTeamName),
 	)
 }
 
@@ -206,7 +206,7 @@ func TestB2BOrgWriter_Update_EmitsAuditorTeams(t *testing.T) {
 		svc.WithB2BOrgReader(&seededOrgReader{org: current}),
 		svc.WithB2BOrgWriter(&seededOrgWriter{updateOrg: updated}),
 		svc.WithB2BOrgPublisher(pub),
-		svc.WithGlobalOrgAdminTeamUID("global-admin-uid"),
+		svc.WithGlobalOrgAdminTeamName("global_org_admin"),
 		svc.WithB2BOrgAuditorTeams([]string{"staff-team", "second-team"}),
 	)
 

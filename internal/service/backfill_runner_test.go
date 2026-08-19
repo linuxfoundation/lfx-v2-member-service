@@ -459,23 +459,23 @@ func (r *multiOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []strin
 
 func TestBackfillRunner_B2BOrg_GlobalAdminFGA(t *testing.T) {
 	tests := []struct {
-		name                  string
-		globalOrgAdminTeamUID string
-		wantAccessCount       int32
-		assertFn              func(t *testing.T, got int32)
+		name                   string
+		globalOrgAdminTeamName string
+		wantAccessCount        int32
+		assertFn               func(t *testing.T, got int32)
 	}{
 		{
-			name:                  "published when UID set",
-			globalOrgAdminTeamUID: "team-uid-abc",
+			name:                   "published when UID set",
+			globalOrgAdminTeamName: "global_org_admin",
 			assertFn: func(t *testing.T, got int32) {
-				assert.GreaterOrEqual(t, got, int32(1), "FGA access message must be published when globalOrgAdminTeamUID is set")
+				assert.GreaterOrEqual(t, got, int32(1), "FGA access message must be published when globalOrgAdminTeamName is set")
 			},
 		},
 		{
-			name:                  "skipped when UID empty",
-			globalOrgAdminTeamUID: "",
+			name:                   "skipped when UID empty",
+			globalOrgAdminTeamName: "",
 			assertFn: func(t *testing.T, got int32) {
-				assert.Equal(t, int32(0), got, "FGA access message must be skipped when globalOrgAdminTeamUID is empty")
+				assert.Equal(t, int32(0), got, "FGA access message must be skipped when globalOrgAdminTeamName is empty")
 			},
 		},
 	}
@@ -485,7 +485,7 @@ func TestBackfillRunner_B2BOrg_GlobalAdminFGA(t *testing.T) {
 			iter := &mock.MockBackfillIterator{B2BOrgs: [][]*model.B2BOrg{{org}}}
 			var accessCount atomic.Int32
 			pub := &countingAccessPublisher{accessCount: &accessCount}
-			runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, tt.globalOrgAdminTeamUID, nil)
+			runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, tt.globalOrgAdminTeamName, nil)
 			require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}))
 			tt.assertFn(t, accessCount.Load())
 		})
@@ -506,7 +506,7 @@ func TestBackfillRunner_TargetedMode_GlobalAdminFGA_PublishedWhenUIDSet(t *testi
 		Items: []string{orgUID},
 	}))
 
-	assert.GreaterOrEqual(t, accessCount.Load(), int32(1), "targeted FGA access message must be published when globalOrgAdminTeamUID is set")
+	assert.GreaterOrEqual(t, accessCount.Load(), int32(1), "targeted FGA access message must be published when globalOrgAdminTeamName is set")
 }
 
 // countingAccessPublisher counts Access calls (FGA publish) separately from Indexer calls.

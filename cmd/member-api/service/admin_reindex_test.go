@@ -168,6 +168,26 @@ func TestAdminReindex_CdcRepair_SupportedTypesAccepted(t *testing.T) {
 
 // ── Provider configuration ─────────────────────────────────────────────────
 
+func TestGlobalOrgAdminTeamName(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "unset is empty", want: ""},
+		{name: "stable name is returned", value: "global_org_admin", want: "global_org_admin"},
+		{name: "surrounding whitespace is trimmed", value: "  global_org_admin  ", want: "global_org_admin"},
+		{name: "whitespace only is empty", value: "   ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GLOBAL_ORG_ADMIN_TEAM_NAME", tt.value)
+			assert.Equal(t, tt.want, GlobalOrgAdminTeamName())
+		})
+	}
+}
+
 // Lives here because the Runner behind AdminReindex is wired with
 // B2BOrgAuditorTeamNames (WithRunnerB2BOrgAuditorTeams), and the reindex FGA
 // emitter is the path that had its guard widened so a blank global-admin UID
@@ -203,8 +223,7 @@ func TestB2BOrgAuditorTeamNames(t *testing.T) {
 			want: []string{},
 		},
 		{
-			// Guards the "team:#member" subject that GLOBAL_ORG_ADMIN_TEAM_UID
-			// leaves reachable by guarding only on != "".
+			// Guards against rendering a "team:#member" subject.
 			name: "whitespace-only is dropped rather than rendered",
 			env:  map[string]string{"LF_STAFF_TEAM_NAME": "   "},
 			want: []string{},

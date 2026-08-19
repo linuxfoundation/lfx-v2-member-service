@@ -62,7 +62,7 @@ Grants and upserts do not flush — nor does the email-change revocation that sh
 
 | Relation | Value | Condition |
 |---|---|---|
-| `global_org_admin` | `"team:{globalOrgAdminTeamUID}"` | On create only, when `globalOrgAdminTeamUID` is non-empty |
+| `global_org_admin` | `"team:{globalOrgAdminTeamName}"` | On create only, when `globalOrgAdminTeamName` is non-empty |
 | `parent` | `"b2b_org:{ParentUID}"` | When `ParentUID` changes; empty clears the tuple |
 | `child` | `["b2b_org:{child_uid}", ...]` | Updated on old/new parent when `ParentUID` changes |
 | `writer` | LFID username string (one per accepted writer, e.g. `"alice"`) | When org settings are updated with a non-nil writers field |
@@ -150,7 +150,7 @@ Workspace CRUD operations (`POST/PUT/DELETE /b2b_orgs/{uid}/workspaces/…`) and
 |---|---|---|---|
 | Create B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Sets `global_org_admin` tuple + auditor team references |
 | Update B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Always sent. Carries the auditor team references but no `global_org_admin`, which is create-only |
-| CDC `AccountChangeEvent` | `b2b_org` | `lfx.fga-sync.update_access` | Same as update; `globalOrgAdminTeamUID` always set (not create-only) |
+| CDC `AccountChangeEvent` | `b2b_org` | `lfx.fga-sync.update_access` | Same as update; `globalOrgAdminTeamName` always set (not create-only) |
 | Reparent B2B org | `b2b_org` | `lfx.fga-sync.update_access` | Up to 3 messages: org's own `parent`, old parent's `child` list, new parent's `child` list |
 | CDC `AccountChangeEvent` (delete) | `b2b_org` | `lfx.fga-sync.delete_access` | Same as delete. `DELETE` and `GAP_DELETE` only |
 | CDC `AccountChangeEvent` (`UNDELETE` / `GAP_UNDELETE`) | `b2b_org` | `lfx.fga-sync.update_access` | Full-sync of accepted writers/auditors read from `org-settings`, rebuilding what the purge withdrew. Additive only; flushed before cursor advancement |
