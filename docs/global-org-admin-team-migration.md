@@ -18,7 +18,10 @@ approved change window and an explicit store ID.
 - Plan copies grants only for current, non-deleted organizations in the OpenSearch census.
 - Any OpenSearch-to-Salesforce count difference blocks writes until explicitly approved.
 - Cleanup requires a matching verification checkpoint, completed API and CDC rollouts, and no
-  old-team tuples absent from the pre-cutover snapshot.
+  old-team tuples absent from the pre-cutover snapshot. Immediately before deletion it also
+  revalidates the stable roster and grants against the approved plan and reruns the baseline
+  allowed/denied authorization controls.
+- `restore` verifies the final pre-cleanup tuple hashes and requires exactly one of `--dry-run` or `--confirm`.
 - Snapshot files can contain principal identifiers. Keep them outside the repository and delete them
   according to the approved operational retention policy.
 
@@ -132,17 +135,39 @@ scripts/migrate-global-org-admin-team-openfga.sh cleanup \
   --store-id "$STORE_ID" \
   --old-team "$OLD_TEAM" \
   --output-dir "$OUT" \
+  --allowed-user <known-admin-lfid> \
+  --denied-user <known-non-admin-lfid> \
+  --sample-org <live-b2b-org-uid> \
   --cutover-complete \
   --dry-run
 ```
 
-The command re-reads old-team tuples, preserves the pre-cleanup set in the output directory, and
-blocks if any tuple was not present in the pre-cutover snapshot. This set comparison detects new old
-writes even when unrelated deletions keep the total count unchanged. After review, replace
-`--dry-run` with `--confirm`. Re-run `verify` and direct authorization checks after cleanup.
+The command revalidates the stable tuple sets and authorization controls, then performs a final
+old-team read. It blocks if any tuple was not present in the pre-cutover snapshot. `--confirm` binds
+that exact roster and grants in `precleanup.checkpoint` before deleting them. Retries require the
+live old-team sets to remain subsets of that immutable binding, then delete from the full binding.
+`--dry-run` does not create it. Re-run `verify` and direct authorization checks after cleanup.
 
 ## Rollback
 
 Before cleanup, revert the GitOps value to the old team identifier; both tuple sets still exist.
-After cleanup, rollback is manual: rerun the migration in the opposite direction using a reviewed
-snapshot, because normal service reconciliation does not remove or restore team-subject tuples.
+After cleanup, first restore the hash-verified final pre-cleanup tuple set while the service still
+targets the stable team:
+
+```bash
+scripts/migrate-global-org-admin-team-openfga.sh restore \
+  --store-id "$STORE_ID" \
+  --old-team "$OLD_TEAM" \
+  --output-dir "$OUT" \
+  --dry-run
+```
+
+Review that the preview covers `precleanup-old-roster.jsonl` and `precleanup-old-grants.jsonl`, then
+replace `--dry-run` with `--confirm`. The command refuses to proceed if either file differs from its
+hash binding in `precleanup.checkpoint`; writes ignore tuples that already exist, so a confirmed
+restore can be retried.
+
+After the confirmed restore, directly verify the known allowed and denied principals against a
+representative organization. Only then revert the GitOps value to the old team identifier and wait
+for both the API and CDC consumer Deployments to complete. Keep the stable tuples in place until the
+rollback has been verified; normal service reconciliation does not restore team-subject tuples.

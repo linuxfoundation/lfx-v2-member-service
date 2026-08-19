@@ -23,6 +23,7 @@
 #   b2b-org-uids.summary  — raw hit count, deduplicated count, and the gap
 
 set -euo pipefail
+umask 077
 
 OUT_DIR="${1:-/tmp/lf-team-auditor-backfill}"
 OPENSEARCH_URL="${OPENSEARCH_URL:-http://localhost:9299}"
@@ -31,8 +32,18 @@ SCROLL_TTL="${SCROLL_TTL:-5m}"
 PAGE_SIZE="${PAGE_SIZE:-500}"
 
 mkdir -p "$OUT_DIR"
+chmod 700 "$OUT_DIR"
 JSONL="$OUT_DIR/b2b-org-uids.jsonl"
 SUMMARY="$OUT_DIR/b2b-org-uids.summary"
+JSONL_TMP="$JSONL.tmp"
+SUMMARY_TMP="$SUMMARY.tmp"
+
+cleanup_census_temps() {
+	rm -f "$JSONL_TMP" "$SUMMARY_TMP"
+}
+
+trap cleanup_census_temps EXIT
+rm -f "$JSONL" "$SUMMARY" "$JSONL_TMP" "$SUMMARY_TMP"
 
 echo "→ OpenSearch: ${OPENSEARCH_URL}/${INDEX}"
 echo "→ Output dir: ${OUT_DIR}"
@@ -48,19 +59,14 @@ import urllib.request
 
 base, index, scroll_ttl, page_size, jsonl_path, summary_path = sys.argv[1:7]
 page_size = int(page_size)
+jsonl_tmp = jsonl_path + ".tmp"
+summary_tmp = summary_path + ".tmp"
 
-# Clear any previous run's output before doing anything else. Refusing to write
-# a bad census is not enough on its own: if this directory already holds a good
-# census from an earlier run, an abort leaves that file in place, and the grant
-# script's only validation is that the file exists. The operator would proceed
-# on a stale census — omitting newer orgs, or worse, targeting the census of a
-# different environment — with the failure already scrolled off screen. Deleting
-# up front means a failed run leaves nothing rather than something plausible.
-for stale in (jsonl_path, summary_path):
-    try:
-        os.unlink(stale)
-    except FileNotFoundError:
-        pass
+def open_private(path):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
 
 # latest=true excludes superseded document versions; the deleted_at must_not
 # excludes soft-deleted orgs. Neither guarantees uniqueness on its own — see
@@ -206,24 +212,31 @@ if expected and raw_hits != expected:
     )
     sys.exit(2)
 
-# Write via temp files and rename, so the final paths only ever appear complete.
-# A crash between the two writes would otherwise leave a census with no summary,
-# which reads as a successful run to anything that only checks for the file.
-with open(jsonl_path + ".tmp", "w", encoding="utf-8") as f:
-    for uid in ordered:
-        f.write(json.dumps({"uid": uid}) + "\n")
+# Publish the census last so its final path is the completion marker.
+try:
+    with open_private(jsonl_tmp) as f:
+        for uid in ordered:
+            f.write(json.dumps({"uid": uid}) + "\n")
 
-with open(summary_path + ".tmp", "w", encoding="utf-8") as f:
-    f.write(f"captured_at={datetime.now(timezone.utc).isoformat()}\n")
-    f.write(f"opensearch_url={base.rstrip('/')}\n")
-    f.write(f"index={index}\n")
-    f.write(f"raw_hits={raw_hits}\n")
-    f.write(f"unique_uids={len(ordered)}\n")
-    f.write(f"duplicates_dropped={duplicates}\n")
-    f.write(f"expected_from_scroll_open={expected}\n")
+    with open_private(summary_tmp) as f:
+        f.write(f"captured_at={datetime.now(timezone.utc).isoformat()}\n")
+        f.write(f"opensearch_url={base.rstrip('/')}\n")
+        f.write(f"index={index}\n")
+        f.write(f"raw_hits={raw_hits}\n")
+        f.write(f"unique_uids={len(ordered)}\n")
+        f.write(f"duplicates_dropped={duplicates}\n")
+        f.write(f"expected_from_scroll_open={expected}\n")
 
-os.replace(jsonl_path + ".tmp", jsonl_path)
-os.replace(summary_path + ".tmp", summary_path)
+    os.replace(summary_tmp, summary_path)
+    os.chmod(summary_path, 0o600)
+    os.replace(jsonl_tmp, jsonl_path)
+    os.chmod(jsonl_path, 0o600)
+finally:
+    for temporary in (jsonl_tmp, summary_tmp):
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 print(f"→ Wrote {len(ordered):,} unique UIDs to {jsonl_path}")
 if duplicates:

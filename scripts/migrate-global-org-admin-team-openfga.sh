@@ -16,14 +16,14 @@ umask 077
 export LC_ALL=C
 
 MIGRATION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/openfga-global-org-admin-migration.sh
+# shellcheck source=scripts/lib/openfga-global-org-admin-migration.sh
 source "$MIGRATION_SCRIPT_DIR/lib/openfga-global-org-admin-migration.sh"
 
 migration_usage() {
 	cat <<'USAGE'
 Usage: migrate-global-org-admin-team-openfga.sh PHASE --store-id ID --old-team NAME --output-dir DIR [options]
 
-Phases: snapshot, plan, apply, verify, cleanup
+Phases: snapshot, plan, apply, verify, cleanup, restore
 Options:
   --openfga-url URL
   --census-file FILE
@@ -33,6 +33,9 @@ Options:
   --dry-run
   --confirm
   --cutover-complete
+
+cleanup requires the allowed/denied/sample controls and --cutover-complete.
+restore verifies the final precleanup tuple hashes before previewing or writing.
 USAGE
 }
 
@@ -260,6 +263,16 @@ migration_validate_plan_hashes() {
 	fi
 }
 
+migration_require_execution_mode() {
+	local phase="$1"
+	local dry_run="$2"
+	local confirm="$3"
+	if [[ "$dry_run" == "$confirm" ]]; then
+		fga_error "$phase requires exactly one of --dry-run or --confirm"
+		return 2
+	fi
+}
+
 migration_apply() {
 	local directory="$1"
 	local dry_run="$2"
@@ -273,10 +286,7 @@ migration_apply() {
 		return 4
 	}
 	migration_validate_plan_hashes "$directory" || return $?
-	[[ "$dry_run" == true || "$confirm" == true ]] || {
-		fga_error "apply requires --dry-run or --confirm"
-		return 2
-	}
+	migration_require_execution_mode apply "$dry_run" "$confirm" || return $?
 	fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run"
 	fga_apply_tuple_file writes "$directory/live-grants.jsonl" "$dry_run"
 	if [[ "$dry_run" == false ]]; then
@@ -296,6 +306,65 @@ migration_normalize_file() {
 		LC_ALL=C sort -u >"$output"
 }
 
+migration_assert_live_stable_plan() {
+	local directory="$1"
+	local extra_grants_output="${2:-}"
+	migration_validate_plan_hashes "$directory" || return $?
+	local temp_dir actual_roster actual_grants expected_roster expected_grants missing_grants status
+	temp_dir=$(mktemp -d)
+	actual_roster="$temp_dir/actual-roster"
+	actual_grants="$temp_dir/actual-grants"
+	expected_roster="$temp_dir/expected-roster"
+	expected_grants="$temp_dir/expected-grants"
+	missing_grants="$temp_dir/missing-grants"
+	if migration_sorted_read \
+		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
+		"$actual_roster" &&
+		migration_sorted_read \
+			"$(jq -n --arg user "team:$FGA_STABLE_TEAM#member" \
+				'{user:$user,relation:"global_org_admin",object:"b2b_org:"}')" \
+			"$actual_grants" &&
+		migration_normalize_file "$directory/stable-roster-plan.jsonl" "$expected_roster" &&
+		migration_normalize_file "$directory/live-grants.jsonl" "$expected_grants" &&
+		comm -23 "$expected_grants" "$actual_grants" >"$missing_grants"; then
+		:
+	else
+		status=$?
+		rm -rf "$temp_dir"
+		return "$status"
+	fi
+	if ! cmp -s "$actual_roster" "$expected_roster" || [[ -s "$missing_grants" ]]; then
+		rm -rf "$temp_dir"
+		fga_error "stable team does not match the approved plan"
+		return 4
+	fi
+	if [[ -n "$extra_grants_output" ]]; then
+		comm -13 "$expected_grants" "$actual_grants" >"$extra_grants_output" || {
+			status=$?
+			rm -rf "$temp_dir"
+			return "$status"
+		}
+	fi
+	rm -rf "$temp_dir"
+}
+
+migration_assert_authorization_baseline() {
+	local directory="$1"
+	local output="$2"
+	local allowed_user="$3"
+	local denied_user="$4"
+	local sample_org="$5"
+	rm -f "$output"
+	migration_write_checks "$output" "$allowed_user" "$denied_user" "$sample_org" || return $?
+	local baseline_checks current_checks
+	baseline_checks=$(jq -cS '.' "$directory/baseline-checks.json")
+	current_checks=$(jq -cS '.' "$output")
+	if [[ "$baseline_checks" != "$current_checks" ]]; then
+		fga_error "authorization checks differ from baseline"
+		return 4
+	fi
+}
+
 migration_verify() {
 	local directory="$1"
 	local allowed_user="${2:-}"
@@ -306,55 +375,42 @@ migration_verify() {
 		fga_error "baseline-checks.json is missing; rerun snapshot"
 		return 6
 	}
-	migration_validate_plan_hashes "$directory" || return $?
-	local actual_roster actual_grants expected_roster expected_grants
-	actual_roster=$(mktemp)
-	actual_grants=$(mktemp)
-	expected_roster=$(mktemp)
-	expected_grants=$(mktemp)
-	migration_sorted_read \
-		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
-		"$actual_roster"
-	migration_sorted_read \
-		"$(jq -n --arg user "team:$FGA_STABLE_TEAM#member" \
-			'{user:$user,relation:"global_org_admin",object:"b2b_org:"}')" \
-		"$actual_grants"
+	local extra_grants status
+	extra_grants=$(mktemp)
+	migration_assert_live_stable_plan "$directory" "$extra_grants" || {
+		status=$?
+		rm -f "$extra_grants"
+		return "$status"
+	}
 	local old_team old_roster old_grants
 	old_team=$(jq -r '.old_team' "$directory/manifest.json")
 	old_roster="$directory/verified-old-roster.jsonl"
 	old_grants="$directory/verified-old-grants.jsonl"
-	migration_sorted_read \
+	if migration_sorted_read \
 		"$(jq -n --arg object "team:$old_team" '{relation:"member",object:$object}')" \
-		"$old_roster"
-	migration_sorted_read \
-		"$(jq -n --arg user "team:$old_team#member" \
-			'{user:$user,relation:"global_org_admin",object:"b2b_org:"}')" \
-		"$old_grants"
-	migration_assert_no_new_old_tuples "$directory" "$old_roster" "$old_grants" || return $?
-	migration_normalize_file "$directory/stable-roster-plan.jsonl" "$expected_roster"
-	migration_normalize_file "$directory/live-grants.jsonl" "$expected_grants"
-	local missing_grants extra_grants
-	missing_grants=$(mktemp)
-	extra_grants=$(mktemp)
-	comm -23 "$expected_grants" "$actual_grants" >"$missing_grants"
-	comm -13 "$expected_grants" "$actual_grants" >"$extra_grants"
-	if ! cmp -s "$actual_roster" "$expected_roster" || [[ -s "$missing_grants" ]]; then
-		rm -f "$actual_roster" "$actual_grants" "$expected_roster" "$expected_grants"
-		rm -f "$missing_grants" "$extra_grants"
-		fga_error "stable team does not match the approved plan"
-		return 4
-	fi
-	rm -f "$actual_roster" "$actual_grants" "$expected_roster" "$expected_grants" "$missing_grants"
-
-	rm -f "$directory/current-checks.json"
-	migration_write_checks "$directory/current-checks.json" "$allowed_user" "$denied_user" "$sample_org"
-	local baseline_checks current_checks
-	baseline_checks=$(jq -cS '.' "$directory/baseline-checks.json")
-	current_checks=$(jq -cS '.' "$directory/current-checks.json")
-	if [[ "$baseline_checks" != "$current_checks" ]]; then
+		"$old_roster" &&
+		migration_sorted_read \
+			"$(jq -n --arg user "team:$old_team#member" \
+				'{user:$user,relation:"global_org_admin",object:"b2b_org:"}')" \
+			"$old_grants"; then
+		:
+	else
+		status=$?
 		rm -f "$extra_grants"
-		fga_error "authorization checks differ from baseline"
-		return 4
+		return "$status"
+	fi
+	migration_assert_no_new_old_tuples "$directory" "$old_roster" "$old_grants" || {
+		status=$?
+		rm -f "$extra_grants"
+		return "$status"
+	}
+
+	local auth_status=0
+	migration_assert_authorization_baseline "$directory" "$directory/current-checks.json" \
+		"$allowed_user" "$denied_user" "$sample_org" || auth_status=$?
+	if [[ "$auth_status" -ne 0 ]]; then
+		rm -f "$extra_grants"
+		return "$auth_status"
 	fi
 	local extra_count summary_tmp
 	extra_count=$(migration_line_count "$extra_grants")
@@ -394,35 +450,188 @@ migration_assert_no_new_old_tuples() {
 	rm -f "$new_roster" "$new_grants"
 }
 
+migration_write_precleanup_binding() {
+	local directory="$1"
+	local roster="$directory/precleanup-old-roster.jsonl"
+	local grants="$directory/precleanup-old-grants.jsonl"
+	[[ -f "$roster" && -f "$grants" ]] || {
+		fga_error "final precleanup tuple files are missing"
+		return 6
+	}
+	local roster_hash grants_hash binding_tmp
+	roster_hash=$(fga_hash_file "$roster")
+	grants_hash=$(fga_hash_file "$grants")
+	binding_tmp=$(mktemp)
+	jq -n --arg roster "$roster_hash" --arg grants "$grants_hash" \
+		'{precleanup_roster_sha256:$roster,precleanup_grants_sha256:$grants}' \
+		>"$binding_tmp" || {
+		rm -f "$binding_tmp"
+		return 6
+	}
+	mv "$binding_tmp" "$directory/precleanup.checkpoint"
+}
+
+migration_validate_precleanup_binding() {
+	local directory="$1"
+	fga_verify_checkpoint "$directory" || return $?
+	local roster="$directory/precleanup-old-roster.jsonl"
+	local grants="$directory/precleanup-old-grants.jsonl"
+	[[ -f "$roster" && -f "$grants" ]] || {
+		fga_error "final precleanup tuple files are missing"
+		return 6
+	}
+	[[ -f "$directory/precleanup.checkpoint" ]] || {
+		fga_error "precleanup hash binding is missing"
+		return 6
+	}
+	local expected_roster expected_grants
+	expected_roster=$(jq -r '.precleanup_roster_sha256 // ""' "$directory/precleanup.checkpoint")
+	expected_grants=$(jq -r '.precleanup_grants_sha256 // ""' "$directory/precleanup.checkpoint")
+	if [[ -z "$expected_roster" || -z "$expected_grants" ||
+		"$expected_roster" != "$(fga_hash_file "$roster")" ||
+		"$expected_grants" != "$(fga_hash_file "$grants")" ]]; then
+		fga_error "final precleanup tuple files do not match the cleanup binding"
+		return 6
+	fi
+}
+
+migration_read_cleanup_files() {
+	local old_team="$1"
+	local roster="$2"
+	local grants="$3"
+	migration_sorted_read \
+		"$(jq -n --arg object "team:$old_team" '{relation:"member",object:$object}')" \
+		"$roster" || return $?
+	migration_sorted_read \
+		"$(jq -n --arg user "team:$old_team#member" \
+			'{user:$user,relation:"global_org_admin",object:"b2b_org:"}')" \
+		"$grants" || return $?
+}
+
+migration_capture_cleanup_files() {
+	local directory="$1"
+	local old_team="$2"
+	local roster="$3"
+	local grants="$4"
+	migration_read_cleanup_files "$old_team" "$roster" "$grants" || return $?
+	migration_assert_no_new_old_tuples "$directory" "$roster" "$grants"
+}
+
+migration_assert_bound_subset() {
+	local directory="$1"
+	local current_roster="$2"
+	local current_grants="$3"
+	local temp_dir expected_roster expected_grants extra_roster extra_grants
+	temp_dir=$(mktemp -d)
+	expected_roster="$temp_dir/expected-roster"
+	expected_grants="$temp_dir/expected-grants"
+	extra_roster="$temp_dir/extra-roster"
+	extra_grants="$temp_dir/extra-grants"
+	local extra_count status
+	if migration_normalize_file "$directory/precleanup-old-roster.jsonl" "$expected_roster" &&
+		migration_normalize_file "$directory/precleanup-old-grants.jsonl" "$expected_grants" &&
+		comm -23 "$current_roster" "$expected_roster" >"$extra_roster" &&
+		comm -23 "$current_grants" "$expected_grants" >"$extra_grants"; then
+		:
+	else
+		status=$?
+		rm -rf "$temp_dir"
+		return "$status"
+	fi
+	extra_count=$(( $(migration_line_count "$extra_roster") + $(migration_line_count "$extra_grants") ))
+	if [[ "$extra_count" -gt 0 ]]; then
+		cp "$extra_roster" "$directory/retry-out-of-bound-roster.jsonl"
+		cp "$extra_grants" "$directory/retry-out-of-bound-grants.jsonl"
+		rm -rf "$temp_dir"
+		fga_error "$extra_count old-team tuples are outside the immutable cleanup binding"
+		return 4
+	fi
+	rm -rf "$temp_dir"
+}
+
+migration_validate_retry_live_set() {
+	local directory="$1"
+	local old_team="$2"
+	local roster grants status=0
+	roster=$(mktemp)
+	grants=$(mktemp)
+	migration_read_cleanup_files "$old_team" "$roster" "$grants" || status=$?
+	if [[ "$status" -eq 0 ]]; then
+		migration_assert_bound_subset "$directory" "$roster" "$grants" || status=$?
+	fi
+	rm -f "$roster" "$grants"
+	return "$status"
+}
+
+migration_delete_tuple_files() {
+	local roster="$1"
+	local grants="$2"
+	local dry_run="$3"
+	fga_apply_tuple_file deletes "$grants" "$dry_run" || return $?
+	fga_apply_tuple_file deletes "$roster" "$dry_run"
+}
+
 migration_cleanup() {
 	local directory="$1"
 	local old_team="$2"
 	local dry_run="$3"
 	local confirm="$4"
 	local cutover_complete="$5"
+	local allowed_user="${6:-}"
+	local denied_user="${7:-}"
+	local sample_org="${8:-}"
+	migration_require_checks true "$allowed_user" "$denied_user" "$sample_org" || return $?
 	fga_verify_checkpoint "$directory" || return $?
-	[[ "$dry_run" == true || "$confirm" == true ]] || {
-		fga_error "cleanup requires --dry-run or --confirm"
-		return 2
-	}
+	migration_require_execution_mode cleanup "$dry_run" "$confirm" || return $?
 	[[ "$cutover_complete" == true ]] || {
 		fga_error "cleanup requires --cutover-complete"
 		return 6
 	}
 
-	local current_roster current_grants
-	current_roster="$directory/precleanup-old-roster.jsonl"
-	current_grants="$directory/precleanup-old-grants.jsonl"
-	migration_sorted_read \
-		"$(jq -n --arg object "team:$old_team" '{relation:"member",object:$object}')" \
-		"$current_roster"
-	migration_sorted_read \
-		"$(jq -n --arg user "team:$old_team#member" \
-			'{user:$user,relation:"global_org_admin",object:"b2b_org:"}')" \
-		"$current_grants"
-	migration_assert_no_new_old_tuples "$directory" "$current_roster" "$current_grants" || return $?
-	fga_apply_tuple_file deletes "$current_grants" "$dry_run"
-	fga_apply_tuple_file deletes "$current_roster" "$dry_run"
+	migration_assert_live_stable_plan "$directory" || return $?
+	migration_assert_authorization_baseline "$directory" "$directory/precleanup-checks.json" \
+		"$allowed_user" "$denied_user" "$sample_org" || return $?
+
+	local bound_roster="$directory/precleanup-old-roster.jsonl"
+	local bound_grants="$directory/precleanup-old-grants.jsonl"
+	if [[ -f "$directory/precleanup.checkpoint" ]]; then
+		migration_validate_precleanup_binding "$directory" || return $?
+		migration_validate_retry_live_set "$directory" "$old_team" || return $?
+		migration_delete_tuple_files "$bound_roster" "$bound_grants" "$dry_run"
+		return $?
+	fi
+
+	local current_roster current_grants temporary=false status=0
+	if [[ "$dry_run" == true ]]; then
+		current_roster=$(mktemp)
+		current_grants=$(mktemp)
+		temporary=true
+	else
+		current_roster="$bound_roster"
+		current_grants="$bound_grants"
+	fi
+	migration_capture_cleanup_files "$directory" "$old_team" "$current_roster" "$current_grants" ||
+		status=$?
+	if [[ "$status" -eq 0 && "$confirm" == true ]]; then
+		migration_write_precleanup_binding "$directory" || status=$?
+	fi
+	if [[ "$status" -eq 0 ]]; then
+		migration_delete_tuple_files "$current_roster" "$current_grants" "$dry_run" || status=$?
+	fi
+	if [[ "$temporary" == true ]]; then
+		rm -f "$current_roster" "$current_grants"
+	fi
+	return "$status"
+}
+
+migration_restore() {
+	local directory="$1"
+	local dry_run="$2"
+	local confirm="$3"
+	migration_require_execution_mode restore "$dry_run" "$confirm" || return $?
+	migration_validate_precleanup_binding "$directory" || return $?
+	fga_apply_tuple_file writes "$directory/precleanup-old-roster.jsonl" "$dry_run"
+	fga_apply_tuple_file writes "$directory/precleanup-old-grants.jsonl" "$dry_run"
 }
 
 migration_parse_args() {
@@ -468,8 +677,10 @@ migration_dispatch() {
 		;;
 	cleanup)
 		migration_cleanup "$MIGRATION_OUTPUT_DIR" "$MIGRATION_OLD_TEAM" \
-			"$MIGRATION_DRY_RUN" "$MIGRATION_CONFIRM" "$MIGRATION_CUTOVER_COMPLETE"
+			"$MIGRATION_DRY_RUN" "$MIGRATION_CONFIRM" "$MIGRATION_CUTOVER_COMPLETE" \
+			"$MIGRATION_ALLOWED_USER" "$MIGRATION_DENIED_USER" "$MIGRATION_SAMPLE_ORG"
 		;;
+	restore) migration_restore "$MIGRATION_OUTPUT_DIR" "$MIGRATION_DRY_RUN" "$MIGRATION_CONFIRM" ;;
 	*) fga_error "unknown phase: $MIGRATION_PHASE"; migration_usage; return 2 ;;
 	esac
 }
@@ -507,7 +718,9 @@ migration_main() {
 	echo "OpenFGA target: $BASE_URL store=$STORE_ID phase=$MIGRATION_PHASE"
 	if [[ "$MIGRATION_PHASE" != snapshot ]]; then
 		migration_validate_manifest "$MIGRATION_OUTPUT_DIR" "$STORE_ID" "$MIGRATION_OLD_TEAM" || return $?
-		migration_validate_snapshot_hashes "$MIGRATION_OUTPUT_DIR" || return $?
+		if [[ "$MIGRATION_PHASE" != restore ]]; then
+			migration_validate_snapshot_hashes "$MIGRATION_OUTPUT_DIR" || return $?
+		fi
 	fi
 	migration_dispatch
 }
