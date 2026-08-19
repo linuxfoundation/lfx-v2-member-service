@@ -273,6 +273,19 @@ func (i *MockKeyContactGrantIndex) Put(_ context.Context, uid string, grant port
 	if i.PutErr != nil {
 		return i.PutErr
 	}
+	// Mirror the adapter's validateKeyContactGrant: reject a partial live pair
+	// or partial PendingRevoke (one field set, the other not — both degrade
+	// to fully empty on the wire's omitempty round-trip), and reject an entry
+	// with neither a complete live pair nor a complete marker.
+	if (grant.MembershipUID == "") != (grant.Username == "") {
+		return errs.NewValidation(fmt.Sprintf("key-contact-grants: membership_uid and username must both be set or both be empty for %s", uid))
+	}
+	if grant.PendingRevoke != nil && (grant.PendingRevoke.MembershipUID == "") != (grant.PendingRevoke.Username == "") {
+		return errs.NewValidation(fmt.Sprintf("key-contact-grants: PendingRevoke membership_uid and username must both be set or both be empty for %s", uid))
+	}
+	if grant.MembershipUID == "" && (grant.PendingRevoke == nil || grant.PendingRevoke.MembershipUID == "") {
+		return errs.NewValidation(fmt.Sprintf("key-contact-grants: membership_uid and username are required for %s unless a complete PendingRevoke marker is set", uid))
+	}
 	stored, exists := i.Entries[uid]
 	// Mirror the adapter: revision 0 means create-only, non-zero means the
 	// stored revision must still match.

@@ -1377,6 +1377,73 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailNotFound_NoGrantNoProvision(t *test
 	assert.Empty(t, spy.adds, "AddPrincipal must not be called for unregistered contact")
 }
 
+// TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMiss_RevokesRecordedGrant
+// covers LFXV2-2999's remaining gap: a key contact whose email now resolves
+// to no registered account (renamed or deregistered since the last
+// successful grant) must have any grant still recorded for it revoked, not
+// just silently skipped.
+func TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMiss_RevokesRecordedGrant(t *testing.T) {
+	kc := &model.KeyContact{
+		UID: sfid("kc-res-4"), MembershipUID: "pm-4",
+		B2BOrgUID: "001000000000004AAA", Email: "renamed@example.com",
+	}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			sfid("kc-res-4"): {MembershipUID: "pm-4", Username: "old-alice", Revision: 1},
+		},
+	}
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCUserReader(&fakeUserReader{err: pkgerrors.NewNotFound("no such user")}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	fgaMsgs := pub.fgaMessages(t)
+	var removes []fgatypes.GenericMemberData
+	for _, msg := range fgaMsgs {
+		if msg.Operation != "member_remove" {
+			continue
+		}
+		data, ok := msg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok)
+		removes = append(removes, data)
+	}
+	require.Len(t, removes, 1, "the recorded grant must be revoked on a definitive miss")
+	assert.Equal(t, "pm-4", removes[0].UID)
+	assert.Equal(t, "old-alice", removes[0].Username)
+	assert.Equal(t, []string{sfid("kc-res-4")}, grants.Deletes, "the confirmed-revoked entry must be cleared")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_EmailTransientFailure_LeavesGrantUntouched
+// covers a transport-level lookup failure: it is not evidence the email is
+// unregistered and must not trigger a revoke of a still-valid grant.
+func TestCDCConsumer_ProjectRole_Upsert_EmailTransientFailure_LeavesGrantUntouched(t *testing.T) {
+	kc := &model.KeyContact{
+		UID: sfid("kc-res-5"), MembershipUID: "pm-5",
+		B2BOrgUID: "001000000000005AAA", Email: "carol@example.com",
+	}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			sfid("kc-res-5"): {MembershipUID: "pm-5", Username: "alice", Revision: 1},
+		},
+	}
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCUserReader(&fakeUserReader{err: pkgerrors.NewUnexpected("auth-service unreachable", nil)}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.False(t, pub.hasAccess(fgaconstants.GenericMemberRemoveSubject),
+		"a transient lookup failure must not revoke a still-valid grant")
+	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
+}
+
 func TestCDCConsumer_ProjectRole_Upsert_NilUserReader_PreservesExistingBehavior(t *testing.T) {
 	// nil userReader must not regress existing behavior: a contact with a stored
 	// Username still gets FGA member_put; no provisioning attempt is made.

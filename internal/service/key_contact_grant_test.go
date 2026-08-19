@@ -65,7 +65,7 @@ func TestPublishKeyContactFGA_NoUsernameRecordsNothing(t *testing.T) {
 	assert.Empty(t, grants.Puts, "and nothing to record")
 }
 
-func TestPublishKeyContactFGA_UnchangedGrantIsNotRewritten(t *testing.T) {
+func TestPublishKeyContactFGA_UnchangedGrantTouchesRevisionButPublishesNothing(t *testing.T) {
 	pub := &accessPayloadPublisher{}
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -80,7 +80,13 @@ func TestPublishKeyContactFGA_UnchangedGrantIsNotRewritten(t *testing.T) {
 	})
 
 	assert.Empty(t, removeMessages(t, pub), "an unchanged grant supersedes nothing")
-	assert.Empty(t, grants.Puts, "and needs no index write")
+	// The index is still touched — a revision-conditional rewrite of the same
+	// pair — so a concurrent revokeKeyContactGrantIfUnregistered claiming a
+	// stale read of this entry sees the advanced revision and aborts rather
+	// than firing a stale revoke for a pair just reconfirmed live.
+	require.Len(t, grants.Puts, 1, "an unchanged pair must still advance the revision for a concurrent revoke to detect")
+	assert.Equal(t, "asset-1", grants.Entries["kc-1"].MembershipUID)
+	assert.Equal(t, uint64(4), grants.Entries["kc-1"].Revision, "the touch must advance the revision, not just re-store the same one")
 }
 
 func TestPublishKeyContactFGA_ReparentRevokesPreviousMembership(t *testing.T) {

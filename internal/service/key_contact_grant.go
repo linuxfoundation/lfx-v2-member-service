@@ -117,6 +117,21 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 					"fga_revoke_failed_dangling_tuple", true,
 					"manual_recovery_required", true)
 			}
+			// Re-confirming an unchanged pair still advances the index
+			// revision: revokeKeyContactGrantIfUnregistered claims the entry
+			// (a CAS rewrite conditional on the revision it read) before
+			// publishing a revoke, specifically to detect a concurrent
+			// same-pair re-grant like this one. Without this touch, an
+			// unchanged pair would never move the revision, so that claim
+			// would see the same stale revision and could not tell a fresh
+			// reconfirmation apart from no concurrent activity at all,
+			// letting a stale revoke through. A conflict here just means
+			// another writer already touched or replaced the entry — this
+			// call's job (confirming the pair is live) is already done.
+			if putErr := idx.Put(ctx, uid, stored); putErr != nil && !pkgerrors.IsConflict(putErr) {
+				slog.WarnContext(ctx, "key_contact grant index touch failed on unchanged pair — a concurrent revoke may not detect this reconfirmation",
+					"uid", uid, "membership_uid", membershipUID, "error", putErr)
+			}
 			return nil
 		}
 
@@ -126,7 +141,16 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 			Revision:      stored.Revision,
 		}
 		var superseded *port.KeyContactGrantRef
-		if found {
+		if found && stored.MembershipUID == "" && stored.Username == "" {
+			// Marker-only entry (its live pair was already revoked and
+			// cleared; only a still-outstanding PendingRevoke for a
+			// different, unrelated pair remains). There is no live pair
+			// here for this new grant to supersede — carry the marker
+			// forward untouched rather than manufacturing a superseded ref
+			// from the empty pair, which would overwrite the only address
+			// for that still-outstanding revoke with an empty one.
+			newGrant.PendingRevoke = stored.PendingRevoke
+		} else if found {
 			superseded = &port.KeyContactGrantRef{MembershipUID: stored.MembershipUID, Username: stored.Username}
 			if stored.PendingRevoke != nil {
 				// The previous supersede's revoke was never confirmed
@@ -204,6 +228,165 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	return nil
 }
 
+// revokeKeyContactGrantIfUnregistered revokes the grant recorded for a key
+// contact whose current email now produces a definitive "no registered
+// account" result, and clears the index entry once the revoke is confirmed
+// delivered. Callers (the key-contact writer, the CDC consumer, and the
+// backfill runner) invoke this only from their existing lookup's
+// pkgerrors.IsNotFound(err) branch — a transport-level failure MUST NOT reach
+// this function.
+//
+// A contact with no recorded grant, or one whose recorded pair is already
+// empty, produces no publish — there is nothing to revoke.
+//
+// Before publishing, this claims the entry with a revision-conditional
+// rewrite of the exact pair it just read, then re-reads once more to pin
+// down the exact revision that claim committed at. That revision — not
+// stored.Revision — is the baseline the final re-read below is compared
+// against: the bucket's revision is a sequence shared by every key in it, so
+// a write to any *other* key between the claim and that final re-read can
+// advance this key's next revision by more than one, and stored.Revision+1
+// would then never match even with no concurrent writer touching this key at
+// all.
+//
+// Between that baseline and the final re-read after publish+flush, nothing
+// serializes this call against a concurrent writer's own CAS — a writer that
+// reasserts the same pair (recordKeyContactGrant's unchanged-pair branch)
+// always advances the revision on its own confirmation, so a revision
+// mismatch there means exactly that raced this call's member_remove. If the
+// pair is still the same one this call just tried to revoke, the remove may
+// have undone a grant just reconfirmed live, so this repairs it with a
+// compensating member_put rather than only skipping the index clear.
+func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string) {
+	if idx == nil || uid == "" {
+		return
+	}
+	stored, found, err := idx.Get(ctx, uid)
+	if err != nil {
+		slog.WarnContext(ctx, "key_contact grant index read failed — cannot check for a stale grant to revoke on unregistered email",
+			"uid", uid, "error", err)
+		return
+	}
+	if !found || stored.MembershipUID == "" || stored.Username == "" {
+		return
+	}
+
+	if claimErr := idx.Put(ctx, uid, stored); claimErr != nil {
+		if pkgerrors.IsConflict(claimErr) {
+			slog.WarnContext(ctx, "key_contact grant changed concurrently — skipping revoke to avoid denying a possibly-reasserted grant",
+				"uid", uid, "membership_uid", stored.MembershipUID)
+		} else {
+			slog.WarnContext(ctx, "key_contact grant index claim failed — cannot safely revoke",
+				"uid", uid, "membership_uid", stored.MembershipUID, "error", claimErr)
+		}
+		return
+	}
+
+	claimed, found, err := idx.Get(ctx, uid)
+	if err != nil || !found {
+		slog.WarnContext(ctx, "key_contact grant index read failed after claim — cannot safely revoke",
+			"uid", uid, "membership_uid", stored.MembershipUID, "error", err)
+		return
+	}
+	if claimed.MembershipUID != stored.MembershipUID || claimed.Username != stored.Username {
+		// Overtaken between the claim committing and this read: treat like a
+		// claim conflict — something else already owns this entry.
+		slog.WarnContext(ctx, "key_contact grant changed concurrently right after claim — skipping revoke",
+			"uid", uid, "membership_uid", stored.MembershipUID)
+		return
+	}
+
+	msg := BuildKeyContactFGARemoveMessage(stored.MembershipUID, stored.Username)
+	if err := p.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg); err != nil {
+		slog.ErrorContext(ctx, "key_contact grant revoke publish failed on unregistered email — grant retained in index for retry",
+			"uid", uid, "membership_uid", stored.MembershipUID,
+			"error", err, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
+	if flushErr := p.Flush(ctx); flushErr != nil {
+		slog.ErrorContext(ctx, "key_contact grant revoke flush failed on unregistered email — delivery indeterminate, grant retained in index for retry",
+			"uid", uid, "membership_uid", stored.MembershipUID,
+			"error", flushErr, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
+	slog.InfoContext(ctx, "key_contact grant revoked — email resolved no registered account",
+		"uid", uid, "membership_uid", stored.MembershipUID)
+
+	current, found, err := idx.Get(ctx, uid)
+	if err != nil || !found {
+		return
+	}
+	if current.Revision != claimed.Revision {
+		if current.MembershipUID == stored.MembershipUID && current.Username == stored.Username {
+			repairMsg := BuildKeyContactFGAPutMessage(stored.MembershipUID, stored.Username)
+			if err := p.Access(ctx, fgaconstants.GenericMemberPutSubject, repairMsg); err != nil {
+				slog.ErrorContext(ctx, "key_contact grant repair put failed after a concurrent same-pair regrant raced this revoke — tuple may be incorrectly absent",
+					"uid", uid, "membership_uid", stored.MembershipUID,
+					"error", err, "fga_revoke_failed_dangling_tuple", true)
+				return
+			}
+			if err := p.Flush(ctx); err != nil {
+				slog.ErrorContext(ctx, "key_contact grant repair flush failed after a concurrent same-pair regrant raced this revoke — tuple may be incorrectly absent",
+					"uid", uid, "membership_uid", stored.MembershipUID,
+					"error", err, "fga_revoke_failed_dangling_tuple", true)
+				return
+			}
+			slog.WarnContext(ctx, "key_contact grant repaired — a concurrent regrant for the same pair raced this revoke's publish",
+				"uid", uid, "membership_uid", stored.MembershipUID)
+			return
+		}
+		// A different pair now occupies this entry: something else
+		// superseded it entirely, and that writer's own supersede-revoke
+		// already addresses our pair — nothing to repair or clear here.
+		return
+	}
+	clearRevokedGrant(ctx, idx, uid, current)
+}
+
+// clearRevokedGrant removes the just-revoked, confirmed-delivered grant from
+// the index. If revoked (the entry as read before the revoke was published)
+// still carried a PendingRevoke marker for an unrelated, still-outstanding
+// supersede, that marker's address is preserved rather than discarded: the
+// entry is rewritten with its live grant cleared but the marker intact,
+// instead of being deleted outright — the marker's own confirmed revoke
+// (revokeSupersededKeyContactGrant / clearPendingRevoke) is what eventually
+// clears it.
+//
+// The write is conditional on revoked.Revision — the revision observed
+// before the revoke was published and flushed — with no retry on conflict.
+// A retry that re-reads and compares by value (MembershipUID/Username) alone
+// cannot tell "still my original entry" apart from a different generation
+// that happens to carry the same pair: a writer can republish the identical
+// {membership_uid, username} for this uid between this call's confirmed
+// revoke and its clear (e.g. the contact becomes reachable again and a fresh
+// member_put lands), which reasserts the live tuple. Retrying against that
+// reread value would delete the index's only address for a tuple another
+// writer just made live again, leaving a future delete unable to revoke it.
+// A conflict here always means some other writer touched this key after our
+// revoke was confirmed delivered, so it is left for that writer's own
+// generation to manage.
+func clearRevokedGrant(ctx context.Context, idx port.KeyContactGrantIndex, uid string, revoked port.KeyContactGrant) {
+	var putErr error
+	if revoked.PendingRevoke != nil {
+		cleared := revoked
+		cleared.MembershipUID = ""
+		cleared.Username = ""
+		putErr = idx.Put(ctx, uid, cleared)
+	} else {
+		putErr = idx.Delete(ctx, uid, revoked.Revision)
+	}
+	if putErr == nil {
+		return
+	}
+	if pkgerrors.IsConflict(putErr) {
+		slog.WarnContext(ctx, "key_contact grant index clear skipped — entry changed since confirmed revoke",
+			"uid", uid, "membership_uid", revoked.MembershipUID)
+		return
+	}
+	slog.WarnContext(ctx, "key_contact grant index clear failed after confirmed revoke — confirmed-delivered grant left in index",
+		"uid", uid, "membership_uid", revoked.MembershipUID, "error", putErr)
+}
+
 // clearPendingRevoke removes the PendingRevoke marker for superseded now that
 // its revoke is confirmed delivered. It is best-effort: leaving a
 // confirmed-delivered marker in place after this fails is stale but harmless
@@ -223,8 +406,19 @@ func clearPendingRevoke(ctx context.Context, idx port.KeyContactGrantIndex, uid 
 			// grant — leave that one alone rather than clobbering it.
 			return nil
 		}
-		current.PendingRevoke = nil
-		putErr := idx.Put(ctx, uid, current)
+
+		var putErr error
+		if current.MembershipUID == "" && current.Username == "" {
+			// Marker-only entry (clearRevokedGrant left it after revoking
+			// its own live pair — see the marker-only Put there): clearing
+			// this, its only marker, leaves neither a live pair nor a
+			// PendingRevoke, which Put rejects as addressing nothing.
+			// Delete the entry outright instead.
+			putErr = idx.Delete(ctx, uid, current.Revision)
+		} else {
+			current.PendingRevoke = nil
+			putErr = idx.Put(ctx, uid, current)
+		}
 		if putErr == nil {
 			return nil
 		}

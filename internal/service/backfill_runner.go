@@ -888,11 +888,15 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 	}
 	username, err := r.userReader.UsernameByEmail(ctx, kc.Email)
 	if err != nil {
-		if !errs.IsNotFound(err) {
+		if errs.IsNotFound(err) {
+			// A definitive miss: revoke any grant still recorded for this contact.
+			revokeKeyContactGrantIfUnregistered(ctx, r.publisher, r.grantIndex, kc.UID)
+		} else {
+			// Transport-level failure — not evidence the email is unregistered;
+			// leave Username empty and any existing grant untouched.
 			log.WarnContext(ctx, "resolve LFID for key contact failed",
 				"uid", kc.UID, "error", err)
 		}
-		// NotFound is expected for unregistered emails — leave Username empty.
 		return
 	}
 	kc.Username = username
