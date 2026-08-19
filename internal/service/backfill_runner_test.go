@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -829,6 +830,67 @@ func TestBackfillRunner_KeyContact_UnregisteredEmail_PublishesNothing(t *testing
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	assert.Empty(t, pub.fgaMessages(t), "an unregistered email must leave the contact pending, not error")
+}
+
+// TestBackfillRunner_KeyContact_DefinitiveMiss_RevokesRecordedGrant covers
+// LFXV2-2999's remaining gap: a backfilled key contact whose email now
+// resolves to no registered account must have any grant still recorded for
+// it revoked, not just silently skipped like an ordinary pending contact.
+func TestBackfillRunner_KeyContact_DefinitiveMiss_RevokesRecordedGrant(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-renamed-1", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "renamed@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-renamed-1": {MembershipUID: "pm-1", Username: "old-alice", Revision: 1},
+		},
+	}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
+			return "", pkgerrors.NewNotFound("no such user")
+		})),
+		svc.WithKeyContactGrantIndex(grants),
+	)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+	removes := pub.fgaMessages(t)
+	require.Len(t, removes, 1, "the recorded grant must be revoked on a definitive miss")
+	assert.Equal(t, "member_remove", removes[0].Operation)
+	data, ok := removes[0].Data.(fgatypes.GenericMemberData)
+	require.True(t, ok)
+	assert.Equal(t, "pm-1", data.UID)
+	assert.Equal(t, "old-alice", data.Username)
+	assert.Equal(t, []string{"kc-renamed-1"}, grants.Deletes, "the confirmed-revoked entry must be cleared")
+}
+
+// TestBackfillRunner_KeyContact_TransientLookupFailure_LeavesGrantUntouched
+// covers a transport-level lookup failure: it is not evidence the email is
+// unregistered and must not trigger a revoke of a still-valid grant.
+func TestBackfillRunner_KeyContact_TransientLookupFailure_LeavesGrantUntouched(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-transient-1", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "alice@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-transient-1": {MembershipUID: "pm-1", Username: "alice", Revision: 1},
+		},
+	}
+	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
+			return "", pkgerrors.NewUnexpected("auth-service unreachable", nil)
+		})),
+		svc.WithKeyContactGrantIndex(grants),
+	)
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+	assert.Empty(t, pub.fgaMessages(t), "a transient lookup failure must not revoke a still-valid grant")
+	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
 }
 
 func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {

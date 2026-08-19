@@ -29,15 +29,26 @@ func NewUserReader(client *NATSClient) port.UserReader {
 
 // UsernameByEmail resolves the registered LFID username for the given primary email address.
 // The auth service replies with a plain-text username on success, or a JSON error envelope on miss.
+// Returns NotFound only for a definitive "no registered account" reply; a transport-level failure
+// (no reply received at all) returns Unexpected — callers must be able to tell an auth-service
+// outage apart from a genuine miss.
 func (u *userReader) UsernameByEmail(ctx context.Context, email string) (string, error) {
 	msg, err := requestWithSpan(ctx, u.client.Conn(), constants.AuthEmailToUsernameLookupSubject, []byte(email))
 	if err != nil {
 		return "", usernameLookupRequestError(email, err)
 	}
+	return parseUsernameByEmailResponse(email, msg.Data)
+}
 
-	body := strings.TrimSpace(string(msg.Data))
+// parseUsernameByEmailResponse parses the auth-service email_to_username reply body. Mirrors
+// parseUserMetadataResponse below: a genuine "no such user" miss envelope (see isUserMissError) →
+// NotFound; an absent/empty body, a non-miss error envelope, or malformed/unparseable JSON →
+// Unexpected (auth-service's documented miss shape is always a JSON envelope, so an empty body is
+// inconclusive, not a confirmed miss); otherwise the body is the plain-text username.
+func parseUsernameByEmailResponse(email string, data []byte) (string, error) {
+	body := strings.TrimSpace(string(data))
 	if body == "" {
-		return "", errors.NewNotFound(fmt.Sprintf("username not found for email: %s", redaction.RedactEmail(email)))
+		return "", errors.NewUnexpected(fmt.Sprintf("empty email_to_username reply for email: %s", redaction.RedactEmail(email)))
 	}
 
 	// Auth-service error responses are JSON objects; success replies are plain-text usernames.

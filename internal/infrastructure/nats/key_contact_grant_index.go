@@ -36,6 +36,35 @@ type keyContactGrantValue struct {
 	PendingRevokeUsername      string `json:"pending_revoke_username,omitempty"`
 }
 
+// validateKeyContactGrant rejects any entry shape that cannot round-trip
+// through storage. Both the live pair and the PendingRevoke marker use
+// omitempty on the wire, so a partially-empty pair or marker (one field set,
+// the other not) silently degrades to fully empty on the next Get —
+// discarding whichever half was actually set with no error at write time.
+// An entry with neither a complete live pair nor a complete marker addresses
+// nothing and is also rejected: a marker-only entry (its live pair already
+// revoked and cleared) must still carry a complete PendingRevoke, or there is
+// nothing left for this key to protect.
+func validateKeyContactGrant(uid string, grant port.KeyContactGrant) error {
+	if (grant.MembershipUID == "") != (grant.Username == "") {
+		return errs.NewValidation(
+			fmt.Sprintf("key-contact-grants: membership_uid and username must both be set or both be empty for %s", uid))
+	}
+	if grant.PendingRevoke != nil && (grant.PendingRevoke.MembershipUID == "") != (grant.PendingRevoke.Username == "") {
+		return errs.NewValidation(
+			fmt.Sprintf("key-contact-grants: PendingRevoke membership_uid and username must both be set or both be empty for %s", uid))
+	}
+	if grant.MembershipUID == "" && (grant.PendingRevoke == nil || grant.PendingRevoke.MembershipUID == "") {
+		// An entry without a live pair addresses nothing unless it is a
+		// marker-only entry carrying a complete PendingRevoke — the live pair
+		// it used to carry was already revoked and cleared, but an unrelated,
+		// still-outstanding PendingRevoke on the same key must survive.
+		return errs.NewValidation(
+			fmt.Sprintf("key-contact-grants: membership_uid and username are required for %s unless a complete PendingRevoke marker is set", uid))
+	}
+	return nil
+}
+
 // KeyContactGrantIndex implements port.KeyContactGrantIndex over the
 // key-contact-grants NATS KV bucket (authoritative, no TTL, history 1).
 type KeyContactGrantIndex struct {
@@ -124,11 +153,8 @@ func (s *KeyContactGrantIndex) Put(ctx context.Context, uid string, grant port.K
 	if uid == "" {
 		return errs.NewValidation("key-contact-grants: uid is required")
 	}
-	if grant.MembershipUID == "" || grant.Username == "" {
-		// An entry without both halves cannot address a revoke, and no grant is
-		// ever published without both.
-		return errs.NewValidation(
-			fmt.Sprintf("key-contact-grants: membership_uid and username are required for %s", uid))
+	if err := validateKeyContactGrant(uid, grant); err != nil {
+		return err
 	}
 	kv, err := s.kv()
 	if err != nil {
