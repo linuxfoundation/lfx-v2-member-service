@@ -214,6 +214,78 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 	assert.False(t, found, "the entry must be fully cleared once the clear's CAS uses the claim's advanced revision")
 }
 
+// TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut
+// covers the race the claim step does NOT close: a concurrent writer's own
+// CAS (recordKeyContactGrant reconfirming the same pair) can still land
+// after this call's claim commits — the claim only protects the window up
+// to its own commit — racing the member_remove this call is about to
+// publish. The final re-read must detect the revision moved past the
+// baseline this call's own claim landed at (not stored.Revision+1: that
+// assumption doesn't hold against a bucket-wide revision counter) and, since
+// the pair is unchanged, repair the possibly-just-removed tuple with a
+// compensating member_put rather than only skipping the index clear.
+func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	callCount := 0
+	grants.GetFn = func(_ context.Context, uid string) (port.KeyContactGrant, bool, error) {
+		callCount++
+		if callCount == 3 {
+			// Simulate a concurrent recordKeyContactGrant reconfirming the
+			// same pair between this call's post-claim baseline read (call
+			// 2) and its final re-read (this call, 3) — i.e. during the
+			// publish/flush round trip.
+			grants.Entries[uid] = port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 99}
+		}
+		entry, found := grants.Entries[uid]
+		return entry, found, nil
+	}
+
+	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+
+	require.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
+		"the revoke's remove must still be published, followed by a repair put once the race is detected")
+	putMsg, ok := pub.LastAccessData.(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_put", putMsg.Operation, "the last publish must be the compensating put, not the original remove")
+	assert.Empty(t, grants.Deletes, "the entry must not be cleared — it belongs to the concurrent writer's generation now")
+	assert.Equal(t, uint64(99), grants.Entries["kc-1"].Revision, "the concurrent writer's generation must be left untouched")
+}
+
+// TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair
+// covers the sibling case: a *different* pair supersedes this entry after
+// the claim (not a same-pair reconfirmation). That writer's own
+// supersede-revoke already addresses the pair this call read, so no repair
+// or clear is needed here — touching either would race that writer's own
+// generation.
+func TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	callCount := 0
+	grants.GetFn = func(_ context.Context, uid string) (port.KeyContactGrant, bool, error) {
+		callCount++
+		if callCount == 3 {
+			grants.Entries[uid] = port.KeyContactGrant{MembershipUID: "asset-new", Username: "bob", Revision: 99}
+		}
+		entry, found := grants.Entries[uid]
+		return entry, found, nil
+	}
+
+	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+
+	require.Equal(t, []string{"access", "flush"}, pub.CallOrder, "only the original remove must publish — no repair for a pair this call never revoked")
+	assert.Empty(t, grants.Deletes, "the entry must not be cleared — it belongs to the superseding writer's generation now")
+	assert.Equal(t, "asset-new", grants.Entries["kc-1"].MembershipUID, "the superseding pair must not be discarded")
+}
+
 // TestClearPendingRevoke_MarkerOnlyEntry_Deletes covers a marker-only entry
 // (its live pair was already revoked and cleared by clearRevokedGrant,
 // leaving only a PendingRevoke for a different, unrelated pair) whose own
