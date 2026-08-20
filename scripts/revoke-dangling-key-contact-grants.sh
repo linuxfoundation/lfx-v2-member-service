@@ -194,15 +194,18 @@ mapping=$(curl -sf -m 5 "${OPENSEARCH_URL}/${OPENSEARCH_INDEX}/_mapping") || {
 if ! echo "$mapping" | jq -e '
 	[.[] | {
 		object_type: .mappings.properties.object_type.type,
+		data: .mappings.properties.data.type,
 		membership_uid: .mappings.properties.data.properties.membership_uid.type,
 		username: .mappings.properties.data.properties.username.type
 	}] | length > 0 and all(
 		.object_type == "keyword" and
-		.membership_uid == "keyword" and
-		.username == "keyword"
+		(
+			.data == "flat_object" or
+			(.membership_uid == "keyword" and .username == "keyword")
+		)
 	)
 ' >/dev/null 2>&1; then
-	echo "ERROR: OpenSearch fields object_type, data.membership_uid, and data.username must be keyword-mapped; exact revalidation is unsafe." >&2
+	echo "ERROR: OpenSearch object_type must be keyword-mapped and data must be flat_object or expose keyword membership_uid and username fields; exact revalidation is unsafe." >&2
 	exit 1
 fi
 
