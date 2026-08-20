@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"regexp"
@@ -78,6 +79,8 @@ type stubObjectStore struct {
 	putData          [][]byte
 	copyCalls        []copyCall
 	versionedURLKeys []string
+	keyedURLs        bool
+	versionCounter   int
 	gotType          string
 	gotDataLen       int
 	deletedKey       string
@@ -99,8 +102,17 @@ func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data [
 	return s.url, nil
 }
 
+func (s *stubObjectStore) enableKeyedURLs() { s.keyedURLs = true }
+
 func (s *stubObjectStore) VersionedURL(key string) string {
 	s.versionedURLKeys = append(s.versionedURLKeys, key)
+	// keyedURLs derives the URL from the key the way the real client does.
+	// The default single fixed url is fine for most tests, but any test that
+	// has to tell the scratch URL apart from the shared key's URL needs this.
+	if s.keyedURLs {
+		s.versionCounter++
+		return fmt.Sprintf("https://cdn.example.com/%s?v=%d", key, s.versionCounter)
+	}
 	return s.url
 }
 
@@ -241,7 +253,7 @@ func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BO
 			w.org.LogoURL = input.LogoURL
 		}
 	}
-	if len(w.updateCalls) >= 2 && w.repointErr != nil {
+	if len(w.updateCalls) == 2 && w.repointErr != nil {
 		return nil, w.repointErr
 	}
 	if w.err != nil {
@@ -830,4 +842,55 @@ func TestLogoUploader_KeepsScratchWhenCommitStatusIsUnknown(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, objectStore.deletedKey, "commit status unknown, so the object must be preserved")
 	require.Len(t, orgWriter.updateCalls, 1, "no rollback may be attempted without knowing the write landed")
+}
+
+func TestLogoUploader_RepointFailureOnSameSharedKeyReportsSuccess(t *testing.T) {
+	// Promotion already succeeded here, so the shared key holds this upload's
+	// bytes. The previous logo came from this same endpoint, so its URL names
+	// that very key and differs only by ?v= -- restoring it restores a pointer
+	// to the *new* bytes, not the old image. Reporting failure would be wrong:
+	// the upload did take effect, and the rollback's real value is moving
+	// Salesforce off the expiring scratch key onto a durable one.
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
+	sameKeyPrevious := "https://cdn.example.com/" + deterministicLogoKey + "?v=1"
+	orgWriter := &stubLogoOrgWriter{
+		org:             &model.B2BOrg{UID: "uid-1"},
+		previousLogoURL: sameKeyPrevious,
+		repointErr:      errors.New("salesforce unavailable"),
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err, "the bytes were promoted, so this upload did take effect")
+	require.NotNil(t, org)
+	require.Len(t, objectStore.copyCalls, 1, "promotion must have succeeded")
+	require.Len(t, orgWriter.updateCalls, 3, "scratch update, failed repoint, then rollback")
+	assert.Equal(t, sameKeyPrevious, orgWriter.updateCalls[2].LogoURL)
+	assert.Equal(t, sameKeyPrevious, org.LogoURL, "the returned org must reflect the rolled-back state, not the pre-rollback one")
+}
+
+func TestLogoUploader_RepointFailureOnForeignPreviousLogoReportsFailure(t *testing.T) {
+	// Same path, but the previous logo came from somewhere else (Crunchbase
+	// enrichment, or the v1 org-dashboard uploader). That is a genuinely
+	// different object, so restoring it really does undo the upload and
+	// reporting failure is accurate.
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
+	orgWriter := &stubLogoOrgWriter{
+		org:             &model.B2BOrg{UID: "uid-1"},
+		previousLogoURL: "https://images.crunchbase.com/acme-logo.png",
+		repointErr:      errors.New("salesforce unavailable"),
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
+	assert.Nil(t, org)
+	require.Len(t, orgWriter.updateCalls, 3)
+	assert.Equal(t, "https://images.crunchbase.com/acme-logo.png", orgWriter.updateCalls[2].LogoURL)
 }
