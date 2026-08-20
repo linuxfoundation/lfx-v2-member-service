@@ -172,9 +172,7 @@ type stubLogoOrgWriter struct {
 	racedLogoURL string
 	// previousLogoURL is what ValidatePrecondition reports as the org's
 	// current Logo_URL__c. The upload path captures it up front as the value
-	// to roll back to, so "" models an org uploading its first-ever logo --
-	// the case that cannot be rolled back at all, since an empty LogoURL means
-	// "leave unchanged" to buildAccountPatch.
+	// to roll back to, so "" models an org uploading its first-ever logo.
 	previousLogoURL string
 	// rollbackLogoURL re-reads before writing and only proceeds while the org
 	// still points at this attempt's scratch object. rollbackSeesLogoURL, if
@@ -191,6 +189,7 @@ type stubLogoOrgWriter struct {
 	committedLogoURL string
 	gotInput         model.B2BOrgInput
 	updateCalls      []model.B2BOrgInput
+	quietUpdateCalls int
 	ifMatches        []string
 	validated        bool
 }
@@ -242,15 +241,32 @@ func (w *stubLogoOrgWriter) ValidatePrecondition(_ context.Context, _, _ string)
 	return w.precondOrg(), nil
 }
 
+func inputLogoURL(input model.B2BOrgInput) string {
+	if input.LogoURL == nil {
+		return ""
+	}
+	return *input.LogoURL
+}
+
 func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+	return w.update(input, ifMatch)
+}
+
+func (w *stubLogoOrgWriter) UpdateWithoutPublish(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+	w.quietUpdateCalls++
+	return w.update(input, ifMatch)
+}
+
+func (w *stubLogoOrgWriter) update(input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
 	w.gotInput = input
 	w.updateCalls = append(w.updateCalls, input)
 	w.ifMatches = append(w.ifMatches, ifMatch)
+	logoURL := inputLogoURL(input)
 	if w.org != nil {
 		if len(w.updateCalls) == 1 && w.racedLogoURL != "" {
 			w.org.LogoURL = w.racedLogoURL
 		} else {
-			w.org.LogoURL = input.LogoURL
+			w.org.LogoURL = logoURL
 		}
 	}
 	if len(w.updateCalls) == 2 && w.repointErr != nil {
@@ -259,11 +275,11 @@ func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BO
 	if w.err != nil {
 		if w.commitDespiteErr {
 			// PATCH landed; only the re-fetch after it failed.
-			w.committedLogoURL = input.LogoURL
+			w.committedLogoURL = logoURL
 		}
 		return nil, w.err
 	}
-	w.committedLogoURL = input.LogoURL
+	w.committedLogoURL = logoURL
 	return w.org, w.err
 }
 
@@ -284,8 +300,9 @@ func TestLogoUploader_Happy(t *testing.T) {
 	assert.Equal(t, deterministicLogoKey, objectStore.copyCalls[0].dst, "promotion must land on the deterministic key so old URLs converge to current bytes")
 	assert.Equal(t, "image/png", objectStore.gotType)
 	assert.Equal(t, len(validPNGBytes), objectStore.gotDataLen)
-	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL)
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", inputLogoURL(orgWriter.gotInput))
 	assert.True(t, orgWriter.validated, "precondition must be validated before the org write")
+	assert.Equal(t, 1, orgWriter.quietUpdateCalls, "the transient scratch URL must not be published")
 	assert.Equal(t, "", objectStore.deletedKey, "scratch key must not be synchronously deleted once published -- cleanup is deferred to the object store's own lifecycle rule so any in-flight propagation of the scratch URL isn't raced")
 
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update (determines the race winner), then the shared-key repoint (only after Copy promotes the bytes there)")
@@ -474,7 +491,7 @@ func TestLogoUploader_OrgWriterError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err), "expected not-found error, got %T: %v", err, err)
 	assert.True(t, orgWriter.validated, "precondition must have been checked (and passed) before this call")
-	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", orgWriter.gotInput.LogoURL, "object store must still be called once the precondition check passes")
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1", inputLogoURL(orgWriter.gotInput), "object store must still be called once the precondition check passes")
 	require.Len(t, objectStore.putKeys, 1, "a losing/failing Update must never reach the shared deterministic key")
 	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "the only write attempted must be the scratch one")
 	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "the scratch object must still be cleaned up after a failed update")
@@ -509,11 +526,8 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 	// The first Update (to the scratch object's URL) has already committed —
 	// org's Logo_URL__c already names bytes that exist. Promoting those bytes
 	// to the shared key via Copy is what's left, and every retry here is
-	// exhausted. This org has no previous logo to restore (previousLogoURL is
-	// unset), so no rollback is possible and it stays pointed at the scratch
-	// object, exactly as before — see
-	// TestLogoUploader_RollsBackToPreviousLogoWhenPromotionFails for the same
-	// path on an org that does have one.
+	// exhausted. This org has no previous logo, so rollback must explicitly
+	// clear Logo_URL__c rather than leave the expiring scratch URL behind.
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
 		commitErr: errors.New("s3 unavailable"),
@@ -523,8 +537,10 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 
 	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.NoError(t, err)
-	require.NotNil(t, org)
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr)
+	assert.Nil(t, org)
 	assert.True(t, orgWriter.validated)
 	require.Len(t, objectStore.putKeys, 1, "expected only the scratch Put")
 	require.Len(t, objectStore.copyCalls, svc.CommitPromoteAttempts, "expected every promotion retry attempt to be exhausted")
@@ -532,17 +548,19 @@ func TestLogoUploader_CommitWriteErrorAfterSuccessfulUpdate(t *testing.T) {
 		assert.Equal(t, objectStore.putKeys[0], c.src)
 		assert.Equal(t, deterministicLogoKey, c.dst)
 	}
-	require.Len(t, orgWriter.updateCalls, 1, "expected only the scratch-URL update -- no repoint is needed since it already points at real bytes")
-	assert.Equal(t, "", objectStore.deletedKey, "scratch object must not be cleaned up once it becomes the object Salesforce names")
+	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update plus an explicit clear")
+	require.NotNil(t, orgWriter.updateCalls[1].LogoURL, "clear must be represented explicitly, not as a no-op")
+	assert.Empty(t, inputLogoURL(orgWriter.updateCalls[1]))
+	assert.Equal(t, "", objectStore.deletedKey, "scratch cleanup remains deferred to the lifecycle rule")
 }
 
 func TestLogoUploader_KeyRepointFailsAfterSuccessfulPromotion(t *testing.T) {
 	// Copy succeeds, but the second Update -- repointing Salesforce from the
-	// scratch URL to the shared key's URL -- fails. org already durably
-	// points at the scratch object from the first Update, which is already a
-	// valid, resolvable URL, so this must be tolerated rather than surfaced
-	// as an upload failure.
-	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	// scratch URL to the shared key's URL -- fails. Since promotion already
+	// succeeded, a first-ever logo is recovered by retrying the durable URL
+	// against a fresh ETag rather than leaving Salesforce on scratch.
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
 	orgWriter := &stubLogoOrgWriter{
 		org:        &model.B2BOrg{UID: "uid-1"},
 		repointErr: pkgerrors.NewPreconditionFailed("b2b org has been modified since last read"),
@@ -553,7 +571,9 @@ func TestLogoUploader_KeyRepointFailsAfterSuccessfulPromotion(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, org)
-	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update, then the failed repoint attempt")
+	require.Len(t, orgWriter.updateCalls, 3, "expected scratch update, failed repoint, then durable recovery")
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1?v=2", inputLogoURL(orgWriter.updateCalls[2]))
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1?v=2", org.LogoURL)
 	assert.Equal(t, "", objectStore.deletedKey, "scratch object must not be cleaned up when the repoint fails")
 }
 
@@ -645,8 +665,9 @@ func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {
 	// CopyIfNewer itself (not the precheck) is what detects the race here: a
 	// second, faster upload has already promoted a newer generation to the
 	// shared key by the time this attempt's copy runs. The retry loop must
-	// stop immediately rather than burn through every attempt, and must
-	// tolerate it the same way every other "abandon promotion" path does.
+	// stop immediately rather than burn through every attempt. Because this
+	// test still observes this attempt's scratch URL in Salesforce, it must
+	// clear the first-ever logo and report that this attempt had no effect.
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
 		commitErr: port.ErrStalePromotion,
@@ -656,10 +677,12 @@ func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {
 
 	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.NoError(t, err, "abandoning the promotion is tolerated, not surfaced as an upload failure")
-	require.NotNil(t, org)
+	require.Error(t, err)
+	assert.Nil(t, org)
 	require.Len(t, objectStore.copyCalls, 1, "must not retry once a newer promotion is detected")
-	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
+	require.Len(t, orgWriter.updateCalls, 2, "the scratch-URL update must be followed by an explicit clear")
+	require.NotNil(t, orgWriter.updateCalls[1].LogoURL)
+	assert.Empty(t, inputLogoURL(orgWriter.updateCalls[1]))
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {
@@ -730,29 +753,32 @@ func TestLogoUploader_RollsBackToPreviousLogoWhenPromotionFails(t *testing.T) {
 	assert.ErrorAs(t, err, &svcErr, "an upload that had no lasting effect must not report success, got: %v", err)
 	assert.Nil(t, org)
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update plus the rollback")
-	assert.Equal(t, previousLogoURL, orgWriter.updateCalls[1].LogoURL, "rollback must restore the pre-upload URL")
+	assert.Equal(t, previousLogoURL, inputLogoURL(orgWriter.updateCalls[1]), "rollback must restore the pre-upload URL")
 	assert.NotEmpty(t, orgWriter.ifMatches[1], "rollback must be conditional on a freshly-read etag")
 }
 
-func TestLogoUploader_CannotRollBackFirstEverLogo(t *testing.T) {
-	// buildAccountPatch (salesforce/b2b_org_writer.go) treats an empty LogoURL
-	// as "leave unchanged" rather than "clear", so an org that had no logo
-	// before has no restorable prior state. It stays pointed at the scratch
-	// object and the call still succeeds -- the pre-existing behaviour, kept
-	// deliberately rather than reported as a failure that the caller could not
-	// act on. This org remains exposed to the scratch expiry.
-	objectStore := &stubObjectStore{
-		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
-		commitErr: errors.New("s3 unavailable"),
+func TestLogoUploader_ClearsFirstEverLogoWhenPrecheckFails(t *testing.T) {
+	// A concurrent Account edit can fail the pre-promotion check without any
+	// S3 outage. A first-ever logo must still be cleared explicitly so the
+	// org is not left on the expiring scratch URL.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:               &model.B2BOrg{UID: "uid-1"},
+		validateErr:       pkgerrors.NewPreconditionFailed("b2b org has been modified since last read"),
+		validateErrOnCall: 2,
 	}
-	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}} // previousLogoURL zero
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
 
 	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.NoError(t, err)
-	require.NotNil(t, org)
-	require.Len(t, orgWriter.updateCalls, 1, "no rollback is possible, so only the scratch-URL update should have run")
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr)
+	assert.Nil(t, org)
+	assert.Empty(t, objectStore.copyCalls)
+	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update plus an explicit clear")
+	require.NotNil(t, orgWriter.updateCalls[1].LogoURL)
+	assert.Empty(t, inputLogoURL(orgWriter.updateCalls[1]))
 }
 
 func TestLogoUploader_SkipsRollbackWhenConcurrentUploadAlreadyMovedTheLogo(t *testing.T) {
@@ -798,7 +824,7 @@ func TestLogoUploader_RollsBackWhenAnyConcurrentOrgChangeFailsThePrecheck(t *tes
 	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
 	assert.Nil(t, org)
 	require.Len(t, orgWriter.updateCalls, 2)
-	assert.Equal(t, previousLogoURL, orgWriter.updateCalls[1].LogoURL)
+	assert.Equal(t, previousLogoURL, inputLogoURL(orgWriter.updateCalls[1]))
 	assert.Empty(t, objectStore.copyCalls, "promotion must not be attempted once the precheck failed")
 }
 
@@ -821,7 +847,7 @@ func TestLogoUploader_KeepsScratchWhenFailedUpdateHadAlreadyCommitted(t *testing
 	require.Error(t, err, "the caller still sees the upload as failed")
 	assert.Empty(t, objectStore.deletedKey, "the object the committed Logo_URL__c names must not be deleted")
 	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update plus a rollback")
-	assert.Equal(t, previousLogoURL, orgWriter.updateCalls[1].LogoURL, "the committed field must be rolled back to its previous value")
+	assert.Equal(t, previousLogoURL, inputLogoURL(orgWriter.updateCalls[1]), "the committed field must be rolled back to its previous value")
 }
 
 func TestLogoUploader_KeepsScratchWhenCommitStatusIsUnknown(t *testing.T) {
@@ -867,7 +893,7 @@ func TestLogoUploader_RepointFailureOnSameSharedKeyReportsSuccess(t *testing.T) 
 	require.NotNil(t, org)
 	require.Len(t, objectStore.copyCalls, 1, "promotion must have succeeded")
 	require.Len(t, orgWriter.updateCalls, 3, "scratch update, failed repoint, then rollback")
-	assert.Equal(t, sameKeyPrevious, orgWriter.updateCalls[2].LogoURL)
+	assert.Equal(t, sameKeyPrevious, inputLogoURL(orgWriter.updateCalls[2]))
 	assert.Equal(t, sameKeyPrevious, org.LogoURL, "the returned org must reflect the rolled-back state, not the pre-rollback one")
 }
 
@@ -892,5 +918,5 @@ func TestLogoUploader_RepointFailureOnForeignPreviousLogoReportsFailure(t *testi
 	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
 	assert.Nil(t, org)
 	require.Len(t, orgWriter.updateCalls, 3)
-	assert.Equal(t, "https://images.crunchbase.com/acme-logo.png", orgWriter.updateCalls[2].LogoURL)
+	assert.Equal(t, "https://images.crunchbase.com/acme-logo.png", inputLogoURL(orgWriter.updateCalls[2]))
 }

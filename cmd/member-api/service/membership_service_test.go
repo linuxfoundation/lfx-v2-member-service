@@ -39,8 +39,22 @@ func (s stubB2BOrgWriterUC) Create(_ context.Context, _ string) (*model.B2BOrg, 
 func (s stubB2BOrgWriterUC) Update(_ context.Context, _ string, _ model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
 	return s.org, s.err
 }
+func (s stubB2BOrgWriterUC) UpdateWithoutPublish(_ context.Context, _ string, _ model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
+	return s.org, s.err
+}
 func (s stubB2BOrgWriterUC) ValidatePrecondition(_ context.Context, _, _ string) (*model.B2BOrg, error) {
 	return s.org, s.err
+}
+
+func TestPayloadToB2BOrgInput_PreservesLogoNoOpSemantics(t *testing.T) {
+	empty := ""
+	input := payloadToB2BOrgInput(&membershipservice.UpdateB2bOrgPayload{LogoURL: &empty})
+	assert.Nil(t, input.LogoURL, "an empty public logo_url remains a no-op")
+
+	logoURL := "https://cdn.example.com/logo"
+	input = payloadToB2BOrgInput(&membershipservice.UpdateB2bOrgPayload{LogoURL: &logoURL})
+	require.NotNil(t, input.LogoURL)
+	assert.Equal(t, logoURL, *input.LogoURL)
 }
 
 type stubLogoUploaderUC struct {

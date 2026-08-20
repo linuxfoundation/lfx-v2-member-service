@@ -172,6 +172,30 @@ func TestB2BOrgWriter_Update_NoOp_SkipsWriteAndPublish(t *testing.T) {
 	assert.Empty(t, pub.calls(), "no-op update must not publish")
 }
 
+func TestB2BOrgWriter_UpdateWithoutPublish_PersistsWithoutEvents(t *testing.T) {
+	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
+	updated := &model.B2BOrg{UID: testB2BOrgUID, LogoURL: "https://cdn.example.com/scratch", UpdatedAt: time.Now()}
+	pub := &trackingPublisher{}
+	w := newB2BOrgWriter(
+		&seededOrgReader{org: current},
+		&seededOrgWriter{updateOrg: updated},
+		pub,
+		"",
+	)
+	logoURL := updated.LogoURL
+
+	result, err := w.UpdateWithoutPublish(
+		context.Background(),
+		testB2BOrgUID,
+		model.B2BOrgInput{LogoURL: &logoURL},
+		"",
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, updated, result)
+	assert.Empty(t, pub.calls(), "transient update must not publish indexer or FGA events")
+}
+
 func TestB2BOrgWriter_Update_HasChanges_IndexerBeforeAccess(t *testing.T) {
 	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
 	updated := &model.B2BOrg{UID: testB2BOrgUID, Name: "Updated Name", UpdatedAt: time.Now()}

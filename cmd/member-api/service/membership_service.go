@@ -676,8 +676,8 @@ func payloadToB2BOrgInput(p *membershipservice.UpdateB2bOrgPayload) model.B2BOrg
 	if p.PrimaryDomain != nil {
 		input.PrimaryDomain = *p.PrimaryDomain
 	}
-	if p.LogoURL != nil {
-		input.LogoURL = *p.LogoURL
+	if p.LogoURL != nil && *p.LogoURL != "" {
+		input.LogoURL = p.LogoURL
 	}
 	if p.Industry != nil {
 		input.Industry = *p.Industry

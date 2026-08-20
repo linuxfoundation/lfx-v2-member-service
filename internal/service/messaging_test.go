@@ -1007,6 +1007,69 @@ func TestPublishB2BOrgIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
 	assert.Equal(t, constants.IndexB2BOrgSubject, pub.LastIndexSubject)
 }
 
+func TestPublishB2BOrgIndexer_SkipsTransientScratchLogo(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	org := &model.B2BOrg{
+		UID:     "org-update-001",
+		LogoURL: "https://cdn.example.com/org-logos-public-scratch/org-update-001/attempt.png?v=1",
+	}
+
+	PublishB2BOrgIndexer(context.Background(), pub, org, indexerConstants.ActionUpdated)
+
+	assert.Nil(t, pub.LastIndexerPayload, "scratch logo URLs must never reach downstream consumers")
+}
+
+func TestPublishB2BOrgIndexer_OmitsTransientParentLogo(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	scratchURL := "https://cdn.example.com/org-logos-public-scratch/parent-001/attempt.png?v=1"
+	org := &model.B2BOrg{
+		UID: "child-001",
+		ParentDetail: &model.B2BOrgParentDetail{
+			UID:     "parent-001",
+			Name:    "Parent",
+			LogoURL: &scratchURL,
+		},
+	}
+
+	PublishB2BOrgIndexer(context.Background(), pub, org, indexerConstants.ActionUpdated)
+
+	require.NotNil(t, pub.LastIndexerPayload)
+	msg := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+	data := msg.Data.(map[string]any)
+	parent := data["parent_detail"].(map[string]any)
+	assert.NotContains(t, parent, "logo_url")
+	require.NotNil(t, org.ParentDetail.LogoURL, "publisher must not mutate the caller's model")
+	assert.Equal(t, scratchURL, *org.ParentDetail.LogoURL)
+}
+
+func TestPublishProjectMembershipIndexer_OmitsTransientCompanyLogo(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	scratchURL := "https://cdn.example.com/org-logos-public-scratch/org-update-001/attempt.png?v=1"
+	pm := &model.ProjectMembership{UID: "pm-update-001", CompanyLogoURL: scratchURL}
+
+	PublishProjectMembershipIndexer(context.Background(), pub, pm, indexerConstants.ActionUpdated)
+
+	require.NotNil(t, pub.LastIndexerPayload)
+	msg := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+	data := msg.Data.(map[string]any)
+	assert.NotContains(t, data, "company_logo_url")
+	assert.Equal(t, scratchURL, pm.CompanyLogoURL, "publisher must not mutate the caller's model")
+}
+
+func TestPublishKeyContactIndexer_OmitsTransientCompanyLogo(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	scratchURL := "https://cdn.example.com/org-logos-public-scratch/org-update-001/attempt.png?v=1"
+	kc := &model.KeyContact{UID: "kc-update-001", CompanyLogoURL: scratchURL}
+
+	PublishKeyContactIndexer(context.Background(), pub, kc, indexerConstants.ActionUpdated)
+
+	require.NotNil(t, pub.LastIndexerPayload)
+	msg := pub.LastIndexerPayload.(*model.MemberIndexerMessage)
+	data := msg.Data.(map[string]any)
+	assert.NotContains(t, data, "company_logo_url")
+	assert.Equal(t, scratchURL, kc.CompanyLogoURL, "publisher must not mutate the caller's model")
+}
+
 func TestPublishProjectMembershipIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	pm := &model.ProjectMembership{UID: "pm-del-001"}

@@ -30,7 +30,10 @@ import (
 // detection would require sniffing XML structure, which its mimesniff-based
 // table doesn't do), so SVG uploads are validated by actually parsing and
 // sanitizing them instead of comparing against a sniffed type.
-const svgMediaType = "image/svg+xml"
+const (
+	svgMediaType         = "image/svg+xml"
+	logoScratchKeyPrefix = "org-logos-public-scratch/"
+)
 
 // CommitPromoteAttempts and commitPromoteRetryDelay bound the retry loop that
 // promotes an already-uploaded scratch object to the shared logo key once
@@ -45,8 +48,8 @@ const (
 )
 
 // LogoUploader uploads a B2B org logo to object storage and writes the
-// resulting URL to the org's Salesforce Logo_URL__c field via B2BOrgWriter —
-// reusing its existing PATCH + indexer/FGA publish path (LFXV2-2016).
+// resulting URL to the org's Salesforce Logo_URL__c field via B2BOrgWriter.
+// Only durable logo states are published to indexer/FGA consumers.
 type LogoUploader interface {
 	UploadB2BOrgLogo(ctx context.Context, uid, contentType string, body io.Reader, ifMatch string) (*model.B2BOrg, error)
 }
@@ -164,27 +167,22 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// lfx-reviewer finding on PR #87). Named after the object-storage
 	// definition's own key (org-logos-public), not the domain model, per
 	// Antonia's naming question on lfx-v2-opentofu#246.
-	scratchKey := fmt.Sprintf("org-logos-public-scratch/%s/%s%s", uid, uuid.NewString(), ext)
+	scratchKey := fmt.Sprintf("%s%s/%s%s", logoScratchKeyPrefix, uid, uuid.NewString(), ext)
 
 	if _, err := o.objectStore.Put(ctx, scratchKey, contentType, data); err != nil {
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
 	}
 
-	// Update is called with the scratch object's URL first, not key's — the
-	// scratch object already exists (Put above just completed), so whatever
-	// this call publishes always resolves to real bytes immediately. This is
-	// what determines the race winner, via the same optimistic-concurrency
-	// check as before; only after it succeeds does promotion to the prettier
-	// shared key happen, and only a second Update — once that promotion has
-	// actually succeeded — repoints Salesforce there. Publishing key's URL
-	// before its bytes were guaranteed to exist left a gap where a reader
-	// could hit a fresh ?v= URL between this call returning and the Copy
-	// below completing, get a cache-miss (404 or stale bytes), and have the
-	// CDN pin that miss under the new querystring for its full TTL even
-	// though promotion later succeeded (see the LFXV2-2016 lfx-reviewer
-	// finding on PR #87, logo_uploader.go:147).
+	// Persist the scratch object's URL first, not key's — the scratch object
+	// already exists (Put above just completed), so Salesforce never names
+	// missing bytes. This determines the race winner via optimistic
+	// concurrency. The scratch URL is deliberately not published to the
+	// indexer: it expires, and losing the later shared-key publish must leave
+	// consumers on their previous durable value rather than this transient
+	// one. Once promotion succeeds, a normal Update both repoints Salesforce
+	// and publishes the durable URL.
 	scratchURL := o.objectStore.VersionedURL(scratchKey)
-	org, err := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: scratchURL}, ifMatch)
+	org, err := o.b2bOrgWriter.UpdateWithoutPublish(ctx, uid, model.B2BOrgInput{LogoURL: &scratchURL}, ifMatch)
 	if err != nil {
 		o.discardScratchAfterFailedUpdate(ctx, uid, scratchKey, scratchURL, previousLogoURL)
 		return nil, err
@@ -213,15 +211,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 
 	// Compute the repoint precondition now, before promoting any bytes.
 	//
-	// org.IsParent was populated in place by the first Update's publishEvents
-	// call (b2b_org_writer.go) — a writer-only derived field that the plain
-	// reader behind validateForUpdate's precondition check never sets. Left
-	// as-is, that asymmetry alone makes etag.LFXEtag's JSON marshal disagree
-	// with the fresh read the repoint check below compares against (`omitempty`
-	// drops IsParent only when false), so every repoint for a parent org would
-	// fail its precondition check even though nothing else changed. Clear it
-	// before hashing so this etag reflects the same shape GetB2BOrg returns
-	// (LFXV2-2016 lfx-reviewer finding on PR #87).
+	// IsParent is a writer-side derived projection, not a persisted Salesforce
+	// field. Clear it before hashing so this ETag matches the shape returned by
+	// the fresh read in ValidatePrecondition.
 	orgForEtag := *org
 	orgForEtag.IsParent = false
 	repointIfMatch, etagErr := etag.LFXEtag(&orgForEtag)
@@ -279,12 +271,8 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// attempt's generation at the moment its own winning Update landed, so a
 	// later stall in this goroutine can no longer change it.
 	// If every retry is exhausted, or a newer promotion has already won,
-	// rollbackLogoURL puts Logo_URL__c back to its pre-upload value and the
-	// call reports failure. Leaving it on the scratch object was the earlier
-	// behaviour, justified as "already a normal, correct-looking value, not a
-	// broken reference to repair" — true only until the scratch prefix's
-	// 2-day lifecycle rule deletes it. See rollbackLogoURL for the one case
-	// that still cannot be repaired (an org's first-ever logo).
+	// rollbackLogoURL puts Logo_URL__c back to its pre-upload value (including
+	// explicitly clearing a first-ever logo) and the call reports failure.
 	//
 	// org.UpdatedAt.UnixNano() is not always strictly increasing across
 	// distinct attempts: Salesforce's LastModifiedDate is reported at
@@ -345,43 +333,36 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// scratch copy is still inside the expiring prefix — so a failure here is
 	// rolled back like the others rather than left pointing at it.
 	keyURL := o.objectStore.VersionedURL(key)
-	repointed, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: keyURL}, repointIfMatch)
+	repointed, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: &keyURL}, repointIfMatch)
 	if updateErr != nil {
 		slog.ErrorContext(ctx, "failed to repoint b2b org logo to its shared key after a successful promotion",
 			"b2b_org_uid", uid, "key", key, "error", updateErr)
 
-		// Unlike every other abandon path, promotion has already succeeded
-		// here, so the shared key holds this upload's bytes. Whether a
-		// rollback truly undoes the upload depends on where the previous logo
-		// lived: the shared key is deterministic per org, so a previous logo
-		// uploaded through this same endpoint differs only by its ?v=
-		// suffix, and restoring that URL restores a pointer to the *new*
-		// bytes. Reporting failure then would be wrong -- the upload did take
-		// effect, and the rollback's value is that it moves Salesforce off the
-		// expiring scratch key onto a durable one. Only a previous logo from
-		// elsewhere (Crunchbase enrichment, the v1 org-dashboard uploader) is
-		// a genuinely different object, and only then did the upload really
-		// not happen (copilot-pull-request-reviewer finding on PR #87).
-		restoresDifferentImage := !sharesSharedLogoKey(previousLogoURL, keyURL)
-		if restored := o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL); restored != nil {
+		// Promotion already succeeded, so the shared key holds this upload's
+		// bytes. For a first-ever logo, retry the repoint against a fresh ETag
+		// instead of clearing the field. Otherwise restore the previous URL:
+		// if it names the same deterministic key, it still resolves to the new
+		// bytes; a foreign previous URL genuinely undoes the upload.
+		safeLogoURL := previousLogoURL
+		if safeLogoURL == "" {
+			safeLogoURL = keyURL
+		}
+		restoresDifferentImage := !sharesSharedLogoKey(safeLogoURL, keyURL)
+		if restored := o.rollbackLogoURL(ctx, uid, safeLogoURL, scratchURL); restored != nil {
 			if restoresDifferentImage {
 				return nil, errLogoUploadIncomplete()
 			}
-			slog.WarnContext(ctx, "logo bytes were promoted but Salesforce could not be repointed; left on the previous versioned URL for the same key, which converges to the new bytes within the cache TTL",
+			slog.WarnContext(ctx, "logo bytes were promoted and the failed repoint was recovered with a durable shared-key URL",
 				"b2b_org_uid", uid, "key", key)
 			return restored, nil
 		}
 		return org, nil
 	}
 
-	// Deliberately not deleted here. This scratch object was already published
-	// as Logo_URL__c by the first Update above (before Copy even ran), which
-	// fired an async indexer publish — a reader that resolved that message (or
-	// a CDN edge that cached the scratch URL) before this repoint could still
-	// be mid-flight against the scratch key's bytes. Deleting it immediately
-	// would race that propagation lag and turn a cached/in-flight reference
-	// into a broken image with nothing to self-heal it, since the object would
-	// be gone. Cleanup is deferred to the object store's own scratch-prefix
+	// Deliberately not deleted here. Although the transient update is not
+	// published to the indexer, a direct Salesforce reader could observe and
+	// cache the scratch URL before this repoint. Deleting it immediately would
+	// race that read. Cleanup is deferred to the object store's scratch-prefix
 	// lifecycle rule (org-logos-public-scratch/, 2-day expiration — see
 	// object-store-definitions.yaml in lfx-v2-opentofu), which gives that
 	// window ample time to close before removal (LFXV2-2016 lfx-reviewer
@@ -404,7 +385,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 // So this re-reads first. If Logo_URL__c does not name this attempt's scratch
 // object the write never landed and the object is safe to remove. If it does,
 // the write committed despite the error: the object stays (it is the one being
-// referenced) and the field is rolled back where a prior value exists. When
+// referenced) and the field is restored or explicitly cleared. When
 // the re-read itself fails, nothing is deleted — an orphan the lifecycle rule
 // will reclaim is strictly better than a dangling reference.
 func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.Context, uid, scratchKey, scratchURL, previousLogoURL string) {
@@ -428,9 +409,10 @@ func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.C
 	}
 }
 
-// rollbackLogoURL best-effort restores Logo_URL__c to the value it held before
-// this upload. Every caller is a path that abandons *after* the first Update
-// already committed the scratch object's URL to Salesforce.
+// rollbackLogoURL best-effort moves Logo_URL__c off this upload's scratch URL.
+// Most callers restore the pre-upload value; an empty value explicitly clears
+// a first-ever logo, while a post-promotion repoint failure can use the durable
+// shared-key URL as the safe target.
 //
 // Without this, those paths leave Salesforce naming an object under the
 // scratch prefix, which the object store's lifecycle rule deletes after 2 days
@@ -448,19 +430,7 @@ func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.C
 // Logo_URL__c on is never clobbered — it simply reports no rollback.
 //
 // Returns the restored org, or nil when nothing was put back.
-func (o *logoUploaderOrchestrator) rollbackLogoURL(ctx context.Context, uid, previousLogoURL, scratchURL string) *model.B2BOrg {
-	// A first-ever logo upload cannot be rolled back: buildAccountPatch
-	// (salesforce/b2b_org_writer.go) treats an empty LogoURL as "leave
-	// unchanged" rather than "clear it", so "no logo" is not an expressible
-	// target through this path — unlike CrunchBaseURL, which is a *string for
-	// exactly that reason. Such an org stays pointed at the scratch object and
-	// is still exposed to the 2-day expiry above.
-	if previousLogoURL == "" {
-		slog.ErrorContext(ctx, "cannot roll back b2b org logo: it had no previous logo and Logo_URL__c cannot be cleared, so it stays pointed at a scratch object that the lifecycle rule will expire",
-			"b2b_org_uid", uid, "scratch_url", scratchURL)
-		return nil
-	}
-
+func (o *logoUploaderOrchestrator) rollbackLogoURL(ctx context.Context, uid, safeLogoURL, scratchURL string) *model.B2BOrg {
 	fresh, err := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, "")
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to re-read b2b org to roll its logo back; leaving it pointed at the scratch object",
@@ -480,14 +450,14 @@ func (o *logoUploaderOrchestrator) rollbackLogoURL(ctx context.Context, uid, pre
 		return nil
 	}
 
-	restored, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: previousLogoURL}, freshETag)
+	restored, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: &safeLogoURL}, freshETag)
 	if updateErr != nil {
-		slog.ErrorContext(ctx, "failed to roll the b2b org logo back to its previous URL; leaving it pointed at the scratch object",
+		slog.ErrorContext(ctx, "failed to move the b2b org logo off its scratch URL",
 			"b2b_org_uid", uid, "error", updateErr)
 		return nil
 	}
 
-	slog.InfoContext(ctx, "rolled b2b org logo back to its previous URL after an incomplete upload",
+	slog.InfoContext(ctx, "moved b2b org logo off its scratch URL after an incomplete upload",
 		"b2b_org_uid", uid)
 	return restored
 }
