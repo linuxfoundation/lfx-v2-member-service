@@ -169,10 +169,18 @@ type stubLogoOrgWriter struct {
 	// set, overrides what that re-read reports -- letting a test simulate a
 	// concurrent upload having already moved the field on.
 	rollbackSeesLogoURL string
-	gotInput            model.B2BOrgInput
-	updateCalls         []model.B2BOrgInput
-	ifMatches           []string
-	validated           bool
+	// commitDespiteErr models UpdateB2BOrg's PATCH-then-re-fetch shape: the
+	// write lands in Salesforce but the re-fetch afterwards fails, so Update
+	// returns an error even though Logo_URL__c already changed.
+	commitDespiteErr bool
+	// committedLogoURL is what Salesforce actually holds -- set only by an
+	// Update that committed, so a failed one is not mistaken for persisted
+	// state by the precondition re-reads.
+	committedLogoURL string
+	gotInput         model.B2BOrgInput
+	updateCalls      []model.B2BOrgInput
+	ifMatches        []string
+	validated        bool
 }
 
 // precondOrg is what ValidatePrecondition hands back. The first call reports
@@ -193,9 +201,9 @@ func (w *stubLogoOrgWriter) precondOrg() *model.B2BOrg {
 		base.LogoURL = w.rollbackSeesLogoURL
 		return base
 	}
-	// Whatever this attempt last committed -- i.e. its scratch URL.
-	if n := len(w.updateCalls); n > 0 {
-		base.LogoURL = w.updateCalls[n-1].LogoURL
+	base.LogoURL = w.committedLogoURL
+	if base.LogoURL == "" {
+		base.LogoURL = w.previousLogoURL
 	}
 	return base
 }
@@ -236,6 +244,14 @@ func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BO
 	if len(w.updateCalls) >= 2 && w.repointErr != nil {
 		return nil, w.repointErr
 	}
+	if w.err != nil {
+		if w.commitDespiteErr {
+			// PATCH landed; only the re-fetch after it failed.
+			w.committedLogoURL = input.LogoURL
+		}
+		return nil, w.err
+	}
+	w.committedLogoURL = input.LogoURL
 	return w.org, w.err
 }
 
@@ -772,4 +788,46 @@ func TestLogoUploader_RollsBackWhenAnyConcurrentOrgChangeFailsThePrecheck(t *tes
 	require.Len(t, orgWriter.updateCalls, 2)
 	assert.Equal(t, previousLogoURL, orgWriter.updateCalls[1].LogoURL)
 	assert.Empty(t, objectStore.copyCalls, "promotion must not be attempted once the precheck failed")
+}
+
+func TestLogoUploader_KeepsScratchWhenFailedUpdateHadAlreadyCommitted(t *testing.T) {
+	// UpdateB2BOrg PATCHes and then re-fetches; a failure in that re-fetch
+	// returns an error even though Logo_URL__c already changed. Deleting the
+	// scratch object on that path would point the committed field at a key
+	// that no longer exists -- broken immediately, not at the scratch
+	// prefix's lifecycle expiry.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		err:              errors.New("re-fetching b2b org after update: upstream timeout"),
+		commitDespiteErr: true,
+		previousLogoURL:  previousLogoURL,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err, "the caller still sees the upload as failed")
+	assert.Empty(t, objectStore.deletedKey, "the object the committed Logo_URL__c names must not be deleted")
+	require.Len(t, orgWriter.updateCalls, 2, "expected the scratch-URL update plus a rollback")
+	assert.Equal(t, previousLogoURL, orgWriter.updateCalls[1].LogoURL, "the committed field must be rolled back to its previous value")
+}
+
+func TestLogoUploader_KeepsScratchWhenCommitStatusIsUnknown(t *testing.T) {
+	// If the re-read that would establish whether the PATCH landed fails too,
+	// nothing is deleted: an orphan the lifecycle rule reclaims is strictly
+	// better than a dangling reference.
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		err:               errors.New("update failed"),
+		validateErr:       errors.New("salesforce unreachable"),
+		validateErrOnCall: 2, // the post-failure re-read
+		previousLogoURL:   previousLogoURL,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	assert.Empty(t, objectStore.deletedKey, "commit status unknown, so the object must be preserved")
+	require.Len(t, orgWriter.updateCalls, 1, "no rollback may be attempted without knowing the write landed")
 }

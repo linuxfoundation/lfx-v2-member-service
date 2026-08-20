@@ -185,10 +185,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	scratchURL := o.objectStore.VersionedURL(scratchKey)
 	org, err := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: scratchURL}, ifMatch)
 	if err != nil {
-		if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
-			slog.WarnContext(ctx, "failed to clean up scratch logo object after a failed update",
-				"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
-		}
+		o.discardScratchAfterFailedUpdate(ctx, uid, scratchKey, scratchURL, previousLogoURL)
 		return nil, err
 	}
 
@@ -370,6 +367,45 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// window ample time to close before removal (LFXV2-2016 lfx-reviewer
 	// finding on PR #87).
 	return repointed, nil
+}
+
+// discardScratchAfterFailedUpdate cleans up this attempt's scratch object
+// after the first Update returned an error — but only once it has established
+// that the error really was pre-commit.
+//
+// An Update error does not prove the Salesforce write failed: UpdateB2BOrg
+// PATCHes and then re-fetches the record (salesforce/b2b_org_writer.go), and a
+// failure in that re-fetch returns an error even though the PATCH already
+// committed Logo_URL__c. Deleting the scratch object on that path points the
+// committed field straight at a key that no longer exists — broken
+// immediately, not merely at the scratch prefix's lifecycle expiry
+// (copilot-pull-request-reviewer finding on PR #87).
+//
+// So this re-reads first. If Logo_URL__c does not name this attempt's scratch
+// object the write never landed and the object is safe to remove. If it does,
+// the write committed despite the error: the object stays (it is the one being
+// referenced) and the field is rolled back where a prior value exists. When
+// the re-read itself fails, nothing is deleted — an orphan the lifecycle rule
+// will reclaim is strictly better than a dangling reference.
+func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.Context, uid, scratchKey, scratchURL, previousLogoURL string) {
+	fresh, readErr := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, "")
+	if readErr != nil {
+		slog.WarnContext(ctx, "cannot determine whether a failed logo update committed; leaving the scratch object for the lifecycle rule to reclaim",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", readErr)
+		return
+	}
+
+	if fresh.LogoURL == scratchURL {
+		slog.ErrorContext(ctx, "logo update reported an error but had already committed; keeping the object it now names",
+			"b2b_org_uid", uid, "scratch_key", scratchKey)
+		o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL)
+		return
+	}
+
+	if delErr := o.objectStore.Delete(ctx, scratchKey); delErr != nil {
+		slog.WarnContext(ctx, "failed to clean up scratch logo object after a failed update",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
+	}
 }
 
 // rollbackLogoURL best-effort restores Logo_URL__c to the value it held before
