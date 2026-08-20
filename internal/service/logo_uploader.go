@@ -206,6 +206,12 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	if org.LogoURL != scratchURL {
 		slog.WarnContext(ctx, "a concurrent logo upload committed between this attempt's update and its re-fetch; abandoning this attempt",
 			"b2b_org_uid", uid, "scratch_key", scratchKey)
+		// Same durability rule the rollback paths apply: that upload commits
+		// its own scratch URL before promoting, so the field can still name an
+		// expiring object, which is not a state to report as settled.
+		if isScratchLogoURL(org.LogoURL) {
+			return nil, errLogoUploadIncomplete()
+		}
 		return org, nil
 	}
 
@@ -220,10 +226,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	if etagErr != nil {
 		slog.ErrorContext(ctx, "failed to compute etag to repoint logo to its shared key after a successful update",
 			"b2b_org_uid", uid, "error", etagErr)
-		if o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL) != nil {
-			return nil, errLogoUploadIncomplete()
-		}
-		return org, nil
+		return o.abandonUpload(ctx, uid, previousLogoURL, scratchURL)
 	}
 
 	// Re-check that this attempt's scratch URL is still the org's current
@@ -240,10 +243,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		// rare S3-outage path. rollbackLogoURL re-reads and only writes if
 		// Logo_URL__c still names this attempt's scratch object, so a genuine
 		// competing upload is left alone.
-		if o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL) != nil {
-			return nil, errLogoUploadIncomplete()
-		}
-		return org, nil
+		return o.abandonUpload(ctx, uid, previousLogoURL, scratchURL)
 	}
 
 	// This attempt has won and Salesforce already durably points at the
@@ -309,11 +309,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 			// This is the accepted cost of the same-millisecond generation tie
 			// documented above, so it is not exotic either. Where a newer
 			// upload has already moved Logo_URL__c on, rollbackLogoURL's
-			// ownership re-check declines and this stays a soft abandon.
-			if o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL) != nil {
-				return nil, errLogoUploadIncomplete()
-			}
-			return org, nil
+			// ownership re-check declines and this stays a soft abandon that
+			// reports that upload's state.
+			return o.abandonUpload(ctx, uid, previousLogoURL, scratchURL)
 		}
 		if attempt < CommitPromoteAttempts {
 			time.Sleep(commitPromoteRetryDelay)
@@ -322,10 +320,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	if commitErr != nil {
 		slog.ErrorContext(ctx, "failed to promote logo to its shared key after the b2b org update already committed",
 			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
-		if o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL) != nil {
-			return nil, errLogoUploadIncomplete()
-		}
-		return org, nil
+		return o.abandonUpload(ctx, uid, previousLogoURL, scratchURL)
 	}
 
 	// Promotion succeeded: repoint Salesforce at the shared key's URL. The
@@ -347,16 +342,20 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		if safeLogoURL == "" {
 			safeLogoURL = keyURL
 		}
-		restoresDifferentImage := !sharesSharedLogoKey(safeLogoURL, keyURL)
-		if restored := o.rollbackLogoURL(ctx, uid, safeLogoURL, scratchURL); restored != nil {
-			if restoresDifferentImage {
+		recovered, outcome := o.rollbackLogoURL(ctx, uid, safeLogoURL, scratchURL)
+		switch outcome {
+		case rollbackSuperseded:
+			return recovered, nil
+		case rollbackRestored:
+			if !sharesSharedLogoKey(safeLogoURL, keyURL) {
 				return nil, errLogoUploadIncomplete()
 			}
 			slog.WarnContext(ctx, "logo bytes were promoted and the failed repoint was recovered with a durable shared-key URL",
 				"b2b_org_uid", uid, "key", key)
-			return restored, nil
+			return recovered, nil
+		default:
+			return nil, errLogoUploadIncomplete()
 		}
-		return org, nil
 	}
 
 	// Deliberately not deleted here. Although the transient update is not
@@ -399,7 +398,7 @@ func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.C
 	if fresh.LogoURL == scratchURL {
 		slog.ErrorContext(ctx, "logo update reported an error but had already committed; keeping the object it now names",
 			"b2b_org_uid", uid, "scratch_key", scratchKey)
-		_ = o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL)
+		_, _ = o.rollbackLogoURL(ctx, uid, previousLogoURL, scratchURL)
 		return
 	}
 
@@ -407,6 +406,39 @@ func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.C
 		slog.WarnContext(ctx, "failed to clean up scratch logo object after a failed update",
 			"b2b_org_uid", uid, "scratch_key", scratchKey, "error", delErr)
 	}
+}
+
+// rollbackOutcome distinguishes the three ways an attempted rollback can end.
+// Collapsing them into "restored or not" made a superseded upload — where
+// another attempt legitimately owns Logo_URL__c — indistinguishable from a
+// rollback that could not be confirmed, and callers answered both with the
+// same degraded success (copilot-pull-request-reviewer finding on PR #87,
+// logo_uploader.go:328).
+type rollbackOutcome int
+
+const (
+	// rollbackRestored means Logo_URL__c now holds the target value.
+	rollbackRestored rollbackOutcome = iota
+	// rollbackSuperseded means someone else already moved the field off this
+	// attempt's scratch object and onto a value that does not expire (another
+	// upload's durable URL, or no logo at all), so there was nothing to roll
+	// back and the record read here is the current state.
+	rollbackSuperseded
+	// rollbackFailed means the field could not be confirmed off the scratch
+	// object, which the lifecycle rule expires after 2 days.
+	rollbackFailed
+)
+
+// abandonUpload gives up on this attempt and maps the rollback outcome onto
+// the response. A superseded attempt reports the org that actually owns the
+// logo now; every other outcome is a failure, including one where the rollback
+// itself could not be confirmed and Salesforce is left naming an expiring
+// object.
+func (o *logoUploaderOrchestrator) abandonUpload(ctx context.Context, uid, safeLogoURL, scratchURL string) (*model.B2BOrg, error) {
+	if superseded, outcome := o.rollbackLogoURL(ctx, uid, safeLogoURL, scratchURL); outcome == rollbackSuperseded {
+		return superseded, nil
+	}
+	return nil, errLogoUploadIncomplete()
 }
 
 // rollbackLogoURL best-effort moves Logo_URL__c off this upload's scratch URL.
@@ -427,39 +459,53 @@ func (o *logoUploaderOrchestrator) discardScratchAfterFailedUpdate(ctx context.C
 // callers arrive here precisely because theirs is stale. That read also
 // confirms this attempt still owns the field before writing, and the Update is
 // conditional on the freshly-read etag, so an upload that already moved
-// Logo_URL__c on is never clobbered — it simply reports no rollback.
+// Logo_URL__c on is never clobbered — it simply reports rollbackSuperseded.
 //
-// Returns the restored org, or nil when nothing was put back.
-func (o *logoUploaderOrchestrator) rollbackLogoURL(ctx context.Context, uid, safeLogoURL, scratchURL string) *model.B2BOrg {
+// Returns the org to report alongside the outcome: the restored record when it
+// wrote, the freshly-read record of the upload that superseded this one, or
+// nil when the rollback failed.
+func (o *logoUploaderOrchestrator) rollbackLogoURL(ctx context.Context, uid, safeLogoURL, scratchURL string) (*model.B2BOrg, rollbackOutcome) {
 	fresh, err := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, "")
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to re-read b2b org to roll its logo back; leaving it pointed at the scratch object",
 			"b2b_org_uid", uid, "error", err)
-		return nil
+		return nil, rollbackFailed
 	}
 	if fresh.LogoURL != scratchURL {
+		// Only a durable target makes this a clean handover. A competing
+		// upload commits its own scratch URL before promoting (see the first
+		// Update above), so the field can name *its* expiring object while it
+		// is still mid-flight — reporting that as the settled current state
+		// would answer 200 with a URL the lifecycle rule deletes in 2 days.
+		// This attempt cannot repair someone else's in-flight write either, so
+		// it declines to write and reports the outcome as unconfirmed.
+		if isScratchLogoURL(fresh.LogoURL) {
+			slog.ErrorContext(ctx, "b2b org logo points at another attempt's scratch object; leaving it for that upload to resolve",
+				"b2b_org_uid", uid, "scratch_url", scratchURL)
+			return nil, rollbackFailed
+		}
 		slog.WarnContext(ctx, "b2b org logo no longer points at this attempt's scratch object; nothing to roll back",
 			"b2b_org_uid", uid, "scratch_url", scratchURL)
-		return nil
+		return fresh, rollbackSuperseded
 	}
 
 	freshETag, etagErr := etag.LFXEtag(fresh)
 	if etagErr != nil {
 		slog.ErrorContext(ctx, "failed to compute etag to roll the b2b org logo back; leaving it pointed at the scratch object",
 			"b2b_org_uid", uid, "error", etagErr)
-		return nil
+		return nil, rollbackFailed
 	}
 
 	restored, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: &safeLogoURL}, freshETag)
 	if updateErr != nil {
 		slog.ErrorContext(ctx, "failed to move the b2b org logo off its scratch URL",
 			"b2b_org_uid", uid, "error", updateErr)
-		return nil
+		return nil, rollbackFailed
 	}
 
 	slog.InfoContext(ctx, "moved b2b org logo off its scratch URL after an incomplete upload",
 		"b2b_org_uid", uid)
-	return restored
+	return restored, rollbackRestored
 }
 
 // sharesSharedLogoKey reports whether rawURL addresses the same object as

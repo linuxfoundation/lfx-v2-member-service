@@ -505,7 +505,9 @@ func TestLogoUploader_AbandonsWhenConcurrentUploadRacesTheReFetch(t *testing.T) 
 	// that re-fetch. When that happens, the returned org describes the other
 	// upload's commit, not this one's, and must not be treated as proof this
 	// attempt won (copilot-pull-request-reviewer finding on PR #87,
-	// 2026-08-18).
+	// 2026-08-18). That other upload is still mid-flight -- its own scratch
+	// URL is what the re-fetch shows -- so there is no settled state to
+	// report and this reports failure rather than 200 on an expiring URL.
 	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
 	orgWriter := &stubLogoOrgWriter{
 		org:          &model.B2BOrg{UID: "uid-1"},
@@ -515,9 +517,31 @@ func TestLogoUploader_AbandonsWhenConcurrentUploadRacesTheReFetch(t *testing.T) 
 
 	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.NoError(t, err, "abandoning this attempt is tolerated, not surfaced as an upload failure")
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
+	assert.Nil(t, org)
+	assert.Empty(t, objectStore.copyCalls, "promotion must never run once the re-fetch is known to belong to another upload")
+	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
+}
+
+func TestLogoUploader_AbandonsWithTheWinnersDurableLogoWhenTheReFetchIsRaced(t *testing.T) {
+	// Same race, but the concurrent upload has already reached its durable
+	// shared-key URL. That is settled state, so this attempt reports it
+	// instead of failing.
+	const winnerLogoURL = "https://cdn.example.com/b2b_org_logos/uid-1?v=99"
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:          &model.B2BOrg{UID: "uid-1"},
+		racedLogoURL: winnerLogoURL,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err, "abandoning this attempt is tolerated once the winner's logo is durable")
 	require.NotNil(t, org)
-	assert.Equal(t, "https://cdn.example.com/org-logos-public-scratch/uid-1/other-attempt.png?v=99", org.LogoURL, "the returned org belongs to the concurrent commit, not this attempt")
+	assert.Equal(t, winnerLogoURL, org.LogoURL, "the returned org belongs to the concurrent commit, not this attempt")
 	assert.Empty(t, objectStore.copyCalls, "promotion must never run once the re-fetch is known to belong to another upload")
 	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
 }
@@ -584,6 +608,10 @@ func TestLogoUploader_RepointPrecheckAbandonsPromotionWhenOrgChangedSinceCommit(
 	// promotion). Copy must never run in that case -- otherwise this
 	// (older, losing) attempt could clobber the shared key with stale bytes
 	// even though its own repoint would later be correctly rejected.
+	//
+	// Here the rollback's own re-read fails too, so nothing confirms the org
+	// is off this attempt's scratch object: that is an unrepaired expiring
+	// reference, not a tolerable abandon, and must surface as an error.
 	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
 	orgWriter := &stubLogoOrgWriter{
 		org:                 &model.B2BOrg{UID: "uid-1"},
@@ -594,10 +622,35 @@ func TestLogoUploader_RepointPrecheckAbandonsPromotionWhenOrgChangedSinceCommit(
 
 	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.NoError(t, err, "abandoning the promotion is tolerated, not surfaced as an upload failure")
-	require.NotNil(t, org)
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr)
+	assert.Nil(t, org)
 	assert.Empty(t, objectStore.copyCalls, "Copy must never run once the pre-promotion precheck detects the org changed")
 	require.Len(t, orgWriter.updateCalls, 1, "only the scratch-URL update -- the repoint Update must never be attempted")
+}
+
+func TestLogoUploader_SupersededAbandonReportsTheOwningUpload(t *testing.T) {
+	// The precheck fails and the rollback's re-read then shows a newer upload
+	// already owns Logo_URL__c. Nothing is broken -- that upload's URL is
+	// durable -- so this reports success, but with the org that actually holds
+	// the logo rather than this attempt's stale scratch-URL record.
+	const winnerLogoURL = "https://cdn.example.com/b2b_org_logos/uid-1?v=9"
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:                 &model.B2BOrg{UID: "uid-1"},
+		validateErr:         pkgerrors.NewPreconditionFailed("b2b org has been modified since last read"),
+		validateErrOnCall:   2,
+		rollbackSeesLogoURL: winnerLogoURL,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err, "another upload owning the logo is not this upload's failure")
+	require.NotNil(t, org)
+	assert.Equal(t, winnerLogoURL, org.LogoURL, "the response must describe the upload that owns the logo, not this attempt's scratch URL")
+	require.Len(t, orgWriter.updateCalls, 1, "a superseded attempt must not write")
 }
 
 func TestLogoUploader_RepointEtagIgnoresParentFlag(t *testing.T) {
@@ -919,4 +972,74 @@ func TestLogoUploader_RepointFailureOnForeignPreviousLogoReportsFailure(t *testi
 	assert.Nil(t, org)
 	require.Len(t, orgWriter.updateCalls, 3)
 	assert.Equal(t, "https://images.crunchbase.com/acme-logo.png", inputLogoURL(orgWriter.updateCalls[2]))
+}
+
+func TestLogoUploader_RepointFailureReportsTheUploadThatSupersededIt(t *testing.T) {
+	// The repoint fails and the rollback's re-read shows a newer upload has
+	// already put a durable URL on the field. This upload's own bytes are
+	// irrelevant now, so it must report that upload's state rather than its
+	// own stale record.
+	const winnerLogoURL = "https://cdn.example.com/b2b_org_logos/uid-1?v=9"
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
+	orgWriter := &stubLogoOrgWriter{
+		org:                 &model.B2BOrg{UID: "uid-1"},
+		repointErr:          errors.New("salesforce unavailable"),
+		rollbackSeesLogoURL: winnerLogoURL,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	assert.Equal(t, winnerLogoURL, org.LogoURL)
+	require.Len(t, orgWriter.updateCalls, 2, "a superseded attempt must not write during rollback")
+}
+
+func TestLogoUploader_RepointFailureWithUnconfirmedRollbackReportsFailure(t *testing.T) {
+	// Promotion succeeded but the repoint failed, and the rollback cannot even
+	// re-read the org. Nothing confirms Salesforce is off the expiring scratch
+	// URL, so this cannot be reported as a success.
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
+	orgWriter := &stubLogoOrgWriter{
+		org:               &model.B2BOrg{UID: "uid-1"},
+		repointErr:        errors.New("salesforce unavailable"),
+		validateErr:       errors.New("salesforce unreachable"),
+		validateErrOnCall: 3,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
+	assert.Nil(t, org)
+	require.Len(t, orgWriter.updateCalls, 2, "the rollback must not write when it cannot read")
+}
+
+func TestLogoUploader_AbandonDoesNotSettleOnAnotherAttemptsScratchURL(t *testing.T) {
+	// A competing upload commits its own scratch URL before promoting, so the
+	// rollback re-read can find the field on *its* expiring object. Treating
+	// that as a settled handover would answer 200 with a URL the lifecycle
+	// rule deletes; this must report failure instead.
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: errors.New("s3 unavailable"),
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:                 &model.B2BOrg{UID: "uid-1"},
+		rollbackSeesLogoURL: "https://cdn.example.com/org-logos-public-scratch/uid-1/other-attempt.png?v=2",
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
+	assert.Nil(t, org)
+	require.Len(t, orgWriter.updateCalls, 1, "another attempt's in-flight write must not be clobbered")
 }
