@@ -24,8 +24,11 @@ type B2BOrgWriter interface {
 	// ValidatePrecondition confirms uid exists and, if ifMatch is set, matches
 	// the org's current ETag — without writing. The logo-upload path
 	// (LFXV2-2016) calls this before uploading bytes to object storage, so a
-	// 404/412 is rejected before any bytes are written, not after.
-	ValidatePrecondition(ctx context.Context, uid, ifMatch string) error
+	// 404/412 is rejected before any bytes are written, not after. It returns
+	// the org as currently persisted, which that path also uses to capture the
+	// pre-upload Logo_URL__c it may need to roll back to; the read happens
+	// either way, so returning it costs no extra round trip.
+	ValidatePrecondition(ctx context.Context, uid, ifMatch string) (*model.B2BOrg, error)
 }
 
 type b2bOrgWriterOrchestrator struct {
@@ -106,9 +109,8 @@ func (o *b2bOrgWriterOrchestrator) validateForUpdate(ctx context.Context, uid, i
 }
 
 // ValidatePrecondition implements B2BOrgWriter.
-func (o *b2bOrgWriterOrchestrator) ValidatePrecondition(ctx context.Context, uid, ifMatch string) error {
-	_, err := o.validateForUpdate(ctx, uid, ifMatch)
-	return err
+func (o *b2bOrgWriterOrchestrator) ValidatePrecondition(ctx context.Context, uid, ifMatch string) (*model.B2BOrg, error) {
+	return o.validateForUpdate(ctx, uid, ifMatch)
 }
 
 // Update updates an existing B2BOrg. No-op (returns current) when input.HasChanges() == false.

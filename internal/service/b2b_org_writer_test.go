@@ -315,7 +315,7 @@ func TestB2BOrgWriter_ValidatePrecondition_Success(t *testing.T) {
 	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
 	w := newB2BOrgWriter(&seededOrgReader{org: current}, &seededOrgWriter{}, &trackingPublisher{}, "")
 
-	err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, mustEtag(t, current))
+	_, err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, mustEtag(t, current))
 
 	assert.NoError(t, err)
 }
@@ -323,7 +323,7 @@ func TestB2BOrgWriter_ValidatePrecondition_Success(t *testing.T) {
 func TestB2BOrgWriter_ValidatePrecondition_NotFound(t *testing.T) {
 	w := newB2BOrgWriter(&seededOrgReader{}, &seededOrgWriter{}, &trackingPublisher{}, "")
 
-	err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, "")
+	_, err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, "")
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsNotFound(err))
@@ -333,7 +333,7 @@ func TestB2BOrgWriter_ValidatePrecondition_IfMatchMismatch(t *testing.T) {
 	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
 	w := newB2BOrgWriter(&seededOrgReader{org: current}, &seededOrgWriter{}, &trackingPublisher{}, "")
 
-	err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, "\"stale-etag\"")
+	_, err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, "\"stale-etag\"")
 
 	require.Error(t, err)
 	assert.True(t, pkgerrors.IsPreconditionFailed(err))
