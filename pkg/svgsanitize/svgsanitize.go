@@ -248,15 +248,42 @@ func skipElement(dec *xml.Decoder) error {
 // reference. Every xmlns declaration is dropped here; the root's is re-added
 // by the caller.
 //
-// encoding/xml reports both the unprefixed "href" and the legacy "xlink:href"
-// with Name.Local == "href" (they differ only in Name.Space), so an element
-// carrying both would otherwise emit two "href" attributes on one output tag
-// — a duplicate, malformed attribute (Copilot/lfx-reviewer finding on PR #87,
-// 2026-08-18). At most one href survives: the unprefixed form wins if present
-// and valid, otherwise the xlink:href form is kept.
+// Attributes are emitted unqualified, so any two inputs sharing a Name.Local
+// collapse to the same output name regardless of their Name.Space. Every
+// allow-listed name is therefore deduplicated, not just href: an element
+// carrying both "fill" and "i:fill" (or the "inkscape:"/"sodipodi:" attributes
+// real design-tool exports routinely emit) would otherwise produce two
+// identically-named attributes on one tag. That is a fatal XML
+// well-formedness error, so a browser fetching the sanitized logo renders a
+// parse error instead of the image — note encoding/xml itself accepts
+// duplicates, so this cannot be caught by round-tripping through Go
+// (Copilot/lfx-reviewer finding on PR #87, 2026-08-18).
+//
+// The unprefixed form wins when both are present, since that is the real SVG
+// presentation attribute and a prefixed twin is foreign metadata; otherwise
+// the first occurrence is kept. href follows the same rule but is tracked
+// separately, because it is additionally gated on being a same-document
+// "#fragment" reference and is emitted last.
 func filterAttrs(attrs []xml.Attr) []xml.Attr {
 	var out []xml.Attr
 	var href *xml.Attr
+	// Local name -> index in out, and whether the kept entry was unprefixed.
+	at := make(map[string]int, len(attrs))
+	unprefixed := make(map[string]bool, len(attrs))
+
+	keep := func(a xml.Attr) {
+		if i, dup := at[a.Name.Local]; dup {
+			if a.Name.Space == "" && !unprefixed[a.Name.Local] {
+				out[i].Value = a.Value
+				unprefixed[a.Name.Local] = true
+			}
+			return
+		}
+		at[a.Name.Local] = len(out)
+		unprefixed[a.Name.Local] = a.Name.Space == ""
+		out = append(out, xml.Attr{Name: xml.Name{Local: a.Name.Local}, Value: a.Value})
+	}
+
 	for _, a := range attrs {
 		switch {
 		case a.Name.Local == "xmlns" || a.Name.Space == "xmlns":
@@ -270,10 +297,10 @@ func filterAttrs(attrs []xml.Attr) []xml.Attr {
 			}
 		case paintAttributes[a.Name.Local]:
 			if isSafePaintValue(a.Value) {
-				out = append(out, xml.Attr{Name: xml.Name{Local: a.Name.Local}, Value: a.Value})
+				keep(a)
 			}
 		case allowedAttributes[a.Name.Local]:
-			out = append(out, xml.Attr{Name: xml.Name{Local: a.Name.Local}, Value: a.Value})
+			keep(a)
 		}
 	}
 	if href != nil {

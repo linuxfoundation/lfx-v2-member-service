@@ -4,6 +4,10 @@
 package svgsanitize_test
 
 import (
+	"bytes"
+	"encoding/xml"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -135,6 +139,93 @@ func TestSanitize_FallsBackToXlinkHrefWhenUnprefixedAbsent(t *testing.T) {
 	got := string(out)
 	assert.Equal(t, 1, strings.Count(got, "href="))
 	assert.Contains(t, got, `href="#legacy"`)
+}
+
+// assertNoDuplicateAttrs fails if any element in doc carries the same
+// attribute name twice. This has to be asserted explicitly: duplicate
+// attributes are a fatal well-formedness error to a conformant XML parser (so
+// a browser refuses to render the logo), but encoding/xml accepts them
+// silently, meaning a plain Sanitize-then-parse round trip in Go cannot catch
+// the bug this guards against.
+func assertNoDuplicateAttrs(t *testing.T, doc []byte) {
+	t.Helper()
+	dec := xml.NewDecoder(bytes.NewReader(doc))
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		require.NoError(t, err)
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		seen := make(map[string]bool, len(se.Attr))
+		for _, a := range se.Attr {
+			name := a.Name.Local
+			assert.Falsef(t, seen[name], "element <%s> emits duplicate attribute %q", se.Name.Local, name)
+			seen[name] = true
+		}
+	}
+}
+
+func TestSanitize_DedupesNamespacedAllowedAttributes(t *testing.T) {
+	// Attributes are emitted unqualified, so a prefixed twin of an
+	// allow-listed name collapses onto it. Before the fix these produced two
+	// identically-named attributes on one tag -- fatal XML to a browser, and
+	// invisible to encoding/xml (Copilot/lfx-reviewer finding on PR #87,
+	// 2026-08-18). inkscape:/sodipodi: are the realistic trigger: design-tool
+	// exports carry them on ordinary logos, so this is reachable without a
+	// crafted payload.
+	in := `<svg xmlns="http://www.w3.org/2000/svg">
+		<rect x="1" ns:x="2" width="3" other:width="4"/>
+		<rect fill="red" i:fill="blue" width="1" height="1"/>
+		<g id="a" inkscape:id="b" sodipodi:role="c"></g>
+	</svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assertNoDuplicateAttrs(t, out)
+
+	got := string(out)
+	// The unprefixed form wins, matching the href rule above.
+	assert.Contains(t, got, `x="1"`)
+	assert.NotContains(t, got, `x="2"`)
+	assert.Contains(t, got, `width="3"`)
+	assert.NotContains(t, got, `width="4"`)
+	assert.Contains(t, got, `fill="red"`)
+	assert.NotContains(t, got, `fill="blue"`)
+	assert.Contains(t, got, `id="a"`)
+	assert.NotContains(t, got, `id="b"`)
+}
+
+func TestSanitize_KeepsPrefixedAttributeWhenUnprefixedAbsent(t *testing.T) {
+	// Mirrors TestSanitize_FallsBackToXlinkHrefWhenUnprefixedAbsent for the
+	// general attribute path: a lone prefixed attribute still collapses to
+	// its allow-listed unqualified name rather than being dropped.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><rect ns:fill="red" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assertNoDuplicateAttrs(t, out)
+	assert.Contains(t, string(out), `fill="red"`)
+}
+
+func TestSanitize_AllowedContentHasNoDuplicateAttrs(t *testing.T) {
+	// Regression guard on the ordinary happy path, so the invariant is held
+	// for every element the sanitizer emits, not only the crafted cases.
+	in := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10">
+		<defs><linearGradient id="g1"><stop offset="0" stop-color="#fff"/></linearGradient></defs>
+		<rect x="0" y="0" width="10" height="10" fill="url(#g1)"/>
+		<use href="#g1"/>
+	</svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assertNoDuplicateAttrs(t, out)
 }
 
 func TestSanitize_DropsNonFragmentPaintURL(t *testing.T) {
