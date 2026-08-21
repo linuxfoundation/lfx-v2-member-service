@@ -174,9 +174,9 @@ func (s *membershipServicesrvc) UpdateB2bOrg(ctx context.Context, p *memberships
 	return result, nil
 }
 
-// UploadB2bOrgLogo uploads a B2B org logo (PNG/JPEG, max 2MB) to object
-// storage and sets it as the org's Logo_URL__c via the same Update path (and
-// If-Match/etag semantics) as UpdateB2bOrg.
+// UploadB2bOrgLogo uploads a B2B org logo (PNG/JPEG/SVG, max 2MB) to object
+// storage and sets it as the org's Logo_URL__c under the same If-Match/etag
+// semantics as UpdateB2bOrg.
 func (s *membershipServicesrvc) UploadB2bOrgLogo(ctx context.Context, p *membershipservice.UploadB2bOrgLogoPayload, body io.ReadCloser) (*membershipservice.UploadB2bOrgLogoResult, error) {
 	defer body.Close() //nolint:errcheck
 

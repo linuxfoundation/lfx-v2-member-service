@@ -53,8 +53,11 @@ type ObjectStoreWriter interface {
 	// Put, for key, without uploading anything. It lets a caller that must not
 	// write to a shared key until it has won an external optimistic-concurrency
 	// check (e.g. logoUploaderOrchestrator, see LFXV2-2016) obtain the URL it
-	// will persist *before* the object at key reflects it — the write to key
-	// itself must follow via Put once that check succeeds.
+	// will persist *before* the object at key reflects it. Once that check
+	// succeeds, key must be made to hold those bytes — for the shared logo key
+	// that is CopyIfNewer promoting an already-written scratch object, which
+	// preserves the ordering guarantees described there; a direct Put to key is
+	// only safe where no concurrent writer can target it.
 	VersionedURL(key string) string
 
 	// Delete best-effort removes the object at key. Callers use it to clean up
