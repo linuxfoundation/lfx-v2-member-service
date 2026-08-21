@@ -1197,8 +1197,10 @@ func TestIsScratchLogoURL(t *testing.T) {
 		url      string
 		expected bool
 	}{
-		{"https://cdn.example.com/org-logos-public-scratch/uid-1/123.png", true},
-		{"https://cdn.example.com/org-logos-public-scratch/uid-2/abc.svg", true},
+		{"https://cdn.example.com/org-logos-public-scratch/uid-1/263ae9eb-9274-4a3a-8cb7-35983c240a91.png", true},
+		{"https://cdn.example.com/org-logos-public-scratch/uid-2/263ae9eb-9274-4a3a-8cb7-35983c240a91.svg?v=12345", true},
+		{"/org-logos-public-scratch/uid-1/263ae9eb-9274-4a3a-8cb7-35983c240a91.png", false},
+		{"https://example.com/org-logos-public-scratch/logo.svg", false},
 		{"https://cdn.example.com/b2b_org_logos/uid-1", false},
 		{"https://cdn.example.com/assets/org-logos-public-scratch/logo.png", false},
 		{"https://external.example.com/images/org-logos-public-scratch/test.jpg", false},

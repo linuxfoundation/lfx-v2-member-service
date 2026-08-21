@@ -13,6 +13,7 @@ import (
 	"context"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -580,13 +581,15 @@ func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *mode
 	}
 }
 
+var scratchPathPattern = regexp.MustCompile(`^org-logos-public-scratch/[^/]+/[^/]+\.(png|jpe?g|svg)$`)
+
 func isScratchLogoURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
-	if err != nil {
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
 	}
 	path := strings.TrimPrefix(parsed.Path, "/")
-	return strings.HasPrefix(path, logoScratchKeyPrefix)
+	return scratchPathPattern.MatchString(path)
 }
 
 // b2bOrgMemberView is the flat per-member wire entry in the indexer doc.
