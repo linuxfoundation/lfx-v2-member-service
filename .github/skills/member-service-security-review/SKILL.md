@@ -15,18 +15,10 @@ description: >
   personal-data pass whose confidence rules deliberately differ from the rest of
   the review. Discovers the concrete guards from the code at review time; this
   skill carries the method, not an inventory.
-allowed-tools: Read, Glob, Grep
 ---
 
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->
 <!-- SPDX-License-Identifier: MIT -->
-
-<!-- `allowed-tools` is deliberate and matches the sibling LFX Go service's
-     security lens (lfx-v2-newsletter-service), where the review lenses declare
-     it and the pipeline skills do not: this lens only ever reads the tree, and
-     it must never be the thing that edits, publishes, or resolves anything. The
-     other skills in this directory carry no such key because several of them do
-     need write tools. -->
 
 # Member Service Security Review
 
@@ -156,12 +148,17 @@ So the "and the domain is reserved" half decides whether you can stay *silent*,
 not whether something is Critical. A clearly synthetic local part never reaches
 Critical on the strength of its domain alone.
 
-**This section is preventive.** As of writing, this repository is clean: there
-are no LF-corporate, contractor, or major consumer mail domains anywhere on
-`main`, and every email literal sits on a reserved or placeholder domain. Do not
-read this section as a list of known defects and do not go looking for a
-remediation item that does not exist. It exists so the first real one does not
-merge.
+**This section is preventive.** As of writing there is no real person's data on
+`main`: a case-insensitive census finds no LF-corporate, contractor, or major
+consumer mail domain anywhere in the tree, and every email literal has a
+synthetic local part. Be precise about what that does *not* claim — a couple of
+dozen of those literals sit on placeholder-style domains that are real
+registrations rather than reserved ones (`acme.com`, `company.com`, `x.com`,
+across a handful of `internal/service/` tests, `ARCHITECTURE.md`, and a doc
+comment in `pkg/redaction/redaction.go`). By the gradient those are the
+low-severity band, not nothing, and they are known and accepted rather than a
+remediation item. Do not read this section as a list of defects, and do not open
+findings against them; it exists so the first *real* one does not merge.
 
 ### Five rules in this repo would otherwise bury a personal-data finding
 
@@ -192,9 +189,10 @@ it suppressed.
 5. **The unreadable-surface rule** — the silence clause in
    `copilot-code-reviewer/SKILL.md`'s **Your knowledge sources** section, and
    **Know your limits** in `member-service-code-review/SKILL.md`. Both say that a
-   finding you cannot confirm must not be raised at all, "not as a defect, and
-   not as a question for the author". This one silences the class *independently
-   of the floor*, and it forbids the remedy the override prescribes: whether a
+   finding you cannot confirm must not be raised at all — neither as a defect
+   nor as a question put to the author to resolve on your behalf. This one
+   silences the class *independently of the floor*, and it forbids the remedy
+   the override prescribes: whether a
    committed literal belongs to a real person is never resolvable from any
    repository, so "raise it and say you are unsure" is exactly the hedged
    question that clause bars. Both files now carve it out, and so does this
@@ -536,7 +534,14 @@ not touch an anchor above, do not invent a finding for it.
 
 For a personal-data finding, the shape is different and is set by the *Personal
 data in this diff* section: give the **category and location only**, never the
-value; state the severity from the gradient; and where you are unsure whether a
+value; state the severity from the gradient, using the posting vocabulary
+`copilot-code-reviewer` defines — a real named individual is `[critical]`; an
+unresolved "is this a person?" is `[critical]` or `[high]`; and the gradient's
+low-severity band (a clearly synthetic local part on a non-reserved domain) is
+`[nit]`, which by design does not block and which the conductor does not carry as
+a row. Say plainly in such a comment that it is a hygiene fix, so the
+non-blocking severity reads as deliberate rather than as a downgrade; and where
+you are unsure whether a
 value describes a real person, say so explicitly and name what would resolve it
 rather than resolving it toward silence. Such a finding is filed as its own
 inline comment and never folded into the summary — this skill does not publish
