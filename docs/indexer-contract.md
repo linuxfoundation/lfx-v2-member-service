@@ -41,11 +41,11 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 
 Logo uploads (`POST /b2b_orgs/{uid}/logo`) stage the uploaded bytes at a short-lived **scratch** object key before promoting them to the durable shared key. Scratch objects are deleted as soon as the upload completes, so a scratch URL that reaches OpenSearch becomes a permanently broken image. To prevent that, every publisher that carries a logo URL classifies it with `isScratchLogoURL` and suppresses transient values before building the indexer message.
 
-**Classifier (`internal/service/messaging.go` — `isScratchLogoURL`).** A URL is transient only when *all* hold:
+**Classifier (`internal/service/messaging.go` — `isScratchLogoURL`).** It **fails closed**: with no valid configured CDN host there is no way to tell our scratch space from an unrelated site using the same path shape, and a false positive would suppress a legitimate record's publish on every retry. A URL is transient only when *all* hold:
 
-1. It parses as an absolute URL with scheme `http` or `https` and a non-empty host.
-2. When `CDN_URL_PREFIX` is set and parses to a host, the URL's host matches it case-insensitively (a foreign host is never treated as our scratch space).
-3. Its path, with the leading `/` trimmed, matches `^org-logos-public-scratch/[^/]+/[^/]+\.(png|jpe?g|svg)$` — the exact top-level scratch prefix, not a substring match anywhere in the path.
+1. `CDN_URL_PREFIX` is set and parses to a non-empty host. If it is unset or unparseable, nothing is classified as transient — the processes without that config (CDC consumer, backfill) never mint scratch URLs, and the upload path never publishes one.
+2. The URL parses as absolute with scheme `http` or `https` and a non-empty host that matches the CDN host case-insensitively.
+3. Its path, with the leading `/` trimmed, matches `^org-logos-public-scratch/[^/]+/[^/]+$` — the exact top-level scratch prefix, not a substring match anywhere in the path. Scratch keys carry no file extension; like the shared key, Content-Type lives on the object.
 
 **Behavior per resource type** (applied only when `action != deleted`; delete messages carry a bare UID string and no logo field):
 
@@ -61,6 +61,8 @@ Suppression mutates a **shallow copy** of the record (and of `parent_detail`), n
 **Recovery.** A skipped or stripped publish is logged at `warn` with `publish_failed_for_backfill_repair=true` and is self-healing: promotion commits the durable versioned URL (`https://{cdn}/b2b_org_logos/{uid}?v={nanos}`) to Salesforce, and the subsequent publish (or CDC replay / `/admin/reindex`) carries the durable value. Suppression is therefore a transient-state filter, not data loss.
 
 **Publish ordering on the upload path.** The upload endpoint itself never publishes an unbacked URL: it persists the durable URL with `UpdateWithoutPublish`, promotes the bytes onto the shared key, and only then calls `PublishOrgUpdated`. A promotion that cannot be completed rolls the field back — also unpublished — so indexer/FGA consumers observe either the previous logo or the new one, never an intermediate state. The suppression rules above therefore act as defense in depth for records arriving from other paths (CDC, reindex).
+
+**Recoverable pending promotions.** The scratch key is `org-logos-public-scratch/{uid}/{v}`, where `{v}` is the cache-busting token of the URL committed to Salesforce, and the scratch object is deleted only once the outcome is unambiguous (promoted, superseded by another upload, demonstrably uncommitted, or rolled back). So if the process dies — or Salesforce's PATCH lands but its re-fetch fails — between the commit and the promotion, the persisted `Logo_URL__c` alone identifies the object holding the pending bytes, and re-running the upload (or promoting that key) completes it. An ambiguous PATCH outcome is reconciled by re-reading the record rather than assumed uncommitted.
 
 ---
 

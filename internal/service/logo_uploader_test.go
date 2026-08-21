@@ -24,10 +24,13 @@ import (
 )
 
 // scratchKeyPattern matches the per-attempt scratch key format
-// org-logos-public-scratch/{uid}/{uuid}{ext} — a top-level prefix distinct
-// from the deterministic b2b_org_logos/{uid} key, so an S3 lifecycle rule can
-// target scratch objects by prefix alone.
-var scratchKeyPattern = regexp.MustCompile(`^org-logos-public-scratch/uid-1/[0-9a-f-]{36}\.png$`)
+// org-logos-public-scratch/{uid}/{version} — a top-level prefix distinct from
+// the deterministic b2b_org_logos/{uid} key, so an S3 lifecycle rule can
+// target scratch objects by prefix alone. {version} is the cache-busting token
+// of the URL committed to Salesforce, which is what makes an interrupted
+// promotion recoverable from the persisted record alone. Like the shared key
+// it carries no file extension — Content-Type lives on the object.
+var scratchKeyPattern = regexp.MustCompile(`^org-logos-public-scratch/uid-1/[^/]+$`)
 
 // deterministicLogoKey is the stable, reused-every-upload key for uid-1 —
 // what makes a copy of a superseded logo URL converge to current bytes
@@ -315,7 +318,8 @@ func TestLogoUploader_Happy(t *testing.T) {
 	require.NotNil(t, org)
 	assert.Equal(t, "uid-1", org.UID)
 	require.Len(t, objectStore.putKeys, 1, "expected only the scratch write via Put")
-	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "the only Put must be to a unique scratch key, not the deterministic one")
+	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "the only Put must be to a scratch key, not the deterministic one")
+	assert.Equal(t, "org-logos-public-scratch/uid-1/1", objectStore.putKeys[0], "the scratch key must be derivable from the committed URL's version token")
 	require.Len(t, objectStore.copyCalls, 1, "expected the scratch object promoted to the deterministic key via Copy")
 	assert.Equal(t, objectStore.putKeys[0], objectStore.copyCalls[0].src)
 	assert.Equal(t, deterministicLogoKey, objectStore.copyCalls[0].dst, "promotion must land on the deterministic key so old URLs converge to current bytes")
@@ -353,7 +357,7 @@ func TestLogoUploader_SVGSanitizedBeforeUpload(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, org)
 	require.Len(t, objectStore.putKeys, 1)
-	assert.True(t, strings.HasSuffix(objectStore.putKeys[0], ".svg"), "scratch key must use the .svg extension")
+	assert.Regexp(t, scratchKeyPattern, objectStore.putKeys[0], "scratch key must carry the version token and no extension")
 	require.Len(t, objectStore.copyCalls, 1)
 	assert.Equal(t, deterministicLogoKey, objectStore.copyCalls[0].dst, "the shared key must not embed the .svg extension")
 	require.Len(t, objectStore.putData, 1)
@@ -569,6 +573,66 @@ func TestLogoUploader_CommitReattemptsAboveStampWhenSalesforceHoldsThisURL(t *te
 	assert.Equal(t, int64(43), objectStore.copyCalls[1].generation, "re-attempt must be strictly above the stamp that beat it")
 	require.Len(t, orgWriter.updateCalls, 1)
 	assert.NotNil(t, orgWriter.publishedOrg, "a promoted logo must be published once its bytes are at the shared key")
+}
+
+// UpdateB2BOrg PATCHes then re-fetches, so a returned error does not prove the
+// write was rejected. Treating an ambiguous outcome as uncommitted would drop
+// the scratch bytes while Salesforce already points at the unpromoted shared
+// key, so the uploader re-reads and, when the write landed, carries on.
+func TestLogoUploader_AmbiguousCommitStillPromotes(t *testing.T) {
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:              &model.B2BOrg{UID: "uid-1"},
+		err:              errors.New("salesforce re-fetch failed"),
+		commitDespiteErr: true,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, objectStore.copyCalls, 1, "a write that landed must still be promoted")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "the scratch object is safe to drop once promoted")
+	assert.NotNil(t, orgWriter.publishedOrg)
+}
+
+// The mirror case: the write demonstrably did not land, so the shared key was
+// never referenced and the error is returned as-is.
+func TestLogoUploader_UncommittedWriteSkipsPromotion(t *testing.T) {
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org: &model.B2BOrg{UID: "uid-1"},
+		err: errors.New("salesforce write rejected"),
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	assert.Empty(t, objectStore.copyCalls, "an uncommitted write must never promote bytes to the shared key")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "nothing references the scratch object, so it is cleaned up")
+	assert.Nil(t, orgWriter.publishedOrg)
+}
+
+// While Salesforce may still point at an unpromoted URL, the scratch object is
+// the record's only recovery path, so it must survive the request.
+func TestLogoUploader_RetainsScratchWhenRollbackFails(t *testing.T) {
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: errors.New("s3 copy failure"),
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:        &model.B2BOrg{UID: "uid-1"},
+		repointErr: errors.New("salesforce rollback failed"),
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	require.Len(t, orgWriter.updateCalls, 2, "a failed promotion must attempt a rollback")
+	assert.Empty(t, objectStore.deletedKey, "scratch bytes must be retained while Salesforce may still point at the unpromoted key")
 }
 
 func TestLogoUploader_PromotionFailureRollsBackSalesforce(t *testing.T) {

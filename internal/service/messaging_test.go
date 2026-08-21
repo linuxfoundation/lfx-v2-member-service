@@ -1008,10 +1008,11 @@ func TestPublishB2BOrgIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
 }
 
 func TestPublishB2BOrgIndexer_SkipsTransientScratchLogo(t *testing.T) {
+	t.Setenv("CDN_URL_PREFIX", "https://cdn.example.com")
 	pub := mock.NewMockMemberPublisher()
 	org := &model.B2BOrg{
 		UID:     "org-update-001",
-		LogoURL: "https://cdn.example.com/org-logos-public-scratch/org-update-001/attempt.png?v=1",
+		LogoURL: "https://cdn.example.com/org-logos-public-scratch/org-update-001/1755791234567890123",
 	}
 
 	PublishB2BOrgIndexer(context.Background(), pub, org, indexerConstants.ActionUpdated)
@@ -1020,8 +1021,9 @@ func TestPublishB2BOrgIndexer_SkipsTransientScratchLogo(t *testing.T) {
 }
 
 func TestPublishB2BOrgIndexer_OmitsTransientParentLogo(t *testing.T) {
+	t.Setenv("CDN_URL_PREFIX", "https://cdn.example.com")
 	pub := mock.NewMockMemberPublisher()
-	scratchURL := "https://cdn.example.com/org-logos-public-scratch/parent-001/attempt.png?v=1"
+	scratchURL := "https://cdn.example.com/org-logos-public-scratch/parent-001/1755791234567890123"
 	org := &model.B2BOrg{
 		UID: "child-001",
 		ParentDetail: &model.B2BOrgParentDetail{
@@ -1043,8 +1045,9 @@ func TestPublishB2BOrgIndexer_OmitsTransientParentLogo(t *testing.T) {
 }
 
 func TestPublishProjectMembershipIndexer_OmitsTransientCompanyLogo(t *testing.T) {
+	t.Setenv("CDN_URL_PREFIX", "https://cdn.example.com")
 	pub := mock.NewMockMemberPublisher()
-	scratchURL := "https://cdn.example.com/org-logos-public-scratch/org-update-001/attempt.png?v=1"
+	scratchURL := "https://cdn.example.com/org-logos-public-scratch/org-update-001/1755791234567890123"
 	pm := &model.ProjectMembership{UID: "pm-update-001", CompanyLogoURL: scratchURL}
 
 	PublishProjectMembershipIndexer(context.Background(), pub, pm, indexerConstants.ActionUpdated)
@@ -1057,8 +1060,9 @@ func TestPublishProjectMembershipIndexer_OmitsTransientCompanyLogo(t *testing.T)
 }
 
 func TestPublishKeyContactIndexer_OmitsTransientCompanyLogo(t *testing.T) {
+	t.Setenv("CDN_URL_PREFIX", "https://cdn.example.com")
 	pub := mock.NewMockMemberPublisher()
-	scratchURL := "https://cdn.example.com/org-logos-public-scratch/org-update-001/attempt.png?v=1"
+	scratchURL := "https://cdn.example.com/org-logos-public-scratch/org-update-001/1755791234567890123"
 	kc := &model.KeyContact{UID: "kc-update-001", CompanyLogoURL: scratchURL}
 
 	PublishKeyContactIndexer(context.Background(), pub, kc, indexerConstants.ActionUpdated)
@@ -1209,9 +1213,33 @@ func TestIsScratchLogoURL(t *testing.T) {
 		{"https://external.example.com/images/org-logos-public-scratch/test.jpg", false},
 		{"", false},
 		{"not-a-valid-url:%%%", false},
+		// The scratch key carries no extension, matching the shared key's convention.
+		{"https://cdn.example.com/org-logos-public-scratch/uid-3/1755791234567890123", true},
 	}
 
 	for _, tc := range cases {
 		assert.Equal(t, tc.expected, isScratchLogoURL(tc.url), "isScratchLogoURL(%q)", tc.url)
 	}
+}
+
+// Without a configured CDN host there is nothing to distinguish our scratch
+// space from an unrelated site using the same path shape, and a false positive
+// permanently suppresses a legitimate record, so classification fails closed.
+func TestIsScratchLogoURL_FailsClosedWithoutValidCDNPrefix(t *testing.T) {
+	scratchShaped := "https://cdn.example.com/org-logos-public-scratch/uid-1/1755791234567890123"
+
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("CDN_URL_PREFIX", "")
+		assert.False(t, isScratchLogoURL(scratchShaped))
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		t.Setenv("CDN_URL_PREFIX", "://not-a-url")
+		assert.False(t, isScratchLogoURL(scratchShaped))
+	})
+
+	t.Run("hostless", func(t *testing.T) {
+		t.Setenv("CDN_URL_PREFIX", "/relative/prefix")
+		assert.False(t, isScratchLogoURL("https://example.org/org-logos-public-scratch/x/logo"))
+	})
 }

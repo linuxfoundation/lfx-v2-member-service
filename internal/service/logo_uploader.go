@@ -11,10 +11,9 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -31,8 +30,9 @@ import (
 // table doesn't do), so SVG uploads are validated by actually parsing and
 // sanitizing them instead of comparing against a sniffed type.
 const (
-	svgMediaType         = "image/svg+xml"
-	logoScratchKeyPrefix = "org-logos-public-scratch/"
+	svgMediaType          = "image/svg+xml"
+	logoScratchKeyPrefix  = "org-logos-public-scratch/"
+	logoVersionQueryParam = "v"
 )
 
 // CommitPromoteAttempts and commitPromoteRetryDelay bound the retry loop that
@@ -53,6 +53,7 @@ const (
 	promotionArbiterRounds = 3
 	promoteTimeout         = 15 * time.Second
 	rollbackTimeout        = 15 * time.Second
+	scratchCleanupTimeout  = 3 * time.Second
 )
 
 // LogoUploader uploads a B2B org logo to object storage and writes the
@@ -81,8 +82,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	if parseErr != nil {
 		return nil, pkgerrors.NewValidation(fmt.Sprintf("unsupported logo content type %q", contentType))
 	}
-	ext, ok := constants.AllowedB2BOrgLogoContentTypes[mediaType]
-	if !ok {
+	if _, ok := constants.AllowedB2BOrgLogoContentTypes[mediaType]; !ok {
 		return nil, pkgerrors.NewValidation(fmt.Sprintf("unsupported logo content type %q", contentType))
 	}
 
@@ -142,14 +142,40 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// excludes the content type's file extension: Content-Type is carried on
 	// the object itself rather than inferred from the key.
 	key := fmt.Sprintf("b2b_org_logos/%s", uid)
-	scratchKey := fmt.Sprintf("%s%s/%s%s", logoScratchKeyPrefix, uid, uuid.NewString(), ext)
+
+	// keyURL is minted before the scratch write because the scratch key is
+	// derived from it: the version token Salesforce ends up storing is what
+	// makes a pending promotion recoverable. Given only the committed
+	// Logo_URL__c, the exact scratch object holding the not-yet-promoted bytes
+	// is derivable, so a process that dies between the Salesforce commit and
+	// the promotion leaves behind a complete, self-describing state rather
+	// than an orphan. Like the shared key, it carries no file extension —
+	// Content-Type lives on the object.
+	keyURL := o.objectStore.VersionedURL(key)
+	scratchKey, scratchKeyErr := logoScratchKey(uid, keyURL)
+	if scratchKeyErr != nil {
+		return nil, fmt.Errorf("deriving scratch key for b2b org %s: %w", uid, scratchKeyErr)
+	}
 
 	if _, err := o.objectStore.Put(ctx, scratchKey, contentType, data); err != nil {
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
 	}
+
+	// While Salesforce may still point at keyURL without the shared key
+	// holding its bytes, the scratch object is the only copy that can complete
+	// the promotion — deleting it then would strand the record permanently.
+	// It is therefore cleaned up only once that ambiguity is resolved: the
+	// promotion landed, another upload demonstrably owns the URL, the commit
+	// demonstrably did not land, or the rollback restored the previous value.
+	scratchResolved := false
 	defer func() {
+		if !scratchResolved {
+			slog.WarnContext(ctx, "retaining logo scratch object so the pending promotion stays recoverable",
+				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "logo_url", keyURL)
+			return
+		}
 		// Clean up the temporary scratch object best-effort under a short bounded timeout.
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), scratchCleanupTimeout)
 		defer cleanupCancel()
 		_ = o.objectStore.Delete(cleanupCtx, scratchKey)
 	}()
@@ -161,12 +187,31 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// new URL until the bytes behind it actually exist at the shared key, so the
 	// publish happens after promotion succeeds (and a failed promotion is rolled
 	// back without any consumer ever having seen the intermediate state).
-	keyURL := o.objectStore.VersionedURL(key)
 	updated, updateErr := o.b2bOrgWriter.UpdateWithoutPublish(ctx, uid, model.B2BOrgInput{LogoURL: &keyURL}, ifMatch)
 	if updateErr != nil {
-		slog.ErrorContext(ctx, "failed to update b2b org logo URL in salesforce",
-			"b2b_org_uid", uid, "key", key, "error", updateErr)
-		return nil, updateErr
+		// UpdateB2BOrg PATCHes and then re-fetches, so a returned error does
+		// not prove the write was rejected — a failed re-fetch leaves
+		// Logo_URL__c already holding keyURL. Treating that as uncommitted
+		// would delete the scratch bytes while Salesforce points at a shared
+		// key that was never promoted, so re-read and reconcile instead.
+		reread, rereadErr := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, "")
+		switch {
+		case rereadErr != nil:
+			// Outcome unknown: keep the scratch object, since the commit may have landed.
+			slog.ErrorContext(ctx, "failed to update b2b org logo URL in salesforce and could not determine whether the write landed",
+				"b2b_org_uid", uid, "key", key, "error", updateErr, "reread_error", rereadErr)
+			return nil, updateErr
+		case reread.LogoURL != keyURL:
+			// The write did not land; nothing references the scratch object.
+			scratchResolved = true
+			slog.ErrorContext(ctx, "failed to update b2b org logo URL in salesforce",
+				"b2b_org_uid", uid, "key", key, "error", updateErr)
+			return nil, updateErr
+		default:
+			slog.WarnContext(ctx, "b2b org logo URL update reported an error but the write landed; continuing to promotion",
+				"b2b_org_uid", uid, "key", key, "error", updateErr)
+			updated = reread
+		}
 	}
 
 	// Detach post-commit promotion from client cancellation so a disconnecting
@@ -204,7 +249,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		if holder.LogoURL != keyURL {
 			slog.WarnContext(promoteCtx, "a newer logo upload owns the shared key; abandoning this promotion",
 				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key)
-			// The winner publishes its own state; this attempt must not.
+			// Nothing points at these bytes any more, and the winner publishes
+			// its own state, so this attempt must not.
+			scratchResolved = true
 			return updated, nil
 		}
 
@@ -216,14 +263,33 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	if commitErr != nil {
 		slog.ErrorContext(promoteCtx, "failed to promote logo to its shared key after salesforce update; rolling back",
 			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "error", commitErr)
-		o.rollback(ctx, uid, current, updated)
+		// Only a successful rollback takes Salesforce off keyURL; until then
+		// the scratch bytes remain the record's only recovery path.
+		scratchResolved = o.rollback(ctx, uid, current, updated)
 		return nil, pkgerrors.NewServiceUnavailable("logo upload could not be completed; retry")
 	}
+
+	scratchResolved = true
 
 	// The shared key now holds these bytes, so the committed URL is safe to expose.
 	o.b2bOrgWriter.PublishOrgUpdated(promoteCtx, current, updated)
 
 	return updated, nil
+}
+
+// logoScratchKey derives the scratch object key from the versioned URL that
+// will be committed to Salesforce, so the pending bytes of an interrupted
+// promotion can be located from the persisted record alone.
+func logoScratchKey(uid, keyURL string) (string, error) {
+	parsed, err := url.Parse(keyURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing versioned logo URL: %w", err)
+	}
+	version := parsed.Query().Get(logoVersionQueryParam)
+	if version == "" || strings.ContainsRune(version, '/') {
+		return "", fmt.Errorf("versioned logo URL has no usable %s token", logoVersionQueryParam)
+	}
+	return fmt.Sprintf("%s%s/%s", logoScratchKeyPrefix, uid, version), nil
 }
 
 // promote copies the scratch object onto the shared key, retrying transient
@@ -244,11 +310,11 @@ func (o *logoUploaderOrchestrator) promote(ctx context.Context, scratchKey, key 
 }
 
 // rollback quietly restores the org's pre-upload logo URL after a promotion
-// failure. It runs on its own context derived from the request's: an expired
+// failure, reporting whether Salesforce is known to be off the failed URL. It runs on its own context derived from the request's: an expired
 // promotion deadline must not also deny the compensating write, and a
 // disconnected client must not skip it. The restore is unpublished because the
 // commit it compensates was never published either.
-func (o *logoUploaderOrchestrator) rollback(ctx context.Context, uid string, current, updated *model.B2BOrg) {
+func (o *logoUploaderOrchestrator) rollback(ctx context.Context, uid string, current, updated *model.B2BOrg) bool {
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 	defer cancel()
 
@@ -260,7 +326,9 @@ func (o *logoUploaderOrchestrator) rollback(ctx context.Context, uid string, cur
 	if _, err := o.b2bOrgWriter.UpdateWithoutPublish(rollbackCtx, uid, model.B2BOrgInput{LogoURL: &restoreURL}, rollbackETag); err != nil {
 		slog.ErrorContext(rollbackCtx, "failed to rollback salesforce logo URL after promotion failure",
 			"b2b_org_uid", uid, "error", err)
+		return false
 	}
+	return true
 }
 
 // sharesSharedLogoKey reports whether rawURL addresses the same object as

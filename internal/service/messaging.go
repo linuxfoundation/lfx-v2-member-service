@@ -582,19 +582,34 @@ func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *mode
 	}
 }
 
-var scratchPathPattern = regexp.MustCompile(`^org-logos-public-scratch/[^/]+/[^/]+\.(png|jpe?g|svg)$`)
+// scratchPathPattern matches the scratch key shape minted by
+// logoUploaderOrchestrator: the scratch key carries no file extension, since
+// Content-Type lives on the object itself.
+var scratchPathPattern = regexp.MustCompile(`^org-logos-public-scratch/[^/]+/[^/]+$`)
 
+// isScratchLogoURL reports whether rawURL addresses a transient logo-upload
+// scratch object. It fails CLOSED: without a valid configured CDN host to
+// compare against there is no way to tell our own scratch space from an
+// unrelated site that happens to use the same path shape, and a false positive
+// here permanently suppresses a legitimate record's publish on every retry. So
+// an unset or unparseable CDN_URL_PREFIX means "classify nothing as transient"
+// — the processes that lack that config (CDC consumer, backfill) never mint
+// scratch URLs, and the upload path never publishes one.
 func isScratchLogoURL(rawURL string) bool {
+	cdnPrefix := os.Getenv("CDN_URL_PREFIX")
+	if cdnPrefix == "" {
+		return false
+	}
+	parsedCDN, cdnErr := url.Parse(cdnPrefix)
+	if cdnErr != nil || parsedCDN.Host == "" {
+		return false
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
 	}
-	if cdnPrefix := os.Getenv("CDN_URL_PREFIX"); cdnPrefix != "" {
-		if parsedCDN, err := url.Parse(cdnPrefix); err == nil && parsedCDN.Host != "" {
-			if !strings.EqualFold(parsed.Host, parsedCDN.Host) {
-				return false
-			}
-		}
+	if !strings.EqualFold(parsed.Host, parsedCDN.Host) {
+		return false
 	}
 	path := strings.TrimPrefix(parsed.Path, "/")
 	return scratchPathPattern.MatchString(path)
