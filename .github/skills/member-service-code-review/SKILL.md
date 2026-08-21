@@ -9,10 +9,9 @@ description: >
   specifics worth a second look, and the minimum personal-data rule that applies
   to every diff including test, doc and generated files. Use on every pull
   request this repo receives, however small — including one that changes only
-  tests, only docs, or only generated output; this is the reviewer's line-level
-  lens. The
-  security anchors and the full personal-data pass live in
-  `member-service-security-review`.
+  tests, only docs, or only generated output; this is the reviewer's
+  line-level lens. The security anchors and the full personal-data pass live
+  in `member-service-security-review`.
 ---
 
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->

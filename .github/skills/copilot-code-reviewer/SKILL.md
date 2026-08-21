@@ -227,11 +227,10 @@ costs the author attention; spend it only where it changes the outcome:
   linter is Revive, configured by `revive.toml`, not golangci-lint — and runs
   the shared license-header check, alongside blocking secret scanning;
   `.github/workflows/` and `.mega-linter.yml` are the authority for the current
-  set. One exception, because it is load-bearing: **that secret scanning does
-  not cover personal data.** `.gitleaks.toml:10-20` allowlists `.*_test\.go$`
-  and `^gen/.*\.go$` outright, so every Go test file and every generated Go
-  file is invisible to it — and gitleaks looks for credentials, not for
-  people, in the
+  set. One exception, because it is load-bearing: **that secret scanning does not
+  cover personal data.** `.gitleaks.toml:10-20` allowlists `.*_test\.go$` and
+  `^gen/.*\.go$` outright, so every Go test file and every generated Go file is
+  invisible to it — and gitleaks looks for credentials, not for people, in the
   files it does scan. Nothing in this pipeline looks for a person's name or
   address anywhere. "CI would have caught it" is never a reason to stay silent
   about personal data.

@@ -149,6 +149,15 @@ So the "and the domain is reserved" half decides whether you can stay *silent*,
 not whether something is Critical. A clearly synthetic local part never reaches
 Critical on the strength of its domain alone.
 
+**One correction to the block's reserved list, on a point of fact.** It names
+`example.com`, `example.org`, `*.example`, `.test` and `.invalid`, and omits
+`example.net`, which RFC 2606 §3 reserves alongside the other two `example.`
+domains. Treat `example.net` as reserved. Applied literally the list would send
+a synthetic local part on a genuinely reserved domain to the `[nit]` "use a
+reserved domain" comment — a false positive of exactly the kind the gradient
+exists to prevent. The omission is being fixed in the shared text; until it is,
+this sentence governs here.
+
 **This section is preventive.** As of writing there is no real person's data on
 `main`: a case-insensitive census finds no LF-corporate, contractor, or major
 consumer mail domain anywhere in the tree, and every email literal has a
@@ -192,13 +201,12 @@ it suppressed.
    **Know your limits** in `member-service-code-review/SKILL.md`. Both say that a
    finding you cannot confirm must not be raised at all — neither as a defect
    nor as a question put to the author to resolve on your behalf. This one
-   silences the class *independently of the floor*, and it forbids the remedy
-   the override prescribes: whether a
-   committed literal belongs to a real person is never resolvable from any
-   repository, so "raise it and say you are unsure" is exactly the hedged
-   question that clause bars. Both files now carve it out, and so does this
-   skill's own per-fact step 4 — the rule governs unreadable *system* facts, not
-   the identity of a value in the diff.
+   silences the class *independently of the floor*, and it forbids the remedy the
+   override prescribes: whether a committed literal belongs to a real person is
+   never resolvable from any repository, so "raise it and say you are unsure"
+   is exactly the hedged question that clause bars. Both files now carve it
+   out, and so does this skill's own per-fact step 4 — the rule governs
+   unreadable *system* facts, not the identity of a value in the diff.
 
 ### Where personal data lives in this repo
 
@@ -542,10 +550,10 @@ low-severity band (a clearly synthetic local part on a non-reserved domain) is
 `[nit]`, which by design does not block (the conductor gives an
 *unaddressed* nit no row at all; an addressed one is still recorded as
 `fixed`). Say plainly in such a comment that it is a hygiene fix, so the
-non-blocking severity reads as deliberate rather than as a downgrade; and where
-you are unsure whether a
-value describes a real person, say so explicitly and name what would resolve it
-rather than resolving it toward silence. Such a finding is filed as its own
-inline comment and never folded into the summary — this skill does not publish
-anything itself, so give the finding that shape and let the reviewer skill, which
-owns posting, carry it there.
+non-blocking severity reads as deliberate rather than as a downgrade; and
+where you are
+unsure whether a value describes a real person, say so explicitly and name what
+would resolve it rather than resolving it toward silence. Such a finding is
+filed as its own inline comment and never folded into the summary — this skill
+does not publish anything itself, so give the finding that shape and let the
+reviewer skill, which owns posting, carry it there.
