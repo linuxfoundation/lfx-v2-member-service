@@ -13,6 +13,7 @@ import (
 	"context"
 	"log/slog"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -587,6 +588,13 @@ func isScratchLogoURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
+	}
+	if cdnPrefix := os.Getenv("CDN_URL_PREFIX"); cdnPrefix != "" {
+		if parsedCDN, err := url.Parse(cdnPrefix); err == nil && parsedCDN.Host != "" {
+			if !strings.EqualFold(parsed.Host, parsedCDN.Host) {
+				return false
+			}
+		}
 	}
 	path := strings.TrimPrefix(parsed.Path, "/")
 	return scratchPathPattern.MatchString(path)

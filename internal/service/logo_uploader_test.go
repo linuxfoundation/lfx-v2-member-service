@@ -522,11 +522,55 @@ func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {
 
 	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
 
-	require.Error(t, err)
-	assert.True(t, pkgerrors.IsPreconditionFailed(err))
-	assert.Nil(t, org)
+	require.NoError(t, err)
+	require.NotNil(t, org)
 	require.Len(t, objectStore.copyCalls, 1, "must not retry once a newer promotion is detected")
-	require.Empty(t, orgWriter.updateCalls, "Salesforce must not be updated when promotion is stale")
+	require.Len(t, orgWriter.updateCalls, 1, "Salesforce was updated before promotion was detected stale")
+}
+
+func TestLogoUploader_PromotionFailureRollsBackSalesforce(t *testing.T) {
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: errors.New("s3 copy failure"),
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:             &model.B2BOrg{UID: "uid-1"},
+		previousLogoURL: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=old",
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr)
+	assert.Nil(t, org)
+	require.Len(t, orgWriter.updateCalls, 2, "must update Salesforce then rollback on promotion failure")
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=old", inputLogoURL(orgWriter.updateCalls[1]), "rollback must restore previous logo URL")
+}
+
+func TestLogoUploader_CanceledContextAfterCommitStillPromotes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	objectStore := &stubObjectStore{
+		url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org: &model.B2BOrg{UID: "uid-1"},
+	}
+	orgWriter.onUpdateWithoutPublish = func() {
+		// Simulate client disconnecting immediately after Salesforce update commits.
+		cancel()
+	}
+
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(ctx, "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, objectStore.copyCalls, 1, "promotion must have run despite canceled request context")
+	require.Len(t, orgWriter.updateCalls, 1)
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {

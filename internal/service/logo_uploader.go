@@ -20,6 +20,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/imageresize"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/svgsanitize"
 )
@@ -139,45 +140,65 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, fmt.Errorf("uploading logo for b2b org %s: %w", uid, err)
 	}
 	defer func() {
-		// Clean up the temporary scratch object best-effort.
-		_ = o.objectStore.Delete(context.WithoutCancel(ctx), scratchKey)
+		// Clean up the temporary scratch object best-effort under a short bounded timeout.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cleanupCancel()
+		_ = o.objectStore.Delete(cleanupCtx, scratchKey)
 	}()
 
-	// generation orders this promotion against any concurrent attempt.
-	// CopyIfNewer refuses to let an older generation's copy land once a newer
-	// one has already committed to key.
-	generation := current.UpdatedAt.UnixNano()
-	var commitErr error
-	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
-		commitErr = o.objectStore.CopyIfNewer(ctx, scratchKey, key, generation)
-		if commitErr == nil {
-			break
-		}
-		if errors.Is(commitErr, port.ErrStalePromotion) {
-			slog.WarnContext(ctx, "a newer logo upload already promoted to the shared key; abandoning this older promotion",
-				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "error", commitErr)
-			return nil, pkgerrors.NewPreconditionFailed("organization was modified concurrently; retry upload")
-		}
-		if attempt < CommitPromoteAttempts {
-			time.Sleep(commitPromoteRetryDelay)
-		}
-	}
-	if commitErr != nil {
-		slog.ErrorContext(ctx, "failed to promote logo to its shared key",
-			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
-		return nil, pkgerrors.NewServiceUnavailable("logo upload could not be completed; retry")
-	}
-
-	// Promotion to the durable S3 shared key succeeded. Commit the durable URL
-	// directly to Salesforce in a single atomic update. Salesforce is NEVER
-	// pointed at an expiring scratch object, so a process exit or crash cannot
-	// strand Salesforce on a 404 URL.
+	// Commit the durable URL to Salesforce first under the conditional If-Match check.
+	// If the conditional update fails (e.g. CAS conflict or network error), the shared
+	// key in S3 is NEVER overwritten, preserving the prior image bytes completely.
 	keyURL := o.objectStore.VersionedURL(key)
 	updated, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: &keyURL}, ifMatch)
 	if updateErr != nil {
 		slog.ErrorContext(ctx, "failed to update b2b org logo URL in salesforce",
 			"b2b_org_uid", uid, "key", key, "error", updateErr)
 		return nil, updateErr
+	}
+
+	// Detach post-commit promotion from client cancellation so a disconnecting
+	// client does not leave Salesforce pointing at an unpromoted key.
+	promoteCtx, promoteCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer promoteCancel()
+
+	// generation orders this promotion against any concurrent attempt.
+	// CopyIfNewer refuses to let an older generation's copy land once a newer
+	// one has already committed to key.
+	generation := updated.UpdatedAt.UnixNano()
+	var commitErr error
+	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
+		commitErr = o.objectStore.CopyIfNewer(promoteCtx, scratchKey, key, generation)
+		if commitErr == nil {
+			break
+		}
+		if errors.Is(commitErr, port.ErrStalePromotion) {
+			slog.WarnContext(promoteCtx, "a newer logo upload already promoted to the shared key; abandoning this older promotion",
+				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "error", commitErr)
+			return updated, nil
+		}
+		if attempt < CommitPromoteAttempts {
+			time.Sleep(commitPromoteRetryDelay)
+		}
+	}
+	if commitErr != nil {
+		slog.ErrorContext(promoteCtx, "failed to promote logo to its shared key after salesforce update; rolling back",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
+		// Rollback Salesforce to the previous logo URL
+		var restoreURL *string
+		if current.LogoURL != "" && !isScratchLogoURL(current.LogoURL) {
+			restoreURL = &current.LogoURL
+		} else {
+			empty := ""
+			restoreURL = &empty
+		}
+		rollbackETag, _ := etag.LFXEtag(updated)
+		_, rollbackErr := o.b2bOrgWriter.Update(promoteCtx, uid, model.B2BOrgInput{LogoURL: restoreURL}, rollbackETag)
+		if rollbackErr != nil {
+			slog.ErrorContext(promoteCtx, "failed to rollback salesforce logo URL after promotion failure",
+				"b2b_org_uid", uid, "error", rollbackErr)
+		}
+		return nil, pkgerrors.NewServiceUnavailable("logo upload could not be completed; retry")
 	}
 
 	return updated, nil
