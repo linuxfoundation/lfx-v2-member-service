@@ -77,9 +77,8 @@ not adjudicated.
   describes a real person has followed its instructions correctly, and "the
   reviewer was not confident" is not a valid rebuttal of such a thread.
   Reviewer scope and the signal bar live in `/copilot-code-reviewer`; read it
-  when a rebuttal
-  turns on whether a finding was in scope at all. When a thread turns on a
-  peer-owned contract, read the central `linuxfoundation/lfx-skills`
+  when a rebuttal turns on whether a finding was in scope at all. When a thread
+  turns on a peer-owned contract, read the central `linuxfoundation/lfx-skills`
   (`skills/lfx/SKILL.md`, `skills/lfx-platform-architecture/SKILL.md`) via the
   GitHub MCP rather than guessing — and where the authority is a peer repo you
   cannot read, the reviewer skill's silence rule applies to you too: an

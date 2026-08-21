@@ -323,7 +323,7 @@ quoting it in a PR comment publishes it a second time.
 
 That is the minimum. The full pass — the taxonomy of what is and is not
 personal data, the severity gradient, this service's personal-data sinks, and
-the four rules in this repo that would otherwise bury such a finding — lives in
+the rules in this repo that would otherwise bury such a finding — lives in
 `member-service-security-review`
 (`.github/skills/member-service-security-review/SKILL.md`), which also now owns
 this service's **security anchors**: the boundaries that make a diff
