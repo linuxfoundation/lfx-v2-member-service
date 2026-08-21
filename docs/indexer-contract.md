@@ -37,6 +37,31 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 
 ---
 
+## Transient Logo URL Suppression (`b2b_org`, `project_membership`, `key_contact`)
+
+Logo uploads (`POST /b2b_orgs/{uid}/logo`) stage the uploaded bytes at a short-lived **scratch** object key before promoting them to the durable shared key. Scratch objects are deleted as soon as the upload completes, so a scratch URL that reaches OpenSearch becomes a permanently broken image. To prevent that, every publisher that carries a logo URL classifies it with `isScratchLogoURL` and suppresses transient values before building the indexer message.
+
+**Classifier (`internal/service/messaging.go` — `isScratchLogoURL`).** A URL is transient only when *all* hold:
+
+1. It parses as an absolute URL with scheme `http` or `https` and a non-empty host.
+2. When `CDN_URL_PREFIX` is set and parses to a host, the URL's host matches it case-insensitively (a foreign host is never treated as our scratch space).
+3. Its path, with the leading `/` trimmed, matches `^org-logos-public-scratch/[^/]+/[^/]+\.(png|jpe?g|svg)$` — the exact top-level scratch prefix, not a substring match anywhere in the path.
+
+**Behavior per resource type** (applied only when `action != deleted`; delete messages carry a bare UID string and no logo field):
+
+| Object type            | Field                       | Behavior when transient                                                      |
+|------------------------|-----------------------------|------------------------------------------------------------------------------|
+| `b2b_org`              | `logo_url`                  | **Publish skipped entirely** — the whole message is dropped                   |
+| `b2b_org`              | `parent_detail.logo_url`    | Published, with `parent_detail.logo_url` omitted from the copied `parent_detail` |
+| `project_membership`   | `company_logo_url`          | Published, with `company_logo_url` cleared                                    |
+| `key_contact`          | `company_logo_url`          | Published, with `company_logo_url` cleared                                    |
+
+Suppression mutates a **shallow copy** of the record (and of `parent_detail`), never the caller's struct, so the in-memory/cached record is unaffected.
+
+**Recovery.** A skipped or stripped publish is logged at `warn` with `publish_failed_for_backfill_repair=true` and is self-healing: promotion commits the durable versioned URL (`https://{cdn}/b2b_org_logos/{uid}?v={nanos}`) to Salesforce, and the subsequent publish (or CDC replay / `/admin/reindex`) carries the durable value. Suppression is therefore a transient-state filter, not data loss.
+
+---
+
 ## B2B Org
 
 **Object type:** `b2b_org`
@@ -58,7 +83,7 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 | `website`             | string (optional)   | Website URL                                                                                                                                                  |
 | `primary_domain`      | string (optional)   | Canonical primary domain                                                                                                                                     |
 | `domain_aliases`      | []string (optional) | Additional normalized domains                                                                                                                                |
-| `logo_url`            | string (optional)   | Logo image URL                                                                                                                                               |
+| `logo_url`            | string (optional)   | Logo image URL. A transient scratch URL suppresses the whole publish — see [Transient Logo URL Suppression](#transient-logo-url-suppression-b2b_org-project_membership-key_contact) |
 | `industry`            | string (optional)   | Industry classification                                                                                                                                      |
 | `sector`              | string (optional)   | Sector classification                                                                                                                                        |
 | `crunch_base_url`     | string (optional)   | CrunchBase profile URL                                                                                                                                       |
@@ -141,7 +166,7 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 | `start_date`        | string (optional)  | Membership start date                          |
 | `end_date`          | string (optional)  | Membership end date                            |
 | `company_name`      | string             | Member company name                            |
-| `company_logo_url`  | string (optional)  | Member company logo URL                        |
+| `company_logo_url`  | string (optional)  | Member company logo URL. Cleared when transient (see [Transient Logo URL Suppression](#transient-logo-url-suppression-b2b_org-project_membership-key_contact)). |
 | `company_domain`    | string (optional)  | Member company website/domain                  |
 | `tier_name`         | string (optional)  | Product name, e.g. `Gold Corporate Membership` |
 | `tier_family`       | string (optional)  | Product family, e.g. `Membership`              |
@@ -218,7 +243,7 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 | `username`         | string (optional)   | Resolved LFID username                                                      |
 | `emails`           | []string (optional) | Full list of email addresses                                                |
 | `company_name`     | string              | Member company name                                                         |
-| `company_logo_url` | string (optional)   | Member company logo URL                                                     |
+| `company_logo_url` | string (optional)   | Member company logo URL. Cleared when transient (see [Transient Logo URL Suppression](#transient-logo-url-suppression-b2b_org-project_membership-key_contact)). |
 | `company_domain`   | string (optional)   | Member company website/domain                                               |
 | `created_at`       | timestamp           | Creation time (RFC3339)                                                     |
 | `updated_at`       | timestamp           | Last update time (RFC3339)                                                  |

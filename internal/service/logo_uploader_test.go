@@ -69,14 +69,17 @@ const maliciousSVGBytes = `<svg xmlns="http://www.w3.org/2000/svg" onload="alert
 // CopyIfNewer fail only that many times before succeeding, to exercise the
 // retry loop itself.
 type stubObjectStore struct {
-	url              string
-	err              error
-	commitErr        error
-	commitErrCount   int
-	deleteErr        error
-	putKeys          []string
-	putData          [][]byte
-	copyCalls        []copyCall
+	url            string
+	err            error
+	commitErr      error
+	commitErrCount int
+	deleteErr      error
+	putKeys        []string
+	putData        [][]byte
+	copyCalls      []copyCall
+	// copyCtxErrs records ctx.Err() as seen by each CopyIfNewer call, so a
+	// test can prove promotion ran on a context detached from the request's.
+	copyCtxErrs      []error
 	versionedURLKeys []string
 	keyedURLs        bool
 	versionCounter   int
@@ -120,7 +123,8 @@ func (s *stubObjectStore) Delete(_ context.Context, key string) error {
 	return s.deleteErr
 }
 
-func (s *stubObjectStore) CopyIfNewer(_ context.Context, src, dst string, generation int64) error {
+func (s *stubObjectStore) CopyIfNewer(ctx context.Context, src, dst string, generation int64) error {
+	s.copyCtxErrs = append(s.copyCtxErrs, ctx.Err())
 	s.copyCalls = append(s.copyCalls, copyCall{src: src, dst: dst, generation: generation})
 	if s.commitErr == nil {
 		return nil
@@ -185,14 +189,16 @@ type stubLogoOrgWriter struct {
 	// committedLogoURL is what Salesforce actually holds -- set only by an
 	// Update that committed, so a failed one is not mistaken for persisted
 	// state by the precondition re-reads.
-	committedLogoURL       string
-	publishedOrg           *model.B2BOrg
-	onUpdateWithoutPublish func()
-	gotInput               model.B2BOrgInput
-	updateCalls            []model.B2BOrgInput
-	quietUpdateCalls       int
-	ifMatches              []string
-	validated              bool
+	committedLogoURL string
+	publishedOrg     *model.B2BOrg
+	// onUpdateCommitted fires after an Update call has committed, modelling
+	// side effects that happen once Salesforce already holds the new URL.
+	onUpdateCommitted func()
+	gotInput          model.B2BOrgInput
+	updateCalls       []model.B2BOrgInput
+	quietUpdateCalls  int
+	ifMatches         []string
+	validated         bool
 }
 
 func (w *stubLogoOrgWriter) PublishOrgUpdated(_ context.Context, _, org *model.B2BOrg) {
@@ -254,14 +260,15 @@ func inputLogoURL(input model.B2BOrgInput) string {
 }
 
 func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
-	return w.update(input, ifMatch)
+	org, err := w.update(input, ifMatch)
+	if w.onUpdateCommitted != nil {
+		w.onUpdateCommitted()
+	}
+	return org, err
 }
 
 func (w *stubLogoOrgWriter) UpdateWithoutPublish(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
 	w.quietUpdateCalls++
-	if w.onUpdateWithoutPublish != nil {
-		w.onUpdateWithoutPublish()
-	}
 	return w.update(input, ifMatch)
 }
 
@@ -558,7 +565,7 @@ func TestLogoUploader_CanceledContextAfterCommitStillPromotes(t *testing.T) {
 	orgWriter := &stubLogoOrgWriter{
 		org: &model.B2BOrg{UID: "uid-1"},
 	}
-	orgWriter.onUpdateWithoutPublish = func() {
+	orgWriter.onUpdateCommitted = func() {
 		// Simulate client disconnecting immediately after Salesforce update commits.
 		cancel()
 	}
@@ -571,6 +578,9 @@ func TestLogoUploader_CanceledContextAfterCommitStillPromotes(t *testing.T) {
 	require.NotNil(t, org)
 	require.Len(t, objectStore.copyCalls, 1, "promotion must have run despite canceled request context")
 	require.Len(t, orgWriter.updateCalls, 1)
+	require.Equal(t, context.Canceled, ctx.Err(), "request context must be canceled once Salesforce committed")
+	require.Len(t, objectStore.copyCtxErrs, 1)
+	assert.NoError(t, objectStore.copyCtxErrs[0], "promotion must run on a context detached from the canceled request context")
 }
 
 func TestLogoUploader_PreconditionFailurePreventsUpload(t *testing.T) {
