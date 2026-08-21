@@ -86,9 +86,8 @@ kind: KeyValue
 metadata:
   name: {{ .Values.nats.kv_bucket_org_workspace_projects.name | replace "_" "-" }}
   namespace: lfx
-  annotations:
-    argocd.argoproj.io/sync-options: Prune=false
   {{- if .Values.nats.kv_bucket_org_workspace_projects.keep }}
+  annotations:
     "helm.sh/resource-policy": keep
   {{- end }}
   labels:
