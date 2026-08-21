@@ -223,13 +223,15 @@ verify against. The code is the authority for the shape any of these has today.
   design. That is a settled decision, not a finding — but it means anything that
   logs or echoes a request line in those flows is republishing an address.
 - **Generated fan-out, served to anonymous callers.** A single `dsl.Example()`
-  in the design replicates into six committed files —
+  in the design replicates into as many as six committed files —
   `gen/http/openapi.json`, `gen/http/openapi.yaml`, `gen/http/openapi3.json`,
   `gen/http/openapi3.yaml`, `gen/http/cli/membership/cli.go` and
-  `gen/http/membership_service/client/cli.go`. The occurrence count varies with
-  the value — one sampled example produced 99 across those six files, others
-  produce more — but the six-file fan-out itself is invariant. Those documents
-  are not merely committed:
+  `gen/http/membership_service/client/cli.go`. Neither the occurrence count nor
+  the file set is fixed: of the 50 distinct string examples in the design today,
+  29 reach all six files and 15 reach only the four OpenAPI documents, because an
+  example on a response-only field never reaches the CLI files. The four OpenAPI
+  documents are the constant, and they are the ones that matter most, because
+  they are not merely committed:
   `cmd/member-api/kodata/gen/http/openapi{,3}.{json,yaml}` are tracked symlinks
   into `gen/http/`, `Dockerfile:37,40` copies that tree into the image's
   `KO_DATA_PATH`, `charts/lfx-v2-member-service/templates/httproute.yaml:37-39`
@@ -275,7 +277,7 @@ verify against. The code is the authority for the shape any of these has today.
 - **Logging, redacted by hand.** `pkg/redaction` offers `Redact` and
   `RedactEmail` (which keeps the domain and masks the local part), and it is
   applied at only a handful of call sites. There is known unredacted drift — for
-  example `internal/infrastructure/salesforce/contact_repo.go:82-121` logs a raw
+  example `internal/infrastructure/salesforce/contact_repo.go:82-137` logs a raw
   email, first name and last name and interpolates the raw address into three
   error strings. That drift is **not** a finding against an author who did not
   touch it, and it is not a pattern to copy: a *new* site that emits a raw
