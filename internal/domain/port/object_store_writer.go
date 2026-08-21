@@ -6,15 +6,36 @@ package port
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ErrStalePromotion is returned by ObjectStoreWriter.CopyIfNewer when dstKey
 // already reflects a promotion with a generation at least as new as the one
 // requested — either because a HeadObject pre-check saw it, or because a
-// concurrent writer won the underlying conditional CopyObject. Callers must
-// treat this as "abandon this promotion, a newer one already won", not a
-// transient failure to retry.
+// concurrent writer won the underlying conditional CopyObject. It means "some
+// other attempt's bytes currently own dstKey", not "that attempt is the
+// authoritative winner": generations are derived from a coarse, shared clock,
+// so two attempts can legitimately carry the same one. Callers that hold an
+// external arbiter for ownership (e.g. logoUploaderOrchestrator, for which the
+// conditional Salesforce commit is the single serialization point) must
+// consult it rather than treating this error as a definitive loss.
 var ErrStalePromotion = errors.New("a newer promotion already committed to this key")
+
+// StalePromotionError carries the generation currently stamped on dstKey so a
+// caller that the arbiter confirms as the real winner can re-attempt strictly
+// above it. It satisfies errors.Is(err, ErrStalePromotion).
+type StalePromotionError struct {
+	// ExistingGeneration is the generation stamped on dstKey that beat this
+	// attempt. Zero when the loss came from a conditional-copy conflict rather
+	// than an observed stamp.
+	ExistingGeneration int64
+}
+
+func (e *StalePromotionError) Error() string {
+	return fmt.Sprintf("%s (existing generation %d)", ErrStalePromotion, e.ExistingGeneration)
+}
+
+func (e *StalePromotionError) Is(target error) bool { return target == ErrStalePromotion }
 
 // ObjectStoreWriter uploads binary objects (e.g. B2B org logos) to durable,
 // publicly-fetchable object storage.
@@ -54,7 +75,9 @@ type ObjectStoreWriter interface {
 	// after a faster, newer attempt's and physically overwrite dstKey's bytes
 	// with stale content, even though the newer attempt's own record update
 	// already succeeded (LFXV2-2016 lfx-reviewer finding on PR #87). Returns
-	// ErrStalePromotion if a promotion at least as new already won; callers
-	// must treat that as "abandon this promotion", not retry.
+	// a *StalePromotionError (which satisfies errors.Is(err,
+	// ErrStalePromotion)) if dstKey already carries a generation at least as
+	// new; callers must resolve that against their own arbiter rather than
+	// retrying blindly.
 	CopyIfNewer(ctx context.Context, srcKey, dstKey string, generation int64) error
 }

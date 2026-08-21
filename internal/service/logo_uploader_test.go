@@ -191,14 +191,17 @@ type stubLogoOrgWriter struct {
 	// state by the precondition re-reads.
 	committedLogoURL string
 	publishedOrg     *model.B2BOrg
-	// onUpdateCommitted fires after an Update call has committed, modelling
-	// side effects that happen once Salesforce already holds the new URL.
+	// onUpdateCommitted fires after a commit has landed, modelling side
+	// effects that happen once Salesforce already holds the new URL.
 	onUpdateCommitted func()
 	gotInput          model.B2BOrgInput
-	updateCalls       []model.B2BOrgInput
-	quietUpdateCalls  int
-	ifMatches         []string
-	validated         bool
+	// updateCtxErrs records ctx.Err() as seen by each commit call, so a test
+	// can prove the compensating write runs on a live context.
+	updateCtxErrs    []error
+	updateCalls      []model.B2BOrgInput
+	quietUpdateCalls int
+	ifMatches        []string
+	validated        bool
 }
 
 func (w *stubLogoOrgWriter) PublishOrgUpdated(_ context.Context, _, org *model.B2BOrg) {
@@ -259,20 +262,23 @@ func inputLogoURL(input model.B2BOrgInput) string {
 	return *input.LogoURL
 }
 
-func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
-	org, err := w.update(input, ifMatch)
-	if w.onUpdateCommitted != nil {
-		w.onUpdateCommitted()
-	}
-	return org, err
+func (w *stubLogoOrgWriter) Update(ctx context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+	w.updateCtxErrs = append(w.updateCtxErrs, ctx.Err())
+	return w.update(input, ifMatch)
 }
 
-func (w *stubLogoOrgWriter) UpdateWithoutPublish(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+func (w *stubLogoOrgWriter) UpdateWithoutPublish(ctx context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
 	w.quietUpdateCalls++
+	w.updateCtxErrs = append(w.updateCtxErrs, ctx.Err())
 	return w.update(input, ifMatch)
 }
 
 func (w *stubLogoOrgWriter) update(input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+	// Fired from the shared helper, so the hook follows whichever commit
+	// method the uploader actually calls rather than pinning a stale one.
+	if w.onUpdateCommitted != nil {
+		defer w.onUpdateCommitted()
+	}
 	w.gotInput = input
 	w.updateCalls = append(w.updateCalls, input)
 	w.ifMatches = append(w.ifMatches, ifMatch)
@@ -519,10 +525,38 @@ func TestLogoUploader_PromotionGenerationDerivedFromOrgUpdatedAt(t *testing.T) {
 	assert.Equal(t, committedAt.UnixNano(), objectStore.copyCalls[0].generation, "promotion generation must be derived from org.UpdatedAt")
 }
 
-func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {
+// A contended promotion is arbitrated by Salesforce, not by the stamp on the
+// shared key: whichever attempt's URL Salesforce currently holds owns the
+// bytes. Here the org points at another upload's URL, so this attempt lost and
+// must abandon quietly rather than overwrite the winner's bytes.
+func TestLogoUploader_CommitAbandonsWhenSalesforceHoldsAnotherUploadsURL(t *testing.T) {
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
-		commitErr: port.ErrStalePromotion,
+		commitErr: &port.StalePromotionError{ExistingGeneration: 42},
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:                 &model.B2BOrg{UID: "uid-1"},
+		rollbackSeesLogoURL: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=999",
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	require.Len(t, objectStore.copyCalls, 1, "must not re-attempt once Salesforce names another upload the winner")
+	require.Len(t, orgWriter.updateCalls, 1, "must not roll back a commit another upload already superseded")
+	assert.Nil(t, orgWriter.publishedOrg, "the winning upload publishes; this one must not")
+}
+
+// Equal generations tie: the shared key's stamp is "at least as new", but this
+// attempt is the one Salesforce points at, so its bytes must win rather than
+// silently losing to the tie-peer's.
+func TestLogoUploader_CommitReattemptsAboveStampWhenSalesforceHoldsThisURL(t *testing.T) {
+	objectStore := &stubObjectStore{
+		url:            "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr:      &port.StalePromotionError{ExistingGeneration: 42},
+		commitErrCount: 1,
 	}
 	orgWriter := &stubLogoOrgWriter{org: &model.B2BOrg{UID: "uid-1"}}
 	uploader := svc.NewLogoUploader(objectStore, orgWriter)
@@ -531,8 +565,10 @@ func TestLogoUploader_CommitAbandonsWhenNewerPromotionAlreadyWon(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, org)
-	require.Len(t, objectStore.copyCalls, 1, "must not retry once a newer promotion is detected")
-	require.Len(t, orgWriter.updateCalls, 1, "Salesforce was updated before promotion was detected stale")
+	require.Len(t, objectStore.copyCalls, 2, "must re-attempt the promotion once Salesforce confirms this upload owns the URL")
+	assert.Equal(t, int64(43), objectStore.copyCalls[1].generation, "re-attempt must be strictly above the stamp that beat it")
+	require.Len(t, orgWriter.updateCalls, 1)
+	assert.NotNil(t, orgWriter.publishedOrg, "a promoted logo must be published once its bytes are at the shared key")
 }
 
 func TestLogoUploader_PromotionFailureRollsBackSalesforce(t *testing.T) {
@@ -554,6 +590,35 @@ func TestLogoUploader_PromotionFailureRollsBackSalesforce(t *testing.T) {
 	assert.Nil(t, org)
 	require.Len(t, orgWriter.updateCalls, 2, "must update Salesforce then rollback on promotion failure")
 	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=old", inputLogoURL(orgWriter.updateCalls[1]), "rollback must restore previous logo URL")
+}
+
+// Rollback compensates a commit the client can no longer be told about, so it
+// must not inherit the request's cancellation (nor the promotion deadline that
+// just expired).
+func TestLogoUploader_CanceledContextStillRollsBackFailedPromotion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
+		commitErr: errors.New("s3 copy failure"),
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:             &model.B2BOrg{UID: "uid-1"},
+		previousLogoURL: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=old",
+	}
+	orgWriter.onUpdateCommitted = cancel
+
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	_, err := uploader.UploadB2BOrgLogo(ctx, "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	require.Equal(t, context.Canceled, ctx.Err())
+	require.Len(t, orgWriter.updateCalls, 2, "rollback must run despite the canceled request context")
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1.png?v=old", inputLogoURL(orgWriter.updateCalls[1]))
+	require.Len(t, orgWriter.updateCtxErrs, 2)
+	assert.NoError(t, orgWriter.updateCtxErrs[1], "rollback must run on a live context, not the canceled request or expired promotion context")
+	assert.Nil(t, orgWriter.publishedOrg, "a rolled-back upload must never be published")
 }
 
 func TestLogoUploader_CanceledContextAfterCommitStillPromotes(t *testing.T) {

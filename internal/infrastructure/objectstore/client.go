@@ -210,7 +210,7 @@ func (c *Client) CopyIfNewer(ctx context.Context, srcKey, dstKey string, generat
 		case headErr == nil:
 			if existing, ok := head.Metadata[promotionGenerationMetadataKey]; ok {
 				if existingGen, parseErr := strconv.ParseInt(existing, 10, 64); parseErr == nil && existingGen >= generation {
-					return port.ErrStalePromotion
+					return &port.StalePromotionError{ExistingGeneration: existingGen}
 				}
 			}
 			ifMatch = head.ETag

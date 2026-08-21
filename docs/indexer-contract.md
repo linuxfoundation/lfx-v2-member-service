@@ -60,6 +60,8 @@ Suppression mutates a **shallow copy** of the record (and of `parent_detail`), n
 
 **Recovery.** A skipped or stripped publish is logged at `warn` with `publish_failed_for_backfill_repair=true` and is self-healing: promotion commits the durable versioned URL (`https://{cdn}/b2b_org_logos/{uid}?v={nanos}`) to Salesforce, and the subsequent publish (or CDC replay / `/admin/reindex`) carries the durable value. Suppression is therefore a transient-state filter, not data loss.
 
+**Publish ordering on the upload path.** The upload endpoint itself never publishes an unbacked URL: it persists the durable URL with `UpdateWithoutPublish`, promotes the bytes onto the shared key, and only then calls `PublishOrgUpdated`. A promotion that cannot be completed rolls the field back — also unpublished — so indexer/FGA consumers observe either the previous logo or the new one, never an intermediate state. The suppression rules above therefore act as defense in depth for records arriving from other paths (CDC, reindex).
+
 ---
 
 ## B2B Org

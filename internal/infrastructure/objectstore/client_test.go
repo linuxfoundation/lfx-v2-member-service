@@ -218,18 +218,16 @@ func TestClient_CopyIfNewer_StaleGenerationCaughtByHeadObject(t *testing.T) {
 }
 
 func TestClient_CopyIfNewer_EqualGenerationIsStale(t *testing.T) {
-	// generation is derived from Salesforce's millisecond-precision
-	// LastModifiedDate, so two genuinely concurrent promotions for the same
-	// org can carry an identical generation. There is no signal available
-	// here that can order them correctly across the API chart's replicas, so
-	// an equal existing generation must be treated as stale (same as a
-	// strictly greater one) -- letting it through would allow a delayed
-	// attempt that happens to share a generation with an already-promoted one
-	// to overwrite it later, which is a live regression rather than a missed
-	// optimization (LFXV2-2016 copilot-pull-request-reviewer finding on PR
-	// #87, 2026-08-18, on an earlier revision that let equal generations
-	// through on the mistaken assumption that an unbreakable tie is harmless
-	// to leave unordered).
+	// generation is derived from Salesforce's coarse LastModifiedDate, so two
+	// genuinely concurrent promotions for the same org can carry an identical
+	// generation. Nothing observable here can order them, so an equal existing
+	// generation is reported as stale (same as a strictly greater one) rather
+	// than let through to overwrite bytes that may belong to the winner. The
+	// tie is broken one level up, in logoUploaderOrchestrator, against the
+	// conditional Salesforce commit -- the single global serialization point
+	// for logo uploads -- which is why the error carries the existing
+	// generation: the attempt Salesforce names as the owner re-attempts
+	// strictly above it (LFXV2-2016 review findings on PR #87).
 	copyCalls := 0
 	server := fakeS3ServerWithPromote(t, "b2b_org_logos/uid-1", http.StatusOK, map[string]string{"Promoted-At": "1000"}, http.StatusOK, &copyCalls)
 	defer server.Close()
@@ -238,6 +236,9 @@ func TestClient_CopyIfNewer_EqualGenerationIsStale(t *testing.T) {
 	err := client.CopyIfNewer(context.Background(), "b2b_org_logo_scratch/uid-1/tmp.png", "b2b_org_logos/uid-1", 1000)
 
 	require.ErrorIs(t, err, port.ErrStalePromotion)
+	var stale *port.StalePromotionError
+	require.ErrorAs(t, err, &stale)
+	assert.Equal(t, int64(1000), stale.ExistingGeneration, "the caller arbitrating the tie needs the stamp it must re-attempt above")
 	assert.Equal(t, 0, copyCalls, "an equal generation must be caught by HeadObject before ever attempting CopyObject")
 }
 

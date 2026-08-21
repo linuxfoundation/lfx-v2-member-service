@@ -45,6 +45,14 @@ const (
 const (
 	CommitPromoteAttempts   = 3
 	commitPromoteRetryDelay = 200 * time.Millisecond
+	// promotionArbiterRounds bounds how many times a contended promotion may
+	// re-consult Salesforce and re-attempt above the winning stamp. Only the
+	// single attempt Salesforce currently points at can take this path, so it
+	// converges; the bound exists so a pathological churn of concurrent
+	// uploads cannot spin here.
+	promotionArbiterRounds = 3
+	promoteTimeout         = 15 * time.Second
+	rollbackTimeout        = 15 * time.Second
 )
 
 // LogoUploader uploads a B2B org logo to object storage and writes the
@@ -149,8 +157,12 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// Commit the durable URL to Salesforce first under the conditional If-Match check.
 	// If the conditional update fails (e.g. CAS conflict or network error), the shared
 	// key in S3 is NEVER overwritten, preserving the prior image bytes completely.
+	// The commit is deliberately quiet: indexer/FGA consumers must not observe the
+	// new URL until the bytes behind it actually exist at the shared key, so the
+	// publish happens after promotion succeeds (and a failed promotion is rolled
+	// back without any consumer ever having seen the intermediate state).
 	keyURL := o.objectStore.VersionedURL(key)
-	updated, updateErr := o.b2bOrgWriter.Update(ctx, uid, model.B2BOrgInput{LogoURL: &keyURL}, ifMatch)
+	updated, updateErr := o.b2bOrgWriter.UpdateWithoutPublish(ctx, uid, model.B2BOrgInput{LogoURL: &keyURL}, ifMatch)
 	if updateErr != nil {
 		slog.ErrorContext(ctx, "failed to update b2b org logo URL in salesforce",
 			"b2b_org_uid", uid, "key", key, "error", updateErr)
@@ -159,7 +171,7 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 
 	// Detach post-commit promotion from client cancellation so a disconnecting
 	// client does not leave Salesforce pointing at an unpromoted key.
-	promoteCtx, promoteCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	promoteCtx, promoteCancel := context.WithTimeout(context.WithoutCancel(ctx), promoteTimeout)
 	defer promoteCancel()
 
 	// generation orders this promotion against any concurrent attempt.
@@ -167,41 +179,88 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// one has already committed to key.
 	generation := updated.UpdatedAt.UnixNano()
 	var commitErr error
-	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
-		commitErr = o.objectStore.CopyIfNewer(promoteCtx, scratchKey, key, generation)
+	for round := 1; round <= promotionArbiterRounds; round++ {
+		commitErr = o.promote(promoteCtx, scratchKey, key, generation)
 		if commitErr == nil {
 			break
 		}
-		if errors.Is(commitErr, port.ErrStalePromotion) {
-			slog.WarnContext(promoteCtx, "a newer logo upload already promoted to the shared key; abandoning this older promotion",
-				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "error", commitErr)
+
+		var stale *port.StalePromotionError
+		if !errors.As(commitErr, &stale) {
+			break
+		}
+
+		// Another attempt's bytes own the shared key. Generations come from
+		// Salesforce's coarse LastModifiedDate, so "at least as new" does not
+		// prove that attempt won — two commits in the same tick tie. The
+		// conditional Salesforce update is the single global serialization
+		// point for logo commits, so it, not the stamp, decides the owner.
+		holder, holderErr := o.b2bOrgWriter.ValidatePrecondition(promoteCtx, uid, "")
+		if holderErr != nil {
+			slog.ErrorContext(promoteCtx, "failed to re-read b2b org to arbitrate a contended logo promotion",
+				"b2b_org_uid", uid, "key", key, "error", holderErr)
+			break
+		}
+		if holder.LogoURL != keyURL {
+			slog.WarnContext(promoteCtx, "a newer logo upload owns the shared key; abandoning this promotion",
+				"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key)
+			// The winner publishes its own state; this attempt must not.
 			return updated, nil
+		}
+
+		// Salesforce still points at this attempt's URL, so these are the bytes
+		// that must end up at the shared key. Re-attempt strictly above the
+		// stamp that beat us.
+		generation = stale.ExistingGeneration + 1
+	}
+	if commitErr != nil {
+		slog.ErrorContext(promoteCtx, "failed to promote logo to its shared key after salesforce update; rolling back",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "error", commitErr)
+		o.rollback(ctx, uid, current, updated)
+		return nil, pkgerrors.NewServiceUnavailable("logo upload could not be completed; retry")
+	}
+
+	// The shared key now holds these bytes, so the committed URL is safe to expose.
+	o.b2bOrgWriter.PublishOrgUpdated(promoteCtx, current, updated)
+
+	return updated, nil
+}
+
+// promote copies the scratch object onto the shared key, retrying transient
+// failures. A stale-promotion loss is returned immediately for the caller to
+// arbitrate — it is a contention outcome, not a transient error.
+func (o *logoUploaderOrchestrator) promote(ctx context.Context, scratchKey, key string, generation int64) error {
+	var err error
+	for attempt := 1; attempt <= CommitPromoteAttempts; attempt++ {
+		err = o.objectStore.CopyIfNewer(ctx, scratchKey, key, generation)
+		if err == nil || errors.Is(err, port.ErrStalePromotion) {
+			return err
 		}
 		if attempt < CommitPromoteAttempts {
 			time.Sleep(commitPromoteRetryDelay)
 		}
 	}
-	if commitErr != nil {
-		slog.ErrorContext(promoteCtx, "failed to promote logo to its shared key after salesforce update; rolling back",
-			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key, "attempts", CommitPromoteAttempts, "error", commitErr)
-		// Rollback Salesforce to the previous logo URL
-		var restoreURL *string
-		if current.LogoURL != "" && !isScratchLogoURL(current.LogoURL) {
-			restoreURL = &current.LogoURL
-		} else {
-			empty := ""
-			restoreURL = &empty
-		}
-		rollbackETag, _ := etag.LFXEtag(updated)
-		_, rollbackErr := o.b2bOrgWriter.Update(promoteCtx, uid, model.B2BOrgInput{LogoURL: restoreURL}, rollbackETag)
-		if rollbackErr != nil {
-			slog.ErrorContext(promoteCtx, "failed to rollback salesforce logo URL after promotion failure",
-				"b2b_org_uid", uid, "error", rollbackErr)
-		}
-		return nil, pkgerrors.NewServiceUnavailable("logo upload could not be completed; retry")
-	}
+	return err
+}
 
-	return updated, nil
+// rollback quietly restores the org's pre-upload logo URL after a promotion
+// failure. It runs on its own context derived from the request's: an expired
+// promotion deadline must not also deny the compensating write, and a
+// disconnected client must not skip it. The restore is unpublished because the
+// commit it compensates was never published either.
+func (o *logoUploaderOrchestrator) rollback(ctx context.Context, uid string, current, updated *model.B2BOrg) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+
+	restoreURL := ""
+	if current.LogoURL != "" && !isScratchLogoURL(current.LogoURL) {
+		restoreURL = current.LogoURL
+	}
+	rollbackETag, _ := etag.LFXEtag(updated)
+	if _, err := o.b2bOrgWriter.UpdateWithoutPublish(rollbackCtx, uid, model.B2BOrgInput{LogoURL: &restoreURL}, rollbackETag); err != nil {
+		slog.ErrorContext(rollbackCtx, "failed to rollback salesforce logo URL after promotion failure",
+			"b2b_org_uid", uid, "error", err)
+	}
 }
 
 // sharesSharedLogoKey reports whether rawURL addresses the same object as
