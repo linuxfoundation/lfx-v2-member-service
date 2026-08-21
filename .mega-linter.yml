@@ -17,10 +17,13 @@ DISABLE_LINTERS:
   # Repository-wide link checking returns mostly false positives (like internal
   # service URLs in templates).
   - SPELL_LYCHEE
-  - SPELL_CSPELL
   # yamllint is sufficient for us.
   - YAML_PRETTIER
 DISABLE_ERRORS_LINTERS:
+  # There's no easy local feedback loop for spelling issues before
+  # pushing, so keep them non-blocking to avoid unnecessary PR cycles
+  # for words that just need adding to the dictionary.
+  - SPELL_CSPELL
   # This may be informative but doesn't need to break the build.
   - COPYPASTE_JSCPD
   # TBD! Need to work through these.
@@ -31,6 +34,13 @@ YAML_YAMLLINT_CONFIG_FILE: .yamllint
 # yamllint disable-line rule:line-length
 REPOSITORY_KICS_ARGUMENTS: scan --no-progress --exclude-severities="medium,low,info,trace" --exclude-paths="gen/*"
 SPELL_CSPELL_ANALYZE_FILE_NAMES: false
+SPELL_CSPELL_PRE_COMMANDS:
+  - command: >-
+      curl -sf
+      https://raw.githubusercontent.com/linuxfoundation/lfx-public-workflows/main/cspell/flagwords.snippet.json
+      -o /tmp/flagwords.snippet.json &&
+      sed -i -e '/"flagWords": \[\]/{r /tmp/flagwords.snippet.json' -e 'd}' .cspell.json
+    cwd: "workspace"
 # Make sure Vale is setup to run with the styles it needs.
 SPELL_VALE_PRE_COMMANDS:
   - command: mkdir -p styles
