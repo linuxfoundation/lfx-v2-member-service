@@ -7,8 +7,10 @@ description: >
   readability, code truthfulness), how to hold the diff to the repo's documented
   standards for this Goa + NATS + Salesforce Go service, the member-service
   specifics worth a second look, and the minimum personal-data rule that applies
-  to every diff including test, doc and generated files. Use on every PR that
-  changes code, however small; this is the reviewer's line-level lens. The
+  to every diff including test, doc and generated files. Use on every pull
+  request this repo receives, however small — including one that changes only
+  tests, only docs, or only generated output; this is the reviewer's line-level
+  lens. The
   security anchors and the full personal-data pass live in
   `member-service-security-review`.
 ---
@@ -380,3 +382,9 @@ that could describe a real person.
   platform defaults, a deployed chart value, a peer service's payload, the
   Salesforce org's own configuration — you cannot confirm it, so say nothing: do
   not assert the defect, and do not ask the author to verify it for you.
+  **One question is exempt, deliberately: whether a value committed in this diff
+  belongs to a real person.** That is not an unreadable *system* fact that
+  someone else could look up — it is never resolvable from the tree at all, and
+  the author is the only person who can resolve it. Staying silent there means
+  staying silent always. Raise it, say you are unsure, and ask; the personal-data
+  rule above and `member-service-security-review` govern how.

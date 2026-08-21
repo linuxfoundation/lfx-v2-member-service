@@ -21,6 +21,13 @@ allowed-tools: Read, Glob, Grep
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->
 <!-- SPDX-License-Identifier: MIT -->
 
+<!-- `allowed-tools` is deliberate and matches the sibling LFX Go service's
+     security lens (lfx-v2-newsletter-service), where the review lenses declare
+     it and the pipeline skills do not: this lens only ever reads the tree, and
+     it must never be the thing that edits, publishes, or resolves anything. The
+     other skills in this directory carry no such key because several of them do
+     need write tools. -->
+
 # Member Service Security Review
 
 This service is the member-facing read and write path over Salesforce, and the
@@ -66,8 +73,8 @@ Run a focused, **diff-aware** review, not a whole-repo audit:
    - *Assessment*: trace each input to its sink and confirm a guard sits on the
      path the data actually takes, not three functions away.
 4. **Confidence-gate every finding** (1-10, report only >= 8, matching the
-   reviewer skill's >=80% gate at
-   `.github/skills/copilot-code-reviewer/SKILL.md:170`) — **except** the
+   >=80% gate in the **High confidence only** bullet of
+   `.github/skills/copilot-code-reviewer/SKILL.md`) — **except** the
    "is this a real person or a synthetic placeholder?" judgment, which is
    explicitly exempted below and must be raised while unsure.
 5. **Evidence, not vibes.** Each finding names the file and function, what the
@@ -127,7 +134,25 @@ corporate email address at `path/to/file.ts:42`". Replace any quoted value with
 ## Personal data in this service
 
 Everything above is estate-wide and identical in all seven LFX repositories that
-carry it. What follows is specific to `lfx-v2-member-service`. It tells you where
+carry it. What follows is specific to `lfx-v2-member-service`.
+
+**One reading note first, because the block compresses two rules that look like
+they collide.** *Severity gradient* calls a synthetic local part on a real mail
+domain a low-severity defect; *Signal discipline is overridden* says to treat an
+address as real unless the local part is clearly synthetic **and** the domain is
+reserved. They govern different steps, and read in order they agree:
+
+- **Is the local part clearly synthetic?** If no, you cannot tell whether this is
+  a person — raise it at Critical/High and say you are unsure. That is the
+  override, and it is the whole point of it.
+- **If yes**, you have already answered the person question, and the gradient
+  takes over: on a reserved domain there is nothing to say at all; on a real mail
+  domain it is a low-severity defect, worth one comment asking for a reserved
+  domain.
+
+So the "and the domain is reserved" half decides whether you can stay *silent*,
+not whether something is Critical. A clearly synthetic local part never reaches
+Critical on the strength of its domain alone. It tells you where
 this repo's personal data actually lives and which of this repo's own rules would
 otherwise silence a finding about it.
 
@@ -150,12 +175,13 @@ Clear all four. Clearing three leaves the class suppressed.
    whether a value grants access, not whether it is shaped like a token. A real
    person's name or address authenticates nowhere and is a finding anyway. That
    test scopes *credentials*; it does not scope personal data.
-3. **The confidence floor**, at `copilot-code-reviewer/SKILL.md:170` ("Comment
-   only when you have HIGH CONFIDENCE (>=80%)") and again at `:177-178` ("prefer
-   silence over a speculative or hedged comment"). Both are overridden above for
+3. **The confidence floor**, in the **High confidence only** bullet of
+   `copilot-code-reviewer/SKILL.md` — "Comment only when you have HIGH
+   CONFIDENCE (>=80%)", and, two sentences later in the same bullet, "prefer
+   silence over a speculative or hedged comment". Both are overridden above for
    the real-person judgment, and only for it.
-4. **"Never duplicate the deterministic pipeline"**, at
-   `copilot-code-reviewer/SKILL.md:190`. The secret scanning it refers to does
+4. **"Never duplicate the deterministic pipeline"** — the bullet of that name in
+   `copilot-code-reviewer/SKILL.md`. The secret scanning it refers to does
    **not** cover this: `.gitleaks.toml:10-20` allowlists `.*_test\.go$` and
    `^gen/.*\.go$` outright, and gitleaks detects credentials, not people. So
    every Go test file and every generated Go file in this repo is invisible to
@@ -180,8 +206,10 @@ verify against. The code is the authority for the shape any of these has today.
   in the design replicates into six committed files —
   `gen/http/openapi.json`, `gen/http/openapi.yaml`, `gen/http/openapi3.json`,
   `gen/http/openapi3.yaml`, `gen/http/cli/membership/cli.go` and
-  `gen/http/membership_service/client/cli.go` (one current example measures 99
-  occurrences across those six). Those documents are not merely committed:
+  `gen/http/membership_service/client/cli.go`. The occurrence count varies with
+  the value — one sampled example produced 99 across those six files, others
+  produce more — but the six-file fan-out itself is invariant. Those documents
+  are not merely committed:
   `cmd/member-api/kodata/gen/http/openapi{,3}.{json,yaml}` are tracked symlinks
   into `gen/http/`, `Dockerfile:37,40` copies that tree into the image's
   `KO_DATA_PATH`, `charts/lfx-v2-member-service/templates/httproute.yaml:37-39`
@@ -232,7 +260,8 @@ verify against. The code is the authority for the shape any of these has today.
   error strings. That drift is **not** a finding against an author who did not
   touch it, and it is not a pattern to copy: a *new* site that emits a raw
   address, name or username is a finding.
-- **Errors, where the type decides escape.** `cmd/member-api/service/error.go:18-58`
+- **Errors, where the type decides escape.**
+  `cmd/member-api/service/error.go:18-58`
   passes the error through to the caller for every classified domain error
   (`NotFound`, `Validation`, `Conflict`, `ServiceUnavailable`,
   `PreconditionFailed`, `NotImplemented`); only the unclassified default at
@@ -240,9 +269,11 @@ verify against. The code is the authority for the shape any of these has today.
   an address reaches the client is decided by which `pkgerrors` type wraps it.
   An error message built from personal data and returned as a classified domain
   error is an exposure, not just an untidy log line.
-- **Mock records that ship in the production binary.** `internal/infrastructure/mock/`
-  is **not** test-only. It compiles into the binary and is selected at runtime by
-  `REPOSITORY_SOURCE=mock`; `mock/membership.go` seeds records with
+- **Mock records that ship in the production binary.**
+  `internal/infrastructure/mock/`
+  is **not** test-only. `cmd/member-api/service/providers.go:25` imports it from
+  non-test code and selects it at runtime on `REPOSITORY_SOURCE`, so it compiles
+  into the shipped binary; `mock/membership.go` seeds records with
   `FirstName`, `LastName` and `Email`. A `.go` file with no `_test` suffix reads
   as production code to every reviewer, and it is this repo's largest
   person-shaped fixture surface. Treat `internal/infrastructure/mock/*.go` and
@@ -266,8 +297,8 @@ fully-populated Salesforce `Account` sObject response body captured from a live
 query, and `:21-23` records a real Account SFID with a comment saying so.
 
 **It is not a finding.** An `Account` is an organization: its fields are a
-company name, a switchboard number, a website and a billing address, and this
-particular one is the repository owner's own organization. Do not flag it, and
+company name, a switchboard number, a website, an industry and a domain, and
+this particular one is the repository owner's own organization. Do not flag it, and
 do not ask for it to be replaced.
 
 Cite it instead as the *habit*: a fixture built by pasting a live API response.
@@ -304,6 +335,11 @@ satisfiable in this service**: there is no dedicated audit log here. Do not
 accept "it is for audit" as a justification for a new personal-data write on
 this repo, and do not propose building an audit sink as the fix for a finding.
 
+Note also what that exception is *about*. It is written for log output. The
+personal data this service retains is not log output — it is persisted state in
+the `org-settings` and `key-contact-grants` buckets, which is a different
+question with a different answer, and the logging exception does not govern it.
+
 ## Per-fact data-exposure pass
 
 When the diff adds or changes a field on a response payload, on an emitted
@@ -330,9 +366,13 @@ read or write path — run this structured pass on top of the methodology above:
 4. **Verdict per fact.** Enforced and matching sibling parity; a gap (no
    enforcement, or weaker than a sibling serving the same data); or unverifiable
    here because enforcement lives in a repo you cannot read — the OpenFGA model,
-   the Heimdall platform defaults, the indexer's own access evaluation. Where it
-   is unverifiable, the silence rule in `copilot-code-reviewer`'s *Your knowledge
-   sources* applies: do not raise it at all.
+   the Heimdall platform defaults, the indexer's own access evaluation. Where the
+   *enforcement* is unverifiable, the silence rule in `copilot-code-reviewer`'s
+   *Your knowledge sources* applies: do not raise it at all. That rule reaches
+   this step's access question only. It does **not** reach whether a value is a
+   real person's data — that question is never resolvable from any repository, so
+   silencing it for unverifiability would silence it permanently, and both that
+   skill and this one carve it out explicitly.
 
 Skip this pass only when the diff adds no field to any of those surfaces and no
 new or changed read/write path.

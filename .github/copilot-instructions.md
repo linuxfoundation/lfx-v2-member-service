@@ -9,8 +9,8 @@ handles that job. Follow it exactly.
 
 ## 1. Code review
 
-When the task is to **review a change** for correctness, design, and security,
-the review method lives in `.github/skills/`:
+When the task is to **review a change** for correctness, design, security, and
+the personal data it commits, the review method lives in `.github/skills/`:
 
 - `copilot-code-reviewer` — the entry point: reviewer scope, signal bar, the
   severity vocabulary, and how to decide what is worth a comment.
@@ -49,8 +49,11 @@ When the task is to check whether the **AI reviewers' findings** are fixed or
 validly rebutted and to update the agentic gate, use the **`/pr-conductor`** skill
 and follow it. It reconciles the AI-reviewer threads (never human threads), works
 with the engineer on findings that go against the architecture, references
-`/member-service-code-review`, and posts its agentic-check verdict in the format
-defined by `/agentic-comment-format`.
+`/member-service-code-review` and `/member-service-security-review`, and posts
+its agentic-check verdict in the format defined by `/agentic-comment-format`. A
+thread about personal data in a committed value is reconciled under the security
+lens's rules, where a reviewer's stated uncertainty is compliance rather than
+weakness — so "the reviewer was not confident" does not settle such a thread.
 
 ## The agent tasks act through the GitHub MCP server
 

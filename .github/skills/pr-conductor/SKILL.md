@@ -75,8 +75,9 @@ not adjudicated.
   personal data in a committed value is reconciled under that skill's rules, not
   the general signal bar: a reviewer that says it is unsure whether a value
   describes a real person has followed its instructions correctly, and "the
-  reviewer was not confident" is not a valid rebuttal of such a thread. Reviewer scope
-  and the signal bar live in `/copilot-code-reviewer`; read it when a rebuttal
+  reviewer was not confident" is not a valid rebuttal of such a thread.
+  Reviewer scope and the signal bar live in `/copilot-code-reviewer`; read it
+  when a rebuttal
   turns on whether a finding was in scope at all. When a thread turns on a
   peer-owned contract, read the central `linuxfoundation/lfx-skills`
   (`skills/lfx/SKILL.md`, `skills/lfx-platform-architecture/SKILL.md`) via the
