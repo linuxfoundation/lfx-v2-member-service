@@ -37,12 +37,13 @@ SPELL_CSPELL_ANALYZE_FILE_NAMES: false
 SPELL_CSPELL_PRE_COMMANDS:
   - command: >-
       cp .cspell.json /tmp/cspell.json.orig &&
-      curl -sf
+      curl -sSf
       https://raw.githubusercontent.com/linuxfoundation/lfx-public-workflows/main/cspell/flagwords.snippet.json
       -o /tmp/flagwords.snippet.json &&
       sed -i -e '/"flagWords": \[\]/{r /tmp/flagwords.snippet.json' -e 'd}' .cspell.json
     cwd: "workspace"
-POST_COMMANDS:
+    continue_if_failed: false
+SPELL_CSPELL_POST_COMMANDS:
   - command: cp /tmp/cspell.json.orig .cspell.json
     cwd: "workspace"
 # Make sure Vale is setup to run with the styles it needs.
