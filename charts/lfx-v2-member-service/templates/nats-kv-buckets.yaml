@@ -86,13 +86,15 @@ kind: KeyValue
 metadata:
   name: {{ .Values.nats.kv_bucket_org_workspace_projects.name | replace "_" "-" }}
   namespace: lfx
-  {{- if .Values.nats.kv_bucket_org_workspace_projects.keep }}
   annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+  {{- if .Values.nats.kv_bucket_org_workspace_projects.keep }}
     "helm.sh/resource-policy": keep
   {{- end }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
 spec:
+  preventDelete: true
   bucket: {{ .Values.nats.kv_bucket_org_workspace_projects.name }}
   replicas: {{ .Values.nats.kv_bucket_org_workspace_projects.replicas }}
   history: {{ .Values.nats.kv_bucket_org_workspace_projects.history }}
