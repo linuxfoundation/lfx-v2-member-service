@@ -4,17 +4,14 @@ description: >
   Security and privacy review for lfx-v2-member-service pull requests. Use when
   a PR touches a handler, the Goa design, auth, a KV bucket or cache path, the
   Salesforce adapters, an emitted indexer or FGA message, a NATS subject, an
-  outbound email, logging, an error path, config or the chart — and, always and
-  regardless of what else the diff touches, when it adds or changes ANY
-  literal value that could describe a real person: test data, a fixture, a
-  mock or seed record, a Goa `dsl.Example()`, a chart value, a doc or contract
-  example, a code comment, or a generated artifact. A test-only, docs-only or
-  generated-only diff is in scope on those grounds alone. Applies a diff-aware,
-  high-confidence, low-false-positive methodology (adapted from Anthropic's
-  claude-code-security-review) to this service's durable threat anchors, plus a
-  personal-data pass whose confidence rules deliberately differ from the rest of
-  the review. Discovers the concrete guards from the code at review time; this
-  skill carries the method, not an inventory.
+  outbound email, logging, an error path, config or the chart — and, whatever
+  else the diff touches, whenever it adds or changes ANY literal value that
+  could describe a real person: test data, a fixture, a mock or seed record, a
+  Goa `dsl.Example()`, a chart value, a doc or contract example, a code comment,
+  or a generated artifact. A test-only, docs-only or generated-only diff is in
+  scope on those grounds alone. Carries this service's durable threat anchors
+  and a personal-data pass whose confidence rules deliberately differ from the
+  rest of the review.
 ---
 
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->
@@ -31,6 +28,11 @@ authorization system, and it holds some of them in NATS buckets that carry no
 TTL and have no upstream to rebuild them from. Authorization is decided entirely
 by the Heimdall RuleSet in this repo's chart, not by Go code. Those facts set the
 stakes for every judgment here.
+
+The method here is diff-aware, high-confidence and low-false-positive, adapted
+from Anthropic's `claude-code-security-review`. It discovers the concrete guards
+from the code at review time: this skill carries the method, not an inventory of
+what the service looks like today.
 
 Reviewer scope and the general signal bar are owned by `copilot-code-reviewer`
 (`.github/skills/copilot-code-reviewer/SKILL.md`); the line-level method is owned
@@ -99,7 +101,24 @@ the fix, never a finding.
 Critical whether it appears in a log line, an error string, a response field, a
 cache key, a persisted row, a message payload, an outbound request body, a
 model prompt, a generated artifact, a chart value, a doc, a code comment, or a
-test fixture. Test-only, docs-only, example-only and generated-artifact-only
+test fixture.
+
+That list names data that should not be there. Where a service's **own contract
+owns a field**, carrying a person's data through that field at runtime is the
+happy path, not a finding: for contract-owned runtime flow the finding is data
+landing *outside* a contract-owned field, a redaction or authorization guard this
+diff drops or that a sibling path still has, or a widening that sends the value
+somewhere new. A **committed literal is unconditional** — a real person's data
+written into a file in this repository is Critical whatever field or contract it
+corresponds to, because the file, not the flow, is the disclosure.
+
+The single exception is the narrow audit case in the
+canonical policy: a raw value in a **dedicated, audit-named emission** whose code
+cites the policy mandating that specific field, which does **not** also reach the
+general logger, errors, metrics, traces or user-visible responses, and which is in
+the audit record's declared schema. Authentication material is never eligible for
+it. Where a repo has no dedicated audit sink the exception is unavailable — say so
+plainly rather than implying it exists. Test-only, docs-only, example-only and generated-artifact-only
 diffs are fully in scope. Any "we do not flag test files, Markdown or docs"
 carve-out elsewhere in this reviewer's instructions does not apply to personal
 data.
@@ -116,8 +135,13 @@ suppressing it is exactly how real addresses reached `main`. When you are
 UNSURE, raise it as Critical/High, say plainly that you are unsure, and name
 what would resolve it. Do NOT suppress it, do NOT file it as a suppressed
 comment, and do NOT fold it into a summary or overview. Treat an address as
-real unless the local part is clearly synthetic AND the domain is reserved
-(`example.com`, `example.org`, `*.example`, `.test`, `.invalid`).
+belonging to a real person unless the local part is clearly synthetic **or** the
+domain is reserved (`example.com`, `example.net`, `example.org`, `*.example`,
+`.test`, `.invalid`, `.localhost` — the RFC 2606 set). That test decides the
+*person* question only, never the severity: once the local part is clearly
+synthetic the person question is answered, and the gradient above governs — a
+synthetic local part on a real mail domain is the low band, not a leak. A
+synthetic local part on a reserved domain is nothing to report at all.
 
 **Never reproduce the value.** Report by category and location only — "a real
 corporate email address at `path/to/file.ts:42`". Replace any quoted value with
@@ -130,33 +154,6 @@ carry it, and is maintained as one text — do not edit it here. What follows is
 specific to `lfx-v2-member-service`: where this repo's personal data actually
 lives, and which of this repo's own rules would otherwise silence a finding
 about it.
-
-**One reading note before that, because the block compresses two rules that look
-like they collide.** *Severity gradient* calls a synthetic local part on a real
-mail domain a low-severity defect; *Signal discipline is overridden* says to
-treat an address as real unless the local part is clearly synthetic **and** the
-domain is reserved. They govern different steps, and read in order they agree:
-
-- **Is the local part clearly synthetic?** If no, you cannot tell whether this is
-  a person — raise it at Critical/High and say you are unsure. That is the
-  override, and it is the whole point of it.
-- **If yes**, you have already answered the person question, and the gradient
-  takes over: on a reserved domain there is nothing to say at all; on a real mail
-  domain it is a low-severity defect, worth one comment asking for a reserved
-  domain.
-
-So the "and the domain is reserved" half decides whether you can stay *silent*,
-not whether something is Critical. A clearly synthetic local part never reaches
-Critical on the strength of its domain alone.
-
-**One correction to the block's reserved list, on a point of fact.** It names
-`example.com`, `example.org`, `*.example`, `.test` and `.invalid`, and omits
-`example.net`, which RFC 2606 §3 reserves alongside the other two `example.`
-domains. Treat `example.net` as reserved. Applied literally the list would send
-a synthetic local part on a genuinely reserved domain to the `[nit]` "use a
-reserved domain" comment — a false positive of exactly the kind the gradient
-exists to prevent. The omission is being fixed in the shared text; until it is,
-this sentence governs here.
 
 **This section is preventive.** As of writing there is no real person's data on
 `main`: a case-insensitive census finds no LF-corporate, contractor, or major
@@ -211,6 +208,18 @@ it suppressed.
 
 Named so you recognise a sink when the diff touches one — not as an inventory to
 verify against. The code is the authority for the shape any of these has today.
+
+**Read this list with the contract-owned-flow rule above in hand.** This service
+*exists* to move member and contact names, addresses and usernames through most
+of what follows: the HTTP responses, the `org-settings` bucket, the indexer
+documents and their tags, the FGA subjects, the auth-service lookup, the outbound
+invite mail. Personal data travelling those fields at runtime is the product
+working, not a finding. What this list is for is telling you where the value ends
+up, so you can ask the questions that *are* findings: does it now land somewhere
+outside a contract-owned field, does this diff drop a redaction or authorization
+guard that the sibling path still has, does it widen what an existing field
+carries or who receives it — and, separately and unconditionally, is any of it
+being written into the repository as a literal.
 
 - **The HTTP contract.** `cmd/member-api/design/type.go` and
   `cmd/member-api/design/membership.go`: key-contact first name, last name and
@@ -367,16 +376,16 @@ class.
 
 ### Audit-log exception
 
-The estate's data-privacy reference allows a narrow exception for writing
-personal data to a dedicated audit sink under stated conditions. **It is not
-satisfiable in this service**: there is no dedicated audit log here. Do not
-accept "it is for audit" as a justification for a new personal-data write on
-this repo, and do not propose building an audit sink as the fix for a finding.
+The narrow audit exception stated above **is not satisfiable in this service**:
+there is no dedicated, audit-named emission here at all. Say that plainly rather
+than implying the exception exists. Do not accept "it is for audit" as a
+justification for a new personal-data write on this repo, and do not propose
+building an audit sink as the fix for a finding.
 
-Note also what that exception is *about*. It is written for log output. The
-personal data this service retains is not log output — it is persisted state in
-the `org-settings` and `key-contact-grants` buckets, which is a different
-question with a different answer, and the logging exception does not govern it.
+It is also the wrong tool for what this service actually retains. The exception
+governs a dedicated emission; the personal data held here is persisted state in
+the `org-settings` and `key-contact-grants` buckets, which are contract-owned
+fields and answer to the contract-owned-flow rule, not to this one.
 
 ## Per-fact data-exposure pass
 
