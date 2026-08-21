@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -108,11 +109,56 @@ var urlFragmentPattern = regexp.MustCompile(`(?i)^url\(\s*['"]?#[^'"()\s]+['"]?\
 // stroke/clip-path/mask) would let a "sanitized" SVG still issue an outbound
 // request or point at attacker-controlled markup — the same class of leak
 // href's fragment-only rule exists to close, just via a different attribute.
+// It normalizes CSS escape sequences first so that encoded variants such as
+// u\000072l(...) cannot bypass the url(...) check.
 func isSafePaintValue(v string) bool {
-	if !strings.Contains(strings.ToLower(v), "url(") {
+	norm := unescapeCSS(v)
+	if !strings.Contains(strings.ToLower(norm), "url(") {
 		return true
 	}
-	return urlFragmentPattern.MatchString(strings.TrimSpace(v))
+	return urlFragmentPattern.MatchString(strings.TrimSpace(norm))
+}
+
+// unescapeCSS decodes CSS escape sequences (\XXXXXX or \char) from s.
+func unescapeCSS(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			start := i
+			for i < len(s) && (i-start) < 6 && isHex(s[i]) {
+				i++
+			}
+			if i > start {
+				hexStr := s[start:i]
+				val, _ := strconv.ParseUint(hexStr, 16, 32)
+				if val > 0 && val <= 0x10FFFF {
+					b.WriteRune(rune(val))
+				}
+				// Optional trailing whitespace consumed per CSS spec.
+				if i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f') {
+					// consumed
+				} else {
+					i--
+				}
+				continue
+			}
+			if s[i] != '\r' && s[i] != '\n' && s[i] != '\f' {
+				b.WriteByte(s[i])
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // Sanitize parses data as XML, verifies its root element is <svg>, and

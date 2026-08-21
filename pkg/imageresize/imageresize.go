@@ -24,12 +24,11 @@ import (
 // otherwise a small compressed file could declare enormous pixel dimensions
 // and exhaust memory on decode regardless of the on-disk size cap already
 // enforced by MaxB2BOrgLogoSizeBytes. The per-axis check alone isn't enough:
-// a 10,000x10,000 image passes it but is still 100 million pixels (~400MB
-// decoded as RGBA), so maxDecodePixels bounds the total regardless of aspect
-// ratio (LFXV2-2016 lfx-reviewer finding on PR #87).
+// maxDecodePixels bounds the total regardless of aspect ratio, capping peak
+// memory to roughly 64MB for 16-bit PNG decodes.
 const (
-	maxDecodeDimensionPx = 10_000
-	maxDecodePixels      = 40_000_000
+	maxDecodeDimensionPx = 4096
+	maxDecodePixels      = 8_000_000
 )
 
 // ShrinkToMax decodes data (already sniffed as mediaType — "image/png" or

@@ -45,6 +45,7 @@ func (s stubB2BOrgWriterUC) UpdateWithoutPublish(_ context.Context, _ string, _ 
 func (s stubB2BOrgWriterUC) ValidatePrecondition(_ context.Context, _, _ string) (*model.B2BOrg, error) {
 	return s.org, s.err
 }
+func (s stubB2BOrgWriterUC) PublishOrgUpdated(_ context.Context, _, _ *model.B2BOrg) {}
 
 func TestPayloadToB2BOrgInput_PreservesLogoNoOpSemantics(t *testing.T) {
 	empty := ""

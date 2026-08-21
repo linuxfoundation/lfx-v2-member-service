@@ -249,6 +249,45 @@ func TestSanitize_DropsNonFragmentPaintURL(t *testing.T) {
 	assert.NotContains(t, got, `mask=`, "a fragment reference with a trailing fallback value must be dropped, not partially rewritten")
 }
 
+func TestSanitize_DropsEscapedNonFragmentPaintURL(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg">
+		<linearGradient id="g"/>
+		<rect fill="u\000072l(https://evil.example/track.svg#x)" width="1" height="1"/>
+		<rect stroke="u\72l('https://evil.example/track.svg#y')" width="1" height="1"/>
+		<rect clip-path="\75\72\6c(https://evil.example/track.svg#z)" width="1" height="1"/>
+		<rect mask="u\72 l(https://evil.example/track.svg#w)" width="1" height="1"/>
+		<rect fill="u\72l(javascript:alert(1))" width="1" height="1"/>
+	</svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	assert.NotContains(t, got, "evil.example")
+	assert.NotContains(t, got, "javascript")
+	assert.NotContains(t, got, "fill=")
+	assert.NotContains(t, got, "stroke=")
+	assert.NotContains(t, got, "clip-path=")
+	assert.NotContains(t, got, "mask=")
+}
+
+func TestSanitize_KeepsEscapedSameDocumentFragmentPaintURL(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg">
+		<linearGradient id="g"/>
+		<rect fill="u\000072l(#g)" width="1" height="1"/>
+		<rect stroke="u\72l(#g)" width="1" height="1"/>
+		<rect clip-path="\75\72\6c(#g)" width="1" height="1"/>
+	</svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	assert.Contains(t, got, `fill="u\000072l(#g)"`)
+	assert.Contains(t, got, `stroke="u\72l(#g)"`)
+	assert.Contains(t, got, `clip-path="\75\72\6c(#g)"`)
+}
+
 func TestSanitize_StripsStyleElementAndAttribute(t *testing.T) {
 	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>rect{fill:url(javascript:alert(1))}</style><rect style="fill:red" width="1" height="1"/></svg>`
 

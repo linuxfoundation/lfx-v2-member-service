@@ -152,7 +152,7 @@ func TestShrinkToMax_DownscalesJPEG(t *testing.T) {
 }
 
 func TestShrinkToMax_RejectsHugeDeclaredDimensions(t *testing.T) {
-	data := pngHeaderOnly(t, 20_000, 20_000)
+	data := pngHeaderOnly(t, 5_000, 5_000)
 
 	_, err := imageresize.ShrinkToMax(data, "image/png", 1024)
 
@@ -160,10 +160,10 @@ func TestShrinkToMax_RejectsHugeDeclaredDimensions(t *testing.T) {
 }
 
 func TestShrinkToMax_RejectsExcessiveTotalPixels(t *testing.T) {
-	// Each axis (8000) is within maxDecodeDimensionPx (10,000), but the total
-	// (64,000,000px) exceeds maxDecodePixels (40,000,000) — a per-axis-only
+	// Each axis (3500) is within maxDecodeDimensionPx (4096), but the total
+	// (12,250,000px) exceeds maxDecodePixels (8,000,000) — a per-axis-only
 	// check would let this through.
-	data := pngHeaderOnly(t, 8_000, 8_000)
+	data := pngHeaderOnly(t, 3_500, 3_500)
 
 	_, err := imageresize.ShrinkToMax(data, "image/png", 1024)
 

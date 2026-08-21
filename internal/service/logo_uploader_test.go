@@ -187,11 +187,16 @@ type stubLogoOrgWriter struct {
 	// Update that committed, so a failed one is not mistaken for persisted
 	// state by the precondition re-reads.
 	committedLogoURL string
+	publishedOrg     *model.B2BOrg
 	gotInput         model.B2BOrgInput
 	updateCalls      []model.B2BOrgInput
 	quietUpdateCalls int
 	ifMatches        []string
 	validated        bool
+}
+
+func (w *stubLogoOrgWriter) PublishOrgUpdated(_ context.Context, _, org *model.B2BOrg) {
+	w.publishedOrg = org
 }
 
 // precondOrg is what ValidatePrecondition hands back. The first call reports
@@ -1042,4 +1047,50 @@ func TestLogoUploader_AbandonDoesNotSettleOnAnotherAttemptsScratchURL(t *testing
 	assert.ErrorAs(t, err, &svcErr, "got: %v", err)
 	assert.Nil(t, org)
 	require.Len(t, orgWriter.updateCalls, 1, "another attempt's in-flight write must not be clobbered")
+}
+
+func TestLogoUploader_AbandonWithPriorScratchLogoURLClearsField(t *testing.T) {
+	// If previousLogoURL was already an expiring scratch URL, a failed upload's
+	// rollback must clear the field to "" rather than restoring the transient URL.
+	objectStore := &stubObjectStore{
+		url:       "https://cdn.example.com/org-logos-public-scratch/uid-1/new-scratch.png",
+		commitErr: errors.New("s3 commit failed"),
+	}
+	orgWriter := &stubLogoOrgWriter{
+		org:             &model.B2BOrg{UID: "uid-1"},
+		previousLogoURL: "https://cdn.example.com/org-logos-public-scratch/uid-1/old-scratch.png",
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr)
+	assert.Nil(t, org)
+	require.Len(t, orgWriter.updateCalls, 2)
+	assert.Equal(t, "", inputLogoURL(orgWriter.updateCalls[1]), "rollback must clear field when prior URL was scratch")
+}
+
+func TestLogoUploader_RepointRecoveryPublishesOrgUpdated(t *testing.T) {
+	// Repoint Update failed (Salesforce committed keyURL but re-fetch failed),
+	// and rollback discovers the durable shared key committed. It returns 200
+	// and must publish the updated org indexer event.
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
+	keyURL := objectStore.VersionedURL(deterministicLogoKey)
+	orgWriter := &stubLogoOrgWriter{
+		org:                 &model.B2BOrg{UID: "uid-1"},
+		repointErr:          errors.New("re-fetch failed after PATCH"),
+		rollbackSeesLogoURL: keyURL,
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	assert.Equal(t, keyURL, org.LogoURL)
+	assert.NotNil(t, orgWriter.publishedOrg, "repoint recovery on committed durable URL must publish indexer update")
+	assert.Equal(t, keyURL, orgWriter.publishedOrg.LogoURL)
 }

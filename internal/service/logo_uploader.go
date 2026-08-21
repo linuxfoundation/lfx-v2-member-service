@@ -133,6 +133,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		return nil, err
 	}
 	previousLogoURL := current.LogoURL
+	if isScratchLogoURL(previousLogoURL) {
+		previousLogoURL = ""
+	}
 
 	// key is deterministic and reused by every upload for this org — that's
 	// what lets a copy of an old logo URL, once superseded, converge to
@@ -345,6 +348,9 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 		recovered, outcome := o.rollbackLogoURL(ctx, uid, safeLogoURL, scratchURL)
 		switch outcome {
 		case rollbackSuperseded:
+			if sharesSharedLogoKey(recovered.LogoURL, keyURL) {
+				o.b2bOrgWriter.PublishOrgUpdated(ctx, current, recovered)
+			}
 			return recovered, nil
 		case rollbackRestored:
 			if !sharesSharedLogoKey(safeLogoURL, keyURL) {
@@ -465,6 +471,9 @@ func (o *logoUploaderOrchestrator) abandonUpload(ctx context.Context, uid, safeL
 // wrote, the freshly-read record of the upload that superseded this one, or
 // nil when the rollback failed.
 func (o *logoUploaderOrchestrator) rollbackLogoURL(ctx context.Context, uid, safeLogoURL, scratchURL string) (*model.B2BOrg, rollbackOutcome) {
+	if isScratchLogoURL(safeLogoURL) {
+		safeLogoURL = ""
+	}
 	fresh, err := o.b2bOrgWriter.ValidatePrecondition(ctx, uid, "")
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to re-read b2b org to roll its logo back; leaving it pointed at the scratch object",
