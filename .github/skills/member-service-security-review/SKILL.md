@@ -125,10 +125,11 @@ corporate email address at `path/to/file.ts:42`". Replace any quoted value with
 
 ## Personal data in this service
 
-Everything above is estate-wide and identical in all seven LFX repositories that
-carry it. What follows is specific to `lfx-v2-member-service`. It tells you
-where this repo's personal data actually lives, and which of this repo's own
-rules would otherwise silence a finding about it.
+Everything above is shared verbatim with the other LFX repositories that
+carry it, and is maintained as one text — do not edit it here. What follows is
+specific to `lfx-v2-member-service`: where this repo's personal data actually
+lives, and which of this repo's own rules would otherwise silence a finding
+about it.
 
 **One reading note before that, because the block compresses two rules that look
 like they collide.** *Severity gradient* calls a synthetic local part on a real
@@ -267,7 +268,7 @@ verify against. The code is the authority for the shape any of these has today.
   `RedactEmail` (which keeps the domain and masks the local part), and it is
   applied at only a handful of call sites. There is known unredacted drift — for
   example `internal/infrastructure/salesforce/contact_repo.go:82-121` logs a raw
-  email, first name and last name and interpolates the raw address into two
+  email, first name and last name and interpolates the raw address into three
   error strings. That drift is **not** a finding against an author who did not
   touch it, and it is not a pattern to copy: a *new* site that emits a raw
   address, name or username is a finding.
@@ -538,8 +539,9 @@ value; state the severity from the gradient, using the posting vocabulary
 `copilot-code-reviewer` defines — a real named individual is `[critical]`; an
 unresolved "is this a person?" is `[critical]` or `[high]`; and the gradient's
 low-severity band (a clearly synthetic local part on a non-reserved domain) is
-`[nit]`, which by design does not block and which the conductor does not carry as
-a row. Say plainly in such a comment that it is a hygiene fix, so the
+`[nit]`, which by design does not block (the conductor gives an
+*unaddressed* nit no row at all; an addressed one is still recorded as
+`fixed`). Say plainly in such a comment that it is a hygiene fix, so the
 non-blocking severity reads as deliberate rather than as a downgrade; and where
 you are unsure whether a
 value describes a real person, say so explicitly and name what would resolve it
