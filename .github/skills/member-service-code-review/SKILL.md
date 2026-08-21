@@ -6,9 +6,11 @@ description: >
   quality dimensions (correctness, error handling, logging, tests, concurrency,
   readability, code truthfulness), how to hold the diff to the repo's documented
   standards for this Goa + NATS + Salesforce Go service, the member-service
-  specifics worth a second look, and the security anchors that make a diff
-  security-relevant here. Use on every PR that changes code, however small; this
-  is the reviewer's line-level lens.
+  specifics worth a second look, and the minimum personal-data rule that applies
+  to every diff including test, doc and generated files. Use on every PR that
+  changes code, however small; this is the reviewer's line-level lens. The
+  security anchors and the full personal-data pass live in
+  `member-service-security-review`.
 ---
 
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->
@@ -136,8 +138,9 @@ Run these on the changed code, scaled to the size of the change:
   request attributes survive. Startup and wiring failures in the composition
   root deliberately abort the process instead — that is not a finding. What is a
   finding is a new log line that drops the context where its siblings carry it,
-  or that emits something the *Security anchors* section says must not be
-  logged.
+  or that emits something the security anchors in
+  `member-service-security-review` say must not be logged — a raw email,
+  personal name, username, or credential above all.
 - **Tests**: new or changed behavior has tests that assert real behavior, not
   that a mock was called. The repo's shape is table-driven tests co-located with
   the code, depending on the port interfaces in `internal/domain/port/` and
@@ -302,100 +305,32 @@ Run these on the changed code, scaled to the size of the change:
   not the absence of a sentence explaining it — a correct new value needs no
   rationale to be correct.
 
-## Security anchors
+## Personal data, and where the security anchors went
 
-These are the boundaries that make a diff security-relevant in this service.
-They describe its shape, not its current line-level guards; verify the concrete
-mechanism in the code each time, and only report what you can trace. If you
-cannot trace a path from attacker-controlled input to a sensitive sink, it is
-not a reportable security finding.
+**Personal data in this diff is Critical wherever it lands** — a log line, an
+error string, a response field, a persisted value, a message payload, a
+generated artifact, a chart value, a doc, a code comment, or a test fixture.
+Test-only, docs-only and generated-only diffs are fully in scope, and no
+"what not to flag" entry in this file or any other reaches this class.
+**The high-confidence floor does not apply to "is this a real person or a
+synthetic placeholder?"** — that question is inherently sub-threshold, so when
+you are unsure, raise it as Critical/High, say you are unsure, and do not
+suppress it. **Never reproduce the value**: report by category and location
+only ("a real corporate email address at `path/to/file.go:42`"), because
+quoting it in a PR comment publishes it a second time.
 
-- **Secrets in the diff.** A hardcoded credential — one that would actually
-  authenticate somewhere — is a finding wherever it appears, including tests,
-  fixtures, chart values, and workflow files, and even when the code path that
-  reads it is dead. Obvious placeholders and sentinels are not: this repo's
-  tests carry values like `fake-token-for-tests`, and `pkg/constants` defines a
-  fixed service-account bearer string that is an identifier rather than a
-  secret. The question is whether the value grants access, not whether it is
-  shaped like a token. Salesforce credentials reach this service only as
-  environment variables sourced from a secret the chart does not create; a diff
-  that inlines one, logs one, or moves one into a values file is a finding.
-- **Authorization is not in the Go code.** Coarse and fine-grained access are
-  both decided by the Heimdall rules in this repo's chart, which template the
-  authorized object out of the request path. Finding no permission check in a new
-  handler tells you nothing and must not be reported as an unprotected endpoint.
-  What is a finding is a secured method with no rule, a rule loosened so an
-  unauthenticated caller reaches a handler that does not itself establish
-  identity, or a rule whose object or relation does not match the resource the
-  handler actually touches. The relation a route requires is not uniform across
-  routes; read the sibling rule rather than assuming.
-- **What the in-process JWT check proves.** The token the service validates is
-  the one Heimdall mints, not the caller's identity-provider token: verifying it
-  proves the request traversed Heimdall and yields a principal claim, and the
-  service refuses a token without one. Do not describe it as validating the
-  user's login. Two switches deliberately weaken this for local development — one
-  that collapses the chart's authorization checks and one that substitutes a
-  fixed principal for token validation. Their existence in the templates is
-  intentional; a diff that changes their defaults, sets them in a values file, or
-  widens what they reach turns off a guard for a deployed cluster, and that is
-  worth saying plainly.
-- **SOQL is assembled by escaping, not by parameter binding.** There is no
-  parameterized-query facility: externally-sourced values are escaped by one of
-  the query helpers in the Salesforce adapter before they are interpolated into
-  a query template, and a new interpolation that skips them is an injection
-  finding. Three details are easy to get wrong in the other direction and are
-  not defects: a pattern escaped for a `LIKE` clause must not be escaped again by
-  the general helper, date-time literals are deliberately emitted unquoted
-  because SOQL rejects them quoted, and an empty set renders as a valid
-  always-false predicate rather than an error. Ground a finding here in the
-  helper the sibling query uses; do not claim injection is structurally
-  impossible in this service, because nothing enforces the convention.
-- **Outbound envelopes carry the caller's bearer token.** The messages this
-  service publishes to the indexer and to fga-sync propagate the incoming
-  authorization header so downstream services act as the caller. Anything that
-  logs, persists, or echoes a whole envelope leaks a live token; the publisher's
-  current habit of logging only subject and size is load-bearing, not incidental.
-- **PII in logs and errors.** Member and contact emails, names and usernames
-  identify people, and this service handles them constantly — one resource even
-  carries an email in the URL path, so it reaches request lines and access logs
-  by design. A redaction helper exists and is applied by hand; it is not
-  automatic, and some existing sites log raw addresses. Those are known drift,
-  not a template to copy: a *new* log or error that emits a raw email, personal
-  name, or credential is a finding, and error strings returned to clients count,
-  since an error that echoes an address leaks it just as effectively. The
-  opaque principal identifier is the deliberate exception — the repo's logging
-  standard asks for it as a stable structured field, and established call sites
-  emit it; it is how a request is traced without naming a person.
-- **Existence masking on nested resources.** A nested resource is authorized
-  against its parent, so the code re-verifies that the child actually belongs to
-  the parent named in the path and answers a mismatch as "not found" rather than
-  "forbidden", to avoid confirming that a record exists. That re-check does not
-  live at a uniform layer — some flows do it in the handler, others in the use
-  case — so a rule about where it belongs is wrong in one direction or the other.
-  What must hold is that every nested read or mutation has one somewhere on its
-  path, and that it does not leak existence.
-- **NATS handlers are unauthenticated by design.** The request/reply subjects
-  this service answers extract no principal and perform no authorization; they
-  trust the bus. Asking for authorization there is unactionable. The rule that
-  bites is narrower and real: a handler must not return data that the HTTP
-  surface gates behind an authorization relation, so a diff that widens a reply
-  payload deserves the question of what the HTTP path would have required to
-  return the same thing.
-- **What the response exposes.** When the diff adds or changes a field on a
-  response, ask whose data it is and which rule gates it. Server-derived fields
-  should not be client-writable, and a newer or less travelled read path that
-  returns the same data behind a weaker rule than its sibling path is the
-  highest-value finding in this area.
-- **Cross-service trust.** Replies from other services' subjects, and the events
-  this service consumes, are untrusted input too. A reply parsed without checking
-  the error shape, or an upstream failure mapped to a validation error so it
-  reads to the caller as their fault, hides real outages and can invert an
-  authorization outcome.
-- **Deployment posture in the chart.** A chart diff that widens exposure — a new
-  route, a broadened rule, a relaxed pod security setting, a port or probe that
-  reaches something previously internal — is in scope, and no check in CI
-  reasons about what it exposes. The chart's *existing* posture is not a finding
-  to file against an author who did not touch it.
+That is the minimum. The full pass — the taxonomy of what is and is not
+personal data, the severity gradient, this service's personal-data sinks, and
+the four rules in this repo that would otherwise bury such a finding — lives in
+`member-service-security-review`
+(`.github/skills/member-service-security-review/SKILL.md`), which also now owns
+this service's **security anchors**: the boundaries that make a diff
+security-relevant here (secrets, the chart-owned authorization model, what the
+JWT check proves, SOQL escaping, bearer-carrying envelopes, PII in logs and
+errors, existence masking, the unauthenticated NATS surface, response exposure,
+cross-service trust, and chart posture). Read that skill for any diff that
+touches one of them, and always for a diff that adds or changes a literal value
+that could describe a real person.
 
 ## What not to flag
 

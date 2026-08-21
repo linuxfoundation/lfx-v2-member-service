@@ -124,3 +124,6 @@ charts/lfx-v2-member-service/values.local.yaml
 
 # Local OrbStack/k8s dev deploy manifest (member-service-local-run/deploy flows)
 local-deploy.yaml
+
+# OAS local souls — never committed
+local-agents/

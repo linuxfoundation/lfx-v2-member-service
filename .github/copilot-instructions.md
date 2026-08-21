@@ -15,8 +15,18 @@ the review method lives in `.github/skills/`:
 - `copilot-code-reviewer` — the entry point: reviewer scope, signal bar, the
   severity vocabulary, and how to decide what is worth a comment.
 - `member-service-code-review` — the line-level implementation lens, this repo's
-  documented standards, and this service's security anchors. Applies to every PR
+  documented standards, and the minimum personal-data rule. Applies to every PR
   that changes code, however small.
+- `member-service-security-review` — this service's security anchors and its
+  personal-data pass. Read it when the diff touches a handler, the Goa design,
+  auth, a KV bucket or cache path, the Salesforce adapters, an emitted indexer or
+  FGA message, a NATS subject, an outbound email, logging, an error path, config
+  or the chart — **and, whatever else the diff touches, whenever it adds or
+  changes a literal value that could describe a real person**: test data, a
+  fixture, a mock or seed record, a Goa `dsl.Example()`, a chart value, a doc or
+  contract example, a code comment, or a generated artifact. A diff that changes
+  only test files, only docs, or only generated output earns that lens on those
+  grounds alone.
 
 Each of these stands on its own and says in its own description when it applies;
 read the ones that apply to the diff in front of you and follow them: together

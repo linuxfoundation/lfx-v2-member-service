@@ -157,10 +157,23 @@ Three sources, each authoritative for its own domain:
    `member-service-code-review` skill
    (`.github/skills/member-service-code-review/SKILL.md`) — it carries the
    line-level method: the grounding technique, the repo's documented standards,
-   the quality dimensions, the member-service specifics, and the security
-   anchors that make a diff security-relevant here. It is the
+   the quality dimensions, and the member-service specifics. It is the
    application-specific review method, not generic advice. If it is already in
    your context, use it; if not, read the file.
+4. **Run the security and privacy lens.** Apply
+   `member-service-security-review`
+   (`.github/skills/member-service-security-review/SKILL.md`) — it carries this
+   service's security anchors and its personal-data pass. Run it when the diff
+   touches a handler, the Goa design, auth, a KV bucket or cache path, the
+   Salesforce adapters, an emitted indexer or FGA message, a NATS subject, an
+   outbound email, logging, an error path, config or the chart.
+   **And run it — whatever else the diff touches, and even when the diff touches
+   nothing else at all — whenever the change adds or alters a literal value that
+   could describe a real person**: test data, a fixture, a mock or seed record, a
+   Goa `dsl.Example()`, a chart value, a doc or contract example, a code comment,
+   or a generated artifact. A test-only, docs-only or generated-only diff earns
+   that lens on those grounds alone. That case is written out explicitly because
+   it is the one that has actually been missed.
 
 ## Signal discipline
 
@@ -176,6 +189,16 @@ costs the author attention; spend it only where it changes the outcome:
   one round of attention, it costs one per push until the PR merges. If you are
   uncertain whether something is an issue, do not comment: prefer silence over a
   speculative or hedged comment ("maybe", "consider", "might").
+  **One judgment is exempt from this bullet, deliberately: "is this value a real
+  person or a synthetic placeholder?"** That question is inherently
+  sub-threshold — the repository rarely holds the evidence that settles it — so
+  applying the floor to it means the answer is always silence, which is exactly
+  how real personal data has reached `main` elsewhere in this estate. When you
+  are unsure, raise it as `critical`/`high`, say plainly that you are unsure, and
+  name what would resolve it. Do not suppress it, and do not fold it into the
+  summary instead of filing it. Report the category and location only, never the
+  value. `member-service-security-review` carries the full rule and the
+  taxonomy.
 - **The changed code only.** Comment only on lines added or modified in this
   PR's diff. Do not comment on pre-existing issues in unchanged code, even when
   it appears as context around the diff — unless the defect is directly
@@ -192,7 +215,13 @@ costs the author attention; spend it only where it changes the outcome:
   linter is Revive, configured by `revive.toml`, not golangci-lint — and runs
   the shared license-header check, alongside blocking secret scanning;
   `.github/workflows/` and `.mega-linter.yml` are the authority for the current
-  set. Lint nits, missing license headers on the file types that check scans,
+  set. One exception, because it is load-bearing: **that secret scanning does
+  not cover personal data.** `.gitleaks.toml:10-20` allowlists `.*_test\.go$`
+  and `^gen/.*\.go$` outright, so every Go test file and every generated Go file
+  is invisible to it — and gitleaks looks for credentials, not for people, in the
+  files it does scan. Nothing in this pipeline looks for a person's name or
+  address anywhere. "CI would have caught it" is never a reason to stay silent
+  about personal data. Lint nits, missing license headers on the file types that check scans,
   and anything the compiler already catches are not findings. Formatting is not
   a finding either, though not because the pipeline catches it: no gofmt or
   golangci-lint check runs in CI and this repo installs no pre-commit hook, so

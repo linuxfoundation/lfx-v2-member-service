@@ -66,11 +66,16 @@ not adjudicated.
 - **The commits since a thread was raised**, which tell you whether it was
   addressed.
 - **The review method.** To judge whether a fix is real or a rebuttal is
-  legitimate, apply `/member-service-code-review`, which carries both the
-  line-level quality lens and this service's security anchors — the section to
-  lean on for anything touching the Heimdall RuleSet, the emitted indexer and
-  FGA messages, an authoritative no-TTL bucket, the Salesforce write path or
-  its API budget, the CDC replay cursor, or logged identifiers. Reviewer scope
+  legitimate, apply `/member-service-code-review`, which carries the line-level
+  quality lens, and `/member-service-security-review`, which carries this
+  service's security anchors and its personal-data pass — the skill to lean on
+  for anything touching the Heimdall RuleSet, the emitted indexer and FGA
+  messages, an authoritative no-TTL bucket, the Salesforce write path or its API
+  budget, the CDC replay cursor, or logged identifiers. A thread raising
+  personal data in a committed value is reconciled under that skill's rules, not
+  the general signal bar: a reviewer that says it is unsure whether a value
+  describes a real person has followed its instructions correctly, and "the
+  reviewer was not confident" is not a valid rebuttal of such a thread. Reviewer scope
   and the signal bar live in `/copilot-code-reviewer`; read it when a rebuttal
   turns on whether a finding was in scope at all. When a thread turns on a
   peer-owned contract, read the central `linuxfoundation/lfx-skills`
