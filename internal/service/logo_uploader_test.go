@@ -186,13 +186,14 @@ type stubLogoOrgWriter struct {
 	// committedLogoURL is what Salesforce actually holds -- set only by an
 	// Update that committed, so a failed one is not mistaken for persisted
 	// state by the precondition re-reads.
-	committedLogoURL string
-	publishedOrg     *model.B2BOrg
-	gotInput         model.B2BOrgInput
-	updateCalls      []model.B2BOrgInput
-	quietUpdateCalls int
-	ifMatches        []string
-	validated        bool
+	committedLogoURL       string
+	publishedOrg           *model.B2BOrg
+	onUpdateWithoutPublish func()
+	gotInput               model.B2BOrgInput
+	updateCalls            []model.B2BOrgInput
+	quietUpdateCalls       int
+	ifMatches              []string
+	validated              bool
 }
 
 func (w *stubLogoOrgWriter) PublishOrgUpdated(_ context.Context, _, org *model.B2BOrg) {
@@ -259,6 +260,9 @@ func (w *stubLogoOrgWriter) Update(_ context.Context, _ string, input model.B2BO
 
 func (w *stubLogoOrgWriter) UpdateWithoutPublish(_ context.Context, _ string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
 	w.quietUpdateCalls++
+	if w.onUpdateWithoutPublish != nil {
+		w.onUpdateWithoutPublish()
+	}
 	return w.update(input, ifMatch)
 }
 
@@ -1093,4 +1097,62 @@ func TestLogoUploader_RepointRecoveryPublishesOrgUpdated(t *testing.T) {
 	assert.Equal(t, keyURL, org.LogoURL)
 	assert.NotNil(t, orgWriter.publishedOrg, "repoint recovery on committed durable URL must publish indexer update")
 	assert.Equal(t, keyURL, orgWriter.publishedOrg.LogoURL)
+}
+
+func TestLogoUploader_CanceledContextAfterCommitStillPromotesAndRepoints(t *testing.T) {
+	// If caller's HTTP context is canceled after the transient Salesforce write
+	// commits, promotion and repointing must run under a detached context so
+	// they succeed and do not leave Salesforce pointing at an expiring scratch URL.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	objectStore := &stubObjectStore{}
+	objectStore.enableKeyedURLs()
+
+	orgWriter := &stubLogoOrgWriter{
+		org: &model.B2BOrg{UID: "uid-1"},
+	}
+	orgWriter.onUpdateWithoutPublish = func() {
+		// Simulate client disconnecting immediately after the first write commits.
+		cancel()
+	}
+
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(ctx, "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	assert.Contains(t, org.LogoURL, "https://cdn.example.com/"+deterministicLogoKey)
+	require.Len(t, objectStore.copyCalls, 1, "promotion must have run despite canceled request context")
+	require.Len(t, orgWriter.updateCalls, 2, "repoint must have run despite canceled request context")
+}
+
+func TestLogoUploader_CanceledContextDuringFailedPromotionStillRollsBack(t *testing.T) {
+	// If caller's context is canceled and promotion fails, the rollback must run
+	// under a detached context and successfully restore/clear Logo_URL__c.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	objectStore := &stubObjectStore{
+		commitErr: errors.New("s3 copy failure"),
+	}
+	objectStore.enableKeyedURLs()
+
+	orgWriter := &stubLogoOrgWriter{
+		org:             &model.B2BOrg{UID: "uid-1"},
+		previousLogoURL: "https://cdn.example.com/b2b_org_logos/uid-1?v=1",
+	}
+	orgWriter.onUpdateWithoutPublish = func() {
+		cancel()
+	}
+
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(ctx, "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.Error(t, err)
+	var svcErr pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &svcErr)
+	assert.Nil(t, org)
+	require.Len(t, orgWriter.updateCalls, 2, "rollback must execute even if caller context is canceled")
+	assert.Equal(t, "https://cdn.example.com/b2b_org_logos/uid-1?v=1", inputLogoURL(orgWriter.updateCalls[1]))
 }
