@@ -585,8 +585,8 @@ func isScratchLogoURL(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	path := "/" + strings.TrimPrefix(parsed.Path, "/")
-	return strings.Contains(path, "/"+logoScratchKeyPrefix)
+	path := strings.TrimPrefix(parsed.Path, "/")
+	return strings.HasPrefix(path, logoScratchKeyPrefix)
 }
 
 // b2bOrgMemberView is the flat per-member wire entry in the indexer doc.

@@ -1191,3 +1191,22 @@ func mapKeys(m map[string]any) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+func TestIsScratchLogoURL(t *testing.T) {
+	cases := []struct {
+		url      string
+		expected bool
+	}{
+		{"https://cdn.example.com/org-logos-public-scratch/uid-1/123.png", true},
+		{"https://cdn.example.com/org-logos-public-scratch/uid-2/abc.svg", true},
+		{"https://cdn.example.com/b2b_org_logos/uid-1", false},
+		{"https://cdn.example.com/assets/org-logos-public-scratch/logo.png", false},
+		{"https://external.example.com/images/org-logos-public-scratch/test.jpg", false},
+		{"", false},
+		{"not-a-valid-url:%%%", false},
+	}
+
+	for _, tc := range cases {
+		assert.Equal(t, tc.expected, isScratchLogoURL(tc.url), "isScratchLogoURL(%q)", tc.url)
+	}
+}
