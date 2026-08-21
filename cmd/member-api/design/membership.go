@@ -169,8 +169,10 @@ var _ = dsl.Service("membership-service", func() {
 	dsl.Method("upload-b2b-org-logo", func() {
 		dsl.Description("Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. " +
 			"The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of " +
-			"image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length " +
-			"set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body " +
+			"image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is " +
+			"not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the " +
+			"generated decoder cannot read, and the size limit is enforced while reading the body regardless. " +
+			"The body isn't reflected as a structured OpenAPI request body " +
 			"because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does " +
 			"not support combining with a Body(...) declaration.")
 
@@ -192,9 +194,6 @@ var _ = dsl.Service("membership-service", func() {
 			IfMatchAttribute()
 			dsl.Attribute("content_type", dsl.String, "MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)", func() {
 				dsl.Example("image/png")
-			})
-			dsl.Attribute("content_length", dsl.Int64, "Size of the uploaded logo in bytes", func() {
-				dsl.Example(102400)
 			})
 			dsl.Required("uid", "content_type", "if_match")
 		})
@@ -220,7 +219,6 @@ var _ = dsl.Service("membership-service", func() {
 			dsl.Param("uid")
 			dsl.Header("if_match:If-Match")
 			dsl.Header("content_type:Content-Type")
-			dsl.Header("content_length:Content-Length")
 			// Goa forbids Body(...) together with SkipRequestBodyEncodeDecode
 			// ("Cannot define a request body when using
 			// SkipRequestBodyEncodeDecode") so the raw binary body can't be

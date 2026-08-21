@@ -219,6 +219,20 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	promoteCtx, promoteCancel := context.WithTimeout(context.WithoutCancel(ctx), promoteTimeout)
 	defer promoteCancel()
 
+	// UpdateB2BOrg re-fetches after its PATCH, so the record handed back can
+	// already describe a concurrent upload's commit rather than this one's.
+	// Promoting on the strength of that record would push these bytes onto the
+	// shared key under the other attempt's ordering, overwriting the logo
+	// Salesforce actually points at.
+	if updated.LogoURL != keyURL {
+		slog.WarnContext(promoteCtx, "a concurrent logo upload won the commit; abandoning this promotion",
+			"b2b_org_uid", uid, "scratch_key", scratchKey, "key", key)
+		// The winner owns both the URL and the bytes, so nothing references
+		// this attempt's scratch object and the winner does its own publish.
+		scratchResolved = true
+		return updated, nil
+	}
+
 	// generation orders this promotion against any concurrent attempt.
 	// CopyIfNewer refuses to let an older generation's copy land once a newer
 	// one has already committed to key.

@@ -29,10 +29,13 @@ type Service interface {
 	// set it as the org's logo URL. The request body is the raw logo image bytes
 	// -- not a JSON envelope -- sent with Content-Type set to one of image/png,
 	// image/jpeg, or image/svg+xml (echoed in the content_type header attribute
-	// below), and Content-Length set to the byte count (echoed in content_length).
-	// This isn't reflected as a structured OpenAPI request body because this
-	// endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which
-	// Goa's generator does not support combining with a Body(...) declaration.
+	// below). Content-Length is not modeled as a payload attribute: net/http moves
+	// it off the header map onto Request.ContentLength, which the generated
+	// decoder cannot read, and the size limit is enforced while reading the body
+	// regardless. The body isn't reflected as a structured OpenAPI request body
+	// because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming
+	// access, which Goa's generator does not support combining with a Body(...)
+	// declaration.
 	UploadB2bOrgLogo(context.Context, *UploadB2bOrgLogoPayload, io.ReadCloser) (res *UploadB2bOrgLogoResult, err error)
 	// Get the access-control settings (writers and auditors) for a B2B organization
 	GetB2bOrgSettings(context.Context, *GetB2bOrgSettingsPayload) (res *GetB2bOrgSettingsResult, err error)
@@ -894,8 +897,6 @@ type UploadB2bOrgLogoPayload struct {
 	IfMatch string
 	// MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
 	ContentType string
-	// Size of the uploaded logo in bytes
-	ContentLength *int64
 }
 
 // UploadB2bOrgLogoResult is the result type of the membership-service service

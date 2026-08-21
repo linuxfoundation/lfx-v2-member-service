@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
@@ -667,11 +666,6 @@ func EncodeUploadB2bOrgLogoRequest(encoder func(*http.Request) goahttp.Encoder) 
 		{
 			head := p.ContentType
 			req.Header.Set("Content-Type", head)
-		}
-		if p.ContentLength != nil {
-			head := *p.ContentLength
-			headStr := strconv.FormatInt(head, 10)
-			req.Header.Set("Content-Length", headStr)
 		}
 		values := req.URL.Query()
 		if p.Version != nil {

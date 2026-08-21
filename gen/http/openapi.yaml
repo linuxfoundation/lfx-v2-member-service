@@ -295,7 +295,7 @@ paths:
             tags:
                 - membership-service
             summary: upload-b2b-org-logo membership-service
-            description: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.
+            description: 'Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org''s logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn''t reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa''s generator does not support combining with a Body(...) declaration.'
             operationId: membership-service#upload-b2b-org-logo
             parameters:
                 - name: v
@@ -325,12 +325,6 @@ paths:
                   description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
                   required: true
                   type: string
-                - name: Content-Length
-                  in: header
-                  description: Size of the uploaded logo in bytes
-                  required: false
-                  type: integer
-                  format: int64
             responses:
                 "200":
                     description: OK response.

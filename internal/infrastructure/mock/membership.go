@@ -404,9 +404,14 @@ func (m *MockObjectStoreWriter) Put(_ context.Context, _ string, _ string, _ []b
 	return "", errors.NewNotImplemented("upload-b2b-org-logo not implemented in mock")
 }
 
-// VersionedURL returns an empty string; never reached since Put always fails.
-func (m *MockObjectStoreWriter) VersionedURL(_ string) string {
-	return ""
+// mockObjectStoreVersion keeps mock URLs deterministic across calls.
+const mockObjectStoreVersion = 1
+
+// VersionedURL returns a syntactically valid deterministic URL. Callers derive
+// other keys from it before ever calling Put, so an empty string would fail
+// them earlier and hide the typed NotImplemented error Put exists to return.
+func (m *MockObjectStoreWriter) VersionedURL(key string) string {
+	return fmt.Sprintf("https://mock-object-store.invalid/%s?v=%d", key, mockObjectStoreVersion)
 }
 
 // Delete always returns not-implemented.

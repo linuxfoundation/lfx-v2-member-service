@@ -11,7 +11,6 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"unicode/utf8"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
@@ -174,7 +173,7 @@ func BuildUpdateB2bOrgPayload(membershipServiceUpdateB2bOrgBody string, membersh
 
 // BuildUploadB2bOrgLogoPayload builds the payload for the membership-service
 // upload-b2b-org-logo endpoint from CLI flags.
-func BuildUploadB2bOrgLogoPayload(membershipServiceUploadB2bOrgLogoUID string, membershipServiceUploadB2bOrgLogoVersion string, membershipServiceUploadB2bOrgLogoBearerToken string, membershipServiceUploadB2bOrgLogoIfMatch string, membershipServiceUploadB2bOrgLogoContentType string, membershipServiceUploadB2bOrgLogoContentLength string) (*membershipservice.UploadB2bOrgLogoPayload, error) {
+func BuildUploadB2bOrgLogoPayload(membershipServiceUploadB2bOrgLogoUID string, membershipServiceUploadB2bOrgLogoVersion string, membershipServiceUploadB2bOrgLogoBearerToken string, membershipServiceUploadB2bOrgLogoIfMatch string, membershipServiceUploadB2bOrgLogoContentType string) (*membershipservice.UploadB2bOrgLogoPayload, error) {
 	var err error
 	var uid string
 	{
@@ -206,23 +205,12 @@ func BuildUploadB2bOrgLogoPayload(membershipServiceUploadB2bOrgLogoUID string, m
 	{
 		contentType = membershipServiceUploadB2bOrgLogoContentType
 	}
-	var contentLength *int64
-	{
-		if membershipServiceUploadB2bOrgLogoContentLength != "" {
-			val, err := strconv.ParseInt(membershipServiceUploadB2bOrgLogoContentLength, 10, 64)
-			contentLength = &val
-			if err != nil {
-				return nil, fmt.Errorf("invalid value for contentLength, must be INT64")
-			}
-		}
-	}
 	v := &membershipservice.UploadB2bOrgLogoPayload{}
 	v.UID = uid
 	v.Version = version
 	v.BearerToken = bearerToken
 	v.IfMatch = ifMatch
 	v.ContentType = contentType
-	v.ContentLength = contentLength
 
 	return v, nil
 }

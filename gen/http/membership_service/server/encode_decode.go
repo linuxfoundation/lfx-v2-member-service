@@ -13,7 +13,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
@@ -555,13 +554,12 @@ func DecodeUploadB2bOrgLogoRequest(mux goahttp.Muxer, decoder func(*http.Request
 	return func(r *http.Request) (*membershipservice.UploadB2bOrgLogoPayload, error) {
 		var payload *membershipservice.UploadB2bOrgLogoPayload
 		var (
-			uid           string
-			version       *string
-			bearerToken   *string
-			ifMatch       string
-			contentType   string
-			contentLength *int64
-			err           error
+			uid         string
+			version     *string
+			bearerToken *string
+			ifMatch     string
+			contentType string
+			err         error
 
 			params = mux.Vars(r)
 		)
@@ -587,20 +585,10 @@ func DecodeUploadB2bOrgLogoRequest(mux goahttp.Muxer, decoder func(*http.Request
 		if contentType == "" {
 			err = goa.MergeErrors(err, goa.MissingFieldError("content_type", "header"))
 		}
-		{
-			contentLengthRaw := r.Header.Get("Content-Length")
-			if contentLengthRaw != "" {
-				v, err2 := strconv.ParseInt(contentLengthRaw, 10, 64)
-				if err2 != nil {
-					err = goa.MergeErrors(err, goa.InvalidFieldTypeError("content_length", contentLengthRaw, "integer"))
-				}
-				contentLength = &v
-			}
-		}
 		if err != nil {
 			return payload, err
 		}
-		payload = NewUploadB2bOrgLogoPayload(uid, version, bearerToken, ifMatch, contentType, contentLength)
+		payload = NewUploadB2bOrgLogoPayload(uid, version, bearerToken, ifMatch, contentType)
 		if payload.BearerToken != nil {
 			if strings.Contains(*payload.BearerToken, " ") {
 				// Remove authorization scheme prefix (e.g. "Bearer")

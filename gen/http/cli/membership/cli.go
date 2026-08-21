@@ -65,14 +65,13 @@ func ParseEndpoint(
 		membershipServiceUpdateB2bOrgBearerTokenFlag = membershipServiceUpdateB2bOrgFlags.String("bearer-token", "", "")
 		membershipServiceUpdateB2bOrgIfMatchFlag     = membershipServiceUpdateB2bOrgFlags.String("if-match", "", "")
 
-		membershipServiceUploadB2bOrgLogoFlags             = flag.NewFlagSet("upload-b2b-org-logo", flag.ExitOnError)
-		membershipServiceUploadB2bOrgLogoUIDFlag           = membershipServiceUploadB2bOrgLogoFlags.String("uid", "REQUIRED", "B2B organization UID")
-		membershipServiceUploadB2bOrgLogoVersionFlag       = membershipServiceUploadB2bOrgLogoFlags.String("version", "", "")
-		membershipServiceUploadB2bOrgLogoBearerTokenFlag   = membershipServiceUploadB2bOrgLogoFlags.String("bearer-token", "", "")
-		membershipServiceUploadB2bOrgLogoIfMatchFlag       = membershipServiceUploadB2bOrgLogoFlags.String("if-match", "REQUIRED", "")
-		membershipServiceUploadB2bOrgLogoContentTypeFlag   = membershipServiceUploadB2bOrgLogoFlags.String("content-type", "REQUIRED", "")
-		membershipServiceUploadB2bOrgLogoContentLengthFlag = membershipServiceUploadB2bOrgLogoFlags.String("content-length", "", "")
-		membershipServiceUploadB2bOrgLogoStreamFlag        = membershipServiceUploadB2bOrgLogoFlags.String("stream", "REQUIRED", "path to file containing the streamed request body")
+		membershipServiceUploadB2bOrgLogoFlags           = flag.NewFlagSet("upload-b2b-org-logo", flag.ExitOnError)
+		membershipServiceUploadB2bOrgLogoUIDFlag         = membershipServiceUploadB2bOrgLogoFlags.String("uid", "REQUIRED", "B2B organization UID")
+		membershipServiceUploadB2bOrgLogoVersionFlag     = membershipServiceUploadB2bOrgLogoFlags.String("version", "", "")
+		membershipServiceUploadB2bOrgLogoBearerTokenFlag = membershipServiceUploadB2bOrgLogoFlags.String("bearer-token", "", "")
+		membershipServiceUploadB2bOrgLogoIfMatchFlag     = membershipServiceUploadB2bOrgLogoFlags.String("if-match", "REQUIRED", "")
+		membershipServiceUploadB2bOrgLogoContentTypeFlag = membershipServiceUploadB2bOrgLogoFlags.String("content-type", "REQUIRED", "")
+		membershipServiceUploadB2bOrgLogoStreamFlag      = membershipServiceUploadB2bOrgLogoFlags.String("stream", "REQUIRED", "path to file containing the streamed request body")
 
 		membershipServiceGetB2bOrgSettingsFlags           = flag.NewFlagSet("get-b2b-org-settings", flag.ExitOnError)
 		membershipServiceGetB2bOrgSettingsUIDFlag         = membershipServiceGetB2bOrgSettingsFlags.String("uid", "REQUIRED", "B2B organization UID")
@@ -369,7 +368,7 @@ func ParseEndpoint(
 				data, err = membershipservicec.BuildUpdateB2bOrgPayload(*membershipServiceUpdateB2bOrgBodyFlag, *membershipServiceUpdateB2bOrgUIDFlag, *membershipServiceUpdateB2bOrgVersionFlag, *membershipServiceUpdateB2bOrgBearerTokenFlag, *membershipServiceUpdateB2bOrgIfMatchFlag)
 			case "upload-b2b-org-logo":
 				endpoint = c.UploadB2bOrgLogo()
-				data, err = membershipservicec.BuildUploadB2bOrgLogoPayload(*membershipServiceUploadB2bOrgLogoUIDFlag, *membershipServiceUploadB2bOrgLogoVersionFlag, *membershipServiceUploadB2bOrgLogoBearerTokenFlag, *membershipServiceUploadB2bOrgLogoIfMatchFlag, *membershipServiceUploadB2bOrgLogoContentTypeFlag, *membershipServiceUploadB2bOrgLogoContentLengthFlag)
+				data, err = membershipservicec.BuildUploadB2bOrgLogoPayload(*membershipServiceUploadB2bOrgLogoUIDFlag, *membershipServiceUploadB2bOrgLogoVersionFlag, *membershipServiceUploadB2bOrgLogoBearerTokenFlag, *membershipServiceUploadB2bOrgLogoIfMatchFlag, *membershipServiceUploadB2bOrgLogoContentTypeFlag)
 				if err == nil {
 					data, err = membershipservicec.BuildUploadB2bOrgLogoStreamPayload(data, *membershipServiceUploadB2bOrgLogoStreamFlag)
 				}
@@ -449,7 +448,7 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    get-b2b-org: Get a specific B2B organization by UID`)
 	fmt.Fprintln(os.Stderr, `    create-b2b-org: Create a new B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org: Update a B2B organization`)
-	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
+	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
 	fmt.Fprintln(os.Stderr, `    get-b2b-org-settings: Get the access-control settings (writers and auditors) for a B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-settings: Replace the writers and/or auditors list on a B2B organization (full-replace semantics)`)
 	fmt.Fprintln(os.Stderr, `    add-b2b-org-settings-user: Add (invite) a single principal to a B2B organization's writers or auditors. Per-principal merge: existing members are preserved; the new entry lands as a pending invite (no username yet).`)
@@ -556,13 +555,12 @@ func membershipServiceUploadB2bOrgLogoUsage() {
 	fmt.Fprint(os.Stderr, " -bearer-token STRING")
 	fmt.Fprint(os.Stderr, " -if-match STRING")
 	fmt.Fprint(os.Stderr, " -content-type STRING")
-	fmt.Fprint(os.Stderr, " -content-length INT64")
 	fmt.Fprint(os.Stderr, " -stream STRING")
 	fmt.Fprintln(os.Stderr)
 
 	// Description
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below), and Content-Length set to the byte count (echoed in content_length). This isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
+	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
 
 	// Flags list
 	fmt.Fprintln(os.Stderr, `    -uid STRING: B2B organization UID`)
@@ -570,12 +568,11 @@ func membershipServiceUploadB2bOrgLogoUsage() {
 	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
 	fmt.Fprintln(os.Stderr, `    -if-match STRING: `)
 	fmt.Fprintln(os.Stderr, `    -content-type STRING: `)
-	fmt.Fprintln(os.Stderr, `    -content-length INT64: `)
 	fmt.Fprintln(os.Stderr, `    -stream STRING: path to file containing the streamed request body`)
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service upload-b2b-org-logo --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\" --content-type \"image/png\" --content-length 102400 --stream \"goa.png\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service upload-b2b-org-logo --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\" --content-type \"image/png\" --stream \"goa.png\"")
 }
 
 func membershipServiceGetB2bOrgSettingsUsage() {

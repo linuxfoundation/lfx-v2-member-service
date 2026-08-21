@@ -635,6 +635,27 @@ func TestLogoUploader_RetainsScratchWhenRollbackFails(t *testing.T) {
 	assert.Empty(t, objectStore.deletedKey, "scratch bytes must be retained while Salesforce may still point at the unpromoted key")
 }
 
+// UpdateB2BOrg re-fetches after its PATCH, so a success can still hand back a
+// record describing a concurrent upload's commit. Promoting on that record
+// would push these bytes onto the shared key under the winner's ordering,
+// overwriting the logo Salesforce actually points at.
+func TestLogoUploader_AbandonsWhenCommitReturnsAnotherUploadsURL(t *testing.T) {
+	objectStore := &stubObjectStore{url: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1"}
+	orgWriter := &stubLogoOrgWriter{
+		org:          &model.B2BOrg{UID: "uid-1"},
+		racedLogoURL: "https://cdn.example.com/b2b_org_logos/uid-1.png?v=2",
+	}
+	uploader := svc.NewLogoUploader(objectStore, orgWriter)
+
+	org, err := uploader.UploadB2BOrgLogo(context.Background(), "uid-1", "image/png", strings.NewReader(validPNGBytes), "")
+
+	require.NoError(t, err)
+	require.NotNil(t, org)
+	assert.Empty(t, objectStore.copyCalls, "must not promote bytes the record no longer points at")
+	assert.Nil(t, orgWriter.publishedOrg, "the winning upload publishes; this one must not")
+	assert.Equal(t, objectStore.putKeys[0], objectStore.deletedKey, "nothing references this attempt's scratch object")
+}
+
 func TestLogoUploader_PromotionFailureRollsBackSalesforce(t *testing.T) {
 	objectStore := &stubObjectStore{
 		url:       "https://cdn.example.com/b2b_org_logos/uid-1.png?v=1",
