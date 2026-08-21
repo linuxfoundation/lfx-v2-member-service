@@ -134,13 +134,15 @@ corporate email address at `path/to/file.ts:42`". Replace any quoted value with
 ## Personal data in this service
 
 Everything above is estate-wide and identical in all seven LFX repositories that
-carry it. What follows is specific to `lfx-v2-member-service`.
+carry it. What follows is specific to `lfx-v2-member-service`. It tells you
+where this repo's personal data actually lives, and which of this repo's own
+rules would otherwise silence a finding about it.
 
-**One reading note first, because the block compresses two rules that look like
-they collide.** *Severity gradient* calls a synthetic local part on a real mail
-domain a low-severity defect; *Signal discipline is overridden* says to treat an
-address as real unless the local part is clearly synthetic **and** the domain is
-reserved. They govern different steps, and read in order they agree:
+**One reading note before that, because the block compresses two rules that look
+like they collide.** *Severity gradient* calls a synthetic local part on a real
+mail domain a low-severity defect; *Signal discipline is overridden* says to
+treat an address as real unless the local part is clearly synthetic **and** the
+domain is reserved. They govern different steps, and read in order they agree:
 
 - **Is the local part clearly synthetic?** If no, you cannot tell whether this is
   a person — raise it at Critical/High and say you are unsure. That is the
@@ -152,9 +154,7 @@ reserved. They govern different steps, and read in order they agree:
 
 So the "and the domain is reserved" half decides whether you can stay *silent*,
 not whether something is Critical. A clearly synthetic local part never reaches
-Critical on the strength of its domain alone. It tells you where
-this repo's personal data actually lives and which of this repo's own rules would
-otherwise silence a finding about it.
+Critical on the strength of its domain alone.
 
 **This section is preventive.** As of writing, this repository is clean: there
 are no LF-corporate, contractor, or major consumer mail domains anywhere on
@@ -163,9 +163,10 @@ read this section as a list of known defects and do not go looking for a
 remediation item that does not exist. It exists so the first real one does not
 merge.
 
-### Four rules in this repo would otherwise bury a personal-data finding
+### Five rules in this repo would otherwise bury a personal-data finding
 
-Clear all four. Clearing three leaves the class suppressed.
+Clear all five. Each one silences the class on its own, so clearing four leaves
+it suppressed.
 
 1. **The dataflow framing.** The *Durable threat anchors* section below opens by
    saying that an untraceable path from attacker-controlled input to a sensitive
@@ -187,6 +188,18 @@ Clear all four. Clearing three leaves the class suppressed.
    every Go test file and every generated Go file in this repo is invisible to
    it, and no check anywhere looks for a person's name or address. "CI has it"
    is never a reason to stay silent here.
+
+5. **The unreadable-surface rule** — the silence clause in
+   `copilot-code-reviewer/SKILL.md`'s **Your knowledge sources** section, and
+   **Know your limits** in `member-service-code-review/SKILL.md`. Both say that a
+   finding you cannot confirm must not be raised at all, "not as a defect, and
+   not as a question for the author". This one silences the class *independently
+   of the floor*, and it forbids the remedy the override prescribes: whether a
+   committed literal belongs to a real person is never resolvable from any
+   repository, so "raise it and say you are unsure" is exactly the hedged
+   question that clause bars. Both files now carve it out, and so does this
+   skill's own per-fact step 4 — the rule governs unreadable *system* facts, not
+   the identity of a value in the diff.
 
 ### Where personal data lives in this repo
 
@@ -326,6 +339,23 @@ object it describes is a person, that is the moment to ask.
 - **Organization domains.** A company's mail or web domain appearing as an
   organization attribute is not a personal address, and several Salesforce tests
   legitimately carry real ones.
+
+### What this lens does not reach
+
+Raising a finding is not the same as routing a PR to a human. This repo's
+escalation surface (`.github/skills/escalation-guidelines/SKILL.md`) frames
+personal data as a *runtime emission* — something that could reach logs, traces,
+indexed documents or error responses. A fixture, a design example, a chart value
+or a doc that commits a real person's data emits through none of those; it is
+published by the merge itself. So a personal-data finding raised under this skill
+is **not**, today, a thing the needs-human gate is guaranteed to escalate on that
+ground.
+
+That is a known gap, recorded here so it is not read as an oversight by the next
+auditor. Closing it changes what escalates to a human, which is the gate owner's
+decision and not this skill's to make. Until it is closed, weight the inline
+finding accordingly: it is the only signal in the pipeline that carries this
+class.
 
 ### Audit-log exception
 
@@ -508,5 +538,7 @@ For a personal-data finding, the shape is different and is set by the *Personal
 data in this diff* section: give the **category and location only**, never the
 value; state the severity from the gradient; and where you are unsure whether a
 value describes a real person, say so explicitly and name what would resolve it
-rather than resolving it toward silence. Post it as its own inline comment — not
-as a line in the summary.
+rather than resolving it toward silence. Such a finding is filed as its own
+inline comment and never folded into the summary — this skill does not publish
+anything itself, so give the finding that shape and let the reviewer skill, which
+owns posting, carry it there.

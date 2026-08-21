@@ -164,7 +164,8 @@ Three sources, each authoritative for its own domain:
      shapes, or a backfill or reindex path actually accepts that record type,
      there is nothing to raise: the finding is data the change would strand, not
      a missing explanation of how it was handled.
-3. **Judge the implementation.** For any change to code, apply the
+3. **Judge the implementation.** On every pull request, however small — including
+   one that changes only tests, only docs, or only generated output — apply the
    `member-service-code-review` skill
    (`.github/skills/member-service-code-review/SKILL.md`) — it carries the
    line-level method: the grounding technique, the repo's documented standards,

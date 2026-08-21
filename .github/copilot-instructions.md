@@ -15,8 +15,9 @@ the personal data it commits, the review method lives in `.github/skills/`:
 - `copilot-code-reviewer` — the entry point: reviewer scope, signal bar, the
   severity vocabulary, and how to decide what is worth a comment.
 - `member-service-code-review` — the line-level implementation lens, this repo's
-  documented standards, and the minimum personal-data rule. Applies to every PR
-  that changes code, however small.
+  documented standards, and the minimum personal-data rule. Applies to every pull
+  request, however small — including one that changes only tests, only docs, or
+  only generated output.
 - `member-service-security-review` — this service's security anchors and its
   personal-data pass. Read it when the diff touches a handler, the Goa design,
   auth, a KV bucket or cache path, the Salesforce adapters, an emitted indexer or
