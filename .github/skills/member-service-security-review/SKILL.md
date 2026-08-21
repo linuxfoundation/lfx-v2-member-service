@@ -195,7 +195,6 @@ it suppressed.
    every Go test file and every generated Go file in this repo is invisible to
    it, and no check anywhere looks for a person's name or address. "CI has it"
    is never a reason to stay silent here.
-
 5. **The unreadable-surface rule** — the silence clause in
    `copilot-code-reviewer/SKILL.md`'s **Your knowledge sources** section, and
    **Know your limits** in `member-service-code-review/SKILL.md`. Both say that a
@@ -552,10 +551,9 @@ low-severity band (a clearly synthetic local part on a non-reserved domain) is
 `[nit]`, which by design does not block (the conductor gives an
 *unaddressed* nit no row at all; an addressed one is still recorded as
 `fixed`). Say plainly in such a comment that it is a hygiene fix, so the
-non-blocking severity reads as deliberate rather than as a downgrade; and
-where you are
-unsure whether a value describes a real person, say so explicitly and name what
-would resolve it rather than resolving it toward silence. Such a finding is
-filed as its own inline comment and never folded into the summary — this skill
-does not publish anything itself, so give the finding that shape and let the
-reviewer skill, which owns posting, carry it there.
+non-blocking severity reads as deliberate rather than as a downgrade; and where
+you are unsure whether a value describes a real person, say so explicitly and
+name what would resolve it rather than resolving it toward silence. Such a
+finding is filed as its own inline comment and never folded into the summary —
+this skill does not publish anything itself, so give the finding that shape and
+let the reviewer skill, which owns posting, carry it there.
