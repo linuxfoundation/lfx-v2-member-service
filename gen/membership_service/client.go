@@ -10,6 +10,7 @@ package membershipservice
 
 import (
 	"context"
+	"io"
 
 	goa "goa.design/goa/v3/pkg"
 )
@@ -19,6 +20,7 @@ type Client struct {
 	GetB2bOrgEndpoint                      goa.Endpoint
 	CreateB2bOrgEndpoint                   goa.Endpoint
 	UpdateB2bOrgEndpoint                   goa.Endpoint
+	UploadB2bOrgLogoEndpoint               goa.Endpoint
 	GetB2bOrgSettingsEndpoint              goa.Endpoint
 	UpdateB2bOrgSettingsEndpoint           goa.Endpoint
 	AddB2bOrgSettingsUserEndpoint          goa.Endpoint
@@ -43,11 +45,12 @@ type Client struct {
 
 // NewClient initializes a "membership-service" service client given the
 // endpoints.
-func NewClient(getB2bOrg, createB2bOrg, updateB2bOrg, getB2bOrgSettings, updateB2bOrgSettings, addB2bOrgSettingsUser, updateB2bOrgSettingsUserRole, deleteB2bOrgSettingsUser, getProjectMembership, getKeyContact, createKeyContact, updateKeyContact, deleteKeyContact, adminReindex, readyz, livez, debugVars, createB2bOrgWorkspace, updateB2bOrgWorkspace, deleteB2bOrgWorkspace, addB2bOrgWorkspaceProject, bulkAddB2bOrgWorkspaceProjects, removeB2bOrgWorkspaceProject goa.Endpoint) *Client {
+func NewClient(getB2bOrg, createB2bOrg, updateB2bOrg, uploadB2bOrgLogo, getB2bOrgSettings, updateB2bOrgSettings, addB2bOrgSettingsUser, updateB2bOrgSettingsUserRole, deleteB2bOrgSettingsUser, getProjectMembership, getKeyContact, createKeyContact, updateKeyContact, deleteKeyContact, adminReindex, readyz, livez, debugVars, createB2bOrgWorkspace, updateB2bOrgWorkspace, deleteB2bOrgWorkspace, addB2bOrgWorkspaceProject, bulkAddB2bOrgWorkspaceProjects, removeB2bOrgWorkspaceProject goa.Endpoint) *Client {
 	return &Client{
 		GetB2bOrgEndpoint:                      getB2bOrg,
 		CreateB2bOrgEndpoint:                   createB2bOrg,
 		UpdateB2bOrgEndpoint:                   updateB2bOrg,
+		UploadB2bOrgLogoEndpoint:               uploadB2bOrgLogo,
 		GetB2bOrgSettingsEndpoint:              getB2bOrgSettings,
 		UpdateB2bOrgSettingsEndpoint:           updateB2bOrgSettings,
 		AddB2bOrgSettingsUserEndpoint:          addB2bOrgSettingsUser,
@@ -126,6 +129,25 @@ func (c *Client) UpdateB2bOrg(ctx context.Context, p *UpdateB2bOrgPayload) (res 
 		return
 	}
 	return ires.(*UpdateB2bOrgResult), nil
+}
+
+// UploadB2bOrgLogo calls the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+// UploadB2bOrgLogo may return the following errors:
+//   - "NotImplemented" (type *goa.ServiceError): Endpoint not implemented
+//   - "NotFound" (type *goa.ServiceError): Resource not found
+//   - "BadRequest" (type *goa.ServiceError): Bad request (unsupported content type or file too large)
+//   - "PreconditionFailed" (type *goa.ServiceError): Precondition failed
+//   - "InternalServerError" (type *goa.ServiceError): Internal server error
+//   - "ServiceUnavailable" (type *goa.ServiceError): Service unavailable
+//   - error: internal error
+func (c *Client) UploadB2bOrgLogo(ctx context.Context, p *UploadB2bOrgLogoPayload, req io.ReadCloser) (res *UploadB2bOrgLogoResult, err error) {
+	var ires any
+	ires, err = c.UploadB2bOrgLogoEndpoint(ctx, &UploadB2bOrgLogoRequestData{Payload: p, Body: req})
+	if err != nil {
+		return
+	}
+	return ires.(*UploadB2bOrgLogoResult), nil
 }
 
 // GetB2bOrgSettings calls the "get-b2b-org-settings" endpoint of the

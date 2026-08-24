@@ -166,6 +166,80 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
+	dsl.Method("upload-b2b-org-logo", func() {
+		dsl.Description("Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. " +
+			"The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of " +
+			"image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is " +
+			"not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the " +
+			"generated decoder cannot read, and the size limit is enforced while reading the body regardless. " +
+			"The body isn't reflected as a structured OpenAPI request body " +
+			"because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does " +
+			"not support combining with a Body(...) declaration.")
+
+		dsl.Security(JWTAuth)
+
+		dsl.Payload(func() {
+			BearerTokenAttribute()
+			VersionAttribute()
+			dsl.Attribute("uid", dsl.String, "B2B organization UID", func() {
+				dsl.Example("001B000000IqhSLIAZ")
+			})
+			// if_match is mandatory here, unlike the other If-Match-bearing
+			// methods in this file: this endpoint writes bytes to a shared
+			// object-storage key, so without a real optimistic-concurrency
+			// check two concurrent uploads can both call Update successfully
+			// and leave the final Salesforce URL and the final object-storage
+			// bytes chosen by two independently-raced writes (see the
+			// LFXV2-2016 Copilot review on PR #87).
+			IfMatchAttribute()
+			dsl.Attribute("content_type", dsl.String, "MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)", func() {
+				dsl.Example("image/png")
+			})
+			dsl.Required("uid", "content_type", "if_match")
+		})
+
+		dsl.Result(func() {
+			dsl.Attribute("b2b_org", B2BOrgResponse, "Updated B2B organization")
+			ETagAttribute()
+			LastModifiedAttribute()
+			dsl.Required("b2b_org")
+		})
+
+		dsl.Error("NotImplemented", dsl.ErrorResult, "Endpoint not implemented")
+		dsl.Error("NotFound", dsl.ErrorResult, "Resource not found")
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request (unsupported content type or file too large)")
+		dsl.Error("PreconditionFailed", dsl.ErrorResult, "Precondition failed")
+		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
+		dsl.Error("ServiceUnavailable", dsl.ErrorResult, "Service unavailable", func() { dsl.Temporary() })
+
+		dsl.HTTP(func() {
+			dsl.POST("/b2b_orgs/{uid}/logo")
+			dsl.Header("bearer_token:Authorization")
+			dsl.Param("version:v")
+			dsl.Param("uid")
+			dsl.Header("if_match:If-Match")
+			dsl.Header("content_type:Content-Type")
+			// Goa forbids Body(...) together with SkipRequestBodyEncodeDecode
+			// ("Cannot define a request body when using
+			// SkipRequestBodyEncodeDecode") so the raw binary body can't be
+			// modeled structurally for OpenAPI here -- it's documented in
+			// prose on the method Description above instead (see the
+			// LFXV2-2016 Copilot review on PR #87).
+			dsl.SkipRequestBodyEncodeDecode()
+			dsl.Response(dsl.StatusOK, func() {
+				dsl.Header("etag:ETag")
+				dsl.Header("last_modified:Last-Modified")
+				dsl.Body("b2b_org")
+			})
+			dsl.Response("NotImplemented", dsl.StatusNotImplemented)
+			dsl.Response("NotFound", dsl.StatusNotFound)
+			dsl.Response("BadRequest", dsl.StatusBadRequest)
+			dsl.Response("PreconditionFailed", dsl.StatusPreconditionFailed)
+			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
+			dsl.Response("ServiceUnavailable", dsl.StatusServiceUnavailable)
+		})
+	})
+
 	dsl.Method("get-b2b-org-settings", func() {
 		dsl.Description("Get the access-control settings (writers and auditors) for a B2B organization")
 

@@ -390,6 +390,40 @@ func (m *MockB2BOrgWriter) UpdateB2BOrg(_ context.Context, _ string, _ model.B2B
 	return nil, errors.NewNotImplemented("update-b2b-org not implemented in mock")
 }
 
+// MockObjectStoreWriter is a stub implementation of port.ObjectStoreWriter for
+// local development when REPOSITORY_SOURCE=mock.
+type MockObjectStoreWriter struct{}
+
+// NewMockObjectStoreWriter creates a new MockObjectStoreWriter.
+func NewMockObjectStoreWriter() *MockObjectStoreWriter {
+	return &MockObjectStoreWriter{}
+}
+
+// Put always returns not-implemented.
+func (m *MockObjectStoreWriter) Put(_ context.Context, _ string, _ string, _ []byte) (string, error) {
+	return "", errors.NewNotImplemented("upload-b2b-org-logo not implemented in mock")
+}
+
+// mockObjectStoreVersion keeps mock URLs deterministic across calls.
+const mockObjectStoreVersion = 1
+
+// VersionedURL returns a syntactically valid deterministic URL. Callers derive
+// other keys from it before ever calling Put, so an empty string would fail
+// them earlier and hide the typed NotImplemented error Put exists to return.
+func (m *MockObjectStoreWriter) VersionedURL(key string) string {
+	return fmt.Sprintf("https://mock-object-store.invalid/%s?v=%d", key, mockObjectStoreVersion)
+}
+
+// Delete always returns not-implemented.
+func (m *MockObjectStoreWriter) Delete(_ context.Context, _ string) error {
+	return errors.NewNotImplemented("delete-b2b-org-logo not implemented in mock")
+}
+
+// CopyIfNewer always returns not-implemented.
+func (m *MockObjectStoreWriter) CopyIfNewer(_ context.Context, _, _ string, _ int64) error {
+	return errors.NewNotImplemented("copy-b2b-org-logo not implemented in mock")
+}
+
 // MockMemberPublisher is a no-op implementation of port.MemberPublisher for
 // local development when MESSAGING_SOURCE=mock. All messages are logged but
 // not published to NATS.

@@ -21,6 +21,19 @@ import (
 type B2BOrgWriter interface {
 	Create(ctx context.Context, sfid string) (*model.B2BOrg, error)
 	Update(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error)
+	// UpdateWithoutPublish persists a transient internal state without exposing
+	// it to the indexer or FGA consumers.
+	UpdateWithoutPublish(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error)
+	// ValidatePrecondition confirms uid exists and, if ifMatch is set, matches
+	// the org's current ETag — without writing. The logo-upload path
+	// (LFXV2-2016) calls this before uploading bytes to object storage, so a
+	// 404/412 is rejected before any bytes are written, not after. It returns
+	// the org as currently persisted, which that path also uses to capture the
+	// pre-upload Logo_URL__c it may need to roll back to; the read happens
+	// either way, so returning it costs no extra round trip.
+	ValidatePrecondition(ctx context.Context, uid, ifMatch string) (*model.B2BOrg, error)
+	// PublishOrgUpdated publishes indexer and access events for an updated org.
+	PublishOrgUpdated(ctx context.Context, current, org *model.B2BOrg)
 }
 
 type b2bOrgWriterOrchestrator struct {
@@ -77,9 +90,11 @@ func (o *b2bOrgWriterOrchestrator) Create(ctx context.Context, sfid string) (*mo
 	return org, nil
 }
 
-// Update updates an existing B2BOrg. No-op (returns current) when input.HasChanges() == false.
-// Validates the optional ETag before writing.
-func (o *b2bOrgWriterOrchestrator) Update(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+// validateForUpdate fetches the current org and, if ifMatch is set, verifies
+// it against the org's current ETag. Shared by Update and ValidatePrecondition
+// so the logo-upload preflight check (LFXV2-2016) enforces the identical rule
+// a write would.
+func (o *b2bOrgWriterOrchestrator) validateForUpdate(ctx context.Context, uid, ifMatch string) (*model.B2BOrg, error) {
 	current, err := o.b2bOrgReader.GetB2BOrg(ctx, uid)
 	if err != nil {
 		return nil, err
@@ -93,6 +108,38 @@ func (o *b2bOrgWriterOrchestrator) Update(ctx context.Context, uid string, input
 		if currentETag != ifMatch {
 			return nil, pkgerrors.NewPreconditionFailed("b2b org has been modified since last read — refresh and retry")
 		}
+	}
+
+	return current, nil
+}
+
+// ValidatePrecondition implements B2BOrgWriter.
+func (o *b2bOrgWriterOrchestrator) ValidatePrecondition(ctx context.Context, uid, ifMatch string) (*model.B2BOrg, error) {
+	return o.validateForUpdate(ctx, uid, ifMatch)
+}
+
+// Update updates an existing B2BOrg. No-op (returns current) when input.HasChanges() == false.
+// Validates the optional ETag before writing.
+func (o *b2bOrgWriterOrchestrator) Update(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+	return o.update(ctx, uid, input, ifMatch, true)
+}
+
+// UpdateWithoutPublish persists a transient internal update without publishing it.
+func (o *b2bOrgWriterOrchestrator) UpdateWithoutPublish(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error) {
+	return o.update(ctx, uid, input, ifMatch, false)
+}
+
+// PublishOrgUpdated publishes indexer and access events for an updated org.
+func (o *b2bOrgWriterOrchestrator) PublishOrgUpdated(ctx context.Context, current, org *model.B2BOrg) {
+	o.publishEvents(ctx, current, org, indexerConstants.ActionUpdated)
+}
+
+func (o *b2bOrgWriterOrchestrator) update(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string, publish bool) (*model.B2BOrg, error) {
+	current, err := o.validateForUpdate(ctx, uid, ifMatch)
+	if err != nil {
+		return nil, err
+	}
+	if ifMatch != "" {
 		input.IfUnmodifiedSince = current.UpdatedAt.UTC().Format(constants.HTTPDateFormat)
 	}
 
@@ -105,7 +152,9 @@ func (o *b2bOrgWriterOrchestrator) Update(ctx context.Context, uid string, input
 		return nil, err
 	}
 
-	o.publishEvents(ctx, current, org, indexerConstants.ActionUpdated)
+	if publish {
+		o.publishEvents(ctx, current, org, indexerConstants.ActionUpdated)
+	}
 	return org, nil
 }
 

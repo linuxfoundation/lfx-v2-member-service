@@ -37,6 +37,35 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 
 ---
 
+## Transient Logo URL Suppression (`b2b_org`, `project_membership`, `key_contact`)
+
+Logo uploads (`POST /b2b_orgs/{uid}/logo`) stage the uploaded bytes at a short-lived **scratch** object key before promoting them to the durable shared key. Scratch objects are deleted as soon as the upload completes, so a scratch URL that reaches OpenSearch becomes a permanently broken image. To prevent that, every publisher that carries a logo URL classifies it with `isScratchLogoURL` and suppresses transient values before building the indexer message.
+
+**Classifier (`internal/service/messaging.go` — `isScratchLogoURL`).** It **fails closed**: with no valid configured CDN host there is no way to tell our scratch space from an unrelated site using the same path shape, and a false positive would suppress a legitimate record's publish on every retry. A URL is transient only when *all* hold:
+
+1. `CDN_URL_PREFIX` is set and parses to a non-empty host. If it is unset or unparseable, nothing is classified as transient — the processes without that config (CDC consumer, backfill) never mint scratch URLs, and the upload path never publishes one.
+2. The URL parses as absolute with scheme `http` or `https` and a non-empty host that matches the CDN host case-insensitively.
+3. Its path, with the leading `/` trimmed, matches `^org-logos-public-scratch/[^/]+/[^/]+$` — the exact top-level scratch prefix, not a substring match anywhere in the path. Scratch keys carry no file extension; like the shared key, Content-Type lives on the object.
+
+**Behavior per resource type** (applied only when `action != deleted`; delete messages carry a bare UID string and no logo field):
+
+| Object type            | Field                       | Behavior when transient                                                      |
+|------------------------|-----------------------------|------------------------------------------------------------------------------|
+| `b2b_org`              | `logo_url`                  | **Publish skipped entirely** — the whole message is dropped                   |
+| `b2b_org`              | `parent_detail.logo_url`    | Published, with `parent_detail.logo_url` omitted from the copied `parent_detail` |
+| `project_membership`   | `company_logo_url`          | Published, with `company_logo_url` cleared                                    |
+| `key_contact`          | `company_logo_url`          | Published, with `company_logo_url` cleared                                    |
+
+Suppression mutates a **shallow copy** of the record (and of `parent_detail`), never the caller's struct, so the in-memory/cached record is unaffected.
+
+**Recovery.** A skipped or stripped publish is logged at `warn` with `publish_failed_for_backfill_repair=true` and is self-healing: promotion commits the durable versioned URL (`https://{cdn}/b2b_org_logos/{uid}?v={nanos}`) to Salesforce, and the subsequent publish (or CDC replay / `/admin/reindex`) carries the durable value. Suppression is therefore a transient-state filter, not data loss.
+
+**Publish ordering on the upload path.** The upload endpoint itself never publishes an unbacked URL: it persists the durable URL with `UpdateWithoutPublish`, promotes the bytes onto the shared key, and only then calls `PublishOrgUpdated`. A promotion that cannot be completed rolls the field back — also unpublished — so indexer/FGA consumers observe either the previous logo or the new one, never an intermediate state. The suppression rules above therefore act as defense in depth for records arriving from other paths (CDC, reindex).
+
+**Recoverable pending promotions.** The scratch key is `org-logos-public-scratch/{uid}/{v}`, where `{v}` is the cache-busting token of the URL committed to Salesforce, and the scratch object is deleted only once the outcome is unambiguous (promoted, superseded by another upload, demonstrably uncommitted, or rolled back). So if the process dies — or Salesforce's PATCH lands but its re-fetch fails — between the commit and the promotion, the persisted `Logo_URL__c` alone identifies the object holding the pending bytes, and re-running the upload (or promoting that key) completes it. An ambiguous PATCH outcome is reconciled by re-reading the record rather than assumed uncommitted.
+
+---
+
 ## B2B Org
 
 **Object type:** `b2b_org`
@@ -58,7 +87,7 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 | `website`             | string (optional)   | Website URL                                                                                                                                                  |
 | `primary_domain`      | string (optional)   | Canonical primary domain                                                                                                                                     |
 | `domain_aliases`      | []string (optional) | Additional normalized domains                                                                                                                                |
-| `logo_url`            | string (optional)   | Logo image URL                                                                                                                                               |
+| `logo_url`            | string (optional)   | Logo image URL. A transient scratch URL suppresses the whole publish — see [Transient Logo URL Suppression](#transient-logo-url-suppression-b2b_org-project_membership-key_contact) |
 | `industry`            | string (optional)   | Industry classification                                                                                                                                      |
 | `sector`              | string (optional)   | Sector classification                                                                                                                                        |
 | `crunch_base_url`     | string (optional)   | CrunchBase profile URL                                                                                                                                       |
@@ -141,7 +170,7 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 | `start_date`        | string (optional)  | Membership start date                          |
 | `end_date`          | string (optional)  | Membership end date                            |
 | `company_name`      | string             | Member company name                            |
-| `company_logo_url`  | string (optional)  | Member company logo URL                        |
+| `company_logo_url`  | string (optional)  | Member company logo URL. Cleared when transient (see [Transient Logo URL Suppression](#transient-logo-url-suppression-b2b_org-project_membership-key_contact)). |
 | `company_domain`    | string (optional)  | Member company website/domain                  |
 | `tier_name`         | string (optional)  | Product name, e.g. `Gold Corporate Membership` |
 | `tier_family`       | string (optional)  | Product family, e.g. `Membership`              |
@@ -218,7 +247,7 @@ Implementation: the five resource publishers listed above (`b2b_org`, `project_m
 | `username`         | string (optional)   | Resolved LFID username                                                      |
 | `emails`           | []string (optional) | Full list of email addresses                                                |
 | `company_name`     | string              | Member company name                                                         |
-| `company_logo_url` | string (optional)   | Member company logo URL                                                     |
+| `company_logo_url` | string (optional)   | Member company logo URL. Cleared when transient (see [Transient Logo URL Suppression](#transient-logo-url-suppression-b2b_org-project_membership-key_contact)). |
 | `company_domain`   | string (optional)   | Member company website/domain                                               |
 | `created_at`       | timestamp           | Creation time (RFC3339)                                                     |
 | `updated_at`       | timestamp           | Last update time (RFC3339)                                                  |
