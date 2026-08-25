@@ -30,6 +30,10 @@ type Client struct {
 	// update-b2b-org endpoint.
 	UpdateB2bOrgDoer goahttp.Doer
 
+	// UploadB2bOrgLogo Doer is the HTTP client used to make requests to the
+	// upload-b2b-org-logo endpoint.
+	UploadB2bOrgLogoDoer goahttp.Doer
+
 	// GetB2bOrgSettings Doer is the HTTP client used to make requests to the
 	// get-b2b-org-settings endpoint.
 	GetB2bOrgSettingsDoer goahttp.Doer
@@ -132,6 +136,7 @@ func NewClient(
 		GetB2bOrgDoer:                      doer,
 		CreateB2bOrgDoer:                   doer,
 		UpdateB2bOrgDoer:                   doer,
+		UploadB2bOrgLogoDoer:               doer,
 		GetB2bOrgSettingsDoer:              doer,
 		UpdateB2bOrgSettingsDoer:           doer,
 		AddB2bOrgSettingsUserDoer:          doer,
@@ -227,6 +232,30 @@ func (c *Client) UpdateB2bOrg() goa.Endpoint {
 		resp, err := c.UpdateB2bOrgDoer.Do(req)
 		if err != nil {
 			return nil, goahttp.ErrRequestError("membership-service", "update-b2b-org", err)
+		}
+		return decodeResponse(resp)
+	}
+}
+
+// UploadB2bOrgLogo returns an endpoint that makes HTTP requests to the
+// membership-service service upload-b2b-org-logo server.
+func (c *Client) UploadB2bOrgLogo() goa.Endpoint {
+	var (
+		encodeRequest  = EncodeUploadB2bOrgLogoRequest(c.encoder)
+		decodeResponse = DecodeUploadB2bOrgLogoResponse(c.decoder, c.RestoreResponseBody)
+	)
+	return func(ctx context.Context, v any) (any, error) {
+		req, err := c.BuildUploadB2bOrgLogoRequest(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		err = encodeRequest(req, v)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.UploadB2bOrgLogoDoer.Do(req)
+		if err != nil {
+			return nil, goahttp.ErrRequestError("membership-service", "upload-b2b-org-logo", err)
 		}
 		return decodeResponse(resp)
 	}

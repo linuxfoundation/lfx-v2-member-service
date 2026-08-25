@@ -10,6 +10,7 @@ package membershipservice
 
 import (
 	"context"
+	"io"
 
 	goa "goa.design/goa/v3/pkg"
 	"goa.design/goa/v3/security"
@@ -20,6 +21,7 @@ type Endpoints struct {
 	GetB2bOrg                      goa.Endpoint
 	CreateB2bOrg                   goa.Endpoint
 	UpdateB2bOrg                   goa.Endpoint
+	UploadB2bOrgLogo               goa.Endpoint
 	GetB2bOrgSettings              goa.Endpoint
 	UpdateB2bOrgSettings           goa.Endpoint
 	AddB2bOrgSettingsUser          goa.Endpoint
@@ -42,6 +44,15 @@ type Endpoints struct {
 	RemoveB2bOrgWorkspaceProject   goa.Endpoint
 }
 
+// UploadB2bOrgLogoRequestData holds both the payload and the HTTP request body
+// reader of the "upload-b2b-org-logo" method.
+type UploadB2bOrgLogoRequestData struct {
+	// Payload is the method payload.
+	Payload *UploadB2bOrgLogoPayload
+	// Body streams the HTTP request body.
+	Body io.ReadCloser
+}
+
 // NewEndpoints wraps the methods of the "membership-service" service with
 // endpoints.
 func NewEndpoints(s Service) *Endpoints {
@@ -51,6 +62,7 @@ func NewEndpoints(s Service) *Endpoints {
 		GetB2bOrg:                      NewGetB2bOrgEndpoint(s, a.JWTAuth),
 		CreateB2bOrg:                   NewCreateB2bOrgEndpoint(s, a.JWTAuth),
 		UpdateB2bOrg:                   NewUpdateB2bOrgEndpoint(s, a.JWTAuth),
+		UploadB2bOrgLogo:               NewUploadB2bOrgLogoEndpoint(s, a.JWTAuth),
 		GetB2bOrgSettings:              NewGetB2bOrgSettingsEndpoint(s, a.JWTAuth),
 		UpdateB2bOrgSettings:           NewUpdateB2bOrgSettingsEndpoint(s, a.JWTAuth),
 		AddB2bOrgSettingsUser:          NewAddB2bOrgSettingsUserEndpoint(s, a.JWTAuth),
@@ -80,6 +92,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 	e.GetB2bOrg = m(e.GetB2bOrg)
 	e.CreateB2bOrg = m(e.CreateB2bOrg)
 	e.UpdateB2bOrg = m(e.UpdateB2bOrg)
+	e.UploadB2bOrgLogo = m(e.UploadB2bOrgLogo)
 	e.GetB2bOrgSettings = m(e.GetB2bOrgSettings)
 	e.UpdateB2bOrgSettings = m(e.UpdateB2bOrgSettings)
 	e.AddB2bOrgSettingsUser = m(e.AddB2bOrgSettingsUser)
@@ -168,6 +181,29 @@ func NewUpdateB2bOrgEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endp
 			return nil, err
 		}
 		return s.UpdateB2bOrg(ctx, p)
+	}
+}
+
+// NewUploadB2bOrgLogoEndpoint returns an endpoint function that calls the
+// method "upload-b2b-org-logo" of service "membership-service".
+func NewUploadB2bOrgLogoEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		ep := req.(*UploadB2bOrgLogoRequestData)
+		var err error
+		sc := security.JWTScheme{
+			Name:           "jwt",
+			Scopes:         []string{},
+			RequiredScopes: []string{},
+		}
+		var token string
+		if ep.Payload.BearerToken != nil {
+			token = *ep.Payload.BearerToken
+		}
+		ctx, err = authJWTFn(ctx, token, &sc)
+		if err != nil {
+			return nil, err
+		}
+		return s.UploadB2bOrgLogo(ctx, ep.Payload, ep.Body)
 	}
 }
 

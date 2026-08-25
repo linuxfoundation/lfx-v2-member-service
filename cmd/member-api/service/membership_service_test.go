@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	goa "goa.design/goa/v3/pkg"
@@ -34,6 +37,33 @@ func (s stubB2BOrgWriterUC) Create(_ context.Context, _ string) (*model.B2BOrg, 
 	return s.org, s.err
 }
 func (s stubB2BOrgWriterUC) Update(_ context.Context, _ string, _ model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
+	return s.org, s.err
+}
+func (s stubB2BOrgWriterUC) UpdateWithoutPublish(_ context.Context, _ string, _ model.B2BOrgInput, _ string) (*model.B2BOrg, error) {
+	return s.org, s.err
+}
+func (s stubB2BOrgWriterUC) ValidatePrecondition(_ context.Context, _, _ string) (*model.B2BOrg, error) {
+	return s.org, s.err
+}
+func (s stubB2BOrgWriterUC) PublishOrgUpdated(_ context.Context, _, _ *model.B2BOrg) {}
+
+func TestPayloadToB2BOrgInput_PreservesLogoNoOpSemantics(t *testing.T) {
+	empty := ""
+	input := payloadToB2BOrgInput(&membershipservice.UpdateB2bOrgPayload{LogoURL: &empty})
+	assert.Nil(t, input.LogoURL, "an empty public logo_url remains a no-op")
+
+	logoURL := "https://cdn.example.com/logo"
+	input = payloadToB2BOrgInput(&membershipservice.UpdateB2bOrgPayload{LogoURL: &logoURL})
+	require.NotNil(t, input.LogoURL)
+	assert.Equal(t, logoURL, *input.LogoURL)
+}
+
+type stubLogoUploaderUC struct {
+	org *model.B2BOrg
+	err error
+}
+
+func (s stubLogoUploaderUC) UploadB2BOrgLogo(_ context.Context, _, _ string, _ io.Reader, _ string) (*model.B2BOrg, error) {
 	return s.org, s.err
 }
 
@@ -113,6 +143,7 @@ type svcBuilder struct {
 	pmReader        port.ProjectMembershipReader
 	settingsR       port.B2BOrgSettingsReader
 	b2bOrgWriter    usecaseSvc.B2BOrgWriter
+	logoUploader    usecaseSvc.LogoUploader
 	kcWriter        usecaseSvc.KeyContactWriter
 	settingsW       usecaseSvc.OrgSettingsWriter
 	workspaceWriter usecaseSvc.WorkspaceWriter
@@ -126,6 +157,9 @@ func withB2BOrgReader(r port.B2BOrgReader) svcOpt {
 }
 func withB2BOrgWriterUC(w usecaseSvc.B2BOrgWriter) svcOpt {
 	return func(b *svcBuilder) { b.b2bOrgWriter = w }
+}
+func withLogoUploaderUC(u usecaseSvc.LogoUploader) svcOpt {
+	return func(b *svcBuilder) { b.logoUploader = u }
 }
 func withKeyContactWriterUC(w usecaseSvc.KeyContactWriter) svcOpt {
 	return func(b *svcBuilder) { b.kcWriter = w }
@@ -157,6 +191,7 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 		pmReader:     mock.NewMockProjectMembershipReader(),
 		settingsR:    mock.NewMockB2BOrgSettings(),
 		b2bOrgWriter: stubB2BOrgWriterUC{org: sampleB2BOrg},
+		logoUploader: stubLogoUploaderUC{org: sampleB2BOrg},
 		kcWriter:     stubKeyContactWriterUC{},
 		settingsW:    stubOrgSettingsWriterUC{settings: &model.B2BOrgSettings{}},
 	}
@@ -164,7 +199,7 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 		o(b)
 	}
 	return NewMembershipService(b.auth, b.storage, b.b2bOrgReader,
-		b.pmReader, b.settingsR, b.b2bOrgWriter, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner)
+		b.pmReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner)
 }
 
 // ─── B2BOrg handler tests ──────────────────────────────────────────────────────
@@ -207,6 +242,65 @@ func TestCreateB2bOrg_MockReturnsNotImplemented(t *testing.T) {
 	var serviceErr *goa.ServiceError
 	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
 	assert.Equal(t, "NotImplemented", serviceErr.Name)
+}
+
+// ─── UploadB2bOrgLogo handler tests ────────────────────────────────────────────
+
+func TestUploadB2bOrgLogo_Happy(t *testing.T) {
+	svc := newTestSvc(withLogoUploaderUC(stubLogoUploaderUC{org: sampleB2BOrg}))
+
+	body := io.NopCloser(strings.NewReader("fake-png-bytes"))
+	result, err := svc.UploadB2bOrgLogo(context.Background(), &membershipservice.UploadB2bOrgLogoPayload{
+		UID:         "lf-uid-001",
+		ContentType: "image/png",
+	}, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.B2bOrg)
+	assert.Equal(t, "lf-uid-001", *result.B2bOrg.UID)
+	assert.NotNil(t, result.LastModified, "Last-Modified must be set")
+}
+
+func TestUploadB2bOrgLogo_ValidationError(t *testing.T) {
+	svc := newTestSvc(withLogoUploaderUC(stubLogoUploaderUC{err: pkgerrors.NewValidation("unsupported logo content type")}))
+
+	body := io.NopCloser(strings.NewReader("fake-svg-bytes"))
+	_, err := svc.UploadB2bOrgLogo(context.Background(), &membershipservice.UploadB2bOrgLogoPayload{
+		UID:         "lf-uid-001",
+		ContentType: "image/svg+xml",
+	}, body)
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "BadRequest", serviceErr.Name)
+}
+
+func TestUploadB2bOrgLogo_EtagIgnoresWriterEnrichedIsParent(t *testing.T) {
+	// The logo uploader's underlying Update call runs publishEvents, which
+	// populates IsParent in place — a derived field the plain reader behind
+	// GetB2bOrg/If-Match checks never sets. If the response etag hashed this
+	// enriched shape as-is, a parent org's own upload response would carry an
+	// etag its next request could never satisfy.
+	orgWithChildren := *sampleB2BOrg
+	orgWithChildren.IsParent = true
+	svc := newTestSvc(withLogoUploaderUC(stubLogoUploaderUC{org: &orgWithChildren}))
+
+	body := io.NopCloser(strings.NewReader("fake-png-bytes"))
+	result, err := svc.UploadB2bOrgLogo(context.Background(), &membershipservice.UploadB2bOrgLogoPayload{
+		UID:         "lf-uid-001",
+		ContentType: "image/png",
+	}, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result.Etag)
+
+	unenriched := orgWithChildren
+	unenriched.IsParent = false
+	wantEtag, etagErr := etag.LFXEtag(&unenriched)
+	require.NoError(t, etagErr)
+	assert.Equal(t, wantEtag, *result.Etag, "response etag must match the shape GetB2bOrg computes (IsParent unset)")
 }
 
 // ─── GetProjectMembership handler tests ───────────────────────────────────────
