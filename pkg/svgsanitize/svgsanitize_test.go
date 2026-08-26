@@ -1198,3 +1198,81 @@ func TestSanitize_BoundsOutputSize(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, out)
 }
+
+func TestSanitize_StyleMediaAndTypeGate(t *testing.T) {
+	// Inlining bakes rules in unconditionally, so a block the browser would
+	// have skipped must not become permanent styling.
+	cases := map[string]struct {
+		attrs     string
+		wantError bool
+	}{
+		"no attributes":    {``, false},
+		"type text/css":    {` type="text/css"`, false},
+		"type uppercase":   {` type="TEXT/CSS"`, false},
+		"type empty":       {` type=""`, false},
+		"media all":        {` media="all"`, false},
+		"media screen":     {` media="screen"`, false},
+		"media padded":     {` media=" Screen "`, false},
+		"media empty":      {` media=""`, false},
+		"type text/plain":  {` type="text/plain"`, true},
+		"type with params": {` type="text/css;charset=utf-8"`, true},
+		"media not all":    {` media="not all"`, true},
+		"media print":      {` media="print"`, true},
+		"media feature":    {` media="(min-width:99999px)"`, true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := `<svg xmlns="http://www.w3.org/2000/svg"><style` + tc.attrs + `>.a{fill:red}</style>` +
+				`<rect class="a" width="1" height="1"/></svg>`
+
+			out, err := svgsanitize.Sanitize([]byte(in))
+
+			if tc.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Contains(t, string(out), `fill="red"`)
+		})
+	}
+}
+
+func TestSanitize_NonApplyingStyleDoesNotOverrideAuthoredAttribute(t *testing.T) {
+	// Stylesheet declarations are prepended, so an ungated never-matching
+	// block would not merely add styling — it would displace the element's
+	// own authored fill.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style media="not all">.a{fill:red}</style>` +
+		`<rect class="a" fill="#00FF00" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.Error(t, err)
+	assert.NotContains(t, string(out), `fill="red"`)
+}
+
+func TestSanitize_BoundsDeclarationVisits(t *testing.T) {
+	// One selector, one rule, a long body, many elements: this stays far under
+	// the rule and index caps but was measured at minutes of CPU before
+	// declarations were charged against the budget. Each element carries a
+	// distinct dead class so the resolution cache never hits — that bypass is
+	// what makes the uncharged inner loop reachable at all.
+	var b strings.Builder
+	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg"><style>.a{`)
+	for i := 0; i < 20000; i++ {
+		b.WriteString("fill:red;")
+	}
+	b.WriteString(`}</style>`)
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&b, `<g class="a d%07d"></g>`, i)
+	}
+	b.WriteString(`</svg>`)
+
+	start := time.Now()
+	_, err := svgsanitize.Sanitize([]byte(b.String()))
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too expensive")
+	assert.Less(t, elapsed, 5*time.Second, "budget must stop the walk quickly")
+}

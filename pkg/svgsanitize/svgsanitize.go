@@ -284,6 +284,9 @@ scan:
 			case depth == 0:
 				depth = 1
 			case isStyleElement(t.Name):
+				if applyErr := styleBlockApplies(t.Attr); applyErr != nil {
+					return nil, applyErr
+				}
 				text, textErr := collectStyleText(dec)
 				if textErr != nil {
 					return nil, textErr
@@ -308,6 +311,50 @@ scan:
 		return &stylesheet{}, nil
 	}
 	return parseStylesheet(blocks)
+}
+
+// styleBlockApplies rejects a <style> element whose attributes mean its rules
+// would not apply as written.
+//
+// Inlining bakes rules into presentation attributes unconditionally, so a
+// block the browser would have skipped becomes permanent. Left ungated this
+// does more than add styling: because stylesheet declarations are prepended,
+// a rule from a never-matching block also displaces the element's own authored
+// fill, and a display rule from one can reveal artwork the author hid.
+//
+// Only statically decidable cases are accepted. A feature-bearing query such
+// as media="(min-width:100px)" resolves against the viewport of whatever page
+// embeds the logo — the same bytes render differently at different sizes — so
+// there is no correct answer at upload time and guessing would invent a
+// rendering no renderer produces. Rejecting matches how parseStylesheet
+// already treats an @media at-rule, which is the same concern in at-rule form.
+//
+// Matching follows HTML's "update a style block" algorithm, which is stricter
+// for type than for media: type must be empty or exactly text/css ignoring
+// case, with no parameters and no surrounding whitespace ("text/css;
+// charset=utf-8" and " text/css " both fail), while media is trimmed and
+// case-insensitive. screen is accepted because a logo rendered from a CDN is
+// on a screen target; the residual divergence is that a media="screen" rule
+// stays baked in when the embedding page is printed.
+func styleBlockApplies(attrs []xml.Attr) error {
+	for _, a := range attrs {
+		if a.Name.Space != "" {
+			continue
+		}
+		switch strings.ToLower(a.Name.Local) {
+		case "type":
+			if a.Value != "" && !strings.EqualFold(a.Value, "text/css") {
+				return fmt.Errorf("svgsanitize: <style> has unsupported type %q", truncateForError(a.Value))
+			}
+		case "media":
+			switch strings.ToLower(strings.TrimSpace(a.Value)) {
+			case "", "all", "screen":
+			default:
+				return fmt.Errorf("svgsanitize: <style> has media %q, whose applicability cannot be preserved", truncateForError(a.Value))
+			}
+		}
+	}
+	return nil
 }
 
 // isStyleElement reports whether a start element is an SVG <style>.

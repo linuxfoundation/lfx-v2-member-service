@@ -89,11 +89,17 @@ var inlinableProperties = map[string]bool{
 // headroom for anything a design tool legitimately emits.
 const maxStylesheetRules = 4096
 
-// maxResolveWork bounds the total number of rule indices visited across the
-// whole document. The rule cap alone is not sufficient: an attacker can stay
-// under it and instead multiply the element count, and no memoization strategy
-// helps when every element resolves to a genuinely different declaration set.
-// A single global budget bounds the product however the work is distributed.
+// maxResolveWork bounds the total work spent resolving classes across the
+// whole document: every rule index looked up and every declaration visited is
+// charged against it.
+//
+// Both dimensions are needed. Capping rules alone leaves the element count
+// free, and capping index lookups alone leaves the declaration count free — a
+// single rule with a very long body, referenced from many elements, reached
+// hundreds of millions of declaration visits while spending 0.4% of the index
+// budget. Memoization cannot substitute for either, since an attacker can give
+// every element a distinct class attribute so no cache key ever repeats. One
+// global budget bounds the product however the input distributes it.
 const maxResolveWork = 1 << 20
 
 // maxDeclarationValueBytes bounds one declaration's value. A single valid
@@ -296,6 +302,21 @@ func (s *stylesheet) parseBlock(css string) error {
 // Malformed fragments (no colon, empty property, empty value) are skipped
 // rather than rejected: they contribute no styling, so dropping them changes
 // nothing a browser would have rendered.
+//
+// Values are deliberately not validated against their property's grammar.
+// A browser discards a declaration whose value is invalid, so where a valid
+// declaration is shadowed by a later invalid one for the same property
+// (.a{fill:#009ADE;fill:not-a-color}) the browser keeps the first and this
+// keeps the second, and the logo renders black — or, for display, reveals
+// artwork the author hid. That divergence is accepted rather than fixed:
+// validating values means rejecting anything the grammar does not recognise,
+// which today would reject var(), color-mix(), oklch(), space-separated rgb()
+// and rem units, all of which currently round-trip correctly. Neither shipped
+// fixture contains a duplicated property in any of its 308 rules, and an
+// unshadowed invalid value already renders identically to the original. The
+// narrower alternative — keeping the earlier declaration when a later one is
+// an unrecognised bare identifier — is tracked separately rather than guessed
+// at here.
 func parseDeclarations(body string) ([]cssDeclaration, error) {
 	parts, err := splitDeclarations(cssCommentPattern.ReplaceAllString(body, " "))
 	if err != nil {
@@ -435,6 +456,15 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 	var order []string
 	for _, i := range matched {
 		rule := s.rules[i]
+		// Charge the declarations too, not just the index lookup. Selectors
+		// and declarations are independent dimensions — one rule with a very
+		// long body reached hundreds of millions of visits while staying far
+		// under the index budget — so the bound has to cover the product of
+		// elements and total declarations, however the input distributes it.
+		s.budget -= len(rule.decls)
+		if s.budget < 0 {
+			return nil, fmt.Errorf("svgsanitize: stylesheet is too expensive to resolve: exceeded %d lookups", maxResolveWork)
+		}
 		for _, d := range rule.decls {
 			switch {
 			case isInertProperty(d.property):
