@@ -206,42 +206,61 @@ func Sanitize(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// extractStylesheet collects the text of every <style> element and parses it.
+// extractStylesheet collects the text of the <style> elements inside the root
+// and parses it.
 //
-// Rules are gathered wherever <style> appears, including inside a subtree the
-// walk will later drop, because CSS applies document-wide regardless of where
-// it is declared — matching that keeps the sanitized rendering faithful to the
-// original. The CSS itself is never emitted; only allow-listed properties with
-// values that clear the existing paint checks reach the output.
+// Collection is scoped to the root subtree, and to subtrees the main pass
+// keeps: a <style> after </svg>, or inside a dropped element such as
+// <foreignObject>, is content the sanitizer otherwise treats as untrusted and
+// discards, so letting it steer the output would be a parser differential
+// against every real renderer. Scanning stops at the root's end element, which
+// also means trailing bytes cannot influence the result.
 //
-// A decode failure here is deliberately swallowed: the main pass re-reads the
-// same bytes and owns the canonical parse/well-formedness errors, so reporting
-// them twice would only risk diverging messages.
+// A decode failure inside that subtree is returned rather than swallowed.
+// Swallowing it would silently produce an un-styled document — precisely the
+// black-logo outcome this package exists to prevent — and the message matches
+// what the main pass emits for the same input.
 func extractStylesheet(data []byte) (*stylesheet, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 
 	var css strings.Builder
 	depth := 0
+
+scan:
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return &stylesheet{}, nil
+			return nil, fmt.Errorf("svgsanitize: parsing input: %w", err)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "style" {
+			switch {
+			case depth == 0:
+				depth = 1
+			case t.Name.Local == "style":
+				text, textErr := collectStyleText(dec)
+				if textErr != nil {
+					return nil, textErr
+				}
+				// Separate blocks so an unterminated comment in one cannot
+				// swallow the next, and a dangling selector cannot splice
+				// onto a following body.
+				css.WriteString(text)
+				css.WriteString("\n")
+			case !allowedElements[t.Name.Local]:
+				if skipErr := skipElement(dec); skipErr != nil {
+					return nil, skipErr
+				}
+			default:
 				depth++
 			}
 		case xml.EndElement:
-			if t.Name.Local == "style" && depth > 0 {
-				depth--
-			}
-		case xml.CharData:
-			if depth > 0 {
-				css.Write(t)
+			depth--
+			if depth <= 0 {
+				break scan
 			}
 		}
 	}
@@ -252,6 +271,32 @@ func extractStylesheet(data []byte) (*stylesheet, error) {
 	return parseStylesheet(css.String())
 }
 
+// collectStyleText consumes an already-open <style> element and returns its
+// text. Comments are included because the legacy
+// "<style><!-- ... --></style>" guard is still emitted by some tools, and
+// treating that CSS as absent would drop the document's styling without
+// raising anything.
+func collectStyleText(dec *xml.Decoder) (string, error) {
+	var b strings.Builder
+	for depth := 1; depth > 0; {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", fmt.Errorf("svgsanitize: parsing input: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			b.Write(t)
+		case xml.Comment:
+			b.Write(t)
+		}
+	}
+	return b.String(), nil
+}
+
 // stylesheetAttrs converts the stylesheet rules matching an element's class
 // attribute into presentation attributes.
 func stylesheetAttrs(sheet *stylesheet, attrs []xml.Attr) ([]xml.Attr, error) {
@@ -259,21 +304,35 @@ func stylesheetAttrs(sheet *stylesheet, attrs []xml.Attr) ([]xml.Attr, error) {
 		return nil, nil
 	}
 
+	// Only an unqualified class attribute drives resolution, because that is
+	// the one filterAttrs emits. Honouring a namespaced twin such as i:class
+	// would style an element from a class it does not end up carrying.
 	var class string
 	for _, a := range attrs {
-		if a.Name.Local == "class" {
+		if a.Name.Local == "class" && a.Name.Space == "" {
 			class = a.Value
 			break
 		}
 	}
 
 	decls, err := sheet.resolveClasses(class)
-	if err != nil || len(decls) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(decls) == 0 {
+		return nil, nil
 	}
 
 	out := make([]xml.Attr, 0, len(decls))
 	for _, d := range decls {
+		// filterAttrs drops a paint value that fails this check, which for a
+		// stylesheet-derived one would mean silently rendering the element
+		// with no fill — black. Every other unrepresentable stylesheet input
+		// is an error, so this one is too.
+		if paintAttributes[d.property] && !isSafePaintValue(d.value) {
+			return nil, fmt.Errorf("svgsanitize: unsafe CSS value %q for property %q: url(...) references must be same-document fragments",
+				truncateForError(d.value), d.property)
+		}
 		out = append(out, xml.Attr{Name: xml.Name{Local: d.property}, Value: d.value})
 	}
 	return out, nil
