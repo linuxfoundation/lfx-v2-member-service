@@ -181,6 +181,126 @@ func isInertProperty(property string) bool {
 	return false
 }
 
+// knownValueKeywords are the bare identifiers a declaration value may legally
+// be: the CSS-wide keywords, the SVG presentation-attribute keywords, and the
+// named colours. It exists only to answer "could this identifier plausibly be
+// valid", not to validate a value against its property's grammar — see
+// isPlausibleValue.
+var knownValueKeywords = map[string]bool{
+	"aliceblue": true, "all": true, "alpha": true, "alphabetic": true, "antiquewhite": true,
+	"aqua": true, "aquamarine": true, "arcs": true, "auto": true, "auto-sense": true,
+	"auto-start-reverse": true, "azure": true, "baseline": true, "beige": true, "bevel": true,
+	"bidi-override": true, "bisque": true, "black": true, "blanchedalmond": true, "blink": true,
+	"block": true, "blue": true, "blueviolet": true, "bold": true, "bolder": true,
+	"border-box": true, "bounding-box": true, "break-spaces": true, "brown": true,
+	"burlywood": true, "butt": true, "cadetblue": true, "central": true, "chartreuse": true,
+	"chocolate": true, "clip": true, "collapse": true, "color": true, "color-burn": true,
+	"color-dodge": true, "condensed": true, "content-box": true, "context-fill": true,
+	"context-stroke": true, "coral": true, "cornflowerblue": true, "cornsilk": true,
+	"crimson": true, "crispedges": true, "currentcolor": true, "cursive": true, "cyan": true,
+	"darkblue": true, "darkcyan": true, "darken": true, "darkgoldenrod": true, "darkgray": true,
+	"darkgreen": true, "darkgrey": true, "darkkhaki": true, "darkmagenta": true,
+	"darkolivegreen": true, "darkorange": true, "darkorchid": true, "darkred": true,
+	"darksalmon": true, "darkseagreen": true, "darkslateblue": true, "darkslategray": true,
+	"darkslategrey": true, "darkturquoise": true, "darkviolet": true, "deeppink": true,
+	"deepskyblue": true, "difference": true, "dimgray": true, "dimgrey": true, "dodgerblue": true,
+	"embed": true, "end": true, "evenodd": true, "exclusion": true, "expanded": true,
+	"extra-condensed": true, "extra-expanded": true, "fantasy": true, "fill": true,
+	"fill-box": true, "firebrick": true, "fixed-position": true, "floralwhite": true,
+	"forestgreen": true, "fuchsia": true, "gainsboro": true, "geometricprecision": true,
+	"ghostwhite": true, "gold": true, "goldenrod": true, "gray": true, "green": true,
+	"greenyellow": true, "grey": true, "hanging": true, "hard-light": true, "hidden": true,
+	"honeydew": true, "horizontal-tb": true, "hotpink": true, "hue": true, "ideographic": true,
+	"indianred": true, "indigo": true, "inherit": true, "initial": true, "inline": true,
+	"isolate": true, "isolate-override": true, "italic": true, "ivory": true, "khaki": true,
+	"large": true, "larger": true, "lavender": true, "lavenderblush": true, "lawngreen": true,
+	"lemonchiffon": true, "lightblue": true, "lightcoral": true, "lightcyan": true,
+	"lighten": true, "lighter": true, "lightgoldenrodyellow": true, "lightgray": true,
+	"lightgreen": true, "lightgrey": true, "lightpink": true, "lightsalmon": true,
+	"lightseagreen": true, "lightskyblue": true, "lightslategray": true, "lightslategrey": true,
+	"lightsteelblue": true, "lightyellow": true, "lime": true, "limegreen": true,
+	"line-through": true, "linen": true, "lr": true, "lr-tb": true, "luminance": true,
+	"luminosity": true, "magenta": true, "margin-box": true, "markers": true, "maroon": true,
+	"mathematical": true, "medium": true, "mediumaquamarine": true, "mediumblue": true,
+	"mediumorchid": true, "mediumpurple": true, "mediumseagreen": true, "mediumslateblue": true,
+	"mediumspringgreen": true, "mediumturquoise": true, "mediumvioletred": true, "middle": true,
+	"middle-anchor": true, "midnightblue": true, "mintcream": true, "mistyrose": true,
+	"miter": true, "miter-clip": true, "moccasin": true, "monospace": true, "multiply": true,
+	"navajowhite": true, "navy": true, "no-change": true, "non-rotation": true,
+	"non-scaling-size": true, "non-scaling-stroke": true, "none": true, "nonzero": true,
+	"normal": true, "nowrap": true, "oblique": true, "oldlace": true, "olive": true,
+	"olivedrab": true, "optimizequality": true, "optimizespeed": true, "orange": true,
+	"orangered": true, "orchid": true, "overlay": true, "overline": true, "padding-box": true,
+	"painted": true, "palegoldenrod": true, "palegreen": true, "paleturquoise": true,
+	"palevioletred": true, "papayawhip": true, "peachpuff": true, "peru": true, "pink": true,
+	"plaintext": true, "plum": true, "powderblue": true, "pre": true, "pre-line": true,
+	"pre-wrap": true, "purple": true, "rebeccapurple": true, "red": true, "reset-size": true,
+	"revert": true, "rl": true, "rl-tb": true, "rosybrown": true, "round": true,
+	"royalblue": true, "saddlebrown": true, "salmon": true, "sandybrown": true,
+	"sans-serif": true, "saturation": true, "screen": true, "scroll": true, "seagreen": true,
+	"seashell": true, "semi-condensed": true, "semi-expanded": true, "serif": true,
+	"sienna": true, "silver": true, "skyblue": true, "slateblue": true, "slategray": true,
+	"slategrey": true, "small": true, "small-caps": true, "smaller": true, "snow": true,
+	"soft-light": true, "springgreen": true, "square": true, "start": true, "steelblue": true,
+	"stroke": true, "stroke-box": true, "sub": true, "super": true, "system-ui": true,
+	"tan": true, "tb": true, "tb-rl": true, "teal": true, "text-after-edge": true,
+	"text-before-edge": true, "thistle": true, "tomato": true, "transparent": true,
+	"turquoise": true, "ultra-condensed": true, "ultra-expanded": true, "underline": true,
+	"unset": true, "use-script": true, "vertical-lr": true, "vertical-rl": true, "view-box": true,
+	"violet": true, "visible": true, "visiblefill": true, "visiblepainted": true,
+	"visiblestroke": true, "wheat": true, "white": true, "whitesmoke": true, "x-large": true,
+	"x-small": true, "xx-large": true, "xx-small": true, "yellow": true, "yellowgreen": true,
+}
+
+// isPlausibleValue reports whether a value could legally apply.
+//
+// It is deliberately permissive: anything carrying a digit, a hash, a
+// function, a percentage or a comma is accepted without inspection, so var(),
+// color-mix(), oklch(), #009ADE, 2rem and space-separated rgb() all pass
+// untouched. Only a bare identifier is checked, against the keyword table
+// above. A conservative answer here costs nothing — the caller only consults
+// it to decide whether a *displacing* declaration should be trusted — whereas
+// validating values properly would mean rejecting every CSS addition this
+// package has not been taught about.
+func isPlausibleValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.ContainsAny(value, "#(),%\"'/") {
+		return true
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] >= '0' && value[i] <= '9' {
+			return true
+		}
+	}
+	if strings.ContainsAny(value, " \t") {
+		// A multi-token value (e.g. "underline solid") is beyond what the
+		// keyword table describes; leave it to the browser.
+		return true
+	}
+	return knownValueKeywords[strings.ToLower(value)]
+}
+
+// displaces reports whether next should override prev for the same property.
+//
+// A browser discards a declaration whose value is invalid, so an earlier valid
+// declaration keeps winning: for .a{fill:#009ADE;fill:not-a-color} it renders
+// blue, and for .a{display:none;display:bogus} the element stays hidden.
+// Emitting the later value instead produced a black logo in the first case and
+// revealed artwork the author had hidden in the second. Priority is checked
+// first, since !important outranks source order either way.
+func displaces(prev, next cssDeclaration) bool {
+	if prev.important && !next.important {
+		return false
+	}
+	if !isPlausibleValue(next.value) && isPlausibleValue(prev.value) {
+		return false
+	}
+	return true
+}
+
 // styleRule is one parsed "selector { ... }" block. Declarations keep source
 // order because a later declaration for the same property wins within a rule.
 type styleRule struct {
@@ -303,20 +423,17 @@ func (s *stylesheet) parseBlock(css string) error {
 // rather than rejected: they contribute no styling, so dropping them changes
 // nothing a browser would have rendered.
 //
-// Values are deliberately not validated against their property's grammar.
-// A browser discards a declaration whose value is invalid, so where a valid
-// declaration is shadowed by a later invalid one for the same property
-// (.a{fill:#009ADE;fill:not-a-color}) the browser keeps the first and this
-// keeps the second, and the logo renders black — or, for display, reveals
-// artwork the author hid. That divergence is accepted rather than fixed:
-// validating values means rejecting anything the grammar does not recognise,
-// which today would reject var(), color-mix(), oklch(), space-separated rgb()
-// and rem units, all of which currently round-trip correctly. Neither shipped
-// fixture contains a duplicated property in any of its 308 rules, and an
-// unshadowed invalid value already renders identically to the original. The
-// narrower alternative — keeping the earlier declaration when a later one is
-// an unrecognised bare identifier — is tracked separately rather than guessed
-// at here.
+// Values are not validated against their property's grammar, because doing so
+// would mean rejecting anything this package has not been taught about —
+// var(), color-mix(), oklch(), space-separated rgb() and rem units all
+// round-trip correctly today and would be casualties. What is checked is
+// narrower: whether a value could plausibly apply at all, used only to stop an
+// unrecognised identifier from displacing a valid earlier declaration for the
+// same property. See isPlausibleValue and displaces.
+//
+// An invalid value that displaces nothing is still emitted verbatim, which is
+// correct: the browser discards it and falls back to the initial value, which
+// is exactly what it would have done with the original document.
 func parseDeclarations(body string) ([]cssDeclaration, error) {
 	parts, err := splitDeclarations(cssCommentPattern.ReplaceAllString(body, " "))
 	if err != nil {
@@ -476,7 +593,7 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 			prev, dup := winner[d.property]
 			if !dup {
 				order = append(order, d.property)
-			} else if prev.important && !d.important {
+			} else if !displaces(prev, d) {
 				continue
 			}
 			winner[d.property] = d

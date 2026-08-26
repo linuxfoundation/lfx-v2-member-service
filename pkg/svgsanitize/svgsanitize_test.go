@@ -1276,3 +1276,83 @@ func TestSanitize_BoundsDeclarationVisits(t *testing.T) {
 	assert.Contains(t, err.Error(), "too expensive")
 	assert.Less(t, elapsed, 5*time.Second, "budget must stop the walk quickly")
 }
+
+func TestSanitize_InvalidValueDoesNotDisplaceValidDeclaration(t *testing.T) {
+	// A browser discards a declaration whose value is invalid, so the earlier
+	// valid one keeps winning. Emitting the later value instead rendered the
+	// logo black, and for display revealed artwork the author had hidden.
+	cases := map[string]struct{ css, want, notWant string }{
+		"colour":       {`fill:#009ADE;fill:not-a-color`, `fill="#009ADE"`, `not-a-color`},
+		"display":      {`display:none;display:bogus`, `display="none"`, `display="bogus"`},
+		"stroke width": {`stroke-width:4;stroke-width:abc`, `stroke-width="4"`, `stroke-width="abc"`},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{` + tc.css + `}</style>` +
+				`<rect class="a" width="1" height="1"/></svg>`
+
+			out, err := svgsanitize.Sanitize([]byte(in))
+
+			require.NoError(t, err)
+			got := string(out)
+			assert.Contains(t, got, tc.want)
+			assert.NotContains(t, got, tc.notWant)
+		})
+	}
+}
+
+func TestSanitize_ModernCSSValuesStillWinTheCascade(t *testing.T) {
+	// The plausibility check must not become a value validator: every one of
+	// these is valid CSS that a browser applies, and rejecting or demoting any
+	// of them would trade a rare wrong colour for routine breakage.
+	cases := map[string]struct{ css, want string }{
+		"var with fallback": {`fill:red;fill:var(--brand,#009ADE)`, `fill="var(--brand,#009ADE)"`},
+		"color-mix":         {`fill:red;fill:color-mix(in srgb,#f00,#f00)`, `fill="color-mix(in srgb,#f00,#f00)"`},
+		"space-separated":   {`fill:red;fill:rgb(0 154 222)`, `fill="rgb(0 154 222)"`},
+		"named colour":      {`fill:red;fill:blue`, `fill="blue"`},
+		"hex":               {`fill:red;fill:#003764`, `fill="#003764"`},
+		"rem unit":          {`stroke-width:2px;stroke-width:2rem`, `stroke-width="2rem"`},
+		"css-wide keyword":  {`fill:red;fill:inherit`, `fill="inherit"`},
+		"currentColor":      {`fill:red;fill:currentColor`, `fill="currentColor"`},
+		"keyword none":      {`fill:red;fill:none`, `fill="none"`},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{` + tc.css + `}</style>` +
+				`<rect class="a" width="1" height="1"/></svg>`
+
+			out, err := svgsanitize.Sanitize([]byte(in))
+
+			require.NoError(t, err)
+			assert.Contains(t, string(out), tc.want)
+		})
+	}
+}
+
+func TestSanitize_UnshadowedInvalidValueIsEmittedVerbatim(t *testing.T) {
+	// With nothing to fall back to, emitting the value is correct: the browser
+	// discards it and uses the initial value, exactly as it would have done
+	// with the original document.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:not-a-color}</style>` +
+		`<rect class="a" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `fill="not-a-color"`)
+}
+
+func TestSanitize_ImportantStillOutranksPlausibility(t *testing.T) {
+	// Priority is checked before plausibility, so a valid later declaration
+	// still loses to an earlier !important one.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:red!important;fill:blue" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	assert.Contains(t, got, `fill="red"`)
+	assert.NotContains(t, got, `fill="blue"`)
+}

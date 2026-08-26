@@ -506,7 +506,7 @@ func resolveInlineStyle(style string) ([]cssDeclaration, error) {
 		prev, dup := winner[d.property]
 		if !dup {
 			order = append(order, d.property)
-		} else if prev.important && !d.important {
+		} else if !displaces(prev, d) {
 			continue
 		}
 		winner[d.property] = d
