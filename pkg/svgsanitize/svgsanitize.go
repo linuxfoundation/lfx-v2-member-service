@@ -20,6 +20,7 @@ package svgsanitize
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -57,6 +58,11 @@ var textBearingElements = map[string]bool{
 // listed here (so a plain color or keyword value passes) but are also
 // checked by isSafePaintValue, since their value can alternatively be a
 // url(...) paint-server/filter reference that must be fragment-only too.
+//
+// stroke-miterlimit, clip-rule and display are present because an inlined
+// stylesheet (see css.go) can carry them and silently dropping any of them
+// changes what renders — display:none in particular hides artwork, so
+// discarding it would reveal layers the author meant to stay hidden.
 var allowedAttributes = map[string]bool{
 	"id": true, "class": true, "transform": true,
 	"viewBox": true, "width": true, "height": true, "preserveAspectRatio": true,
@@ -66,6 +72,7 @@ var allowedAttributes = map[string]bool{
 	"fill": true, "fill-rule": true, "fill-opacity": true,
 	"stroke": true, "stroke-width": true, "stroke-linecap": true,
 	"stroke-linejoin": true, "stroke-dasharray": true, "stroke-opacity": true,
+	"stroke-miterlimit": true, "clip-rule": true, "display": true,
 	"opacity": true, "stop-color": true, "stop-opacity": true,
 	"gradientUnits": true, "gradientTransform": true,
 	"patternUnits": true, "patternContentUnits": true, "patternTransform": true,
@@ -178,15 +185,98 @@ func Sanitize(data []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	// Structural validation above runs first so a DOCTYPE or non-svg root is
+	// still reported as such rather than being pre-empted by a CSS complaint.
+	// The stylesheet needs its own pass because <style> is a child element:
+	// by the time the walk below reaches an element carrying class=, a single
+	// streaming pass may not have read the rules that style it yet.
+	sheet, err := extractStylesheet(data)
+	if err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	enc := xml.NewEncoder(&buf)
-	if err := sanitizeElement(dec, enc, root, true, 0); err != nil {
+	if err := sanitizeElement(dec, enc, root, true, 0, sheet); err != nil {
 		return nil, err
 	}
 	if err := enc.Flush(); err != nil {
 		return nil, fmt.Errorf("svgsanitize: encoding output: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// extractStylesheet collects the text of every <style> element and parses it.
+//
+// Rules are gathered wherever <style> appears, including inside a subtree the
+// walk will later drop, because CSS applies document-wide regardless of where
+// it is declared — matching that keeps the sanitized rendering faithful to the
+// original. The CSS itself is never emitted; only allow-listed properties with
+// values that clear the existing paint checks reach the output.
+//
+// A decode failure here is deliberately swallowed: the main pass re-reads the
+// same bytes and owns the canonical parse/well-formedness errors, so reporting
+// them twice would only risk diverging messages.
+func extractStylesheet(data []byte) (*stylesheet, error) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+
+	var css strings.Builder
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return &stylesheet{}, nil
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "style" {
+				depth++
+			}
+		case xml.EndElement:
+			if t.Name.Local == "style" && depth > 0 {
+				depth--
+			}
+		case xml.CharData:
+			if depth > 0 {
+				css.Write(t)
+			}
+		}
+	}
+
+	if strings.TrimSpace(css.String()) == "" {
+		return &stylesheet{}, nil
+	}
+	return parseStylesheet(css.String())
+}
+
+// stylesheetAttrs converts the stylesheet rules matching an element's class
+// attribute into presentation attributes.
+func stylesheetAttrs(sheet *stylesheet, attrs []xml.Attr) ([]xml.Attr, error) {
+	if sheet.empty() {
+		return nil, nil
+	}
+
+	var class string
+	for _, a := range attrs {
+		if a.Name.Local == "class" {
+			class = a.Value
+			break
+		}
+	}
+
+	decls, err := sheet.resolveClasses(class)
+	if err != nil || len(decls) == 0 {
+		return nil, err
+	}
+
+	out := make([]xml.Attr, 0, len(decls))
+	for _, d := range decls {
+		out = append(out, xml.Attr{Name: xml.Name{Local: d.property}, Value: d.value})
+	}
+	return out, nil
 }
 
 // findRoot advances past any leading XML declaration, comments, and
@@ -225,11 +315,21 @@ func findRoot(dec *xml.Decoder) (xml.StartElement, error) {
 // forces a fresh, known-safe xmlns onto <svg> regardless of what the input
 // declared. depth is the current nesting level, checked against
 // maxSVGNestingDepth to bound recursion.
-func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, isRoot bool, depth int) error {
+func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, isRoot bool, depth int, sheet *stylesheet) error {
 	if depth > maxSVGNestingDepth {
 		return fmt.Errorf("svgsanitize: exceeds maximum nesting depth of %d", maxSVGNestingDepth)
 	}
-	attrs := filterAttrs(se.Attr)
+	// Stylesheet-derived attributes are placed ahead of the element's own so
+	// that filterAttrs' first-occurrence-wins dedupe reproduces the CSS
+	// cascade, where an author rule outranks a presentation attribute. Routing
+	// them through filterAttrs rather than appending to its result keeps them
+	// subject to the same allow-list and isSafePaintValue checks as any
+	// authored attribute.
+	inherited, err := stylesheetAttrs(sheet, se.Attr)
+	if err != nil {
+		return err
+	}
+	attrs := filterAttrs(append(inherited, se.Attr...))
 	if isRoot {
 		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: svgNamespace})
 	}
@@ -246,7 +346,7 @@ func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, is
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if allowedElements[t.Name.Local] {
-				if err := sanitizeElement(dec, enc, t.Copy(), false, depth+1); err != nil {
+				if err := sanitizeElement(dec, enc, t.Copy(), false, depth+1, sheet); err != nil {
 					return err
 				}
 			} else if err := skipElement(dec); err != nil {
