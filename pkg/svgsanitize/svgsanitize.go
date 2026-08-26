@@ -72,13 +72,24 @@ var allowedAttributes = map[string]bool{
 	"fill": true, "fill-rule": true, "fill-opacity": true,
 	"stroke": true, "stroke-width": true, "stroke-linecap": true,
 	"stroke-linejoin": true, "stroke-dasharray": true, "stroke-opacity": true,
-	"stroke-miterlimit": true, "clip-rule": true, "display": true,
 	"opacity": true, "stop-color": true, "stop-opacity": true,
 	"gradientUnits": true, "gradientTransform": true,
 	"patternUnits": true, "patternContentUnits": true, "patternTransform": true,
 	"clip-path": true, "mask": true, "version": true,
 	"font-family": true, "font-size": true, "font-weight": true, "font-style": true,
 	"text-anchor": true, "dominant-baseline": true, "letter-spacing": true,
+	// Presentation attributes that a stylesheet can also set. They are listed
+	// explicitly rather than folded in from inlinableProperties, because this
+	// map answers a security question — may this attribute reach the CDN —
+	// and each entry needs that decision made deliberately. init() asserts the
+	// containment instead of establishing it, so the two cannot drift apart.
+	"stroke-miterlimit": true, "stroke-dashoffset": true,
+	"clip-rule": true, "display": true, "visibility": true, "overflow": true,
+	"color": true, "paint-order": true, "vector-effect": true, "isolation": true,
+	"mix-blend-mode": true, "shape-rendering": true, "color-interpolation": true,
+	"pointer-events": true, "font-variant": true, "font-stretch": true,
+	"text-decoration": true, "baseline-shift": true, "writing-mode": true,
+	"marker-start": true, "marker-mid": true, "marker-end": true,
 }
 
 // svgNamespace is force-declared on the output root regardless of what (if
@@ -97,8 +108,14 @@ const maxSVGNestingDepth = 100
 // <clipPath>, or <mask> element. Unlike href, these aren't handled by
 // filterAttrs' generic allow-list branch because their value is not itself a
 // URL; a URL is only one substring a paint value can legally contain.
+//
+// marker-start/mid/end belong here for the same reason: their value is a
+// FuncIRI, so an ungated one lets a "sanitized" document on a public CDN name
+// an attacker-controlled resource — the outbound-request leak the fragment-only
+// rule exists to close, just through a different attribute.
 var paintAttributes = map[string]bool{
 	"fill": true, "stroke": true, "clip-path": true, "mask": true,
+	"marker-start": true, "marker-mid": true, "marker-end": true,
 }
 
 // urlFragmentPattern matches a value that is *only* a same-document
@@ -347,8 +364,30 @@ func stylesheetAttrs(sheet *stylesheet, attrs []xml.Attr) ([]xml.Attr, error) {
 		return nil, nil
 	}
 
-	out := make([]xml.Attr, 0, len(inlineDecls)+len(sheetDecls))
-	for _, d := range append(inlineDecls, sheetDecls...) {
+	// Cascade order: a style attribute outranks an author stylesheet rule,
+	// unless that rule carries !important. Dropping the priority here would
+	// emit the wrong colour for a document every browser renders differently.
+	merged := make([]cssDeclaration, 0, len(inlineDecls)+len(sheetDecls))
+	fromSheet := make(map[string]cssDeclaration, len(sheetDecls))
+	for _, d := range sheetDecls {
+		fromSheet[d.property] = d
+	}
+	claimed := make(map[string]bool, len(inlineDecls))
+	for _, d := range inlineDecls {
+		if sheet, ok := fromSheet[d.property]; ok && sheet.important && !d.important {
+			continue
+		}
+		claimed[d.property] = true
+		merged = append(merged, d)
+	}
+	for _, d := range sheetDecls {
+		if !claimed[d.property] {
+			merged = append(merged, d)
+		}
+	}
+
+	out := make([]xml.Attr, 0, len(merged))
+	for _, d := range merged {
 		// filterAttrs drops a paint value that fails this check, which for a
 		// CSS-derived one would mean silently rendering the element with no
 		// fill — black. Every other unrepresentable stylesheet input is an
@@ -413,7 +452,7 @@ func findRoot(dec *xml.Decoder) (xml.StartElement, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if t.Name.Local != "svg" {
-				return xml.StartElement{}, fmt.Errorf("svgsanitize: root element is %q, not svg", t.Name.Local)
+				return xml.StartElement{}, fmt.Errorf("svgsanitize: root element is %q, not svg", truncateForError(t.Name.Local))
 			}
 			return t.Copy(), nil
 		case xml.Directive:

@@ -73,14 +73,19 @@ var inlinableProperties = map[string]bool{
 	"text-decoration": true, "baseline-shift": true, "writing-mode": true,
 }
 
-// init makes allowedAttributes a superset of inlinableProperties by
-// construction, so the two sets cannot drift apart in a later edit. Every
-// entry is a genuine SVG presentation attribute carrying an inert
-// keyword/number/colour value, or a paint attribute already gated by
-// isSafePaintValue, so admitting them as authored attributes too is safe.
+// init asserts that every inlinable property is also emittable. The two sets
+// answer different questions — allowedAttributes gates what may reach the CDN,
+// inlinableProperties gates what CSS may set — so neither derives from the
+// other. But a property that is inlinable and not emittable passes the
+// fail-closed gate and is then silently deleted by filterAttrs, which is the
+// exact silent-corruption outcome this package exists to prevent. Panicking at
+// process start turns that class of drift into an immediate, un-missable
+// failure rather than a wrong logo discovered in production.
 func init() {
 	for property := range inlinableProperties {
-		allowedAttributes[property] = true
+		if !allowedAttributes[property] {
+			panic("svgsanitize: inlinable property " + property + " is missing from allowedAttributes")
+		}
 	}
 }
 
@@ -97,10 +102,18 @@ var inertProperties = map[string]bool{
 }
 
 // isInertProperty reports whether a declaration can be discarded without
-// changing what renders. Vendor-prefixed properties qualify because a browser
-// that does not recognise the prefix ignores them too — and rejecting an
-// upload over one would turn a fidelity fix into an availability regression.
+// changing what renders.
+//
+// Vendor-prefixed properties qualify because a browser that does not recognise
+// the prefix ignores them too. A custom property ("--brand") emphatically does
+// not: browsers honour it, and discarding one while keeping a var() that reads
+// it leaves an unresolvable reference, which computes to the initial value —
+// black for fill. That is this package's original bug wearing a different hat,
+// so custom properties fall through to the unsupported branch and fail closed.
 func isInertProperty(property string) bool {
+	if strings.HasPrefix(property, "--") {
+		return false
+	}
 	return inertProperties[property] || strings.HasPrefix(property, "-")
 }
 
@@ -111,18 +124,29 @@ type styleRule struct {
 	decls []cssDeclaration
 }
 
-// cssDeclaration is a single "property: value" pair.
+// cssDeclaration is a single "property: value" pair. important records a
+// !important priority, which the cascade needs even though the marker itself
+// can never be emitted: a presentation attribute has no way to express it.
 type cssDeclaration struct {
-	property string
-	value    string
+	property  string
+	value     string
+	important bool
 }
 
 // stylesheet is every rule parsed from a document's <style> elements, indexed
 // by the class each rule selects. rules keeps source order, which is also
 // cascade order for the equal-specificity selectors this parser accepts.
+//
+// resolved memoizes resolveClasses by class-attribute value. Without it, a
+// document where many elements share a class that many rules select costs
+// rules x elements — and a selector list makes each extra rule three bytes
+// (".a,.a,.a{...}"), so a small upload can buy minutes of CPU on a pod with no
+// request timeout. Keying on the attribute string bounds the work to the
+// number of distinct class attributes in the document.
 type stylesheet struct {
-	rules   []styleRule
-	byClass map[string][]int
+	rules    []styleRule
+	byClass  map[string][]int
+	resolved map[string][]cssDeclaration
 }
 
 // empty reports whether there is nothing to inline, letting the caller skip
@@ -202,12 +226,16 @@ func (s *stylesheet) parseBlock(css string) error {
 	}
 }
 
-// parseDeclarations splits a rule body into property/value pairs. Malformed
-// fragments (no colon, empty property, empty value) are skipped rather than
-// rejected: they contribute no styling, so dropping them changes nothing a
-// browser would have rendered.
+// parseDeclarations splits a declaration list into property/value pairs. It
+// serves both a rule body and a style attribute, so comment stripping lives
+// here rather than in the block parser — comments are legal in either, and
+// handling them on only one path would reject valid input on the other.
+//
+// Malformed fragments (no colon, empty property, empty value) are skipped
+// rather than rejected: they contribute no styling, so dropping them changes
+// nothing a browser would have rendered.
 func parseDeclarations(body string) ([]cssDeclaration, error) {
-	parts, err := splitDeclarations(body)
+	parts, err := splitDeclarations(cssCommentPattern.ReplaceAllString(body, " "))
 	if err != nil {
 		return nil, err
 	}
@@ -222,23 +250,30 @@ func parseDeclarations(body string) ([]cssDeclaration, error) {
 		// A presentation attribute has no notion of priority, so the marker
 		// has to go — carrying it through would emit fill="#003764 !important",
 		// which every browser discards, putting the element right back to the
-		// default black this package exists to prevent.
-		value := strings.TrimSpace(importantPattern.ReplaceAllString(part[colon+1:], ""))
+		// default black this package exists to prevent. The priority itself is
+		// kept on the declaration, because the cascade still needs it.
+		raw := part[colon+1:]
+		stripped := importantPattern.ReplaceAllString(raw, "")
+		value := strings.TrimSpace(stripped)
 		if property == "" || value == "" {
 			continue
 		}
-		out = append(out, cssDeclaration{property: property, value: value})
+		out = append(out, cssDeclaration{
+			property:  property,
+			value:     value,
+			important: len(stripped) != len(raw),
+		})
 	}
 	return out, nil
 }
 
-// splitDeclarations splits a rule body on semicolons that actually terminate a
-// declaration, ignoring any inside a quoted string or a url(...) token. A
-// naive split truncates font-family:"Foo;Bar" into a broken value.
+// splitDeclarations splits a declaration list on semicolons that actually
+// terminate a declaration, ignoring any inside a quoted string or a url(...)
+// token. A naive split truncates font-family:"Foo;Bar" into a broken value.
 //
 // An unterminated quote or parenthesis is an error rather than a best-effort
-// recovery: the remainder of the rule would otherwise be swallowed into one
-// nonsensical value, silently dropping every declaration after it.
+// recovery: the remainder would otherwise be swallowed into one nonsensical
+// value, silently dropping every declaration after it.
 func splitDeclarations(body string) ([]string, error) {
 	var (
 		out    []string
@@ -248,6 +283,12 @@ func splitDeclarations(body string) ([]string, error) {
 	)
 	for i := 0; i < len(body); i++ {
 		c := body[i]
+		// A backslash escapes the next byte, so an apostrophe in a font name
+		// (font-family:'It\'s') does not read as the end of the string.
+		if c == '\\' {
+			i++
+			continue
+		}
 		switch {
 		case quote != 0:
 			if c == quote {
@@ -267,10 +308,10 @@ func splitDeclarations(body string) ([]string, error) {
 		}
 	}
 	if quote != 0 {
-		return nil, fmt.Errorf("svgsanitize: unsupported CSS in <style>: unterminated string in %q", truncateForError(body))
+		return nil, fmt.Errorf("svgsanitize: unsupported CSS: unterminated string in %q", truncateForError(body))
 	}
 	if parens > 0 {
-		return nil, fmt.Errorf("svgsanitize: unsupported CSS in <style>: unbalanced parentheses in %q", truncateForError(body))
+		return nil, fmt.Errorf("svgsanitize: unsupported CSS: unbalanced parentheses in %q", truncateForError(body))
 	}
 	return append(out, body[start:]), nil
 }
@@ -291,6 +332,9 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 	if s.empty() || strings.TrimSpace(classAttr) == "" {
 		return nil, nil
 	}
+	if cached, ok := s.resolved[classAttr]; ok {
+		return cached, nil
+	}
 
 	// Collect matching rule indices, then apply them in source order so the
 	// cascade does not depend on the order classes happen to appear in the
@@ -306,14 +350,14 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 		}
 	}
 	if len(matched) == 0 {
+		s.memoize(classAttr, nil)
 		return nil, nil
 	}
 	sort.Ints(matched)
 
-	// Later declarations override earlier ones for the same property.
-	// Insertion order is tracked separately so output is deterministic —
-	// ranging a map would not be.
-	winner := make(map[string]string)
+	// Later declarations override earlier ones for the same property, except
+	// that an !important one is not displaced by a normal one.
+	winner := make(map[string]cssDeclaration)
 	var order []string
 	for _, i := range matched {
 		rule := s.rules[i]
@@ -325,18 +369,31 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 				return nil, fmt.Errorf("svgsanitize: unsupported CSS property %q in rule %q: cannot be represented as an SVG presentation attribute",
 					truncateForError(d.property), truncateForError(rule.class))
 			}
-			if _, dup := winner[d.property]; !dup {
+			prev, dup := winner[d.property]
+			if !dup {
 				order = append(order, d.property)
+			} else if prev.important && !d.important {
+				continue
 			}
-			winner[d.property] = d.value
+			winner[d.property] = d
 		}
 	}
 
 	out := make([]cssDeclaration, 0, len(order))
 	for _, property := range order {
-		out = append(out, cssDeclaration{property: property, value: winner[property]})
+		out = append(out, winner[property])
 	}
+	s.memoize(classAttr, out)
 	return out, nil
+}
+
+// memoize records a resolved class attribute. Only successful resolutions are
+// cached; a failure aborts the whole document, so there is nothing to reuse.
+func (s *stylesheet) memoize(classAttr string, decls []cssDeclaration) {
+	if s.resolved == nil {
+		s.resolved = make(map[string][]cssDeclaration)
+	}
+	s.resolved[classAttr] = decls
 }
 
 // truncateForError bounds a fragment of attacker-controlled input before it is

@@ -354,19 +354,112 @@ func TestSanitize_InlinablePropertiesAreAllEmittable(t *testing.T) {
 	}
 }
 
-func TestSanitize_UnterminatedCommentDoesNotAffectOtherStyleBlock(t *testing.T) {
-	// Blocks are parsed independently, so a dangling /* in one cannot comment
-	// out the next. Concatenating them first would let it, because the comment
-	// pattern spans newlines.
-	in := `<svg xmlns="http://www.w3.org/2000/svg">` +
-		`<style>.b{fill:#009ADE;}</style><style>/* dangling</style>` +
-		`<rect class="b" width="1" height="1"/></svg>`
+func TestSanitize_RejectsStyleAttributeSettingGeometryOrIdentity(t *testing.T) {
+	// The style attribute path needs the same gate as the stylesheet path:
+	// these are XML attributes but not CSS properties, so honouring them would
+	// erase path geometry or rewrite the id a url(#...) reference resolves
+	// against.
+	for _, decl := range []string{"d:none", "points:0", "id:hijack", "class:other", "transform:scale(99)", "width:9"} {
+		t.Run(decl, func(t *testing.T) {
+			in := `<svg xmlns="http://www.w3.org/2000/svg"><path style="` + decl + `" d="M0 0 L9 9"/></svg>`
+
+			_, err := svgsanitize.Sanitize([]byte(in))
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "unsupported CSS property")
+		})
+	}
+}
+
+func TestSanitize_RejectsExternalMarkerReference(t *testing.T) {
+	// marker-* values are FuncIRIs, so an ungated one would let a sanitized
+	// document on a public CDN fetch an attacker-controlled resource.
+	for _, source := range []string{
+		`<style>.a{marker-mid:url(https://attacker.example/probe);}</style><path class="a" d="M0,0"/>`,
+		`<path style="marker-end:url(https://attacker.example/probe)" d="M0,0"/>`,
+		`<path marker-start="url(https://attacker.example/probe)" d="M0,0"/>`,
+	} {
+		in := `<svg xmlns="http://www.w3.org/2000/svg">` + source + `</svg>`
+
+		out, err := svgsanitize.Sanitize([]byte(in))
+
+		assert.NotContains(t, string(out), "attacker.example")
+		if err == nil {
+			assert.NotContains(t, string(out), "marker-", "external marker must not survive")
+		}
+	}
+}
+
+func TestSanitize_KeepsSameDocumentMarkerReference(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{marker-end:url(#arrow);}</style>` +
+		`<path class="a" d="M0,0"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `marker-end="url(#arrow)"`)
+}
+
+func TestSanitize_RejectsCustomPropertyDefinition(t *testing.T) {
+	// Treating --brand as inert while keeping fill:var(--brand) would leave an
+	// unresolvable reference, which computes to the initial value: black.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{--brand:#00FF00;fill:var(--brand);}</style>` +
+		`<rect class="a" width="1" height="1"/></svg>`
 
 	_, err := svgsanitize.Sanitize([]byte(in))
 
-	// The dangling block fails closed on its own rather than silently
-	// swallowing the block beside it.
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--brand")
+}
+
+func TestSanitize_StylesheetImportantBeatsStyleAttribute(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:#111111 !important;}</style>` +
+		`<rect class="a" style="fill:#222222" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	// An !important author rule outranks a style attribute; dropping the
+	// priority would emit a colour no browser renders.
+	assert.Contains(t, got, `fill="#111111"`)
+	assert.NotContains(t, got, `fill="#222222"`)
+}
+
+func TestSanitize_AllowsCommentsInStyleAttribute(t *testing.T) {
+	// Comments are legal in a style attribute's declaration list; rejecting
+	// them on only that path would be an availability regression.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><rect style="/* brand */fill:#003764" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `fill="#003764"`)
+}
+
+func TestSanitize_AllowsEscapedQuoteInDeclarationValue(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{font-family:'It\'s';fill:#003764;}</style>` +
+		`<text class="a">hi</text></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `fill="#003764"`)
+}
+
+func TestSanitize_UnterminatedCommentDoesNotAffectOtherStyleBlock(t *testing.T) {
+	// The positive half of the isolation guarantee: concatenating blocks would
+	// let the dangling /* in the second block comment out the first, so this
+	// must still resolve. Asserting only that some error occurs would pass
+	// against the concatenating implementation too.
+	in := `<svg xmlns="http://www.w3.org/2000/svg">` +
+		`<style>.b{fill:#009ADE;}</style><style>/* dangling */</style>` +
+		`<rect class="b" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `fill="#009ADE"`)
 }
 
 func TestSanitize_DanglingSelectorCannotSpliceAcrossBlocks(t *testing.T) {
