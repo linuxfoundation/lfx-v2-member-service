@@ -89,7 +89,6 @@ var allowedAttributes = map[string]bool{
 	"mix-blend-mode": true, "shape-rendering": true, "color-interpolation": true,
 	"pointer-events": true, "font-variant": true, "font-stretch": true,
 	"text-decoration": true, "baseline-shift": true, "writing-mode": true,
-	"marker-start": true, "marker-mid": true, "marker-end": true,
 }
 
 // svgNamespace is force-declared on the output root regardless of what (if
@@ -109,13 +108,12 @@ const maxSVGNestingDepth = 100
 // filterAttrs' generic allow-list branch because their value is not itself a
 // URL; a URL is only one substring a paint value can legally contain.
 //
-// marker-start/mid/end belong here for the same reason: their value is a
-// FuncIRI, so an ungated one lets a "sanitized" document on a public CDN name
-// an attacker-controlled resource — the outbound-request leak the fragment-only
-// rule exists to close, just through a different attribute.
+// Every property here has its target element allow-listed (linearGradient,
+// radialGradient, pattern, clipPath, mask), so a surviving fragment reference
+// always resolves. marker-* is excluded from the inlinable set for exactly
+// that reason — see css.go.
 var paintAttributes = map[string]bool{
 	"fill": true, "stroke": true, "clip-path": true, "mask": true,
-	"marker-start": true, "marker-mid": true, "marker-end": true,
 }
 
 // urlFragmentPattern matches a value that is *only* a same-document
@@ -213,7 +211,7 @@ func Sanitize(data []byte) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	enc := xml.NewEncoder(&buf)
+	enc := xml.NewEncoder(&boundedWriter{dst: &buf, remaining: maxSanitizedOutputBytes})
 	if err := sanitizeElement(dec, enc, root, true, 0, sheet); err != nil {
 		return nil, err
 	}
@@ -221,6 +219,34 @@ func Sanitize(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("svgsanitize: encoding output: %s", truncateForError(err.Error()))
 	}
 	return buf.Bytes(), nil
+}
+
+// maxSanitizedOutputBytes bounds the sanitized document.
+//
+// Inlining copies a declaration onto every element that references it, so
+// output is not bounded by input: one large valid value referenced from many
+// compact elements amplifies by orders of magnitude. Measured before this
+// cap, a 169 KiB upload produced 512 MiB of output and peaked well past the
+// pod's 512Mi limit. maxDeclarationValueBytes stops the worst shape at source;
+// this is the general bound.
+const maxSanitizedOutputBytes = 4 << 20
+
+// boundedWriter fails the encode as soon as the output would exceed its limit.
+//
+// The check has to happen here rather than on the returned bytes: reaching a
+// length check on the finished document requires materializing the whole thing
+// first, which is precisely the allocation that exhausts the pod.
+type boundedWriter struct {
+	dst       *bytes.Buffer
+	remaining int
+}
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	if len(p) > w.remaining {
+		return 0, fmt.Errorf("sanitized document exceeds %d bytes", maxSanitizedOutputBytes)
+	}
+	w.remaining -= len(p)
+	return w.dst.Write(p)
 }
 
 // extractStylesheet collects the text of the <style> elements inside the root
@@ -403,6 +429,13 @@ func stylesheetAttrs(sheet *stylesheet, attrs []xml.Attr) ([]xml.Attr, error) {
 
 // resolveInlineStyle parses an element's style attribute under the same rules
 // as a stylesheet rule body.
+//
+// The cascade within a single declaration block is the same one resolveClasses
+// implements: a later declaration wins, except that it cannot displace an
+// earlier !important one. Walking forward and applying that rule keeps the two
+// paths from disagreeing about identical input — an earlier reverse-walk here
+// emitted blue for style="fill:red!important;fill:blue" while the stylesheet
+// path emitted red.
 func resolveInlineStyle(style string) ([]cssDeclaration, error) {
 	if strings.TrimSpace(style) == "" {
 		return nil, nil
@@ -413,26 +446,28 @@ func resolveInlineStyle(style string) ([]cssDeclaration, error) {
 		return nil, err
 	}
 
-	out := make([]cssDeclaration, 0, len(decls))
-	seen := make(map[string]bool, len(decls))
-	for i := len(decls) - 1; i >= 0; i-- {
-		d := decls[i]
+	winner := make(map[string]cssDeclaration, len(decls))
+	var order []string
+	for _, d := range decls {
 		switch {
 		case isInertProperty(d.property):
 			continue
 		case !inlinableProperties[d.property]:
 			return nil, fmt.Errorf("svgsanitize: unsupported CSS property %q in style attribute: cannot be represented as an SVG presentation attribute",
 				truncateForError(d.property))
-		case seen[d.property]:
+		}
+		prev, dup := winner[d.property]
+		if !dup {
+			order = append(order, d.property)
+		} else if prev.important && !d.important {
 			continue
 		}
-		seen[d.property] = true
-		out = append(out, d)
+		winner[d.property] = d
 	}
-	// Walked in reverse so the last declaration for a property wins; restore
-	// document order for deterministic output.
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
+
+	out := make([]cssDeclaration, 0, len(order))
+	for _, property := range order {
+		out = append(out, winner[property])
 	}
 	return out, nil
 }

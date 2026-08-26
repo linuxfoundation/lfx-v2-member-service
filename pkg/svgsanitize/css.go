@@ -50,11 +50,19 @@ var importantPattern = regexp.MustCompile(`(?i)\s*!\s*important\s*$`)
 // CSS set them would corrupt artwork (.a{d:none} erases a path) and let a
 // crafted sheet rewrite the id that a url(#...) reference resolves against.
 //
-// The reverse containment is a hard requirement and is established by init()
-// below, not by keeping two lists in sync by hand: a property that is
-// inlinable but not emittable passes the fail-closed gate here and is then
-// silently deleted by filterAttrs, which is the exact silent-corruption
-// outcome this package exists to prevent.
+// marker-start/mid/end are deliberately absent. Their value is a FuncIRI
+// pointing at a <marker>, which is not in allowedElements and cannot cheaply
+// be added — its geometry attributes (markerWidth, refX, orient, ...) are not
+// allow-listed either, so admitting the element alone would render markers at
+// the wrong size, anchor and angle, which is worse than rendering none.
+// Keeping the properties unsupported means a referenced marker rule fails
+// closed instead of emitting a reference whose target has been stripped.
+//
+// The reverse containment is a hard requirement and is asserted by init()
+// below, not maintained by hand: a property that is inlinable but not
+// emittable passes the fail-closed gate here and is then silently deleted by
+// filterAttrs, which is the exact silent-corruption outcome this package
+// exists to prevent.
 var inlinableProperties = map[string]bool{
 	"fill": true, "fill-rule": true, "fill-opacity": true,
 	"stroke": true, "stroke-width": true, "stroke-linecap": true,
@@ -65,13 +73,34 @@ var inlinableProperties = map[string]bool{
 	"color": true, "display": true, "visibility": true, "overflow": true,
 	"paint-order": true, "vector-effect": true, "isolation": true,
 	"mix-blend-mode": true, "shape-rendering": true, "color-interpolation": true,
-	"pointer-events": true, "marker-start": true, "marker-mid": true,
-	"marker-end":  true,
-	"font-family": true, "font-size": true, "font-weight": true,
+	"pointer-events": true,
+	"font-family":    true, "font-size": true, "font-weight": true,
 	"font-style": true, "font-variant": true, "font-stretch": true,
 	"text-anchor": true, "dominant-baseline": true, "letter-spacing": true,
 	"text-decoration": true, "baseline-shift": true, "writing-mode": true,
 }
+
+// maxStylesheetRules bounds how many rules a document's stylesheets may expand
+// to. A selector list makes each extra rule three bytes (".a,.a,.a{...}"), so
+// without a cap a 2 MiB upload can define ~350k rules; combined with tens of
+// thousands of elements referencing them, resolution reaches ~10^10 index
+// visits. The Linux Foundation logo — the worked example throughout this
+// package — defines 304, so four thousand leaves two orders of magnitude of
+// headroom for anything a design tool legitimately emits.
+const maxStylesheetRules = 4096
+
+// maxResolveWork bounds the total number of rule indices visited across the
+// whole document. The rule cap alone is not sufficient: an attacker can stay
+// under it and instead multiply the element count, and no memoization strategy
+// helps when every element resolves to a genuinely different declaration set.
+// A single global budget bounds the product however the work is distributed.
+const maxResolveWork = 1 << 20
+
+// maxDeclarationValueBytes bounds one declaration's value. A single valid
+// value of ~1 MiB referenced from tens of thousands of elements is copied onto
+// each of them, so this is the cheapest place to stop that amplification at
+// its source. No legitimate font-family or stroke-dasharray approaches it.
+const maxDeclarationValueBytes = 4096
 
 // init asserts that every inlinable property is also emittable. The two sets
 // answer different questions — allowedAttributes gates what may reach the CDN,
@@ -92,29 +121,58 @@ func init() {
 // inertProperties reach no SVG presentation attribute yet cannot change how a
 // document renders, so dropping them is lossless and must not trip the
 // fail-closed check. enable-background was removed from SVG 2 and is
-// implemented by no current browser; the others are editor hints or affect
-// only interactive presentation, and Inkscape and Illustrator emit them
-// routinely alongside the colour rules.
+// implemented by no current browser; cursor affects only interaction, which a
+// static CDN image has none of.
+//
+// white-space is deliberately absent. SVG 2 makes it the whitespace-handling
+// mechanism for <text> (§11.10.3.1, §11.6.1), so pre and pre-line change what
+// renders. It cannot be inlined either: browsers do not honour white-space as
+// a presentation attribute, so emitting one would pass every gate here and
+// still do nothing — silent corruption relocated into the user agent rather
+// than fixed. It therefore falls through to the unsupported branch and fails
+// closed.
 var inertProperties = map[string]bool{
 	"enable-background": true,
 	"cursor":            true,
-	"white-space":       true,
+}
+
+// inertPropertyPrefixes are vendor prefixes belonging to design tools whose
+// properties no browser implements, so discarding them cannot change
+// rendering.
+//
+// This is an allow-list rather than a blanket "starts with a hyphen" test,
+// because that test was wrong: Blink honours -webkit-clip-path,
+// -webkit-mask-image, -webkit-opacity, -webkit-transform and -webkit-filter on
+// SVG content, so treating every prefixed property as inert silently dropped
+// declarations that visibly change the artwork. An unrecognised prefix now
+// fails closed, and the error names the property, so a rejection is
+// self-diagnosing and a re-export fixes it.
+var inertPropertyPrefixes = []string{
+	"-inkscape-",
+	"-sodipodi-",
 }
 
 // isInertProperty reports whether a declaration can be discarded without
 // changing what renders.
 //
-// Vendor-prefixed properties qualify because a browser that does not recognise
-// the prefix ignores them too. A custom property ("--brand") emphatically does
-// not: browsers honour it, and discarding one while keeping a var() that reads
-// it leaves an unresolvable reference, which computes to the initial value —
-// black for fill. That is this package's original bug wearing a different hat,
-// so custom properties fall through to the unsupported branch and fail closed.
+// A custom property ("--brand") is emphatically not inert: browsers honour it,
+// and discarding one while keeping a var() that reads it leaves an
+// unresolvable reference, which computes to the initial value — black for
+// fill. That is this package's original bug wearing a different hat, so custom
+// properties fail closed like any other unsupported declaration.
 func isInertProperty(property string) bool {
 	if strings.HasPrefix(property, "--") {
 		return false
 	}
-	return inertProperties[property] || strings.HasPrefix(property, "-")
+	if inertProperties[property] {
+		return true
+	}
+	for _, prefix := range inertPropertyPrefixes {
+		if strings.HasPrefix(property, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // styleRule is one parsed "selector { ... }" block. Declarations keep source
@@ -147,6 +205,7 @@ type stylesheet struct {
 	rules    []styleRule
 	byClass  map[string][]int
 	resolved map[string][]cssDeclaration
+	budget   int
 }
 
 // empty reports whether there is nothing to inline, letting the caller skip
@@ -171,7 +230,7 @@ func (s *stylesheet) empty() bool {
 // through to resolveClasses, which only rejects them if the rule they belong
 // to is actually referenced by an element (see resolveClasses).
 func parseStylesheet(blocks []string) (*stylesheet, error) {
-	sheet := &stylesheet{byClass: make(map[string][]int)}
+	sheet := &stylesheet{byClass: make(map[string][]int), budget: maxResolveWork}
 	for _, block := range blocks {
 		if err := sheet.parseBlock(block); err != nil {
 			return nil, err
@@ -220,6 +279,9 @@ func (s *stylesheet) parseBlock(css string) error {
 			if m == nil {
 				return fmt.Errorf("svgsanitize: unsupported CSS selector %q in <style>: only simple class selectors are supported", truncateForError(one))
 			}
+			if len(s.rules) >= maxStylesheetRules {
+				return fmt.Errorf("svgsanitize: stylesheet defines more than %d rules", maxStylesheetRules)
+			}
 			s.byClass[m[1]] = append(s.byClass[m[1]], len(s.rules))
 			s.rules = append(s.rules, styleRule{class: m[1], decls: decls})
 		}
@@ -257,6 +319,10 @@ func parseDeclarations(body string) ([]cssDeclaration, error) {
 		value := strings.TrimSpace(stripped)
 		if property == "" || value == "" {
 			continue
+		}
+		if len(value) > maxDeclarationValueBytes {
+			return nil, fmt.Errorf("svgsanitize: CSS value for %q exceeds %d bytes",
+				truncateForError(property), maxDeclarationValueBytes)
 		}
 		out = append(out, cssDeclaration{
 			property:  property,
@@ -338,11 +404,19 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 
 	// Collect matching rule indices, then apply them in source order so the
 	// cascade does not depend on the order classes happen to appear in the
-	// attribute.
+	// attribute. Every index visited is charged against a document-wide
+	// budget: memoization alone cannot bound this, because an attacker can
+	// give each element a distinct class attribute — varying a dead class name
+	// is enough — so that no key ever repeats.
 	var matched []int
 	seen := make(map[int]bool)
 	for _, name := range strings.Fields(classAttr) {
-		for _, i := range s.byClass[name] {
+		indices := s.byClass[name]
+		s.budget -= len(indices)
+		if s.budget < 0 {
+			return nil, fmt.Errorf("svgsanitize: stylesheet is too expensive to resolve: exceeded %d rule lookups", maxResolveWork)
+		}
+		for _, i := range indices {
 			if !seen[i] {
 				seen[i] = true
 				matched = append(matched, i)
