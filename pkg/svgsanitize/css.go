@@ -49,6 +49,12 @@ var importantPattern = regexp.MustCompile(`(?i)\s*!\s*important\s*$`)
 // properties, so no browser would ever apply them from a stylesheet — letting
 // CSS set them would corrupt artwork (.a{d:none} erases a path) and let a
 // crafted sheet rewrite the id that a url(#...) reference resolves against.
+//
+// The reverse containment is a hard requirement and is established by init()
+// below, not by keeping two lists in sync by hand: a property that is
+// inlinable but not emittable passes the fail-closed gate here and is then
+// silently deleted by filterAttrs, which is the exact silent-corruption
+// outcome this package exists to prevent.
 var inlinableProperties = map[string]bool{
 	"fill": true, "fill-rule": true, "fill-opacity": true,
 	"stroke": true, "stroke-width": true, "stroke-linecap": true,
@@ -58,18 +64,44 @@ var inlinableProperties = map[string]bool{
 	"clip-path": true, "clip-rule": true, "mask": true,
 	"color": true, "display": true, "visibility": true, "overflow": true,
 	"paint-order": true, "vector-effect": true, "isolation": true,
-	"mix-blend-mode": true,
-	"font-family":    true, "font-size": true, "font-weight": true,
-	"font-style": true, "font-variant": true,
+	"mix-blend-mode": true, "shape-rendering": true, "color-interpolation": true,
+	"pointer-events": true, "marker-start": true, "marker-mid": true,
+	"marker-end":  true,
+	"font-family": true, "font-size": true, "font-weight": true,
+	"font-style": true, "font-variant": true, "font-stretch": true,
 	"text-anchor": true, "dominant-baseline": true, "letter-spacing": true,
+	"text-decoration": true, "baseline-shift": true, "writing-mode": true,
+}
+
+// init makes allowedAttributes a superset of inlinableProperties by
+// construction, so the two sets cannot drift apart in a later edit. Every
+// entry is a genuine SVG presentation attribute carrying an inert
+// keyword/number/colour value, or a paint attribute already gated by
+// isSafePaintValue, so admitting them as authored attributes too is safe.
+func init() {
+	for property := range inlinableProperties {
+		allowedAttributes[property] = true
+	}
 }
 
 // inertProperties reach no SVG presentation attribute yet cannot change how a
 // document renders, so dropping them is lossless and must not trip the
 // fail-closed check. enable-background was removed from SVG 2 and is
-// implemented by no current browser; Illustrator still emits it out of habit.
+// implemented by no current browser; the others are editor hints or affect
+// only interactive presentation, and Inkscape and Illustrator emit them
+// routinely alongside the colour rules.
 var inertProperties = map[string]bool{
 	"enable-background": true,
+	"cursor":            true,
+	"white-space":       true,
+}
+
+// isInertProperty reports whether a declaration can be discarded without
+// changing what renders. Vendor-prefixed properties qualify because a browser
+// that does not recognise the prefix ignores them too — and rejecting an
+// upload over one would turn a fidelity fix into an availability regression.
+func isInertProperty(property string) bool {
+	return inertProperties[property] || strings.HasPrefix(property, "-")
 }
 
 // styleRule is one parsed "selector { ... }" block. Declarations keep source
@@ -99,8 +131,14 @@ func (s *stylesheet) empty() bool {
 	return s == nil || len(s.rules) == 0
 }
 
-// parseStylesheet parses the concatenated text of a document's <style>
-// elements into rules indexed by class.
+// parseStylesheet parses each <style> element's text into rules indexed by
+// class, in document order.
+//
+// Blocks are parsed independently rather than concatenated, because a browser
+// treats every <style> element as its own stylesheet. Joining them first lets
+// an unterminated /* in one block comment out the next, and lets a dangling
+// selector in one splice onto a body in another — both inventing a rendering
+// no renderer would produce, in the silent direction.
 //
 // It rejects — rather than ignores — any selector it does not understand.
 // Ignoring one would mean emitting an SVG whose styling silently differs from
@@ -108,45 +146,58 @@ func (s *stylesheet) empty() bool {
 // prevent. Unknown *properties* get the opposite treatment: they are carried
 // through to resolveClasses, which only rejects them if the rule they belong
 // to is actually referenced by an element (see resolveClasses).
-func parseStylesheet(css string) (*stylesheet, error) {
+func parseStylesheet(blocks []string) (*stylesheet, error) {
+	sheet := &stylesheet{byClass: make(map[string][]int)}
+	for _, block := range blocks {
+		if err := sheet.parseBlock(block); err != nil {
+			return nil, err
+		}
+	}
+	return sheet, nil
+}
+
+// parseBlock parses one <style> element's text into the sheet.
+func (s *stylesheet) parseBlock(css string) error {
 	css = cssCommentPattern.ReplaceAllString(css, " ")
 
-	sheet := &stylesheet{byClass: make(map[string][]int)}
 	for rest := css; ; {
 		open := strings.IndexByte(rest, '{')
 		if open < 0 {
 			// Trailing text after the last rule is only acceptable if it is
 			// whitespace; anything else means a truncated or unparsable sheet.
 			if strings.TrimSpace(rest) != "" {
-				return nil, fmt.Errorf("svgsanitize: unsupported CSS in <style>: trailing content %q", truncateForError(rest))
+				return fmt.Errorf("svgsanitize: unsupported CSS in <style>: trailing content %q", truncateForError(rest))
 			}
-			return sheet, nil
+			return nil
 		}
 		closeIdx := strings.IndexByte(rest[open:], '}')
 		if closeIdx < 0 {
-			return nil, fmt.Errorf("svgsanitize: unsupported CSS in <style>: unterminated rule")
+			return fmt.Errorf("svgsanitize: unsupported CSS in <style>: unterminated rule")
 		}
 		closeIdx += open
 
 		selector := strings.TrimSpace(rest[:open])
-		decls := parseDeclarations(rest[open+1 : closeIdx])
+		decls, err := parseDeclarations(rest[open+1 : closeIdx])
+		if err != nil {
+			return err
+		}
 		rest = rest[closeIdx+1:]
 
 		// An at-rule (@media, @import, @font-face, ...) changes which
 		// declarations apply, or pulls in an external sheet. Neither can be
 		// represented as a presentation attribute.
 		if strings.HasPrefix(selector, "@") {
-			return nil, fmt.Errorf("svgsanitize: unsupported CSS at-rule %q in <style>", truncateForError(selector))
+			return fmt.Errorf("svgsanitize: unsupported CSS at-rule %q in <style>", truncateForError(selector))
 		}
 
 		for _, one := range strings.Split(selector, ",") {
 			one = strings.TrimSpace(one)
 			m := classSelectorPattern.FindStringSubmatch(one)
 			if m == nil {
-				return nil, fmt.Errorf("svgsanitize: unsupported CSS selector %q in <style>: only simple class selectors are supported", truncateForError(one))
+				return fmt.Errorf("svgsanitize: unsupported CSS selector %q in <style>: only simple class selectors are supported", truncateForError(one))
 			}
-			sheet.byClass[m[1]] = append(sheet.byClass[m[1]], len(sheet.rules))
-			sheet.rules = append(sheet.rules, styleRule{class: m[1], decls: decls})
+			s.byClass[m[1]] = append(s.byClass[m[1]], len(s.rules))
+			s.rules = append(s.rules, styleRule{class: m[1], decls: decls})
 		}
 	}
 }
@@ -155,9 +206,14 @@ func parseStylesheet(css string) (*stylesheet, error) {
 // fragments (no colon, empty property, empty value) are skipped rather than
 // rejected: they contribute no styling, so dropping them changes nothing a
 // browser would have rendered.
-func parseDeclarations(body string) []cssDeclaration {
+func parseDeclarations(body string) ([]cssDeclaration, error) {
+	parts, err := splitDeclarations(body)
+	if err != nil {
+		return nil, err
+	}
+
 	var out []cssDeclaration
-	for _, part := range splitDeclarations(body) {
+	for _, part := range parts {
 		colon := strings.IndexByte(part, ':')
 		if colon < 0 {
 			continue
@@ -173,13 +229,17 @@ func parseDeclarations(body string) []cssDeclaration {
 		}
 		out = append(out, cssDeclaration{property: property, value: value})
 	}
-	return out
+	return out, nil
 }
 
 // splitDeclarations splits a rule body on semicolons that actually terminate a
 // declaration, ignoring any inside a quoted string or a url(...) token. A
 // naive split truncates font-family:"Foo;Bar" into a broken value.
-func splitDeclarations(body string) []string {
+//
+// An unterminated quote or parenthesis is an error rather than a best-effort
+// recovery: the remainder of the rule would otherwise be swallowed into one
+// nonsensical value, silently dropping every declaration after it.
+func splitDeclarations(body string) ([]string, error) {
 	var (
 		out    []string
 		start  int
@@ -206,7 +266,13 @@ func splitDeclarations(body string) []string {
 			start = i + 1
 		}
 	}
-	return append(out, body[start:])
+	if quote != 0 {
+		return nil, fmt.Errorf("svgsanitize: unsupported CSS in <style>: unterminated string in %q", truncateForError(body))
+	}
+	if parens > 0 {
+		return nil, fmt.Errorf("svgsanitize: unsupported CSS in <style>: unbalanced parentheses in %q", truncateForError(body))
+	}
+	return append(out, body[start:]), nil
 }
 
 // resolveClasses computes the presentation attributes contributed by the
@@ -253,7 +319,7 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 		rule := s.rules[i]
 		for _, d := range rule.decls {
 			switch {
-			case inertProperties[d.property]:
+			case isInertProperty(d.property):
 				continue
 			case !inlinableProperties[d.property]:
 				return nil, fmt.Errorf("svgsanitize: unsupported CSS property %q in rule %q: cannot be represented as an SVG presentation attribute",
@@ -273,13 +339,15 @@ func (s *stylesheet) resolveClasses(classAttr string) ([]cssDeclaration, error) 
 	return out, nil
 }
 
-// truncateForError bounds a fragment of attacker-controlled CSS before it is
+// truncateForError bounds a fragment of attacker-controlled input before it is
 // interpolated into an error that surfaces to the uploader and into the
 // request log, so a hostile file cannot use the message as an amplification
-// channel. It cuts on a rune boundary so the result stays valid UTF-8.
+// channel. It applies to decoder errors too, since those embed element and
+// entity names taken straight from the document. It cuts on a rune boundary so
+// the result stays valid UTF-8.
 func truncateForError(s string) string {
 	s = strings.TrimSpace(s)
-	const max = 40
+	const max = 80
 	if len(s) <= max {
 		return s
 	}

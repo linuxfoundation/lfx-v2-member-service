@@ -290,18 +290,143 @@ func TestSanitize_KeepsEscapedSameDocumentFragmentPaintURL(t *testing.T) {
 	assert.Contains(t, got, `clip-path="\75\72\6c(#g)"`)
 }
 
-func TestSanitize_StripsStyleAttribute(t *testing.T) {
+func TestSanitize_RejectsUnsafeStyleAttributeValue(t *testing.T) {
 	in := `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url(javascript:alert(1))" width="1" height="1"/></svg>`
+
+	_, err := svgsanitize.Sanitize([]byte(in))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsafe CSS value")
+}
+
+func TestSanitize_InlinesStyleAttribute(t *testing.T) {
+	// Illustrator emits style="..." instead of a <style> block when its CSS
+	// Properties setting is "Style Attributes" — same artwork, same all-black
+	// outcome if the declarations are simply dropped.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><path style="fill:#009ADE;opacity:0.5" d="M0,0"/></svg>`
 
 	out, err := svgsanitize.Sanitize([]byte(in))
 
 	require.NoError(t, err)
 	got := string(out)
-	assert.NotContains(t, got, "javascript")
-	// Scoped to the attribute spelling rather than the bare substring
-	// "style=", which also matches the allow-listed font-style attribute.
+	assert.Contains(t, got, `fill="#009ADE"`)
+	assert.Contains(t, got, `opacity="0.5"`)
 	assert.NotContains(t, got, ` style=`)
-	assert.Contains(t, got, "rect")
+	assertNoDuplicateAttrs(t, out)
+}
+
+func TestSanitize_StyleAttributeBeatsStylesheet(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:#111111;}</style>` +
+		`<rect class="a" style="fill:#222222" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	got := string(out)
+	// A style attribute outranks an author stylesheet rule.
+	assert.Contains(t, got, `fill="#222222"`)
+	assert.NotContains(t, got, `fill="#111111"`)
+	assertNoDuplicateAttrs(t, out)
+}
+
+func TestSanitize_InlinablePropertiesAreAllEmittable(t *testing.T) {
+	// Every property the resolver accepts must also survive filterAttrs. A
+	// property that passes the CSS gate but is not emittable would be dropped
+	// silently — the exact failure this package exists to prevent. Two of
+	// these, color and visibility, previously regressed that way: a dropped
+	// color left fill="currentColor" resolving to black, and a dropped
+	// visibility:hidden revealed artwork the author had hidden.
+	for _, property := range []string{
+		"color", "visibility", "overflow", "paint-order", "vector-effect",
+		"isolation", "mix-blend-mode", "font-variant", "stroke-dashoffset",
+		"shape-rendering", "text-decoration", "writing-mode", "marker-end",
+	} {
+		t.Run(property, func(t *testing.T) {
+			in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{` + property + `:inherit;}</style>` +
+				`<rect class="a" width="1" height="1"/></svg>`
+
+			out, err := svgsanitize.Sanitize([]byte(in))
+
+			require.NoError(t, err)
+			assert.Contains(t, string(out), property+`="inherit"`,
+				"accepted by resolveClasses but dropped by filterAttrs")
+		})
+	}
+}
+
+func TestSanitize_UnterminatedCommentDoesNotAffectOtherStyleBlock(t *testing.T) {
+	// Blocks are parsed independently, so a dangling /* in one cannot comment
+	// out the next. Concatenating them first would let it, because the comment
+	// pattern spans newlines.
+	in := `<svg xmlns="http://www.w3.org/2000/svg">` +
+		`<style>.b{fill:#009ADE;}</style><style>/* dangling</style>` +
+		`<rect class="b" width="1" height="1"/></svg>`
+
+	_, err := svgsanitize.Sanitize([]byte(in))
+
+	// The dangling block fails closed on its own rather than silently
+	// swallowing the block beside it.
+	require.Error(t, err)
+}
+
+func TestSanitize_DanglingSelectorCannotSpliceAcrossBlocks(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg">` +
+		`<style>.a</style><style>{fill:#FF0000}</style>` +
+		`<rect class="a" width="1" height="1"/></svg>`
+
+	_, err := svgsanitize.Sanitize([]byte(in))
+
+	// Neither block is a complete rule; inventing one across the boundary
+	// would emit a colour no renderer would apply.
+	require.Error(t, err)
+}
+
+func TestSanitize_IgnoresForeignNamespaceStyleElement(t *testing.T) {
+	in := `<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml">` +
+		`<h:style>.a{fill:#FF0000}</h:style><rect class="a" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	// The element is dropped by the walk, so its CSS must not style the
+	// output — nor reject the upload.
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), `fill="#FF0000"`)
+}
+
+func TestSanitize_RejectsUnterminatedDeclarationString(t *testing.T) {
+	// Recovering best-effort would swallow every following declaration into
+	// one nonsensical value, silently losing the fill.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><style>.a{font-family:"x;fill:#003764;}</style>` +
+		`<rect class="a" width="1" height="1"/></svg>`
+
+	_, err := svgsanitize.Sanitize([]byte(in))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unterminated string")
+}
+
+func TestSanitize_AcceptsVendorPrefixedProperties(t *testing.T) {
+	// Inkscape emits these; a browser ignores them, so rejecting the upload
+	// would be an availability regression rather than a fidelity guarantee.
+	in := `<svg xmlns="http://www.w3.org/2000/svg">` +
+		`<style>.a{-inkscape-font-specification:'Sans';fill:#003764;}</style>` +
+		`<rect class="a" width="1" height="1"/></svg>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `fill="#003764"`)
+}
+
+func TestSanitize_BoundsErrorTextFromXMLDecoder(t *testing.T) {
+	// Decoder errors embed element names taken straight from the document, so
+	// they need the same bound as the CSS paths.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><` + strings.Repeat("z", 200_000) + `>`
+
+	_, err := svgsanitize.Sanitize([]byte(in))
+
+	require.Error(t, err)
+	assert.Less(t, len(err.Error()), 500, "decoder error text must be bounded")
 }
 
 func TestSanitize_StyleElementNeverReachesOutput(t *testing.T) {
@@ -398,7 +523,7 @@ func TestSanitize_RejectsInlinedExternalPaintURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsafe CSS value")
 }
 
-func TestSanitize_RejectsTrailingContentAfterRoot(t *testing.T) {
+func TestSanitize_KeepsStylesheetDespiteTrailingBytes(t *testing.T) {
 	// A single trailing byte used to abort stylesheet collection silently,
 	// yielding a successfully "sanitized" document with every class rule
 	// dropped — the all-black logo again, this time with no error at all.
@@ -407,10 +532,21 @@ func TestSanitize_RejectsTrailingContentAfterRoot(t *testing.T) {
 
 	out, err := svgsanitize.Sanitize([]byte(in))
 
-	if err == nil {
-		assert.Contains(t, string(out), `fill="#003764"`,
-			"trailing bytes must not silently discard the stylesheet")
-	}
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `fill="#003764"`)
+}
+
+func TestSanitize_IgnoresStyleAfterRoot(t *testing.T) {
+	// Content past the root is not part of the document the sanitizer emits,
+	// so letting it style the output would be a parser differential against
+	// every real renderer.
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><rect class="a" width="1" height="1"/></svg>` +
+		`<style>.a{fill:#FF0000;}</style>`
+
+	out, err := svgsanitize.Sanitize([]byte(in))
+
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), `fill="#FF0000"`)
 }
 
 func TestSanitize_StripsImportantPriority(t *testing.T) {
@@ -518,7 +654,14 @@ func TestSanitize_AcceptsPropertiesRealExportsEmit(t *testing.T) {
 	out, err := svgsanitize.Sanitize([]byte(in))
 
 	require.NoError(t, err)
-	assert.Contains(t, string(out), `fill="#003764"`)
+	got := string(out)
+	// Assert each one individually: checking only fill would let a property
+	// pass the CSS gate and then be dropped by filterAttrs unnoticed.
+	assert.Contains(t, got, `fill="#003764"`)
+	assert.Contains(t, got, `overflow="visible"`)
+	assert.Contains(t, got, `stroke-dashoffset="2"`)
+	assert.Contains(t, got, `vector-effect="none"`)
+	assert.Contains(t, got, `isolation="auto"`)
 }
 
 func TestSanitize_KeepsQuotedSemicolonInDeclarationValue(t *testing.T) {
@@ -562,25 +705,38 @@ func TestSanitize_IgnoresNamespacedClassTwin(t *testing.T) {
 }
 
 func TestSanitize_HandlesDegenerateStylesheets(t *testing.T) {
-	// None of these may panic or hang; each must either parse or fail closed.
-	for name, css := range map[string]string{
-		"empty":             ``,
-		"empty rule":        `{}`,
-		"leading brace":     `}`,
-		"double open":       `{{`,
-		"double close":      `}}`,
-		"unterminated rule": `.a{fill:red`,
-		"unterminated cmt":  `/* .a{fill:red}`,
-		"brace in value":    `.a{fill:url(#a{b)}`,
-		"only selector":     `.a`,
-	} {
+	// Each case must either parse to a known result or fail closed — never
+	// panic, hang, or silently produce an un-styled document.
+	cases := map[string]struct {
+		css       string
+		wantError bool
+	}{
+		"empty":             {``, false},
+		"whitespace only":   {"  \n\t ", false},
+		"empty rule":        {`{}`, true},
+		"leading brace":     {`}`, true},
+		"double open":       {`{{`, true},
+		"double close":      {`}}`, true},
+		"unterminated rule": {`.a{fill:red`, true},
+		"unterminated cmt":  {`/* .a{fill:red}`, true},
+		"only selector":     {`.a`, true},
+		"valid":             {`.a{fill:#003764}`, false},
+	}
+
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			in := `<svg xmlns="http://www.w3.org/2000/svg"><style>` + css +
+			in := `<svg xmlns="http://www.w3.org/2000/svg"><style>` + tc.css +
 				`</style><rect class="a" width="1" height="1"/></svg>`
 
-			assert.NotPanics(t, func() {
-				_, _ = svgsanitize.Sanitize([]byte(in))
+			var err error
+			require.NotPanics(t, func() {
+				_, err = svgsanitize.Sanitize([]byte(in))
 			})
+			if tc.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

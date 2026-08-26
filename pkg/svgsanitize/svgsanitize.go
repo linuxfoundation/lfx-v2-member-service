@@ -201,7 +201,7 @@ func Sanitize(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	if err := enc.Flush(); err != nil {
-		return nil, fmt.Errorf("svgsanitize: encoding output: %w", err)
+		return nil, fmt.Errorf("svgsanitize: encoding output: %s", truncateForError(err.Error()))
 	}
 	return buf.Bytes(), nil
 }
@@ -223,7 +223,7 @@ func Sanitize(data []byte) ([]byte, error) {
 func extractStylesheet(data []byte) (*stylesheet, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 
-	var css strings.Builder
+	var blocks []string
 	depth := 0
 
 scan:
@@ -233,23 +233,19 @@ scan:
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, fmt.Errorf("svgsanitize: parsing input: %w", err)
+			return nil, fmt.Errorf("svgsanitize: parsing input: %s", truncateForError(err.Error()))
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch {
 			case depth == 0:
 				depth = 1
-			case t.Name.Local == "style":
+			case isStyleElement(t.Name):
 				text, textErr := collectStyleText(dec)
 				if textErr != nil {
 					return nil, textErr
 				}
-				// Separate blocks so an unterminated comment in one cannot
-				// swallow the next, and a dangling selector cannot splice
-				// onto a following body.
-				css.WriteString(text)
-				css.WriteString("\n")
+				blocks = append(blocks, text)
 			case !allowedElements[t.Name.Local]:
 				if skipErr := skipElement(dec); skipErr != nil {
 					return nil, skipErr
@@ -265,10 +261,22 @@ scan:
 		}
 	}
 
-	if strings.TrimSpace(css.String()) == "" {
+	if len(blocks) == 0 {
 		return &stylesheet{}, nil
 	}
-	return parseStylesheet(css.String())
+	return parseStylesheet(blocks)
+}
+
+// isStyleElement reports whether a start element is an SVG <style>.
+//
+// The namespace is checked, unlike the allowedElements lookups, because this
+// is the one element whose *content* steers the output. A foreign-namespace
+// twin such as an XHTML <h:style> is dropped by the walk, so honouring its
+// CSS would style the document from markup the sanitizer discards — and,
+// since unsupported selectors fail closed, could reject an upload outright
+// over a stylesheet that never applied to the SVG in the first place.
+func isStyleElement(name xml.Name) bool {
+	return name.Local == "style" && (name.Space == "" || name.Space == svgNamespace)
 }
 
 // collectStyleText consumes an already-open <style> element and returns its
@@ -281,7 +289,7 @@ func collectStyleText(dec *xml.Decoder) (string, error) {
 	for depth := 1; depth > 0; {
 		tok, err := dec.Token()
 		if err != nil {
-			return "", fmt.Errorf("svgsanitize: parsing input: %w", err)
+			return "", fmt.Errorf("svgsanitize: parsing input: %s", truncateForError(err.Error()))
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -297,43 +305,95 @@ func collectStyleText(dec *xml.Decoder) (string, error) {
 	return b.String(), nil
 }
 
-// stylesheetAttrs converts the stylesheet rules matching an element's class
-// attribute into presentation attributes.
+// stylesheetAttrs converts the CSS applying to an element into presentation
+// attributes, in cascade order: the element's own style="..." outranks the
+// document stylesheet, which in turn outranks its presentation attributes.
+//
+// The style attribute is handled here rather than dropped because Illustrator
+// exports it instead of a <style> block whenever "CSS Properties" is set to
+// "Style Attributes" — the same artwork, the same all-black result, just the
+// other export mode. It is still never emitted: only the declarations that
+// survive the inlinable-property and paint checks reach the output.
 func stylesheetAttrs(sheet *stylesheet, attrs []xml.Attr) ([]xml.Attr, error) {
-	if sheet.empty() {
-		return nil, nil
-	}
-
-	// Only an unqualified class attribute drives resolution, because that is
-	// the one filterAttrs emits. Honouring a namespaced twin such as i:class
-	// would style an element from a class it does not end up carrying.
-	var class string
+	// Only unqualified attributes drive resolution, because those are the ones
+	// filterAttrs emits. Honouring a namespaced twin such as i:class would
+	// style an element from a class it does not end up carrying.
+	var class, inline string
 	for _, a := range attrs {
-		if a.Name.Local == "class" && a.Name.Space == "" {
-			class = a.Value
-			break
+		if a.Name.Space != "" {
+			continue
+		}
+		switch a.Name.Local {
+		case "class":
+			if class == "" {
+				class = a.Value
+			}
+		case "style":
+			if inline == "" {
+				inline = a.Value
+			}
 		}
 	}
 
-	decls, err := sheet.resolveClasses(class)
+	sheetDecls, err := sheet.resolveClasses(class)
 	if err != nil {
 		return nil, err
 	}
-	if len(decls) == 0 {
+	inlineDecls, err := resolveInlineStyle(inline)
+	if err != nil {
+		return nil, err
+	}
+	if len(sheetDecls) == 0 && len(inlineDecls) == 0 {
 		return nil, nil
 	}
 
-	out := make([]xml.Attr, 0, len(decls))
-	for _, d := range decls {
+	out := make([]xml.Attr, 0, len(inlineDecls)+len(sheetDecls))
+	for _, d := range append(inlineDecls, sheetDecls...) {
 		// filterAttrs drops a paint value that fails this check, which for a
-		// stylesheet-derived one would mean silently rendering the element
-		// with no fill — black. Every other unrepresentable stylesheet input
-		// is an error, so this one is too.
+		// CSS-derived one would mean silently rendering the element with no
+		// fill — black. Every other unrepresentable stylesheet input is an
+		// error, so this one is too.
 		if paintAttributes[d.property] && !isSafePaintValue(d.value) {
 			return nil, fmt.Errorf("svgsanitize: unsafe CSS value %q for property %q: url(...) references must be same-document fragments",
 				truncateForError(d.value), d.property)
 		}
 		out = append(out, xml.Attr{Name: xml.Name{Local: d.property}, Value: d.value})
+	}
+	return out, nil
+}
+
+// resolveInlineStyle parses an element's style attribute under the same rules
+// as a stylesheet rule body.
+func resolveInlineStyle(style string) ([]cssDeclaration, error) {
+	if strings.TrimSpace(style) == "" {
+		return nil, nil
+	}
+
+	decls, err := parseDeclarations(style)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]cssDeclaration, 0, len(decls))
+	seen := make(map[string]bool, len(decls))
+	for i := len(decls) - 1; i >= 0; i-- {
+		d := decls[i]
+		switch {
+		case isInertProperty(d.property):
+			continue
+		case !inlinableProperties[d.property]:
+			return nil, fmt.Errorf("svgsanitize: unsupported CSS property %q in style attribute: cannot be represented as an SVG presentation attribute",
+				truncateForError(d.property))
+		case seen[d.property]:
+			continue
+		}
+		seen[d.property] = true
+		out = append(out, d)
+	}
+	// Walked in reverse so the last declaration for a property wins; restore
+	// document order for deterministic output.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
 }
@@ -348,7 +408,7 @@ func findRoot(dec *xml.Decoder) (xml.StartElement, error) {
 			return xml.StartElement{}, fmt.Errorf("svgsanitize: no root element found")
 		}
 		if err != nil {
-			return xml.StartElement{}, fmt.Errorf("svgsanitize: parsing input: %w", err)
+			return xml.StartElement{}, fmt.Errorf("svgsanitize: parsing input: %s", truncateForError(err.Error()))
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -394,13 +454,13 @@ func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, is
 	}
 	name := xml.Name{Local: se.Name.Local}
 	if err := enc.EncodeToken(xml.StartElement{Name: name, Attr: attrs}); err != nil {
-		return fmt.Errorf("svgsanitize: encoding output: %w", err)
+		return fmt.Errorf("svgsanitize: encoding output: %s", truncateForError(err.Error()))
 	}
 
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return fmt.Errorf("svgsanitize: parsing input: %w", err)
+			return fmt.Errorf("svgsanitize: parsing input: %s", truncateForError(err.Error()))
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -413,13 +473,13 @@ func sanitizeElement(dec *xml.Decoder, enc *xml.Encoder, se xml.StartElement, is
 			}
 		case xml.EndElement:
 			if err := enc.EncodeToken(xml.EndElement{Name: name}); err != nil {
-				return fmt.Errorf("svgsanitize: encoding output: %w", err)
+				return fmt.Errorf("svgsanitize: encoding output: %s", truncateForError(err.Error()))
 			}
 			return nil
 		case xml.CharData:
 			if textBearingElements[se.Name.Local] {
 				if err := enc.EncodeToken(t.Copy()); err != nil {
-					return fmt.Errorf("svgsanitize: encoding output: %w", err)
+					return fmt.Errorf("svgsanitize: encoding output: %s", truncateForError(err.Error()))
 				}
 			}
 		}
@@ -436,7 +496,7 @@ func skipElement(dec *xml.Decoder) error {
 	for depth > 0 {
 		tok, err := dec.Token()
 		if err != nil {
-			return fmt.Errorf("svgsanitize: parsing input: %w", err)
+			return fmt.Errorf("svgsanitize: parsing input: %s", truncateForError(err.Error()))
 		}
 		switch tok.(type) {
 		case xml.StartElement:
