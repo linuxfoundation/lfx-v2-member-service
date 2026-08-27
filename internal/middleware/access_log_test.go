@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	goahttp "goa.design/goa/v3/http"
 )
 
 func decodeAccessLog(t *testing.T, buf *bytes.Buffer) map[string]any {
@@ -39,6 +41,7 @@ func runAccessLog(t *testing.T, req *http.Request, next http.Handler) (map[strin
 
 func TestAccessLogMiddlewareLogsCompletedRequest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/123", nil)
+	req.Pattern = "GET /b2b_orgs/{uid}"
 	req.Header.Set("User-Agent", "test-agent/1.0")
 
 	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -52,8 +55,11 @@ func TestAccessLogMiddlewareLogsCompletedRequest(t *testing.T) {
 	if record["verb"] != http.MethodGet {
 		t.Errorf("got verb %v, want %v", record["verb"], http.MethodGet)
 	}
-	if record["pattern"] != "/b2b_orgs/123" {
-		t.Errorf("got pattern %v, want /b2b_orgs/123", record["pattern"])
+	if record["pattern"] != "/b2b_orgs/{uid}" {
+		t.Errorf("got pattern %v, want /b2b_orgs/{uid}", record["pattern"])
+	}
+	if record["path"] != "/b2b_orgs/123" {
+		t.Errorf("got path %v, want /b2b_orgs/123", record["path"])
 	}
 	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusCreated {
 		t.Errorf("got status %v, want %d", record["status"], http.StatusCreated)
@@ -66,6 +72,52 @@ func TestAccessLogMiddlewareLogsCompletedRequest(t *testing.T) {
 	}
 	if bytesWritten, ok := record["bytes_written"].(float64); !ok || int(bytesWritten) != 2 {
 		t.Errorf("got bytes_written %v, want 2", record["bytes_written"])
+	}
+}
+
+// Registering on a real Goa muxer is what makes r.Pattern available; wrapping
+// the muxer from outside silently yields "<unmatched>" for every request.
+func TestAccessLogMiddlewareResolvesPatternFromGoaMuxer(t *testing.T) {
+	mux := goahttp.NewMuxer()
+	mux.Use(AccessLogMiddleware())
+	mux.Handle(http.MethodDelete, "/b2b_orgs/{uid}/settings/users/{email}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	req := httptest.NewRequest(http.MethodDelete, "/b2b_orgs/123/settings/users/johndoe@example.com", nil)
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	record := decodeAccessLog(t, &buf)
+	if want := "/b2b_orgs/{uid}/settings/users/{email}"; record["pattern"] != want {
+		t.Errorf("got pattern %v, want %q", record["pattern"], want)
+	}
+	if want := "/b2b_orgs/123/settings/users/joh****@example.com"; record["path"] != want {
+		t.Errorf("got path %v, want %q", record["path"], want)
+	}
+	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusNoContent {
+		t.Errorf("got status %v, want %d", record["status"], http.StatusNoContent)
+	}
+}
+
+// An unrouted request must not put its concrete URL in pattern, otherwise
+// scanning for arbitrary paths inflates route cardinality.
+func TestAccessLogMiddlewareReportsUnmatchedRoute(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/definitely/not/a/route", nil)
+
+	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	if record["pattern"] != unmatchedRoute {
+		t.Errorf("got pattern %v, want %q", record["pattern"], unmatchedRoute)
+	}
+	if record["path"] != "/definitely/not/a/route" {
+		t.Errorf("got path %v, want the concrete path", record["path"])
 	}
 }
 
@@ -105,12 +157,12 @@ func TestAccessLogMiddlewareRedactsEmailInPath(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	pattern, _ := record["pattern"].(string)
+	pattern, _ := record["path"].(string)
 	if strings.Contains(pattern, "johndoe") {
-		t.Errorf("pattern %q leaks the email local part", pattern)
+		t.Errorf("path %q leaks the email local part", pattern)
 	}
 	if want := "/b2b_orgs/123/settings/users/joh****@example.com"; pattern != want {
-		t.Errorf("got pattern %q, want %q", pattern, want)
+		t.Errorf("got path %q, want %q", pattern, want)
 	}
 }
 
@@ -129,28 +181,58 @@ func TestAccessLogMiddlewareLogsHealthProbesAtDebug(t *testing.T) {
 }
 
 func TestAccessLogMiddlewareLogsPanicAsServerError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/123", nil)
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "panic before writing",
+			handler: func(_ http.ResponseWriter, _ *http.Request) {
+				panic("boom")
+			},
+		},
+		{
+			// The status was already written, but net/http abandons the
+			// response, so recording 200 would report a false success.
+			name: "panic after writing a success status",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("partial"))
+				panic("boom")
+			},
+		},
+	}
 
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/123", nil)
 
-	handler := AccessLogMiddleware()(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		panic("boom")
-	}))
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
 
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Error("expected the panic to propagate to the server")
+			handler := AccessLogMiddleware()(tc.handler)
+
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Error("expected the panic to propagate to the server")
+					}
+				}()
+				handler.ServeHTTP(httptest.NewRecorder(), req)
+			}()
+
+			record := decodeAccessLog(t, &buf)
+			if status, ok := record["status"].(float64); !ok || int(status) != http.StatusInternalServerError {
+				t.Errorf("got status %v, want %d", record["status"], http.StatusInternalServerError)
 			}
-		}()
-		handler.ServeHTTP(httptest.NewRecorder(), req)
-	}()
-
-	record := decodeAccessLog(t, &buf)
-	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusInternalServerError {
-		t.Errorf("got status %v, want %d", record["status"], http.StatusInternalServerError)
+			if record["panic"] != true {
+				t.Errorf("got panic %v, want true", record["panic"])
+			}
+			if record["level"] != "ERROR" {
+				t.Errorf("got level %v, want ERROR", record["level"])
+			}
+		})
 	}
 }

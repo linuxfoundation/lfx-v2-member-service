@@ -28,9 +28,14 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 		enc = goahttp.ResponseEncoder
 	)
 
-	var mux goahttp.Muxer
+	var mux goahttp.ResolverMuxer
 	{
 		mux = goahttp.NewMuxer()
+		// Registered on the muxer, not around it, so r.Pattern is set and the
+		// access log can report the matched route instead of the concrete URL.
+		// chi panics if Use runs after a route is registered, so this must
+		// precede every mount.
+		mux.Use(middleware.AccessLogMiddleware())
 		if dbg {
 			debug.MountPprofHandlers(debug.Adapt(mux))
 			debug.MountDebugLogEnabler(debug.Adapt(mux))
@@ -61,9 +66,6 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 	handler = middleware.RequestIDMiddleware()(handler)
 	// Add Authorization middleware
 	handler = middleware.AuthorizationMiddleware()(handler)
-	// Access logging runs before authorization, so rejected requests are
-	// recorded too.
-	handler = middleware.AccessLogMiddleware()(handler)
 	if dbg {
 		handler = debug.HTTP()(handler)
 	}

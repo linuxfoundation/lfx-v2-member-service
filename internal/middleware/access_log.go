@@ -73,9 +73,29 @@ func redactPath(path string) string {
 	return strings.Join(segments, "/")
 }
 
+// unmatchedRoute is reported instead of the concrete path when no route
+// matched, so scanning for arbitrary URLs cannot inflate route cardinality.
+const unmatchedRoute = "<unmatched>"
+
+// routePattern returns the matched route template, e.g. "/b2b_orgs/{uid}".
+// The Goa muxer sets r.Pattern to "METHOD /template" before dispatching, but
+// only for requests it routed.
+func routePattern(r *http.Request) string {
+	if r.Pattern == "" {
+		return unmatchedRoute
+	}
+	if _, template, found := strings.Cut(r.Pattern, " "); found {
+		return template
+	}
+	return r.Pattern
+}
+
 // AccessLogMiddleware logs one structured record per completed HTTP
 // transaction to stdout at info level, so Datadog gets access metrics without
 // treating normal traffic as errors.
+//
+// Register it on the Goa muxer with Use rather than wrapping the muxer, so
+// r.Pattern is populated by the time it runs.
 func AccessLogMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,14 +106,14 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 			// Deferred so a panicking handler still produces an access record.
 			defer func() {
 				status := rec.status
+				panicked := !completed
 				switch {
-				case status != 0:
-				case completed:
-					status = http.StatusOK
-				default:
-					// The handler panicked; net/http drops the connection
-					// without ever writing a status.
+				case panicked:
+					// net/http abandons the response, so whatever status was
+					// already written never completed.
 					status = http.StatusInternalServerError
+				case status == 0:
+					status = http.StatusOK
 				}
 
 				level := slog.LevelInfo
@@ -101,15 +121,22 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 					level = slog.LevelDebug
 				}
 
-				slog.Log(r.Context(), level, "http request completed",
+				attrs := []any{
 					"verb", r.Method,
-					"pattern", redactPath(r.URL.Path),
+					"pattern", routePattern(r),
+					"path", redactPath(r.URL.Path),
 					"status", status,
-					"duration_ms", float64(time.Since(start).Microseconds())/1000.0,
+					"duration_ms", float64(time.Since(start).Microseconds()) / 1000.0,
 					"user_agent", r.UserAgent(),
 					"bytes_written", rec.written,
 					"request_id", rec.Header().Get(string(constants.RequestIDHeader)),
-				)
+				}
+				if panicked {
+					attrs = append(attrs, "panic", true)
+					level = slog.LevelError
+				}
+
+				slog.Log(r.Context(), level, "http request completed", attrs...)
 			}()
 
 			next.ServeHTTP(rec, r)
