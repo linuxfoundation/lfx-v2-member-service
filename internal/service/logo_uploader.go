@@ -106,10 +106,14 @@ func (o *logoUploaderOrchestrator) UploadB2BOrgLogo(ctx context.Context, uid, co
 	// sniffable binary signature, so it's validated by actually parsing and
 	// sanitizing it below instead — that both confirms it's really an <svg>
 	// document and strips anything unsafe (see pkg/svgsanitize).
+	//
+	// Sanitizing also rejects a document whose <style> rules cannot be
+	// resolved into presentation attributes, so the error covers unsupported
+	// as well as unsafe input — hence the "cannot be processed" wording.
 	if mediaType == svgMediaType {
 		sanitized, sanitizeErr := svgsanitize.Sanitize(data)
 		if sanitizeErr != nil {
-			return nil, pkgerrors.NewValidation(fmt.Sprintf("invalid or unsafe SVG upload: %v", sanitizeErr))
+			return nil, pkgerrors.NewValidation(fmt.Sprintf("SVG upload cannot be processed: %v", sanitizeErr))
 		}
 		data = sanitized
 	} else {
