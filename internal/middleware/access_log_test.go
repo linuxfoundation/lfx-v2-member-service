@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +95,62 @@ func TestAccessLogMiddlewareIncludesRequestID(t *testing.T) {
 	}
 	if got := rr.Header().Get("X-REQUEST-ID"); got != "req-abc" {
 		t.Errorf("got response request id header %q, want req-abc", got)
+	}
+}
+
+func TestAccessLogMiddlewareRedactsEmailInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/b2b_orgs/123/settings/users/johndoe@example.com", nil)
+
+	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	pattern, _ := record["pattern"].(string)
+	if strings.Contains(pattern, "johndoe") {
+		t.Errorf("pattern %q leaks the email local part", pattern)
+	}
+	if want := "/b2b_orgs/123/settings/users/joh****@example.com"; pattern != want {
+		t.Errorf("got pattern %q, want %q", pattern, want)
+	}
+}
+
+func TestAccessLogMiddlewareLogsHealthProbesAtDebug(t *testing.T) {
+	for _, path := range []string{"/livez", "/readyz"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+
+			record, _ := runAccessLog(t, req, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+
+			if record["level"] != "DEBUG" {
+				t.Errorf("got level %v, want DEBUG", record["level"])
+			}
+		})
+	}
+}
+
+func TestAccessLogMiddlewareLogsPanicAsServerError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/123", nil)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	handler := AccessLogMiddleware()(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	}))
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected the panic to propagate to the server")
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	record := decodeAccessLog(t, &buf)
+	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusInternalServerError {
+		t.Errorf("got status %v, want %d", record["status"], http.StatusInternalServerError)
 	}
 }
