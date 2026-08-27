@@ -1,0 +1,98 @@
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+
+package middleware
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func decodeAccessLog(t *testing.T, buf *bytes.Buffer) map[string]any {
+	t.Helper()
+
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &record); err != nil {
+		t.Fatalf("failed to decode log record %q: %v", buf.String(), err)
+	}
+	return record
+}
+
+func runAccessLog(t *testing.T, req *http.Request, next http.Handler) (map[string]any, *httptest.ResponseRecorder) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	rr := httptest.NewRecorder()
+	AccessLogMiddleware()(next).ServeHTTP(rr, req)
+
+	return decodeAccessLog(t, &buf), rr
+}
+
+func TestAccessLogMiddlewareLogsCompletedRequest(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/123", nil)
+	req.Header.Set("User-Agent", "test-agent/1.0")
+
+	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	if record["level"] != "INFO" {
+		t.Errorf("got level %v, want INFO", record["level"])
+	}
+	if record["verb"] != http.MethodGet {
+		t.Errorf("got verb %v, want %v", record["verb"], http.MethodGet)
+	}
+	if record["pattern"] != "/b2b_orgs/123" {
+		t.Errorf("got pattern %v, want /b2b_orgs/123", record["pattern"])
+	}
+	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusCreated {
+		t.Errorf("got status %v, want %d", record["status"], http.StatusCreated)
+	}
+	if record["user_agent"] != "test-agent/1.0" {
+		t.Errorf("got user_agent %v, want test-agent/1.0", record["user_agent"])
+	}
+	if _, ok := record["duration_ms"].(float64); !ok {
+		t.Errorf("expected numeric duration_ms, got %v", record["duration_ms"])
+	}
+	if bytesWritten, ok := record["bytes_written"].(float64); !ok || int(bytesWritten) != 2 {
+		t.Errorf("got bytes_written %v, want 2", record["bytes_written"])
+	}
+}
+
+func TestAccessLogMiddlewareDefaultsStatusToOK(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+
+	record, _ := runAccessLog(t, req, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+
+	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusOK {
+		t.Errorf("got status %v, want %d", record["status"], http.StatusOK)
+	}
+}
+
+func TestAccessLogMiddlewareIncludesRequestID(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/b2b_orgs/123", nil)
+	req.Header.Set("X-REQUEST-ID", "req-abc")
+
+	// Chained the same way as the server: request ID is assigned inside.
+	handler := RequestIDMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	record, rr := runAccessLog(t, req, handler)
+
+	if record["request_id"] != "req-abc" {
+		t.Errorf("got request_id %v, want req-abc", record["request_id"])
+	}
+	if got := rr.Header().Get("X-REQUEST-ID"); got != "req-abc" {
+		t.Errorf("got response request id header %q, want req-abc", got)
+	}
+}

@@ -18,13 +18,15 @@ import (
 func wrapError(ctx context.Context, err error) error {
 	var notFound pkgerrors.NotFound
 	if errors.As(err, &notFound) {
-		slog.ErrorContext(ctx, "request failed", "error", err)
+		// 404 is expected control flow, not a service failure.
+		slog.InfoContext(ctx, "resource not found", "error", err)
 		return membershipservice.MakeNotFound(err)
 	}
 
 	var validation pkgerrors.Validation
 	if errors.As(err, &validation) {
-		slog.ErrorContext(ctx, "request failed", "error", err)
+		// 400 is caller error, not a service failure.
+		slog.InfoContext(ctx, "request validation failed", "error", err)
 		return membershipservice.MakeBadRequest(err)
 	}
 

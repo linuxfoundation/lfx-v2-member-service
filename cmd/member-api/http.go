@@ -61,6 +61,9 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 	handler = middleware.RequestIDMiddleware()(handler)
 	// Add Authorization middleware
 	handler = middleware.AuthorizationMiddleware()(handler)
+	// Log every completed HTTP transaction (outermost app middleware so it
+	// also captures authorization rejections)
+	handler = middleware.AccessLogMiddleware()(handler)
 	if dbg {
 		handler = debug.HTTP()(handler)
 	}
@@ -99,8 +102,10 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 }
 
 // errorHandler returns a function that writes and logs the given error.
-func errorHandler(logCtx context.Context) func(context.Context, http.ResponseWriter, error) {
+// It logs with the per-request context so request_id, trace_id and span_id are
+// preserved instead of the long-lived server context.
+func errorHandler(_ context.Context) func(context.Context, http.ResponseWriter, error) {
 	return func(ctx context.Context, w http.ResponseWriter, err error) {
-		slog.ErrorContext(logCtx, "HTTP error occurred", "error", err)
+		slog.ErrorContext(ctx, "HTTP error occurred", "error", err)
 	}
 }
