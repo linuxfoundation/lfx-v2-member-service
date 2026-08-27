@@ -128,8 +128,8 @@ func (o *B2BOrg) Tags() []string {
 
 // B2BOrgInput carries the mutable fields for creating or updating a B2BOrg
 // record. All fields are optional on update; a zero value means "leave
-// unchanged". CrunchBaseURL uses *string so that nil = "don't touch" and
-// empty string = "explicitly clear the field".
+// unchanged". LogoURL and CrunchBaseURL use *string so that nil = "don't
+// touch" and empty string = "explicitly clear the field".
 type B2BOrgInput struct {
 	// Name is the organization's display name (Account.Name).
 	Name string
@@ -147,7 +147,8 @@ type B2BOrgInput struct {
 	PrimaryDomain string
 
 	// LogoURL is the URL of the organization's logo image (Account.Logo_URL__c).
-	LogoURL string
+	// Nil = don't change; empty string = explicitly clear.
+	LogoURL *string
 
 	// Industry is the organization's industry classification (Account.Industry).
 	Industry string
@@ -173,7 +174,7 @@ type B2BOrgInput struct {
 // infrastructure concern and does not count as a change.
 func (i B2BOrgInput) HasChanges() bool {
 	return i.Name != "" || i.Description != "" || i.Phone != "" ||
-		i.Website != "" || i.PrimaryDomain != "" || i.LogoURL != "" ||
+		i.Website != "" || i.PrimaryDomain != "" || i.LogoURL != nil ||
 		i.Industry != "" || i.Sector != "" || i.CrunchBaseURL != nil ||
 		i.NumberOfEmployees != nil
 }

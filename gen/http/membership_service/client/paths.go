@@ -27,6 +27,11 @@ func UpdateB2bOrgMembershipServicePath(uid string) string {
 	return fmt.Sprintf("/b2b_orgs/%v", uid)
 }
 
+// UploadB2bOrgLogoMembershipServicePath returns the URL path to the membership-service service upload-b2b-org-logo HTTP endpoint.
+func UploadB2bOrgLogoMembershipServicePath(uid string) string {
+	return fmt.Sprintf("/b2b_orgs/%v/logo", uid)
+}
+
 // GetB2bOrgSettingsMembershipServicePath returns the URL path to the membership-service service get-b2b-org-settings HTTP endpoint.
 func GetB2bOrgSettingsMembershipServicePath(uid string) string {
 	return fmt.Sprintf("/b2b_orgs/%v/settings", uid)

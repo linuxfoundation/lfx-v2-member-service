@@ -12,6 +12,9 @@ package service
 import (
 	"context"
 	"log/slog"
+	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -535,6 +538,26 @@ func buildB2BOrgIndexerInput(org *model.B2BOrg, action indexerConstants.MessageA
 // PublishB2BOrgIndexer builds and publishes a MemberIndexerMessage for a B2BOrg.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, action indexerConstants.MessageAction) {
+	if action != indexerConstants.ActionDeleted && isScratchLogoURL(org.LogoURL) {
+		slog.WarnContext(ctx, "skipping b2b org indexer publish for transient logo URL",
+			"uid", org.UID,
+			"publish_failed_for_backfill_repair", true)
+		return
+	}
+	if action != indexerConstants.ActionDeleted &&
+		org.ParentDetail != nil &&
+		org.ParentDetail.LogoURL != nil &&
+		isScratchLogoURL(*org.ParentDetail.LogoURL) {
+		safeOrg := *org
+		safeParent := *org.ParentDetail
+		safeParent.LogoURL = nil
+		safeOrg.ParentDetail = &safeParent
+		org = &safeOrg
+		slog.WarnContext(ctx, "omitting transient parent logo URL from b2b org indexer publish",
+			"uid", org.UID,
+			"publish_failed_for_backfill_repair", true)
+	}
+
 	indexMsg := &model.MemberIndexerMessage{
 		Action:         action,
 		Tags:           org.Tags(),
@@ -557,6 +580,39 @@ func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *mode
 		slog.DebugContext(ctx, "b2b org indexer published",
 			"uid", org.UID, "subject", constants.IndexB2BOrgSubject)
 	}
+}
+
+// scratchPathPattern matches the scratch key shape minted by
+// logoUploaderOrchestrator: the scratch key carries no file extension, since
+// Content-Type lives on the object itself.
+var scratchPathPattern = regexp.MustCompile(`^org-logos-public-scratch/[^/]+/[^/]+$`)
+
+// isScratchLogoURL reports whether rawURL addresses a transient logo-upload
+// scratch object. It fails CLOSED: without a valid configured CDN host to
+// compare against there is no way to tell our own scratch space from an
+// unrelated site that happens to use the same path shape, and a false positive
+// here permanently suppresses a legitimate record's publish on every retry. So
+// an unset or unparseable CDN_URL_PREFIX means "classify nothing as transient"
+// — the processes that lack that config (CDC consumer, backfill) never mint
+// scratch URLs, and the upload path never publishes one.
+func isScratchLogoURL(rawURL string) bool {
+	cdnPrefix := os.Getenv("CDN_URL_PREFIX")
+	if cdnPrefix == "" {
+		return false
+	}
+	parsedCDN, cdnErr := url.Parse(cdnPrefix)
+	if cdnErr != nil || parsedCDN.Host == "" {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	if !strings.EqualFold(parsed.Host, parsedCDN.Host) {
+		return false
+	}
+	path := strings.TrimPrefix(parsed.Path, "/")
+	return scratchPathPattern.MatchString(path)
 }
 
 // b2bOrgMemberView is the flat per-member wire entry in the indexer doc.
@@ -661,6 +717,15 @@ func buildProjectMembershipIndexerInput(pm *model.ProjectMembership, action inde
 // PublishProjectMembershipIndexer builds and publishes a MemberIndexerMessage for a ProjectMembership.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership, action indexerConstants.MessageAction) {
+	if action != indexerConstants.ActionDeleted && isScratchLogoURL(pm.CompanyLogoURL) {
+		safePM := *pm
+		safePM.CompanyLogoURL = ""
+		pm = &safePM
+		slog.WarnContext(ctx, "omitting transient company logo URL from project membership indexer publish",
+			"uid", pm.UID,
+			"publish_failed_for_backfill_repair", true)
+	}
+
 	indexMsg := &model.MemberIndexerMessage{
 		Action:         action,
 		Tags:           pm.Tags(),
@@ -725,6 +790,15 @@ func buildKeyContactIndexerInput(kc *model.KeyContact, action indexerConstants.M
 // PublishKeyContactIndexer builds and publishes a MemberIndexerMessage for a KeyContact.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishKeyContactIndexer(ctx context.Context, p port.MemberPublisher, kc *model.KeyContact, action indexerConstants.MessageAction) {
+	if action != indexerConstants.ActionDeleted && isScratchLogoURL(kc.CompanyLogoURL) {
+		safeKC := *kc
+		safeKC.CompanyLogoURL = ""
+		kc = &safeKC
+		slog.WarnContext(ctx, "omitting transient company logo URL from key contact indexer publish",
+			"uid", kc.UID,
+			"publish_failed_for_backfill_repair", true)
+	}
+
 	indexMsg := &model.MemberIndexerMessage{
 		Action:         action,
 		Tags:           kc.Tags(),
