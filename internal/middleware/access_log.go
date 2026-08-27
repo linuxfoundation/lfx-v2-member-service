@@ -13,8 +13,9 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
 )
 
-// healthPaths are polled by Kubernetes probes several times a minute; logging
-// them at info level would drown the access log.
+// healthPaths are polled by Kubernetes probes several times a minute, so
+// successful probes are downgraded to debug to keep them out of the access
+// log. Failed probes stay at info.
 var healthPaths = map[string]bool{
 	"/livez":  true,
 	"/readyz": true,
@@ -117,7 +118,12 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 				}
 
 				level := slog.LevelInfo
-				if healthPaths[r.URL.Path] {
+				switch {
+				case panicked:
+					level = slog.LevelError
+				case healthPaths[r.URL.Path] && status < http.StatusBadRequest:
+					// Only successful probes are noise. A failing probe is a
+					// readiness incident and must stay visible at info.
 					level = slog.LevelDebug
 				}
 
@@ -133,7 +139,6 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 				}
 				if panicked {
 					attrs = append(attrs, "panic", true)
-					level = slog.LevelError
 				}
 
 				slog.Log(r.Context(), level, "http request completed", attrs...)

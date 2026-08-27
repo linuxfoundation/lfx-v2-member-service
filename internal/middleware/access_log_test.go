@@ -180,6 +180,27 @@ func TestAccessLogMiddlewareLogsHealthProbesAtDebug(t *testing.T) {
 	}
 }
 
+// A failing probe is a readiness incident, so it must survive the default
+// LOG_LEVEL=info rather than being discarded with the healthy probe noise.
+func TestAccessLogMiddlewareKeepsFailedHealthProbesAtInfo(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+
+			record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+
+			if record["level"] != "INFO" {
+				t.Errorf("got level %v, want INFO", record["level"])
+			}
+			if got, ok := record["status"].(float64); !ok || int(got) != status {
+				t.Errorf("got status %v, want %d", record["status"], status)
+			}
+		})
+	}
+}
+
 func TestAccessLogMiddlewareLogsPanicAsServerError(t *testing.T) {
 	tests := []struct {
 		name    string
