@@ -28,9 +28,14 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 		enc = goahttp.ResponseEncoder
 	)
 
-	var mux goahttp.Muxer
+	var mux goahttp.ResolverMuxer
 	{
 		mux = goahttp.NewMuxer()
+		// Registered on the muxer, not around it, so r.Pattern is set and the
+		// access log can report the matched route instead of the concrete URL.
+		// chi panics if Use runs after a route is registered, so this must
+		// precede every mount.
+		mux.Use(middleware.AccessLogMiddleware())
 		if dbg {
 			debug.MountPprofHandlers(debug.Adapt(mux))
 			debug.MountDebugLogEnabler(debug.Adapt(mux))
@@ -48,7 +53,7 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 		membershipServiceServer *membershipservicesvr.Server
 	)
 	{
-		eh := errorHandler(ctx)
+		eh := errorHandler()
 		membershipServiceServer = membershipservicesvr.New(membershipServiceEndpoints, mux, dec, enc, eh, nil, koDataDir, koDataDir, koDataDir, koDataDir)
 	}
 
@@ -99,8 +104,10 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 }
 
 // errorHandler returns a function that writes and logs the given error.
-func errorHandler(logCtx context.Context) func(context.Context, http.ResponseWriter, error) {
-	return func(ctx context.Context, w http.ResponseWriter, err error) {
-		slog.ErrorContext(logCtx, "HTTP error occurred", "error", err)
+// It logs with the per-request context so request_id, trace_id and span_id are
+// preserved instead of the long-lived server context.
+func errorHandler() func(context.Context, http.ResponseWriter, error) {
+	return func(ctx context.Context, _ http.ResponseWriter, err error) {
+		slog.ErrorContext(ctx, "HTTP error occurred", "error", err)
 	}
 }
