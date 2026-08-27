@@ -166,6 +166,36 @@ func TestAccessLogMiddlewareRedactsEmailInPath(t *testing.T) {
 	}
 }
 
+// chi routes on the escaped path, so an address whose local part contains an
+// encoded slash still reaches the {email} route. It must be redacted as one
+// value rather than split across segments.
+func TestAccessLogMiddlewareRedactsEncodedSlashEmail(t *testing.T) {
+	mux := goahttp.NewMuxer()
+	mux.Use(AccessLogMiddleware())
+	mux.Handle(http.MethodDelete, "/b2b_orgs/{uid}/settings/users/{email}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	req := httptest.NewRequest(http.MethodDelete, "/b2b_orgs/123/settings/users/john%2Fdoe%40example.com", nil)
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	record := decodeAccessLog(t, &buf)
+	path, _ := record["path"].(string)
+	for _, leak := range []string{"john/doe", "john%2Fdoe", "johndoe"} {
+		if strings.Contains(path, leak) {
+			t.Errorf("path %q leaks %q", path, leak)
+		}
+	}
+	if want := "/b2b_orgs/123/settings/users/joh****@example.com"; path != want {
+		t.Errorf("got path %q, want %q", path, want)
+	}
+}
+
 func TestAccessLogMiddlewareLogsHealthProbesAtDebug(t *testing.T) {
 	for _, path := range []string{"/livez", "/readyz"} {
 		t.Run(path, func(t *testing.T) {
