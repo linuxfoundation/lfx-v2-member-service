@@ -19,6 +19,7 @@ import (
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	goahttp "goa.design/goa/v3/http"
+	goa "goa.design/goa/v3/pkg"
 )
 
 // BuildGetB2bOrgRequest instantiates a HTTP request object with method and
@@ -2011,6 +2012,150 @@ func DecodeGetProjectMembershipResponse(decoder func(*http.Response) goahttp.Dec
 		default:
 			body, _ := io.ReadAll(resp.Body)
 			return nil, goahttp.ErrInvalidResponse("membership-service", "get-project-membership", resp.StatusCode, string(body))
+		}
+	}
+}
+
+// BuildGetMemberTiersRequest instantiates a HTTP request object with method
+// and path set to call the "membership-service" service "get-member-tiers"
+// endpoint
+func (c *Client) BuildGetMemberTiersRequest(ctx context.Context, v any) (*http.Request, error) {
+	var (
+		username string
+	)
+	{
+		p, ok := v.(*membershipservice.GetMemberTiersPayload)
+		if !ok {
+			return nil, goahttp.ErrInvalidType("membership-service", "get-member-tiers", "*membershipservice.GetMemberTiersPayload", v)
+		}
+		username = p.Username
+	}
+	u := &url.URL{Scheme: c.scheme, Host: c.host, Path: GetMemberTiersMembershipServicePath(username)}
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, goahttp.ErrInvalidURL("membership-service", "get-member-tiers", u.String(), err)
+	}
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
+
+	return req, nil
+}
+
+// EncodeGetMemberTiersRequest returns an encoder for requests sent to the
+// membership-service get-member-tiers server.
+func EncodeGetMemberTiersRequest(encoder func(*http.Request) goahttp.Encoder) func(*http.Request, any) error {
+	return func(req *http.Request, v any) error {
+		p, ok := v.(*membershipservice.GetMemberTiersPayload)
+		if !ok {
+			return goahttp.ErrInvalidType("membership-service", "get-member-tiers", "*membershipservice.GetMemberTiersPayload", v)
+		}
+		if p.BearerToken != nil {
+			head := *p.BearerToken
+			if !strings.Contains(head, " ") {
+				req.Header.Set("Authorization", "Bearer "+head)
+			} else {
+				req.Header.Set("Authorization", head)
+			}
+		}
+		values := req.URL.Query()
+		if p.Version != nil {
+			values.Add("v", *p.Version)
+		}
+		req.URL.RawQuery = values.Encode()
+		return nil
+	}
+}
+
+// DecodeGetMemberTiersResponse returns a decoder for responses returned by the
+// membership-service get-member-tiers endpoint. restoreBody controls whether
+// the response body should be restored after having been read.
+// DecodeGetMemberTiersResponse may return the following errors:
+//   - "BadRequest" (type *goa.ServiceError): http.StatusBadRequest
+//   - "InternalServerError" (type *goa.ServiceError): http.StatusInternalServerError
+//   - "ServiceUnavailable" (type *goa.ServiceError): http.StatusServiceUnavailable
+//   - error: internal error
+func DecodeGetMemberTiersResponse(decoder func(*http.Response) goahttp.Decoder, restoreBody bool) func(*http.Response) (any, error) {
+	return func(resp *http.Response) (any, error) {
+		if restoreBody {
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			defer func() {
+				resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			}()
+		} else {
+			defer resp.Body.Close()
+		}
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var (
+				body []*MemberOrgTierResponseResponse
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "get-member-tiers", err)
+			}
+			for _, e := range body {
+				if e != nil {
+					if err2 := ValidateMemberOrgTierResponseResponse(e); err2 != nil {
+						err = goa.MergeErrors(err, err2)
+					}
+				}
+			}
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "get-member-tiers", err)
+			}
+			res := NewGetMemberTiersMemberOrgTierResponseOK(body)
+			return res, nil
+		case http.StatusBadRequest:
+			var (
+				body GetMemberTiersBadRequestResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "get-member-tiers", err)
+			}
+			err = ValidateGetMemberTiersBadRequestResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "get-member-tiers", err)
+			}
+			return nil, NewGetMemberTiersBadRequest(&body)
+		case http.StatusInternalServerError:
+			var (
+				body GetMemberTiersInternalServerErrorResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "get-member-tiers", err)
+			}
+			err = ValidateGetMemberTiersInternalServerErrorResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "get-member-tiers", err)
+			}
+			return nil, NewGetMemberTiersInternalServerError(&body)
+		case http.StatusServiceUnavailable:
+			var (
+				body GetMemberTiersServiceUnavailableResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "get-member-tiers", err)
+			}
+			err = ValidateGetMemberTiersServiceUnavailableResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "get-member-tiers", err)
+			}
+			return nil, NewGetMemberTiersServiceUnavailable(&body)
+		default:
+			body, _ := io.ReadAll(resp.Body)
+			return nil, goahttp.ErrInvalidResponse("membership-service", "get-member-tiers", resp.StatusCode, string(body))
 		}
 	}
 }
@@ -4406,6 +4551,27 @@ func marshalOrgUserRequestBodyToMembershipserviceOrgUser(v *OrgUserRequestBody) 
 		Username:     v.Username,
 		InvitedAs:    v.InvitedAs,
 		InviteStatus: v.InviteStatus,
+	}
+
+	return res
+}
+
+// unmarshalMemberOrgTierResponseResponseToMembershipserviceMemberOrgTierResponse
+// builds a value of type *membershipservice.MemberOrgTierResponse from a value
+// of type *MemberOrgTierResponseResponse.
+func unmarshalMemberOrgTierResponseResponseToMembershipserviceMemberOrgTierResponse(v *MemberOrgTierResponseResponse) *membershipservice.MemberOrgTierResponse {
+	res := &membershipservice.MemberOrgTierResponse{
+		B2bOrgUID:     *v.B2bOrgUID,
+		CompanyName:   v.CompanyName,
+		MembershipUID: *v.MembershipUID,
+		ProjectUID:    v.ProjectUID,
+		ProjectSlug:   v.ProjectSlug,
+		TierUID:       v.TierUID,
+		TierName:      v.TierName,
+		Tier:          *v.Tier,
+		Status:        v.Status,
+		StartDate:     v.StartDate,
+		EndDate:       v.EndDate,
 	}
 
 	return res

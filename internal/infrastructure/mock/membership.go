@@ -51,12 +51,17 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 	}
 	mock.tiers[sampleTier.UID] = sampleTier
 
-	// Sample membership (Asset).
+	// Sample membership (Asset). B2BOrgUID and a far-future EndDate are
+	// required by the member-tiers flow, which reads this record through
+	// GetMembership and filters out memberships that are org-less or past
+	// their end date; a dated end (originally 2025-12-31) silently expired
+	// the seed once the calendar passed it.
 	sampleMembership := &model.ProjectMembership{
 		UID:              "11111111-1111-1111-1111-111111111111",
 		TierUID:          "tier-1",
 		ProjectUID:       "project-uid-1",
 		ProjectSlug:      "linux-foundation",
+		B2BOrgUID:        "org-1",
 		Status:           "Active",
 		Year:             "2025",
 		Tier:             "Gold",
@@ -66,7 +71,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 		AnnualFullPrice:  50000,
 		PaymentFrequency: "Annual",
 		StartDate:        "2025-01-01T00:00:00Z",
-		EndDate:          "2025-12-31T23:59:59Z",
+		EndDate:          "2099-12-31T23:59:59Z",
 		CompanyName:      "Example Corp",
 		CompanyLogoURL:   "https://example.com/logo.png",
 		CompanyDomain:    "https://example.com",
@@ -599,9 +604,16 @@ func NewMockProjectMembershipReader() *MockProjectMembershipReader {
 func (m *MockProjectMembershipReader) AssembleProjectMembership(_ context.Context, uid string) (*model.ProjectMembership, time.Time, error) {
 	if uid == "11111111-1111-1111-1111-111111111111" {
 		return &model.ProjectMembership{
-			UID:        "11111111-1111-1111-1111-111111111111",
-			ProjectUID: "project-1",
-			B2BOrgUID:  "org-1",
+			UID:         "11111111-1111-1111-1111-111111111111",
+			ProjectUID:  "project-1",
+			ProjectSlug: "linux-foundation",
+			B2BOrgUID:   "org-1",
+			CompanyName: "Mock Corp",
+			TierUID:     "tier-1",
+			TierName:    "Gold Corporate Membership",
+			Status:      "Active",
+			StartDate:   "2025-01-01",
+			EndDate:     "2099-12-31",
 		}, time.Now(), nil
 	}
 	return nil, time.Time{}, errors.NewNotFound("project membership not found in mock")

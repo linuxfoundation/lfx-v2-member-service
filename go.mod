@@ -17,14 +17,14 @@ require (
 	github.com/k-capehart/go-salesforce/v3 v3.1.2
 	github.com/linkedin/goavro/v2 v2.15.0
 	github.com/linuxfoundation/lfx-v2-email-service v0.1.6
-	github.com/linuxfoundation/lfx-v2-fga-sync v0.2.17
+	github.com/linuxfoundation/lfx-v2-fga-sync v0.3.9
 	github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16
 	github.com/linuxfoundation/lfx-v2-invite-service v0.1.4
-	github.com/nats-io/nats.go v1.49.0
+	github.com/nats-io/nats.go v1.51.0
 	github.com/remychantenay/slog-otel v1.3.5
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/exporters/autoexport v0.69.0
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/contrib/propagators/autoprop v0.69.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/log v0.20.0
@@ -77,12 +77,14 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/openfga/go-sdk v0.8.0 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
+	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

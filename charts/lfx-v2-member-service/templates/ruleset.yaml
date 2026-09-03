@@ -61,6 +61,43 @@ spec:
             values:
               aud: {{ .Values.app.audience }}
 
+    - id: "rule:lfx:lfx-v2-member-service:b2b_orgs:member-tiers"
+      allow_encoded_slashes: 'off'
+      match:
+        methods:
+          - GET
+        routes:
+          - path: /b2b_orgs/member-tiers/:username
+      execute:
+        - authenticator: oidc
+        - authenticator: anonymous_authenticator
+        {{- if .Values.app.use_oidc_contextualizer }}
+        - contextualizer: oidc_contextualizer
+        {{- end }}
+        {{- if .Values.openfga.enabled }}
+        {{/*
+          Machine-to-machine endpoint (Insights Cloudflare Worker, LFX One):
+          callers must be members of the global org-admin team, mirroring the
+          POST /b2b_orgs and /admin routes. Swap in a dedicated team via
+          values when caller-specific scoping is needed.
+        */}}
+        - authorizer: openfga_check
+          config:
+            values:
+              relation: member
+              object: "team:{{ .Values.app.globalOrgAdminTeamName | trim }}"
+        {{- else }}
+        {{/*
+          When OpenFGA is disabled, allow all requests.
+          (Only meant for *local development* because OpenFGA should be enabled when deployed.)
+        */}}
+        - authorizer: allow_all
+        {{- end }}
+        - finalizer: create_jwt
+          config:
+            values:
+              aud: {{ .Values.app.audience }}
+
     - id: "rule:lfx:lfx-v2-member-service:b2b_orgs:create"
       allow_encoded_slashes: 'off'
       match:

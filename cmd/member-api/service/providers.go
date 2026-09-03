@@ -45,6 +45,9 @@ var (
 	projectResolver port.ProjectResolver
 	resolverDoOnce  sync.Once
 
+	userMembershipReader port.UserMembershipReader
+	userMembershipDoOnce sync.Once
+
 	// mockSettings is the shared in-memory settings store used in mock mode.
 	// Reader and writer must point at the same instance so writes are visible to reads.
 	mockSettings     *mock.MockB2BOrgSettings
@@ -180,6 +183,38 @@ func ProjectResolverImpl(ctx context.Context) port.ProjectResolver {
 			projectResolver = infraproject.NewProjectResolver(projectRPC, projectRepo, cache)
 		})
 		return projectResolver
+
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+		return nil
+	}
+}
+
+// UserMembershipReaderImpl initialises and returns the
+// port.UserMembershipReader implementation selected by the REPOSITORY_SOURCE
+// environment variable:
+//
+//   - "salesforce" (default): reads the user's key-contact tuples from OpenFGA
+//     via the fga-sync NATS RPC (lfx.access_check.read_tuples).
+//   - "mock": in-memory reader seeded to match the mock project membership
+//     reader; for local development.
+func UserMembershipReaderImpl(ctx context.Context) port.UserMembershipReader {
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	switch repoSource {
+	case "mock":
+		slog.InfoContext(ctx, "initialising mock user membership reader")
+		return mock.NewMockUserMembershipReader()
+
+	case "salesforce":
+		userMembershipDoOnce.Do(func() {
+			natsInit(ctx)
+			userMembershipReader = nats.NewAccessCheckRPC(natsClient.Conn(), natsTimeoutFromEnv())
+		})
+		return userMembershipReader
 
 	default:
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)

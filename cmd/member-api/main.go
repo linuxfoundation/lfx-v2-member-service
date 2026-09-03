@@ -131,6 +131,7 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.MemberReaderImpl(ctx),
 		service.B2BOrgReaderImpl(ctx),
 		service.ProjectMembershipReaderImpl(ctx),
+		service.UserMembershipReaderImpl(ctx),
 		service.B2BOrgSettingsReaderImpl(ctx),
 		service.B2BOrgWriterUseCase(ctx),
 		service.LogoUploaderUseCase(ctx),

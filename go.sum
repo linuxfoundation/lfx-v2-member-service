@@ -101,6 +101,8 @@ github.com/linuxfoundation/lfx-v2-email-service v0.1.6 h1:ucScp8SOm7tUVOQtC/PQ8Q
 github.com/linuxfoundation/lfx-v2-email-service v0.1.6/go.mod h1:ic4UkGJyZvjagDaI34UnuTfoxCHQsxaSFJQs5SRpynM=
 github.com/linuxfoundation/lfx-v2-fga-sync v0.2.17 h1:ZW2PyrEPB6SmT14qa3qlrcU4rB/eKRumPUOwaoS5or4=
 github.com/linuxfoundation/lfx-v2-fga-sync v0.2.17/go.mod h1:075J7/39UbsuLsJCXgVkbpKK1VIuPa7gbyhLsoTBAXo=
+github.com/linuxfoundation/lfx-v2-fga-sync v0.3.9 h1:lLxdhDelwnN3+LdYFfuezAJt9o2uuPWPi98ddyZs824=
+github.com/linuxfoundation/lfx-v2-fga-sync v0.3.9/go.mod h1:FBjqq0YJHYu4kYDWpjT1fsvr+uaER85LdVbWwGHbkrQ=
 github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16 h1:pOcjVN+KQo2h80je1glL0p69aekwpxmzcTE0VHDwQ/8=
 github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16/go.mod h1:hLf2Hl39PsUg2qtl5os0noXxCXWHrkO26EPT+G0RhmA=
 github.com/linuxfoundation/lfx-v2-invite-service v0.1.4 h1:cgF0vZDcFXCh1xhlvsTxBFwja3WtcRX2cOIB39zU2Wg=
@@ -113,6 +115,8 @@ github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
 github.com/nats-io/nats.go v1.49.0 h1:yh/WvY59gXqYpgl33ZI+XoVPKyut/IcEaqtsiuTJpoE=
 github.com/nats-io/nats.go v1.49.0/go.mod h1:fDCn3mN5cY8HooHwE2ukiLb4p4G4ImmzvXyJt+tGwdw=
+github.com/nats-io/nats.go v1.51.0 h1:ByW84XTz6W03GSSsygsZcA+xgKK8vPGaa/FCAAEHnAI=
+github.com/nats-io/nats.go v1.51.0/go.mod h1:26HypzazeOkyO3/mqd1zZd53STJN0EjCYF9Uy2ZOBno=
 github.com/nats-io/nkeys v0.4.15 h1:JACV5jRVO9V856KOapQ7x+EY8Jo3qw1vJt/9Jpwzkk4=
 github.com/nats-io/nkeys v0.4.15/go.mod h1:CpMchTXC9fxA5zrMo4KpySxNjiDVvr8ANOSZdiNfUrs=
 github.com/nats-io/nuid v1.0.1 h1:5iA8DT8V7q8WK2EScv2padNa/rTESc1KdnPw4TC2paw=
@@ -123,6 +127,8 @@ github.com/onsi/ginkgo v1.10.3/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+
 github.com/onsi/gomega v1.7.1/go.mod h1:XdKZgCCFLUoM/7CFJVPcG8C1xQ1AJ0vpAezJrB7JYyY=
 github.com/onsi/gomega v1.38.3 h1:eTX+W6dobAYfFeGC2PV6RwXRu/MyT+cQguijutvkpSM=
 github.com/onsi/gomega v1.38.3/go.mod h1:ZCU1pkQcXDO5Sl9/VVEGlDyp+zm0m1cmeG5TOzLgdh4=
+github.com/openfga/go-sdk v0.8.0 h1:xwjqxO1v3QU6Tzx5xu33jpOpurqJYxXPM2uiR2QsfCo=
+github.com/openfga/go-sdk v0.8.0/go.mod h1:s5zZD4NFmf6yQa74iJEAwBZgHx4NaNzoOOVmA6YcY2M=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
@@ -140,6 +146,8 @@ github.com/remychantenay/slog-otel v1.3.5 h1:VBxvLh6wJ+ioY9Lup66Bin8UWzRYdVYCDhr
 github.com/remychantenay/slog-otel v1.3.5/go.mod h1:ZkazuFMICKGDrO0r1njxKRdjTt/YcXKn6v2+0q/b0+U=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
+github.com/sourcegraph/conc v0.3.0 h1:OQTbbt6P72L20UqAkXXuLOj79LfEanQ+YQFNpLA9ySo=
+github.com/sourcegraph/conc v0.3.0/go.mod h1:Sdozi7LEKbFPqYX2/J+iBAM6HpqSLTASQIKqDmF7Mt0=
 github.com/spf13/afero v1.15.0 h1:b/YBCLWAJdFWJTN9cLhiXXcD7mzKn9Dm86dNnfyQw1I=
 github.com/spf13/afero v1.15.0/go.mod h1:NC2ByUVxtQs4b3sIUphxK0NioZnmxgyCrfzeuq8lxMg=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
@@ -159,6 +167,8 @@ go.opentelemetry.io/contrib/exporters/autoexport v0.69.0 h1:R3jsCoTIzv0BiYNhW0ax
 go.opentelemetry.io/contrib/exporters/autoexport v0.69.0/go.mod h1:m07gqyr2QhQxKOKb5vqKCCBtLH3uqlNYR7PU/FISXVU=
 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 h1:OyrsyzuttWTSur2qN/Lm0m2a8yqyIjUVBZcxFPuXq2o=
 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0/go.mod h1:C2NGBr+kAB4bk3xtMXfZ94gqFDtg/GkI7e9zqGh5Beg=
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0 h1:CqXxU8VOmDefoh0+ztfGaymYbhdB/tT3zs79QaZTNGY=
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0/go.mod h1:BuhAPThV8PBHBvg8ZzZ/Ok3idOdhWIodywz2xEcRbJo=
 go.opentelemetry.io/contrib/propagators/autoprop v0.69.0 h1:3gzAeb5dgGzwB7hXutgJ07Xsv3v4Wc0llV8AaMc0wiQ=
 go.opentelemetry.io/contrib/propagators/autoprop v0.69.0/go.mod h1:SpChkgQWjh6egTT0chEc7VfusZgQMPzLsxRWWrqJdaQ=
 go.opentelemetry.io/contrib/propagators/aws v1.44.0 h1:Rtvfd6nTbAF2csjiw41m1DfuqC5TneXs+gB84ZA3gq4=

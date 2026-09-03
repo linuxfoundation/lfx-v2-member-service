@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	goahttp "goa.design/goa/v3/http"
@@ -1684,6 +1685,122 @@ func EncodeGetProjectMembershipError(encoder func(context.Context, http.Response
 				body = formatter(ctx, res)
 			} else {
 				body = NewGetProjectMembershipServiceUnavailableResponseBody(res)
+			}
+			w.Header().Set("goa-error", res.GoaErrorName())
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return enc.Encode(body)
+		default:
+			return encodeError(ctx, w, v)
+		}
+	}
+}
+
+// EncodeGetMemberTiersResponse returns an encoder for responses returned by
+// the membership-service get-member-tiers endpoint.
+func EncodeGetMemberTiersResponse(encoder func(context.Context, http.ResponseWriter) goahttp.Encoder) func(context.Context, http.ResponseWriter, any) error {
+	return func(ctx context.Context, w http.ResponseWriter, v any) error {
+		res, _ := v.([]*membershipservice.MemberOrgTierResponse)
+		enc := encoder(ctx, w)
+		body := NewGetMemberTiersResponseBody(res)
+		w.WriteHeader(http.StatusOK)
+		return enc.Encode(body)
+	}
+}
+
+// DecodeGetMemberTiersRequest returns a decoder for requests sent to the
+// membership-service get-member-tiers endpoint.
+func DecodeGetMemberTiersRequest(mux goahttp.Muxer, decoder func(*http.Request) goahttp.Decoder) func(*http.Request) (*membershipservice.GetMemberTiersPayload, error) {
+	return func(r *http.Request) (*membershipservice.GetMemberTiersPayload, error) {
+		var payload *membershipservice.GetMemberTiersPayload
+		var (
+			username    string
+			version     *string
+			bearerToken *string
+			err         error
+
+			params = mux.Vars(r)
+		)
+		username = params["username"]
+		if utf8.RuneCountInString(username) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("username", username, utf8.RuneCountInString(username), 1, true))
+		}
+		if utf8.RuneCountInString(username) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("username", username, utf8.RuneCountInString(username), 255, false))
+		}
+		versionRaw := r.URL.Query().Get("v")
+		if versionRaw != "" {
+			version = &versionRaw
+		}
+		if version != nil {
+			if !(*version == "1") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
+			}
+		}
+		bearerTokenRaw := r.Header.Get("Authorization")
+		if bearerTokenRaw != "" {
+			bearerToken = &bearerTokenRaw
+		}
+		if err != nil {
+			return payload, err
+		}
+		payload = NewGetMemberTiersPayload(username, version, bearerToken)
+		if payload.BearerToken != nil {
+			if strings.Contains(*payload.BearerToken, " ") {
+				// Remove authorization scheme prefix (e.g. "Bearer")
+				cred := strings.SplitN(*payload.BearerToken, " ", 2)[1]
+				payload.BearerToken = &cred
+			}
+		}
+
+		return payload, nil
+	}
+}
+
+// EncodeGetMemberTiersError returns an encoder for errors returned by the
+// get-member-tiers membership-service endpoint.
+func EncodeGetMemberTiersError(encoder func(context.Context, http.ResponseWriter) goahttp.Encoder, formatter func(ctx context.Context, err error) goahttp.Statuser) func(context.Context, http.ResponseWriter, error) error {
+	encodeError := goahttp.ErrorEncoder(encoder, formatter)
+	return func(ctx context.Context, w http.ResponseWriter, v error) error {
+		var en goa.GoaErrorNamer
+		if !errors.As(v, &en) {
+			return encodeError(ctx, w, v)
+		}
+		switch en.GoaErrorName() {
+		case "BadRequest":
+			var res *goa.ServiceError
+			errors.As(v, &res)
+			enc := encoder(ctx, w)
+			var body any
+			if formatter != nil {
+				body = formatter(ctx, res)
+			} else {
+				body = NewGetMemberTiersBadRequestResponseBody(res)
+			}
+			w.Header().Set("goa-error", res.GoaErrorName())
+			w.WriteHeader(http.StatusBadRequest)
+			return enc.Encode(body)
+		case "InternalServerError":
+			var res *goa.ServiceError
+			errors.As(v, &res)
+			enc := encoder(ctx, w)
+			var body any
+			if formatter != nil {
+				body = formatter(ctx, res)
+			} else {
+				body = NewGetMemberTiersInternalServerErrorResponseBody(res)
+			}
+			w.Header().Set("goa-error", res.GoaErrorName())
+			w.WriteHeader(http.StatusInternalServerError)
+			return enc.Encode(body)
+		case "ServiceUnavailable":
+			var res *goa.ServiceError
+			errors.As(v, &res)
+			enc := encoder(ctx, w)
+			var body any
+			if formatter != nil {
+				body = formatter(ctx, res)
+			} else {
+				body = NewGetMemberTiersServiceUnavailableResponseBody(res)
 			}
 			w.Header().Set("goa-error", res.GoaErrorName())
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -3692,6 +3809,27 @@ func unmarshalOrgUserRequestBodyToMembershipserviceOrgUser(v *OrgUserRequestBody
 		Username:     v.Username,
 		InvitedAs:    *v.InvitedAs,
 		InviteStatus: v.InviteStatus,
+	}
+
+	return res
+}
+
+// marshalMembershipserviceMemberOrgTierResponseToMemberOrgTierResponseResponse
+// builds a value of type *MemberOrgTierResponseResponse from a value of type
+// *membershipservice.MemberOrgTierResponse.
+func marshalMembershipserviceMemberOrgTierResponseToMemberOrgTierResponseResponse(v *membershipservice.MemberOrgTierResponse) *MemberOrgTierResponseResponse {
+	res := &MemberOrgTierResponseResponse{
+		B2bOrgUID:     v.B2bOrgUID,
+		CompanyName:   v.CompanyName,
+		MembershipUID: v.MembershipUID,
+		ProjectUID:    v.ProjectUID,
+		ProjectSlug:   v.ProjectSlug,
+		TierUID:       v.TierUID,
+		TierName:      v.TierName,
+		Tier:          v.Tier,
+		Status:        v.Status,
+		StartDate:     v.StartDate,
+		EndDate:       v.EndDate,
 	}
 
 	return res
