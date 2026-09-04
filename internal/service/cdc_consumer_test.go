@@ -1565,6 +1565,35 @@ func TestCDCConsumer_QuotaGuard_AboveThreshold_SkipsUpsert(t *testing.T) {
 	assert.Empty(t, pub.access, "quota exceeded must suppress FGA publish")
 }
 
+// Cache eviction costs no Salesforce quota, so it must still run even when
+// the quota guard defers the SOQL re-fetch — otherwise a status, end-date, or
+// tier change would keep serving stale cached data until the guard clears.
+func TestCDCConsumer_QuotaGuard_AboveThreshold_StillEvictsCache(t *testing.T) {
+	pm := &model.ProjectMembership{UID: sfid("pm-quota-evict")}
+	pub := &subjectCapturingPublisher{}
+	invalidator := &mock.MockCacheInvalidator{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-quota-evict")}, ReplayID: []byte("qg-evict")},
+		}},
+		&fakeB2BOrgReader{},
+		invalidator,
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100}), // 0.96 ≥ 0.95
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, pub.indexer, "quota exceeded must still suppress indexer publish")
+	assert.Equal(t, 1, invalidator.MembershipCalls, "sObject cache must still be invalidated despite the quota guard")
+	assert.Equal(t, 1, evictor.DeleteCalls, "soft-TTL membership cache must still be evicted despite the quota guard")
+}
+
 func TestCDCConsumer_QuotaGuard_AtThreshold_SkipsUpsert(t *testing.T) {
 	pm := &model.ProjectMembership{UID: sfid("pm-quota-2")}
 	pub := &subjectCapturingPublisher{}

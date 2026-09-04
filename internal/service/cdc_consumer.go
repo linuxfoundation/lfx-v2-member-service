@@ -887,13 +887,6 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		}
 		return nil
 	}
-	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
-		if isRestore(changeType) {
-			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
-		}
-		return nil
-	}
-
 	// Evict the sObject cache entry for each ID so subsequent re-fetch goes to
 	// Salesforce rather than returning a stale cached record.
 	for _, id := range upsertIDs {
@@ -909,6 +902,13 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 					"uid", id, "error", err)
 			}
 		}
+	}
+
+	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
+		}
+		return nil
 	}
 
 	memberships, convErrSFIDs, err := o.membershipBatch.FetchMembershipsBySFIDs(ctx, upsertIDs)
