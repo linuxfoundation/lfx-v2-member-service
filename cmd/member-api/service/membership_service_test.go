@@ -618,6 +618,51 @@ func TestGetMemberTiers_DuplicateTuplesReadOnce(t *testing.T) {
 	assert.Equal(t, 1, mr.calls["m-1"], "duplicate reverse-index tuples must not multiply membership reads")
 }
 
+// A reverse index larger than any real key contact would fan out into that many
+// cache-cold Salesforce reads. GetMemberTiers must refuse it (fail closed)
+// before issuing a single membership read, not truncate to a wrong top tier.
+func TestGetMemberTiers_CandidateCapFailsClosed(t *testing.T) {
+	uids := make([]string, maxMemberTierCandidates+1)
+	for i := range uids {
+		uids[i] = fmt.Sprintf("m-%d", i)
+	}
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", uids)
+	mr := &countingMemberReader{
+		MemberReader: &mapMemberReader{memberships: map[string]*model.ProjectMembership{}},
+		calls:        map[string]int{},
+	}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+	assert.Empty(t, mr.calls, "candidate cap must refuse before any membership read")
+}
+
+// A candidate set exactly at the cap is within bounds and resolves normally;
+// the guard trips only above it.
+func TestGetMemberTiers_CandidateCapBoundaryResolves(t *testing.T) {
+	uids := make([]string, maxMemberTierCandidates)
+	memberships := make(map[string]*model.ProjectMembership, len(uids))
+	for i := range uids {
+		id := fmt.Sprintf("m-%d", i)
+		uids[i] = id
+		memberships[id] = &model.ProjectMembership{UID: id, B2BOrgUID: "org-" + id, TierName: "Gold Membership", Status: "Active"}
+	}
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", uids)
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(&mapMemberReader{memberships: memberships}))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	assert.Len(t, res, maxMemberTierCandidates)
+}
+
 // A membership record without a b2b_org_uid cannot be attributed to an
 // organization; it must be skipped rather than fail the lookup or surface as
 // a malformed entry (b2b_org_uid is required in the response contract).

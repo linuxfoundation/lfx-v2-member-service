@@ -243,6 +243,11 @@ func (s *membershipServicesrvc) GetProjectMembership(ctx context.Context, p *mem
 	return result, nil
 }
 
+// maxMemberTierCandidates caps how many reverse-index UIDs GetMemberTiers
+// resolves per user. Each can be a Salesforce read, so past the cap it fails
+// closed rather than fan out or truncate to a wrong top tier.
+const maxMemberTierCandidates = 200
+
 // GetMemberTiers lists the highest active membership tier per B2B organization
 // for the organizations the given user is a key contact of, ordered highest
 // tier first so the leading entry is the user's top tier. The FGA tuples are a
@@ -264,6 +269,11 @@ func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershi
 	uids, err := s.userMembershipReader.MembershipUIDsForUser(ctx, username)
 	if err != nil {
 		return nil, wrapError(ctx, err)
+	}
+	if len(uids) > maxMemberTierCandidates {
+		slog.WarnContext(ctx, "member-tiers candidate set exceeds cap; refusing to fan out",
+			"username", redaction.Redact(username), "candidates", len(uids), "cap", maxMemberTierCandidates)
+		return nil, wrapError(ctx, pkgerrors.NewServiceUnavailable("too many candidate memberships to resolve safely"))
 	}
 
 	now := time.Now().UTC()
