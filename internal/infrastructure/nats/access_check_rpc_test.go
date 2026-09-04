@@ -73,10 +73,22 @@ func TestParseReadTuplesResponse(t *testing.T) {
 			wantErr:  func(t *testing.T, err error) { require.NoError(t, err) },
 		},
 		{
-			name:     "absent results field is a genuine empty result, not an error",
-			body:     `{}`,
-			wantUIDs: []string{},
-			wantErr:  func(t *testing.T, err error) { require.NoError(t, err) },
+			name: "absent results field is inconclusive, not an empty result",
+			body: `{}`,
+			wantErr: func(t *testing.T, err error) {
+				require.Error(t, err)
+				var unavailable pkgerrors.ServiceUnavailable
+				assert.ErrorAs(t, err, &unavailable, "a reply omitting results must fail closed, got %v", err)
+			},
+		},
+		{
+			name: "null results field is inconclusive, not an empty result",
+			body: `{"results":null}`,
+			wantErr: func(t *testing.T, err error) {
+				require.Error(t, err)
+				var unavailable pkgerrors.ServiceUnavailable
+				assert.ErrorAs(t, err, &unavailable, "a null results field must fail closed, got %v", err)
+			},
 		},
 		{
 			name: "error envelope is ServiceUnavailable, not an empty result",

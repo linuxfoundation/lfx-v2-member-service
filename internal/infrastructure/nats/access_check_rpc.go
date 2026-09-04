@@ -101,6 +101,11 @@ func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
 	if resp.Error != "" {
 		return nil, errs.NewServiceUnavailable(fmt.Sprintf("fga-sync read_tuples reported an error: %s", resp.Error))
 	}
+	// fga-sync always sends results (empty array for no matches), so an absent
+	// or null field is a malformed reply, not "no memberships".
+	if resp.Results == nil {
+		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reply omitted results")
+	}
 
 	uids := make([]string, 0, len(resp.Results))
 	for _, tuple := range resp.Results {
