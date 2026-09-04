@@ -556,6 +556,49 @@ func BuildGetProjectMembershipPayload(membershipServiceGetProjectMembershipUID s
 	return v, nil
 }
 
+// BuildGetMemberTiersPayload builds the payload for the membership-service
+// get-member-tiers endpoint from CLI flags.
+func BuildGetMemberTiersPayload(membershipServiceGetMemberTiersUsername string, membershipServiceGetMemberTiersVersion string, membershipServiceGetMemberTiersBearerToken string) (*membershipservice.GetMemberTiersPayload, error) {
+	var err error
+	var username string
+	{
+		username = membershipServiceGetMemberTiersUsername
+		if utf8.RuneCountInString(username) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("username", username, utf8.RuneCountInString(username), 1, true))
+		}
+		if utf8.RuneCountInString(username) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("username", username, utf8.RuneCountInString(username), 255, false))
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	var version *string
+	{
+		if membershipServiceGetMemberTiersVersion != "" {
+			version = &membershipServiceGetMemberTiersVersion
+			if !(*version == "1") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var bearerToken *string
+	{
+		if membershipServiceGetMemberTiersBearerToken != "" {
+			bearerToken = &membershipServiceGetMemberTiersBearerToken
+		}
+	}
+	v := &membershipservice.GetMemberTiersPayload{}
+	v.Username = username
+	v.Version = version
+	v.BearerToken = bearerToken
+
+	return v, nil
+}
+
 // BuildGetKeyContactPayload builds the payload for the membership-service
 // get-key-contact endpoint from CLI flags.
 func BuildGetKeyContactPayload(membershipServiceGetKeyContactMembershipUID string, membershipServiceGetKeyContactUID string, membershipServiceGetKeyContactVersion string, membershipServiceGetKeyContactBearerToken string, membershipServiceGetKeyContactIfNoneMatch string, membershipServiceGetKeyContactIfModifiedSince string) (*membershipservice.GetKeyContactPayload, error) {
@@ -815,7 +858,7 @@ func BuildAdminReindexPayload(membershipServiceAdminReindexBody string, membersh
 	{
 		err = json.Unmarshal([]byte(membershipServiceAdminReindexBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"cdc_repair\": true,\n      \"dry_run\": false,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\",\n      \"until\": \"2026-06-20T00:00:00Z\"\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"cdc_repair\": false,\n      \"dry_run\": false,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\",\n      \"until\": \"2026-06-20T00:00:00Z\"\n   }'")
 		}
 		if body.Since != nil {
 			err = goa.MergeErrors(err, goa.ValidateFormat("body.since", *body.Since, goa.FormatDateTime))
@@ -1143,7 +1186,7 @@ func BuildBulkAddB2bOrgWorkspaceProjectsPayload(membershipServiceBulkAddB2bOrgWo
 	{
 		err = json.Unmarshal([]byte(membershipServiceBulkAddB2bOrgWorkspaceProjectsBody), &body)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"projects\": [\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         },\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         },\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         }\n      ]\n   }'")
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"projects\": [\n         {\n            \"project_name\": \"Kubernetes\",\n            \"project_slug\": \"kubernetes\"\n         }\n      ]\n   }'")
 		}
 		if body.Projects == nil {
 			err = goa.MergeErrors(err, goa.MissingFieldError("projects", "body"))

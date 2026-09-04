@@ -238,6 +238,10 @@ type DeleteB2bOrgSettingsUserResponseBody B2bOrgSettingsResponseResponseBody
 // service "get-project-membership" endpoint HTTP response body.
 type GetProjectMembershipResponseBody ProjectMembershipResponseResponseBody
 
+// GetMemberTiersResponseBody is the type of the "membership-service" service
+// "get-member-tiers" endpoint HTTP response body.
+type GetMemberTiersResponseBody []*MemberOrgTierResponseResponse
+
 // GetKeyContactResponseBody is the type of the "membership-service" service
 // "get-key-contact" endpoint HTTP response body.
 type GetKeyContactResponseBody ProjectKeyContactResponseResponseBody
@@ -1375,6 +1379,63 @@ type GetProjectMembershipInternalServerErrorResponseBody struct {
 // "membership-service" service "get-project-membership" endpoint HTTP response
 // body for the "ServiceUnavailable" error.
 type GetProjectMembershipServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// GetMemberTiersBadRequestResponseBody is the type of the "membership-service"
+// service "get-member-tiers" endpoint HTTP response body for the "BadRequest"
+// error.
+type GetMemberTiersBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// GetMemberTiersInternalServerErrorResponseBody is the type of the
+// "membership-service" service "get-member-tiers" endpoint HTTP response body
+// for the "InternalServerError" error.
+type GetMemberTiersInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// GetMemberTiersServiceUnavailableResponseBody is the type of the
+// "membership-service" service "get-member-tiers" endpoint HTTP response body
+// for the "ServiceUnavailable" error.
+type GetMemberTiersServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name string `form:"name" json:"name" xml:"name"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -2813,6 +2874,37 @@ type ProjectMembershipResponseResponseBody struct {
 	UpdatedAt *string `form:"updated_at,omitempty" json:"updated_at,omitempty" xml:"updated_at,omitempty"`
 }
 
+// MemberOrgTierResponseResponse is used to define fields on response body
+// types.
+type MemberOrgTierResponseResponse struct {
+	// UID of the B2B organization (Account) holding the membership
+	B2bOrgUID string `form:"b2b_org_uid" json:"b2b_org_uid" xml:"b2b_org_uid"`
+	// Member company name (denormalized from Account)
+	CompanyName *string `form:"company_name,omitempty" json:"company_name,omitempty" xml:"company_name,omitempty"`
+	// UID of the winning membership (Asset)
+	MembershipUID string `form:"membership_uid" json:"membership_uid" xml:"membership_uid"`
+	// V2 project UUID the membership is scoped to
+	ProjectUID *string `form:"project_uid,omitempty" json:"project_uid,omitempty" xml:"project_uid,omitempty"`
+	// URL slug of the project the membership is scoped to
+	ProjectSlug *string `form:"project_slug,omitempty" json:"project_slug,omitempty" xml:"project_slug,omitempty"`
+	// UID of the membership tier (Product2)
+	TierUID *string `form:"tier_uid,omitempty" json:"tier_uid,omitempty" xml:"tier_uid,omitempty"`
+	// Raw product name of the tier (denormalized from Product2)
+	TierName *string `form:"tier_name,omitempty" json:"tier_name,omitempty" xml:"tier_name,omitempty"`
+	// Normalized tier class derived from the tier name. One of: platinum, premier,
+	// founding, strategic, gold, steering, silver, general, associate, end_user,
+	// academic, contributor, other (highest first, matching the LFX One Org Lens
+	// taxonomy). Deliberately not a closed enum so the taxonomy can grow without
+	// breaking clients; unrecognized names fall back to other.
+	Tier string `form:"tier" json:"tier" xml:"tier"`
+	// Membership status
+	Status *string `form:"status,omitempty" json:"status,omitempty" xml:"status,omitempty"`
+	// Membership start date
+	StartDate *string `form:"start_date,omitempty" json:"start_date,omitempty" xml:"start_date,omitempty"`
+	// Membership end date
+	EndDate *string `form:"end_date,omitempty" json:"end_date,omitempty" xml:"end_date,omitempty"`
+}
+
 // ProjectKeyContactResponseResponseBody is used to define fields on response
 // body types.
 type ProjectKeyContactResponseResponseBody struct {
@@ -3251,6 +3343,20 @@ func NewGetProjectMembershipResponseBody(res *membershipservice.GetProjectMember
 		TierProductType:  res.ProjectMembership.TierProductType,
 		CreatedAt:        res.ProjectMembership.CreatedAt,
 		UpdatedAt:        res.ProjectMembership.UpdatedAt,
+	}
+	return body
+}
+
+// NewGetMemberTiersResponseBody builds the HTTP response body from the result
+// of the "get-member-tiers" endpoint of the "membership-service" service.
+func NewGetMemberTiersResponseBody(res []*membershipservice.MemberOrgTierResponse) GetMemberTiersResponseBody {
+	body := make([]*MemberOrgTierResponseResponse, len(res))
+	for i, val := range res {
+		if val == nil {
+			body[i] = nil
+			continue
+		}
+		body[i] = marshalMembershipserviceMemberOrgTierResponseToMemberOrgTierResponseResponse(val)
 	}
 	return body
 }
@@ -4335,6 +4441,51 @@ func NewGetProjectMembershipInternalServerErrorResponseBody(res *goa.ServiceErro
 // the "membership-service" service.
 func NewGetProjectMembershipServiceUnavailableResponseBody(res *goa.ServiceError) *GetProjectMembershipServiceUnavailableResponseBody {
 	body := &GetProjectMembershipServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewGetMemberTiersBadRequestResponseBody builds the HTTP response body from
+// the result of the "get-member-tiers" endpoint of the "membership-service"
+// service.
+func NewGetMemberTiersBadRequestResponseBody(res *goa.ServiceError) *GetMemberTiersBadRequestResponseBody {
+	body := &GetMemberTiersBadRequestResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewGetMemberTiersInternalServerErrorResponseBody builds the HTTP response
+// body from the result of the "get-member-tiers" endpoint of the
+// "membership-service" service.
+func NewGetMemberTiersInternalServerErrorResponseBody(res *goa.ServiceError) *GetMemberTiersInternalServerErrorResponseBody {
+	body := &GetMemberTiersInternalServerErrorResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewGetMemberTiersServiceUnavailableResponseBody builds the HTTP response
+// body from the result of the "get-member-tiers" endpoint of the
+// "membership-service" service.
+func NewGetMemberTiersServiceUnavailableResponseBody(res *goa.ServiceError) *GetMemberTiersServiceUnavailableResponseBody {
+	body := &GetMemberTiersServiceUnavailableResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,
@@ -5521,6 +5672,17 @@ func NewGetProjectMembershipPayload(uid string, version *string, bearerToken *st
 	v.BearerToken = bearerToken
 	v.IfNoneMatch = ifNoneMatch
 	v.IfModifiedSince = ifModifiedSince
+
+	return v
+}
+
+// NewGetMemberTiersPayload builds a membership-service service
+// get-member-tiers endpoint payload.
+func NewGetMemberTiersPayload(username string, version *string, bearerToken *string) *membershipservice.GetMemberTiersPayload {
+	v := &membershipservice.GetMemberTiersPayload{}
+	v.Username = username
+	v.Version = version
+	v.BearerToken = bearerToken
 
 	return v
 }

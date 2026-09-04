@@ -16,6 +16,7 @@ import (
 // compile-time interface checks.
 var (
 	_ port.CacheInvalidator              = (*MockCacheInvalidator)(nil)
+	_ port.MembershipCacheEvictor        = (*MockMembershipCacheEvictor)(nil)
 	_ port.MembershipBatchReader         = (*MockMembershipBatchReader)(nil)
 	_ port.KeyContactBatchReader         = (*MockKeyContactBatchReader)(nil)
 	_ port.KeyContactsByMembershipReader = (*MockKeyContactsByMembershipReader)(nil)
@@ -50,6 +51,22 @@ func (c *MockCacheInvalidator) InvalidateProjectMembership(_ context.Context, _ 
 func (c *MockCacheInvalidator) InvalidateKeyContact(_ context.Context, _ string) error {
 	c.KeyContactCalls++
 	return c.InvalidateErr
+}
+
+// MockMembershipCacheEvictor is a test double for port.MembershipCacheEvictor
+// that records each DeleteMembership call and can return a configured error.
+type MockMembershipCacheEvictor struct {
+	DeleteCalls int
+	DeletedUIDs []string
+
+	// DeleteErr is returned by DeleteMembership when non-nil.
+	DeleteErr error
+}
+
+func (e *MockMembershipCacheEvictor) DeleteMembership(_ context.Context, uid string) error {
+	e.DeleteCalls++
+	e.DeletedUIDs = append(e.DeletedUIDs, uid)
+	return e.DeleteErr
 }
 
 // MockMembershipBatchReader is a test double for port.MembershipBatchReader

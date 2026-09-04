@@ -58,30 +58,67 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-// redactPath redacts email addresses embedded in path segments, because
-// several routes carry a member email as a path parameter and the access log
-// must not expose it.
+// piiPathParams names route path parameters whose values are PII and must be
+// redacted from the access-logged path, matched by name in the route template
+// (e.g. "{username}") since a username has no detectable shape like an email.
+var piiPathParams = map[string]bool{
+	"username": true,
+}
+
+// redactPath strips sensitive values from the access-logged path. It removes
+// two classes: the value of any path parameter named in piiPathParams (matched
+// by position against the matched route template), and email addresses embedded
+// in any segment by content (several routes carry a member email as a path
+// parameter).
 //
-// It takes the escaped path: chi routes on the escaped form, so an address
-// containing an encoded slash (john%2Fdoe%40example.com) still reaches the
-// {email} route. Splitting the decoded path would break that address across
-// two segments and redact only the second half.
-func redactPath(escapedPath string) string {
-	if !strings.ContainsAny(escapedPath, "@%") {
-		return escapedPath
+// It works on the escaped path: chi routes on the escaped form, so a value
+// containing an encoded slash (john%2Fdoe) still reaches its route as one
+// segment. Redacting the whole escaped segment, rather than splitting the
+// decoded path, keeps such a value from being reshaped into extra segments and
+// only partly redacted.
+func redactPath(routeTemplate, escapedPath string) string {
+	segments := strings.Split(escapedPath, "/")
+	redacted := false
+
+	// Redact named PII parameters by position. Goa path parameters never span a
+	// slash, so a template like "/b2b_orgs/member-tiers/{username}" aligns
+	// segment-for-segment with the concrete path.
+	if templateSegs := strings.Split(routeTemplate, "/"); len(templateSegs) == len(segments) {
+		for i, ts := range templateSegs {
+			if name, ok := pathParamName(ts); ok && piiPathParams[name] {
+				segments[i] = redaction.Redact(segments[i])
+				redacted = true
+			}
+		}
 	}
 
-	segments := strings.Split(escapedPath, "/")
-	for i, segment := range segments {
-		decoded, err := url.PathUnescape(segment)
-		if err != nil || !strings.Contains(decoded, "@") {
-			// Leave non-email segments exactly as received, so an encoded
-			// value is never silently reshaped into extra path segments.
-			continue
+	// Redact email addresses in any remaining segment by content.
+	if strings.ContainsAny(escapedPath, "@%") {
+		for i, segment := range segments {
+			decoded, err := url.PathUnescape(segment)
+			if err != nil || !strings.Contains(decoded, "@") {
+				// Leave non-email segments exactly as received, so an encoded
+				// value is never silently reshaped into extra path segments.
+				continue
+			}
+			segments[i] = redaction.RedactEmail(decoded)
+			redacted = true
 		}
-		segments[i] = redaction.RedactEmail(decoded)
+	}
+
+	if !redacted {
+		return escapedPath
 	}
 	return strings.Join(segments, "/")
+}
+
+// pathParamName returns the parameter name of a route-template segment written
+// as "{name}", and whether the segment is such a parameter.
+func pathParamName(segment string) (string, bool) {
+	if len(segment) >= 2 && segment[0] == '{' && segment[len(segment)-1] == '}' {
+		return segment[1 : len(segment)-1], true
+	}
+	return "", false
 }
 
 // unmatchedRoute is reported instead of the concrete path when no route
@@ -140,7 +177,7 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 				attrs := []any{
 					"verb", r.Method,
 					"pattern", routePattern(r),
-					"path", redactPath(r.URL.EscapedPath()),
+					"path", redactPath(routePattern(r), r.URL.EscapedPath()),
 					"status", status,
 					"duration_ms", float64(time.Since(start).Microseconds()) / 1000.0,
 					"user_agent", r.UserAgent(),

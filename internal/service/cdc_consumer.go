@@ -78,6 +78,7 @@ type CDCConsumer struct {
 	keyContactsByMembership port.KeyContactsByMembershipReader
 	accountBatch            port.AccountBatchReader
 	cacheInvalidator        port.CacheInvalidator
+	membershipCacheEvictor  port.MembershipCacheEvictor
 	publisher               port.MemberPublisher
 	quotaGauge              port.SalesforceQuotaGauge
 	quotaSkipThreshold      float64
@@ -133,6 +134,12 @@ func WithCDCAccountBatchReader(r port.AccountBatchReader) CDCConsumerOption {
 
 func WithCDCCacheInvalidator(i port.CacheInvalidator) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.cacheInvalidator = i }
+}
+
+// WithCDCMembershipCacheEvictor sets the soft-TTL membership-cache evictor.
+// When nil (e.g. mock mode) soft-TTL eviction is skipped.
+func WithCDCMembershipCacheEvictor(e port.MembershipCacheEvictor) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.membershipCacheEvictor = e }
 }
 
 func WithCDCPublisher(p port.MemberPublisher) CDCConsumerOption {
@@ -880,13 +887,6 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		}
 		return nil
 	}
-	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
-		if isRestore(changeType) {
-			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
-		}
-		return nil
-	}
-
 	// Evict the sObject cache entry for each ID so subsequent re-fetch goes to
 	// Salesforce rather than returning a stale cached record.
 	for _, id := range upsertIDs {
@@ -894,6 +894,21 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 			slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed",
 				"uid", id, "error", err, "publish_failed_for_backfill_repair", true)
 		}
+		// Also evict the soft-TTL membership cache GetMemberTiers serves from, so a
+		// status, end-date, or tier change shows on the next read.
+		if o.membershipCacheEvictor != nil {
+			if err := o.membershipCacheEvictor.DeleteMembership(ctx, id); err != nil {
+				slog.WarnContext(ctx, "cdc: soft-TTL membership cache eviction failed",
+					"uid", id, "error", err)
+			}
+		}
+	}
+
+	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
+		}
+		return nil
 	}
 
 	memberships, convErrSFIDs, err := o.membershipBatch.FetchMembershipsBySFIDs(ctx, upsertIDs)
@@ -1167,6 +1182,12 @@ func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
 	if err := o.cacheInvalidator.InvalidateProjectMembership(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed on delete",
 			"uid", uid, "error", err)
+	}
+	if o.membershipCacheEvictor != nil {
+		if err := o.membershipCacheEvictor.DeleteMembership(ctx, uid); err != nil {
+			slog.WarnContext(ctx, "cdc: soft-TTL membership cache eviction failed on delete",
+				"uid", uid, "error", err)
+		}
 	}
 
 	stubPM := &model.ProjectMembership{UID: uid}

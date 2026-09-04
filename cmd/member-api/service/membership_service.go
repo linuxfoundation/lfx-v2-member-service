@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"expvar"
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +25,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 	"goa.design/goa/v3/security"
 )
@@ -32,6 +36,7 @@ type membershipServicesrvc struct {
 	auth                    domain.Authenticator
 	b2bOrgReader            port.B2BOrgReader
 	projectMembershipReader port.ProjectMembershipReader
+	userMembershipReader    port.UserMembershipReader
 	b2bOrgSettingsReader    port.B2BOrgSettingsReader
 	b2bOrgWriter            usecaseSvc.B2BOrgWriter
 	logoUploader            usecaseSvc.LogoUploader
@@ -236,6 +241,194 @@ func (s *membershipServicesrvc) GetProjectMembership(ctx context.Context, p *mem
 		result.Etag = &etagVal
 	}
 	return result, nil
+}
+
+// maxMemberTierCandidates caps how many reverse-index UIDs GetMemberTiers
+// resolves per user. Each can be a Salesforce read, so past the cap it fails
+// closed rather than fan out or truncate to a wrong top tier.
+const maxMemberTierCandidates = 200
+
+// GetMemberTiers lists the highest active membership tier per B2B organization
+// for the organizations the given user is a key contact of, ordered highest
+// tier first so the leading entry is the user's top tier. The FGA tuples are a
+// reverse index only; each candidate is verified against the authoritative
+// membership record. Unknown users yield an empty list, not 404, so callers
+// cannot probe which usernames exist.
+//
+// Candidates read through the cached GetMembership, not the always-revalidating
+// AssembleProjectMembership, to spare Salesforce calls. Eligibility (the
+// key-contact edge) is read live from fga-sync each call and never cached
+// here; only status, end date, and tier come from the soft-TTL cache, which
+// the CDC consumer evicts on each Asset change, so the next read is fresh.
+func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershipservice.GetMemberTiersPayload) ([]*membershipservice.MemberOrgTierResponse, error) {
+	username := strings.TrimSpace(p.Username)
+	if username == "" {
+		return nil, wrapError(ctx, pkgerrors.NewValidation("username must not be blank"))
+	}
+
+	uids, err := s.userMembershipReader.MembershipUIDsForUser(ctx, username)
+	if err != nil {
+		return nil, wrapError(ctx, err)
+	}
+	if len(uids) > maxMemberTierCandidates {
+		slog.WarnContext(ctx, "member-tiers candidate set exceeds cap; refusing to fan out",
+			"username", redaction.Redact(username), "candidates", len(uids), "cap", maxMemberTierCandidates)
+		return nil, wrapError(ctx, pkgerrors.NewServiceUnavailable("too many candidate memberships to resolve safely"))
+	}
+
+	now := time.Now().UTC()
+	best := make(map[string]*model.ProjectMembership, len(uids))
+	seen := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		if seen[uid] {
+			continue
+		}
+		seen[uid] = true
+
+		membership, err := s.storage.GetMembership(ctx, uid)
+		if err != nil {
+			var notFound pkgerrors.NotFound
+			if errors.As(err, &notFound) {
+				// Dangling reverse-index tuple: FGA references a membership
+				// that no longer resolves. Skip it rather than failing the
+				// whole lookup.
+				slog.WarnContext(ctx, "skipping dangling membership tuple",
+					"membership_uid", uid, "username", redaction.Redact(username))
+				continue
+			}
+			// Any other failure would silently omit organizations the user
+			// belongs to, so fail the whole lookup closed. The Salesforce-
+			// backed reader reports outages as untyped wrapped errors; coerce
+			// those to ServiceUnavailable so callers see the documented 503
+			// rather than a generic 500.
+			var unavailable pkgerrors.ServiceUnavailable
+			if !errors.As(err, &unavailable) {
+				err = pkgerrors.NewServiceUnavailable("reading membership record", err)
+			}
+			return nil, wrapError(ctx, err)
+		}
+
+		if !membershipCountsAsActive(membership, now) {
+			continue
+		}
+		if membership.B2BOrgUID == "" {
+			slog.WarnContext(ctx, "skipping membership without b2b_org_uid", "membership_uid", uid)
+			continue
+		}
+		if current, ok := best[membership.B2BOrgUID]; !ok || membershipOutranks(membership, current) {
+			best[membership.B2BOrgUID] = membership
+		}
+	}
+
+	ordered := make([]*model.ProjectMembership, 0, len(best))
+	for _, m := range best {
+		ordered = append(ordered, m)
+	}
+	// Highest tier first, so a caller can take the leading entry as the user's
+	// top tier across all their organizations without carrying the rank order
+	// itself. Equal tiers break by company name, then b2b_org_uid, for a stable
+	// and human-legible order.
+	sort.Slice(ordered, func(i, j int) bool {
+		ri := model.TierClassRank(model.TierClass(ordered[i].TierName))
+		rj := model.TierClassRank(model.TierClass(ordered[j].TierName))
+		if ri != rj {
+			return ri > rj
+		}
+		if ordered[i].CompanyName != ordered[j].CompanyName {
+			return ordered[i].CompanyName < ordered[j].CompanyName
+		}
+		return ordered[i].B2BOrgUID < ordered[j].B2BOrgUID
+	})
+
+	res := make([]*membershipservice.MemberOrgTierResponse, 0, len(ordered))
+	for _, m := range ordered {
+		res = append(res, memberOrgTierToResponse(m))
+	}
+	return res, nil
+}
+
+// membershipCountsAsActive reports whether a membership counts towards the
+// member-tiers lookup: Status is Active and the end date, when parseable, has
+// not passed. A membership stays active through its end date.
+func membershipCountsAsActive(m *model.ProjectMembership, now time.Time) bool {
+	if !strings.EqualFold(m.Status, "Active") {
+		return false
+	}
+	if end, ok := parseMembershipDate(m.EndDate); ok && end.Before(now.Truncate(24*time.Hour)) {
+		return false
+	}
+	return true
+}
+
+// membershipOutranks reports whether candidate should replace current as an
+// organization's winning membership: a strictly higher normalized tier class,
+// or the same class with a later (or open-ended) end date.
+func membershipOutranks(candidate, current *model.ProjectMembership) bool {
+	candRank := model.TierClassRank(model.TierClass(candidate.TierName))
+	curRank := model.TierClassRank(model.TierClass(current.TierName))
+	if candRank != curRank {
+		return candRank > curRank
+	}
+	return membershipEndForCompare(candidate).After(membershipEndForCompare(current))
+}
+
+// membershipEndCompareMax stands in for an absent or unparseable end date
+// during tie-breaking, treating such memberships as open-ended.
+var membershipEndCompareMax = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+
+func membershipEndForCompare(m *model.ProjectMembership) time.Time {
+	if end, ok := parseMembershipDate(m.EndDate); ok {
+		return end
+	}
+	return membershipEndCompareMax
+}
+
+// parseMembershipDate parses a Salesforce date or datetime string.
+func parseMembershipDate(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"2006-01-02", time.RFC3339} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// memberOrgTierToResponse maps an organization's winning membership to one
+// member-tiers response entry.
+func memberOrgTierToResponse(m *model.ProjectMembership) *membershipservice.MemberOrgTierResponse {
+	resp := &membershipservice.MemberOrgTierResponse{
+		B2bOrgUID:     m.B2BOrgUID,
+		MembershipUID: m.UID,
+		Tier:          model.TierClass(m.TierName),
+	}
+	if m.CompanyName != "" {
+		resp.CompanyName = &m.CompanyName
+	}
+	if m.ProjectUID != "" {
+		resp.ProjectUID = &m.ProjectUID
+	}
+	if m.ProjectSlug != "" {
+		resp.ProjectSlug = &m.ProjectSlug
+	}
+	if m.TierUID != "" {
+		resp.TierUID = &m.TierUID
+	}
+	if m.TierName != "" {
+		resp.TierName = &m.TierName
+	}
+	if m.Status != "" {
+		resp.Status = &m.Status
+	}
+	if m.StartDate != "" {
+		resp.StartDate = &m.StartDate
+	}
+	if m.EndDate != "" {
+		resp.EndDate = &m.EndDate
+	}
+	return resp
 }
 
 // ── Key Contacts ─────────────────────────────────────────────────────────────
@@ -1197,6 +1390,7 @@ func NewMembershipService(
 	storage port.MemberReader,
 	b2bOrgReader port.B2BOrgReader,
 	projectMshipR port.ProjectMembershipReader,
+	userMembershipR port.UserMembershipReader,
 	b2bOrgSettingsReader port.B2BOrgSettingsReader,
 	b2bOrgWriter usecaseSvc.B2BOrgWriter,
 	logoUploader usecaseSvc.LogoUploader,
@@ -1210,6 +1404,7 @@ func NewMembershipService(
 		auth:                    auth,
 		b2bOrgReader:            b2bOrgReader,
 		projectMembershipReader: projectMshipR,
+		userMembershipReader:    userMembershipR,
 		b2bOrgSettingsReader:    b2bOrgSettingsReader,
 		b2bOrgWriter:            b2bOrgWriter,
 		logoUploader:            logoUploader,

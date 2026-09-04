@@ -39,6 +39,48 @@ var MembershipTierResponse = dsl.Type("membership-tier-response", func() {
 	})
 })
 
+// MemberOrgTierResponse is the DSL type for one entry of the member-tiers
+// lookup: the highest active membership tier a B2B organization holds, for an
+// organization the queried user is a key contact of.
+var MemberOrgTierResponse = dsl.Type("member-org-tier-response", func() {
+	dsl.Description("Highest active membership tier held by one B2B organization the user is a key contact of")
+	dsl.Attribute("b2b_org_uid", dsl.String, "UID of the B2B organization (Account) holding the membership", func() {
+		dsl.Example("001B000000IqhSLIAZ")
+	})
+	dsl.Attribute("company_name", dsl.String, "Member company name (denormalized from Account)", func() {
+		dsl.Example("Example Corp")
+	})
+	dsl.Attribute("membership_uid", dsl.String, "UID of the winning membership (Asset)", func() {
+		dsl.Example("02i2M000009ABCdIAM")
+	})
+	dsl.Attribute("project_uid", dsl.String, "V2 project UUID the membership is scoped to", func() {
+		dsl.Format(dsl.FormatUUID)
+		dsl.Example("a27394a3-7a6c-4d0f-9e0f-692d8753924f")
+	})
+	dsl.Attribute("project_slug", dsl.String, "URL slug of the project the membership is scoped to", func() {
+		dsl.Example("lf-main")
+	})
+	dsl.Attribute("tier_uid", dsl.String, "UID of the membership tier (Product2)", func() {
+		dsl.Example("01t2M000009ABCdIAM")
+	})
+	dsl.Attribute("tier_name", dsl.String, "Raw product name of the tier (denormalized from Product2)", func() {
+		dsl.Example("Gold Corporate Membership")
+	})
+	dsl.Attribute("tier", dsl.String, "Normalized tier class derived from the tier name. One of: platinum, premier, founding, strategic, gold, steering, silver, general, associate, end_user, academic, contributor, other (highest first, matching the LFX One Org Lens taxonomy). Deliberately not a closed enum so the taxonomy can grow without breaking clients; unrecognized names fall back to other.", func() {
+		dsl.Example("gold")
+	})
+	dsl.Attribute("status", dsl.String, "Membership status", func() {
+		dsl.Example("Active")
+	})
+	dsl.Attribute("start_date", dsl.String, "Membership start date", func() {
+		dsl.Example("2025-02-01")
+	})
+	dsl.Attribute("end_date", dsl.String, "Membership end date", func() {
+		dsl.Example("2025-12-31")
+	})
+	dsl.Required("b2b_org_uid", "membership_uid", "tier")
+})
+
 // ProjectMembershipResponse is the DSL type for a project membership (Asset) response.
 // Account (company) attributes are denormalized directly onto this type.
 var ProjectMembershipResponse = dsl.Type("project-membership-response", func() {
