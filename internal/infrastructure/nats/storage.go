@@ -96,6 +96,30 @@ func (s *Storage) PutMembership(ctx context.Context, membership *model.ProjectMe
 	return putCached(ctx, s, keyPrefixMembership+membership.UID, membership)
 }
 
+// DeleteMembership evicts the cached ProjectMembership for the UID from the
+// soft-TTL bucket so the next read re-fetches fresh; a missing key is a no-op.
+func (s *Storage) DeleteMembership(ctx context.Context, membershipUID string) error {
+	if membershipUID == "" {
+		return errs.NewValidation("membershipUID cannot be empty")
+	}
+
+	kv, ok := s.client.kvStore[constants.KVBucketNameCache]
+	if !ok {
+		return errs.NewUnexpected(fmt.Sprintf("KV bucket %q not initialized", constants.KVBucketNameCache))
+	}
+
+	key := keyPrefixMembership + membershipUID
+	if err := kv.Delete(ctx, key); err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil
+		}
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to delete key %q from bucket %q", key, constants.KVBucketNameCache), err)
+	}
+
+	return nil
+}
+
 // ─── KeyContact ──────────────────────────────────────────────────────────────
 
 // GetKeyContactsForMembership retrieves all key contacts cached for the given

@@ -250,8 +250,10 @@ func (s *membershipServicesrvc) GetProjectMembership(ctx context.Context, p *mem
 // cannot probe which usernames exist.
 //
 // Candidates read through the cached GetMembership, not the always-revalidating
-// AssembleProjectMembership, to spare Salesforce calls; eligibility still stays
-// live via FGA, so only tier metadata can lag.
+// AssembleProjectMembership, to spare Salesforce calls. Eligibility (the
+// key-contact edge) is read live from fga-sync each call and never cached
+// here; only status, end date, and tier come from the soft-TTL cache, which
+// the CDC consumer evicts on each Asset change, so the next read is fresh.
 func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershipservice.GetMemberTiersPayload) ([]*membershipservice.MemberOrgTierResponse, error) {
 	username := strings.TrimSpace(p.Username)
 	if username == "" {

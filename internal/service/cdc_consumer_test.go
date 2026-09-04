@@ -559,6 +559,86 @@ func TestCDCConsumer_Asset_Delete_PublishesIndexerOnly(t *testing.T) {
 	assert.Equal(t, sfid("pm-uid-del"), data)
 }
 
+// TestCDCConsumer_Asset_Upsert_EvictsSoftTTLMembershipCache verifies that an
+// Asset upsert evicts the soft-TTL membership cache (the cache GetMemberTiers
+// serves from) so a status/end-date/tier change stops being served as active
+// within one CDC event, keyed by the same UID the sObject cache and indexer use.
+func TestCDCConsumer_Asset_Upsert_EvictsSoftTTLMembershipCache(t *testing.T) {
+	pm := &model.ProjectMembership{UID: sfid("pm-uid-evict"), B2BOrgUID: "org-uid-1"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-uid-evict")}, ReplayID: []byte("re1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, evictor.DeleteCalls, "soft-TTL membership cache must be evicted once on an Asset upsert")
+	assert.Equal(t, []string{sfid("pm-uid-evict")}, evictor.DeletedUIDs,
+		"eviction must target the membership UID (same identifier the sObject cache and indexer use)")
+}
+
+// TestCDCConsumer_Asset_Delete_EvictsSoftTTLMembershipCache verifies that a
+// genuine Asset delete also evicts the soft-TTL membership cache, via the shared
+// publishAssetDeleteIndex convergence point, so a removed membership stops being
+// served as an active tier.
+func TestCDCConsumer_Asset_Delete_EvictsSoftTTLMembershipCache(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("pm-uid-evict-del")}, ReplayID: []byte("re2")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, evictor.DeleteCalls, "soft-TTL membership cache must be evicted on an Asset delete")
+	assert.Equal(t, []string{sfid("pm-uid-evict-del")}, evictor.DeletedUIDs)
+}
+
+// TestCDCConsumer_Asset_Upsert_SoftTTLEvictionError_IsNonFatal verifies that a
+// soft-TTL eviction failure is swallowed: the indexer and FGA publish still
+// happen, so a transient KV error cannot stall CDC convergence.
+func TestCDCConsumer_Asset_Upsert_SoftTTLEvictionError_IsNonFatal(t *testing.T) {
+	pm := &model.ProjectMembership{UID: sfid("pm-uid-evict-err"), B2BOrgUID: "org-uid-1"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{DeleteErr: errors.New("kv unavailable")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-uid-evict-err")}, ReplayID: []byte("re3")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, evictor.DeleteCalls)
+	assert.NotEmpty(t, pub.indexer, "a soft-TTL eviction failure must not block the indexer publish")
+	assert.NotEmpty(t, pub.access, "a soft-TTL eviction failure must not block the FGA publish")
+}
+
 // ── Project_Role__c (key_contact) tests ──────────────────────────────────────
 
 func TestCDCConsumer_ProjectRole_Upsert_WithUsername_PublishesIndexerAndFGAMemberPut(t *testing.T) {

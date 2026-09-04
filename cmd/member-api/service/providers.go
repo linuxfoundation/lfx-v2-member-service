@@ -1042,6 +1042,9 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// this KV record survived).
 		usecaseSvc.WithCDCB2BOrgSettingsReader(B2BOrgSettingsReaderImpl(ctx)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
+		// Soft-TTL membership-cache evictor: the cache GetMemberTiers reads
+		// from, so a CDC status or tier change is fresh on the next read.
+		usecaseSvc.WithCDCMembershipCacheEvictor(nats.NewStorage(natsClient)),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithCDCB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
