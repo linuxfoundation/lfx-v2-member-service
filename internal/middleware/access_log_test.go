@@ -196,6 +196,69 @@ func TestAccessLogMiddlewareRedactsEncodedSlashEmail(t *testing.T) {
 	}
 }
 
+// The member-tiers route carries the LFID username as a path parameter, which
+// is PII under this repo's logging rules. It has no email-like shape to detect,
+// so it must be redacted by route position rather than by content.
+func TestAccessLogMiddlewareRedactsUsernameInPath(t *testing.T) {
+	mux := goahttp.NewMuxer()
+	mux.Use(AccessLogMiddleware())
+	mux.Handle(http.MethodGet, "/b2b_orgs/member-tiers/{username}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/member-tiers/johndoe", nil)
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	record := decodeAccessLog(t, &buf)
+	path, _ := record["path"].(string)
+	if strings.Contains(path, "johndoe") {
+		t.Errorf("path %q leaks the username", path)
+	}
+	if want := "/b2b_orgs/member-tiers/joh****"; path != want {
+		t.Errorf("got path %q, want %q", path, want)
+	}
+	// The route template still identifies the endpoint in pattern.
+	if want := "/b2b_orgs/member-tiers/{username}"; record["pattern"] != want {
+		t.Errorf("got pattern %v, want %q", record["pattern"], want)
+	}
+}
+
+// chi routes on the escaped path, so a username containing an encoded slash or
+// at-sign still reaches the {username} route as one segment. It must be redacted
+// as a single value rather than split across segments or leaked for lacking an
+// email shape.
+func TestAccessLogMiddlewareRedactsEncodedUsernameInPath(t *testing.T) {
+	mux := goahttp.NewMuxer()
+	mux.Use(AccessLogMiddleware())
+	mux.Handle(http.MethodGet, "/b2b_orgs/member-tiers/{username}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	req := httptest.NewRequest(http.MethodGet, "/b2b_orgs/member-tiers/john%2Fdoe%40corp", nil)
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	record := decodeAccessLog(t, &buf)
+	path, _ := record["path"].(string)
+	for _, leak := range []string{"john/doe", "john%2Fdoe", "johndoe", "doe%40corp", "@corp"} {
+		if strings.Contains(path, leak) {
+			t.Errorf("path %q leaks %q", path, leak)
+		}
+	}
+	if want := "/b2b_orgs/member-tiers/joh****"; path != want {
+		t.Errorf("got path %q, want %q", path, want)
+	}
+}
+
 func TestAccessLogMiddlewareLogsHealthProbesAtDebug(t *testing.T) {
 	for _, path := range []string{"/livez", "/readyz"} {
 		t.Run(path, func(t *testing.T) {

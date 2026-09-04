@@ -25,6 +25,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 	"goa.design/goa/v3/security"
 )
@@ -282,7 +283,7 @@ func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershi
 				// that no longer resolves. Skip it rather than failing the
 				// whole lookup.
 				slog.WarnContext(ctx, "skipping dangling membership tuple",
-					"membership_uid", uid, "username", username)
+					"membership_uid", uid, "username", redaction.Redact(username))
 				continue
 			}
 			// Any other failure would silently omit organizations the user

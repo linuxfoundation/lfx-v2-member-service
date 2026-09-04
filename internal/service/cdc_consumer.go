@@ -136,9 +136,8 @@ func WithCDCCacheInvalidator(i port.CacheInvalidator) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.cacheInvalidator = i }
 }
 
-// WithCDCMembershipCacheEvictor injects the soft-TTL membership-cache evictor so
-// CDC evicts that cache alongside the sObject cache. When nil (e.g. mock mode)
-// soft-TTL eviction is skipped.
+// WithCDCMembershipCacheEvictor sets the soft-TTL membership-cache evictor.
+// When nil (e.g. mock mode) soft-TTL eviction is skipped.
 func WithCDCMembershipCacheEvictor(e port.MembershipCacheEvictor) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.membershipCacheEvictor = e }
 }
@@ -902,9 +901,8 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 			slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed",
 				"uid", id, "error", err, "publish_failed_for_backfill_repair", true)
 		}
-		// Also evict the soft-TTL membership cache (the one GetMemberTiers serves
-		// from) so a status/end-date/tier change is reflected on the next read
-		// instead of lingering for the stale window.
+		// Also evict the soft-TTL membership cache GetMemberTiers serves from, so a
+		// status, end-date, or tier change shows on the next read.
 		if o.membershipCacheEvictor != nil {
 			if err := o.membershipCacheEvictor.DeleteMembership(ctx, id); err != nil {
 				slog.WarnContext(ctx, "cdc: soft-TTL membership cache eviction failed",

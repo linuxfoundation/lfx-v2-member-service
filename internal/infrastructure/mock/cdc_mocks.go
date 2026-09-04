@@ -54,10 +54,7 @@ func (c *MockCacheInvalidator) InvalidateKeyContact(_ context.Context, _ string)
 }
 
 // MockMembershipCacheEvictor is a test double for port.MembershipCacheEvictor
-// that records every DeleteMembership call and optionally returns a configured
-// error. Use it to assert that CDC evicts the soft-TTL membership cache (the one
-// GetMemberTiers reads from) on a change event, or to simulate an eviction
-// failure and check it is non-fatal.
+// that records each DeleteMembership call and can return a configured error.
 type MockMembershipCacheEvictor struct {
 	DeleteCalls int
 	DeletedUIDs []string
