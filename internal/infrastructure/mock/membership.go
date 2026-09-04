@@ -41,7 +41,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 	// Sample tier (Product2).
 	sampleTier := &model.MembershipTier{
 		UID:         "tier-1",
-		ProjectUID:  "project-uid-1",
+		ProjectUID:  "22222222-2222-2222-2222-222222222222",
 		ProjectSlug: "linux-foundation",
 		Name:        "Gold Membership",
 		Family:      "Membership",
@@ -59,7 +59,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 	sampleMembership := &model.ProjectMembership{
 		UID:              "11111111-1111-1111-1111-111111111111",
 		TierUID:          "tier-1",
-		ProjectUID:       "project-uid-1",
+		ProjectUID:       "22222222-2222-2222-2222-222222222222",
 		ProjectSlug:      "linux-foundation",
 		B2BOrgUID:        "org-1",
 		Status:           "Active",
@@ -88,7 +88,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 		UID:            "contact-role-1",
 		MembershipUID:  "11111111-1111-1111-1111-111111111111",
 		TierUID:        "tier-1",
-		ProjectUID:     "project-uid-1",
+		ProjectUID:     "22222222-2222-2222-2222-222222222222",
 		ProjectSlug:    "linux-foundation",
 		Role:           "Primary Contact",
 		Status:         "Active",
