@@ -74,6 +74,9 @@ func (r *AccessCheckRPC) MembershipUIDsForUser(ctx context.Context, username str
 		Data:    payload,
 	}
 
+	// Unlike this file's other fga-sync calls (fire-and-forget publishes),
+	// this blocks for a reply: fga-sync must be live and responsive, and a
+	// timeout or no-responder failure fails closed as ServiceUnavailable.
 	reply, err := requestMsgWithSpan(ctx, r.conn, msg)
 	if err != nil {
 		return nil, errs.NewServiceUnavailable("fga-sync read_tuples RPC failed", err)
