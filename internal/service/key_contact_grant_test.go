@@ -80,8 +80,8 @@ func TestPublishKeyContactFGA_UnchangedGrantTouchesRevisionButPublishesNothing(t
 	}, nil)
 
 	assert.Empty(t, removeMessages(t, pub), "an unchanged grant supersedes nothing")
-	// The index is still touched (a revision-conditional rewrite of the same
-	// pair), so a concurrent revokeKeyContactGrantIfNoLongerLive claiming a
+	// The index is still touched — a revision-conditional rewrite of the same
+	// pair — so a concurrent revokeKeyContactGrantIfNoLongerLive claiming a
 	// stale read of this entry sees the advanced revision and aborts rather
 	// than firing a stale revoke for a pair just reconfirmed live.
 	require.Len(t, grants.Puts, 1, "an unchanged pair must still advance the revision for a concurrent revoke to detect")

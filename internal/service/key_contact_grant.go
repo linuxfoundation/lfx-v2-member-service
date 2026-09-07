@@ -224,8 +224,17 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 					"fga_revoke_failed_dangling_tuple", true,
 					"manual_recovery_required", true)
 			}
-			// Touch the pair so a concurrent revoke's CAS claim sees the bumped
-			// revision; a conflict just means another writer got there first.
+			// Re-confirming an unchanged pair still advances the index
+			// revision: revokeKeyContactGrantIfNoLongerLive claims the entry
+			// (a CAS rewrite conditional on the revision it read) before
+			// publishing a revoke, specifically to detect a concurrent
+			// same-pair re-grant like this one. Without this touch, an
+			// unchanged pair would never move the revision, so that claim
+			// would see the same stale revision and could not tell a fresh
+			// reconfirmation apart from no concurrent activity at all,
+			// letting a stale revoke through. A conflict here just means
+			// another writer already touched or replaced the entry — this
+			// call's job (confirming the pair is live) is already done.
 			if putErr := idx.Put(ctx, uid, stored); putErr != nil && !pkgerrors.IsConflict(putErr) {
 				slog.WarnContext(ctx, "key_contact grant index touch failed on unchanged pair — a concurrent revoke may not detect this reconfirmation",
 					"uid", uid, "membership_uid", membershipUID, "error", putErr)
