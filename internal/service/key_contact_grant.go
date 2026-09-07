@@ -92,31 +92,47 @@ func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 // where any unrecorded or unconfirmed grant must hold the replay cursor.
 func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister membershipKeyContactLister) (bool, error) {
 	if strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
-		if lister != nil && kc.MembershipUID != "" && kc.Email != "" && idx != nil {
-			stored, found, err := idx.Get(ctx, kc.UID)
+		if kc.MembershipUID == "" || kc.Email == "" || idx == nil {
+			// An inactive contact must never hold a live tuple: revoke any
+			// recorded grant instead of publishing a put.
+			revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, kc.UID, reasonInactiveStatus)
+			return false, nil
+		}
+		stored, found, err := idx.Get(ctx, kc.UID)
+		if err != nil {
+			slog.WarnContext(ctx, "key_contact grant index read failed: skipping revoke to avoid stripping a possibly still-justified tuple",
+				"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
+			return false, nil
+		}
+		// A cold index (a miss, or a marker-only pair already cleared) leaves
+		// the record's own pair as the only revocable address.
+		indexed := found && stored.MembershipUID != "" && stored.Username != ""
+		if !indexed && kc.Username == "" {
+			return false, nil
+		}
+		if lister != nil {
+			live, err := hasLiveSiblingForEmail(ctx, lister, kc.MembershipUID, kc.UID, kc.Email)
 			if err != nil {
-				slog.WarnContext(ctx, "key_contact grant index read failed: skipping revoke to avoid stripping a possibly still-justified tuple",
-					"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
+				// Fail safe like revokeOrDowngradeOrgDashboardRole: uncertain
+				// sibling state must never cause a still-justified tuple to be stripped.
+				slog.WarnContext(ctx, "key_contact sibling scan failed: skipping revoke to avoid stripping a possibly still-justified tuple",
+					"uid", kc.UID, "membership_uid", kc.MembershipUID, "index_entry_usable", indexed, "error", err)
 				return false, nil
 			}
-			if found && stored.MembershipUID != "" && stored.Username != "" {
-				live, err := hasLiveSiblingGrant(ctx, lister, kc)
-				if err != nil {
-					// Fail safe like revokeOrDowngradeOrgDashboardRole: uncertain
-					// sibling state must never cause a still-justified tuple to be stripped.
-					slog.WarnContext(ctx, "key_contact sibling scan failed: skipping revoke to avoid stripping a possibly still-justified tuple",
-						"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
-					return false, nil
-				}
-				if live {
+			if live {
+				if indexed {
 					clearKeyContactGrantIndexEntry(ctx, p, idx, kc, stored)
-					return false, nil
 				}
+				return false, nil
 			}
 		}
-		// An inactive contact must never hold a live tuple: revoke any
-		// recorded grant instead of publishing a put.
-		revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, kc.UID, reasonInactiveStatus)
+		// An inactive contact must never hold a live tuple: revoke the
+		// recorded grant, or the record's own pair on a cold index.
+		if indexed {
+			revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, kc.UID, reasonInactiveStatus)
+		} else {
+			publishColdKeyContactRevoke(ctx, p, kc)
+		}
 		return false, nil
 	}
 	if kc.Username == "" || kc.MembershipUID == "" {
@@ -139,14 +155,16 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 	return true, recordKeyContactGrant(ctx, p, idx, kc.UID, kc.MembershipUID, kc.Username)
 }
 
-// Reports whether another record on kc's membership is non-Inactive with the same email, i.e. still justifies the tuple.
-func hasLiveSiblingGrant(ctx context.Context, lister membershipKeyContactLister, kc *model.KeyContact) (bool, error) {
-	siblings, err := lister.ListKeyContactsForMembership(ctx, kc.MembershipUID)
+// hasLiveSiblingForEmail reports whether the membership has another record
+// (excluding excludeUID) with this email and a non-Inactive status. Such a
+// record still justifies the FGA tuple, so it must not be revoked.
+func hasLiveSiblingForEmail(ctx context.Context, lister membershipKeyContactLister, membershipUID, excludeUID, email string) (bool, error) {
+	siblings, err := lister.ListKeyContactsForMembership(ctx, membershipUID)
 	if err != nil {
 		return false, err
 	}
 	for _, sib := range siblings {
-		if sib.UID == kc.UID || !strings.EqualFold(sib.Email, kc.Email) {
+		if sib.UID == excludeUID || !strings.EqualFold(sib.Email, email) {
 			continue
 		}
 		if !strings.EqualFold(sib.Status, constants.RoleStatusInactive) {
@@ -154,6 +172,47 @@ func hasLiveSiblingGrant(ctx context.Context, lister membershipKeyContactLister,
 		}
 	}
 	return false, nil
+}
+
+// oldPairStillJustified reports whether a live sibling still holds the
+// pre-update email, so its FGA pair must not be removed. A failed scan
+// counts as justified, failing safe.
+func oldPairStillJustified(ctx context.Context, lister membershipKeyContactLister, membershipUID string, current *model.KeyContact) bool {
+	if lister == nil {
+		return false
+	}
+	live, err := hasLiveSiblingForEmail(ctx, lister, membershipUID, current.UID, current.Email)
+	if err != nil {
+		slog.WarnContext(ctx, "key contact old-pair sibling scan failed on email change: skipping remove",
+			"uid", current.UID, "membership_uid", membershipUID, "error", err)
+		return true
+	}
+	if live {
+		slog.DebugContext(ctx, "key contact old email still live on another sibling: skipping old pair remove",
+			"uid", current.UID, "membership_uid", membershipUID)
+	}
+	return live
+}
+
+// publishColdKeyContactRevoke revokes kc's own pair directly, used when the
+// grant index has no usable entry to drive the revoke. There is no index
+// entry to protect here, so a Flush failure is only logged.
+func publishColdKeyContactRevoke(ctx context.Context, p port.MemberPublisher, kc *model.KeyContact) {
+	msg := BuildKeyContactFGARemoveMessage(kc.MembershipUID, kc.Username)
+	if err := p.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg); err != nil {
+		slog.ErrorContext(ctx, "key_contact cold-index grant revoke publish failed",
+			"uid", kc.UID, "membership_uid", kc.MembershipUID,
+			"error", err, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
+	if flushErr := p.Flush(ctx); flushErr != nil {
+		slog.ErrorContext(ctx, "key_contact cold-index grant revoke flush failed — delivery indeterminate",
+			"uid", kc.UID, "membership_uid", kc.MembershipUID,
+			"error", flushErr, "fga_revoke_failed_dangling_tuple", true)
+		return
+	}
+	slog.InfoContext(ctx, "key_contact cold-index grant revoked",
+		"uid", kc.UID, "membership_uid", kc.MembershipUID, "reason", reasonInactiveStatus)
 }
 
 // clearKeyContactGrantIndexEntry runs when a live sibling keeps kc's tuple:

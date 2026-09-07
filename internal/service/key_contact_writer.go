@@ -380,10 +380,11 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 	}
 
 	if emailChanging {
+		lister := siblingListerFor(o.keyContactsByMembership)
 		// Paired FGA: put new username first (avoid no-access window), then remove old.
 		newKC.Username, _ = o.resolveUsernameForContact(ctx, "", newKC.Email)
-		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, siblingListerFor(o.keyContactsByMembership))
-		// This revoke is intentionally unconditional, even though
+		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister)
+		// This revoke is intentionally unconditional on the index, even though
 		// PublishKeyContactFGA's recordKeyContactGrant also revokes a superseded
 		// grant when the index already holds one — a duplicate member_remove is
 		// idempotent, but skipping this one is not safe. The index-driven revoke
@@ -395,9 +396,11 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		// grant from live data (current.Username/current.Email) rather than from
 		// the index, so it is also the only one that reproduces the legacy
 		// auth0|-prefix fallback in resolveUsernameForContact — it must run
-		// regardless of whether the index-driven path also ran.
+		// regardless of whether the index-driven path also ran. It is still
+		// skipped below when a live sibling on the same membership still
+		// holds the old email, since that pair remains justified.
 		oldUsername, _ := o.resolveUsernameForContact(ctx, current.Username, current.Email)
-		if oldUsername != newKC.Username {
+		if oldUsername != newKC.Username && !oldPairStillJustified(ctx, lister, newKC.MembershipUID, current) {
 			if pubErr := o.publishFGARemove(ctx, newKC.MembershipUID, oldUsername); pubErr != nil {
 				// Log at error severity (dangling permission), but do not propagate — the
 				// SF update already succeeded and returning an error would mislead callers.

@@ -735,3 +735,148 @@ func TestKeyContactWriter_Delete_ColdReadRevisionZero_DoesNotTombstoneConcurrent
 	require.NoError(t, getErr)
 	assert.True(t, found, "revision-0 delete must be a no-op, not an unconditional delete")
 }
+
+// ── Cold-index Inactive revoke ────────────────────────────────────────────────
+
+// Grants published before the index existed (or whose index write failed) have
+// a live tuple but no entry. Deactivation must still revoke them from the
+// record's own pair rather than no-op on the index miss.
+func TestPublishKeyContactFGA_InactiveColdIndex_RevokesCurrentPair(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	lister := &fakeMembershipLister{siblings: []*model.KeyContact{
+		{UID: "kc-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Inactive"},
+	}}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "a cold index has no entry to drive the revoke, so the record's own pair must be used")
+	assert.Equal(t, "asset-1", removes[0].UID)
+	assert.Equal(t, "alice", removes[0].Username)
+	assert.Empty(t, grants.Puts, "nothing was recorded, so nothing must be written")
+	assert.Empty(t, grants.Deletes, "there is no entry to clear")
+}
+
+func TestPublishKeyContactFGA_InactiveColdIndexWithLiveSibling_NoRevoke(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	lister := &fakeMembershipLister{siblings: []*model.KeyContact{
+		{UID: "kc-2", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"},
+	}}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	assert.Empty(t, removeMessages(t, pub),
+		"a live sibling still justifies the tuple even when no index entry exists")
+	assert.Empty(t, grants.Puts)
+	assert.Empty(t, grants.Deletes)
+}
+
+func TestPublishKeyContactFGA_InactiveColdIndexSiblingScanError_NoPublishNoMutation(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	lister := &fakeMembershipLister{err: assert.AnError}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	assert.Empty(t, pub.accessMsgs,
+		"an uncertain sibling scan must publish nothing, not fall back to a cold-index revoke")
+	assert.Empty(t, grants.Puts)
+	assert.Empty(t, grants.Deletes)
+}
+
+// ── Email change with a shared old pair ───────────────────────────────────────
+
+func newKCWriterWithSiblingReader(
+	storage svc.MemberStorageReader,
+	pub svc.PublisherForKC,
+	userReader svc.UserReaderForKC,
+	grants port.KeyContactGrantIndex,
+	siblings port.KeyContactsByMembershipReader,
+) svc.KeyContactWriter {
+	return svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{UID: testMembershipUID}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(userReader),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+}
+
+func TestKeyContactWriter_Update_EmailChange_OldPairSharedByLiveSibling_SuppressesOldRemove(t *testing.T) {
+	current := &model.KeyContact{
+		UID: "kc-1", MembershipUID: testMembershipUID, Email: "old@example.com", Username: "alice",
+	}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	// A different record still holds the old email live on the same membership,
+	// so the old pair's tuple is still justified.
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "kc-2", MembershipUID: testMembershipUID, Email: "old@example.com", Status: "Active"},
+	}}
+	usernames := map[string]string{"old@example.com": "alice", "new@example.com": "bob"}
+
+	w := newKCWriterWithSiblingReader(newSeededStorage(current), pub,
+		userReaderFunc(func(_ context.Context, email string) (string, error) { return usernames[email], nil }),
+		grants, siblings)
+
+	newEmail := "new@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: "kc-1", Email: &newEmail,
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, removeMessages(t, pub),
+		"the old pair is still justified by a live sibling and must not be removed")
+	assert.Equal(t, "bob", grants.Entries["kc-1"].Username, "the new grant must still be recorded")
+}
+
+func TestKeyContactWriter_Update_EmailChange_NoLiveSibling_StillRemovesOldPair(t *testing.T) {
+	current := &model.KeyContact{
+		UID: "kc-1", MembershipUID: testMembershipUID, Email: "old@example.com", Username: "alice",
+	}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	// Only the updated record itself carries the old email: it must not count
+	// as its own sibling, so the old pair is removed exactly as before.
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "kc-1", MembershipUID: testMembershipUID, Email: "old@example.com", Status: "Active"},
+	}}
+	usernames := map[string]string{"old@example.com": "alice", "new@example.com": "bob"}
+
+	w := newKCWriterWithSiblingReader(newSeededStorage(current), pub,
+		userReaderFunc(func(_ context.Context, email string) (string, error) { return usernames[email], nil }),
+		grants, siblings)
+
+	newEmail := "new@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: "kc-1", Email: &newEmail,
+	})
+	require.NoError(t, err)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "with no live sibling the old pair must still be removed")
+	assert.Equal(t, testMembershipUID, removes[0].UID)
+	assert.Equal(t, "alice", removes[0].Username)
+}
