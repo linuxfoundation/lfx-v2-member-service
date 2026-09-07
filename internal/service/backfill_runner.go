@@ -417,6 +417,10 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			if r.midRunQuotaExceeded() {
 				return errQuotaStop
 			}
+			var lister membershipKeyContactLister
+			if !req.DryRun {
+				lister = r.batchedSiblingLister(ctx, kcs)
+			}
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
@@ -429,7 +433,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					}
-					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
+					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister)
 					published++
 				}
 			}
@@ -865,6 +869,10 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 	}
 
 	var published int
+	var lister membershipKeyContactLister
+	if !req.DryRun {
+		lister = r.batchedSiblingLister(ctx, contacts)
+	}
 	for _, kc := range contacts {
 		if req.DryRun {
 			published++
@@ -879,7 +887,7 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 		}
-		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister)
 		published++
 	}
 
@@ -912,6 +920,49 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 		return
 	}
 	kc.Username = username
+}
+
+// batchedSiblingLister prefetches, in one Salesforce query, the key contacts of
+// every membership an Inactive contact in kcs may sibling-check. Returns nil
+// when no reader is wired or no contact needs the check.
+func (r *Runner) batchedSiblingLister(ctx context.Context, kcs []*model.KeyContact) membershipKeyContactLister {
+	if r.keyContactsByMembership == nil {
+		return nil
+	}
+	uidSet := make(map[string]struct{})
+	for _, kc := range kcs {
+		if kc.MembershipUID != "" && strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
+			uidSet[kc.MembershipUID] = struct{}{}
+		}
+	}
+	if len(uidSet) == 0 {
+		return nil
+	}
+	uids := make([]string, 0, len(uidSet))
+	for uid := range uidSet {
+		uids = append(uids, uid)
+	}
+	grouped, err := r.keyContactsByMembership.FetchKeyContactsByAssetSFIDs(ctx, uids)
+	if err != nil {
+		// Surface the error per lookup so the revoke path fails safe (skips
+		// the revoke), instead of a nil lister disabling the check entirely.
+		return failedKeyContactLister{err: err}
+	}
+	return mappedKeyContactLister(grouped)
+}
+
+// failedKeyContactLister reports a prefetch failure on every lookup.
+type failedKeyContactLister struct{ err error }
+
+func (l failedKeyContactLister) ListKeyContactsForMembership(context.Context, string) ([]*model.KeyContact, error) {
+	return nil, l.err
+}
+
+// mappedKeyContactLister serves sibling lookups from a prefetched grouping.
+type mappedKeyContactLister map[string][]*model.KeyContact
+
+func (m mappedKeyContactLister) ListKeyContactsForMembership(_ context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	return m[membershipUID], nil
 }
 
 // countAbsent counts requested SFIDs not present in the returned set (which
