@@ -13,11 +13,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
@@ -28,10 +30,51 @@ import (
 // update, not the grant itself.
 const maxGrantIndexAttempts = 3
 
+// Reasons passed to revokeKeyContactGrantIfNoLongerLive, defined once so its
+// several call sites can't drift out of sync with each other.
+const (
+	reasonEmailUnregistered = "email resolved no registered account"
+	reasonInactiveStatus    = "key contact status is Inactive"
+)
+
+// membershipKeyContactLister lists a membership's key contacts, letting an
+// Inactive revoke check whether a sibling still justifies the tuple.
+type membershipKeyContactLister interface {
+	ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error)
+}
+
+// keyContactsByMembershipLister adapts port.KeyContactsByMembershipReader to
+// membershipKeyContactLister for one membership. Unlike port.MemberReader, its
+// backing fetch is never served from the stale membership-group cache.
+type keyContactsByMembershipLister struct {
+	reader port.KeyContactsByMembershipReader
+}
+
+func (l keyContactsByMembershipLister) ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	grouped, err := l.reader.FetchKeyContactsByAssetSFIDs(ctx, []string{membershipUID})
+	if err != nil {
+		return nil, err
+	}
+	return grouped[membershipUID], nil
+}
+
+// siblingListerFor wraps r for the Inactive-revoke sibling check, or returns
+// nil when no reader is wired (disabling the check).
+func siblingListerFor(r port.KeyContactsByMembershipReader) membershipKeyContactLister {
+	if r == nil {
+		return nil
+	}
+	return keyContactsByMembershipLister{reader: r}
+}
+
 // PublishKeyContactFGA emits an FGA member_put for accepted key contacts
 // (non-empty username + membershipUID). Pending contacts have no FGA tuple.
 // Used by the CDC consumer, the key_contact writer, the backfill runner, and the
 // invite-accepted handler.
+//
+// Inactive contacts are revoked unless a sibling record on the membership
+// still resolves to the same person, in which case only this entry is
+// cleared.
 //
 // It also records the published grant in idx and revokes any grant this one
 // supersedes. Recording is what makes deletion revocable at all: a CDC delete
@@ -39,13 +82,43 @@ const maxGrantIndexAttempts = 3
 // already gone by then, so the membership object and username cannot be
 // recovered from any other source at revoke time. A nil idx skips both (mock
 // mode), leaving the publish behaviour unchanged.
-func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact) {
-	_, _ = publishKeyContactFGA(ctx, p, idx, kc)
+//
+// lister may be nil, which disables the sibling check.
+func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister membershipKeyContactLister) {
+	_, _ = publishKeyContactFGA(ctx, p, idx, kc, lister)
 }
 
 // publishKeyContactFGA is the error-reporting form used by CDC restoration,
 // where any unrecorded or unconfirmed grant must hold the replay cursor.
-func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact) (bool, error) {
+func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister membershipKeyContactLister) (bool, error) {
+	if strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
+		if lister != nil && kc.MembershipUID != "" && kc.Email != "" && idx != nil {
+			stored, found, err := idx.Get(ctx, kc.UID)
+			if err != nil {
+				slog.WarnContext(ctx, "key_contact grant index read failed: skipping revoke to avoid stripping a possibly still-justified tuple",
+					"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
+				return false, nil
+			}
+			if found && stored.MembershipUID != "" && stored.Username != "" {
+				live, err := hasLiveSiblingGrant(ctx, lister, kc)
+				if err != nil {
+					// Fail safe like revokeOrDowngradeOrgDashboardRole: uncertain
+					// sibling state must never cause a still-justified tuple to be stripped.
+					slog.WarnContext(ctx, "key_contact sibling scan failed: skipping revoke to avoid stripping a possibly still-justified tuple",
+						"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
+					return false, nil
+				}
+				if live {
+					clearKeyContactGrantIndexEntry(ctx, p, idx, kc, stored)
+					return false, nil
+				}
+			}
+		}
+		// An inactive contact must never hold a live tuple: revoke any
+		// recorded grant instead of publishing a put.
+		revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, kc.UID, reasonInactiveStatus)
+		return false, nil
+	}
 	if kc.Username == "" || kc.MembershipUID == "" {
 		return false, nil
 	}
@@ -64,6 +137,40 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 		"subject", fgaconstants.GenericMemberPutSubject)
 
 	return true, recordKeyContactGrant(ctx, p, idx, kc.UID, kc.MembershipUID, kc.Username)
+}
+
+// Reports whether another record on kc's membership is non-Inactive with the same email, i.e. still justifies the tuple.
+func hasLiveSiblingGrant(ctx context.Context, lister membershipKeyContactLister, kc *model.KeyContact) (bool, error) {
+	siblings, err := lister.ListKeyContactsForMembership(ctx, kc.MembershipUID)
+	if err != nil {
+		return false, err
+	}
+	for _, sib := range siblings {
+		if sib.UID == kc.UID || !strings.EqualFold(sib.Email, kc.Email) {
+			continue
+		}
+		if !strings.EqualFold(sib.Status, constants.RoleStatusInactive) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// clearKeyContactGrantIndexEntry runs when a live sibling keeps kc's tuple:
+// it deletes kc's index entry so a later delete of kc cannot revoke the
+// sibling's access. If the entry names a different pair, that stale pair is
+// revoked instead.
+func clearKeyContactGrantIndexEntry(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, stored port.KeyContactGrant) {
+	// An empty kc.Username means the lookup failed, not that the pair differs:
+	// leave the entry untouched rather than guess.
+	if kc.Username == "" {
+		return
+	}
+	if stored.MembershipUID != kc.MembershipUID || stored.Username != kc.Username {
+		revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, kc.UID, reasonInactiveStatus)
+		return
+	}
+	clearRevokedGrant(ctx, idx, kc.UID, stored)
 }
 
 // recordKeyContactGrant stores the grant just published for key contact uid and
@@ -117,17 +224,8 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 					"fga_revoke_failed_dangling_tuple", true,
 					"manual_recovery_required", true)
 			}
-			// Re-confirming an unchanged pair still advances the index
-			// revision: revokeKeyContactGrantIfUnregistered claims the entry
-			// (a CAS rewrite conditional on the revision it read) before
-			// publishing a revoke, specifically to detect a concurrent
-			// same-pair re-grant like this one. Without this touch, an
-			// unchanged pair would never move the revision, so that claim
-			// would see the same stale revision and could not tell a fresh
-			// reconfirmation apart from no concurrent activity at all,
-			// letting a stale revoke through. A conflict here just means
-			// another writer already touched or replaced the entry — this
-			// call's job (confirming the pair is live) is already done.
+			// Touch the pair so a concurrent revoke's CAS claim sees the bumped
+			// revision; a conflict just means another writer got there first.
 			if putErr := idx.Put(ctx, uid, stored); putErr != nil && !pkgerrors.IsConflict(putErr) {
 				slog.WarnContext(ctx, "key_contact grant index touch failed on unchanged pair — a concurrent revoke may not detect this reconfirmation",
 					"uid", uid, "membership_uid", membershipUID, "error", putErr)
@@ -228,13 +326,12 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	return nil
 }
 
-// revokeKeyContactGrantIfUnregistered revokes the grant recorded for a key
-// contact whose current email now produces a definitive "no registered
-// account" result, and clears the index entry once the revoke is confirmed
-// delivered. Callers (the key-contact writer, the CDC consumer, and the
-// backfill runner) invoke this only from their existing lookup's
-// pkgerrors.IsNotFound(err) branch — a transport-level failure MUST NOT reach
-// this function.
+// revokeKeyContactGrantIfNoLongerLive revokes a key contact's recorded grant
+// and clears the index entry once the revoke is confirmed delivered. reason
+// is logged only.
+//
+// Only call once nothing else can justify the tuple. Treat a transport or
+// lookup failure as uncertain and skip the revoke instead of calling this.
 //
 // A contact with no recorded grant, or one whose recorded pair is already
 // empty, produces no publish — there is nothing to revoke.
@@ -257,14 +354,14 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 // pair is still the same one this call just tried to revoke, the remove may
 // have undone a grant just reconfirmed live, so this repairs it with a
 // compensating member_put rather than only skipping the index clear.
-func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string) {
+func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, uid string, reason string) {
 	if idx == nil || uid == "" {
 		return
 	}
 	stored, found, err := idx.Get(ctx, uid)
 	if err != nil {
-		slog.WarnContext(ctx, "key_contact grant index read failed — cannot check for a stale grant to revoke on unregistered email",
-			"uid", uid, "error", err)
+		slog.WarnContext(ctx, "key_contact grant index read failed — cannot check for a stale grant to revoke",
+			"uid", uid, "reason", reason, "error", err)
 		return
 	}
 	if !found || stored.MembershipUID == "" || stored.Username == "" {
@@ -298,19 +395,19 @@ func revokeKeyContactGrantIfUnregistered(ctx context.Context, p port.MemberPubli
 
 	msg := BuildKeyContactFGARemoveMessage(stored.MembershipUID, stored.Username)
 	if err := p.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg); err != nil {
-		slog.ErrorContext(ctx, "key_contact grant revoke publish failed on unregistered email — grant retained in index for retry",
-			"uid", uid, "membership_uid", stored.MembershipUID,
+		slog.ErrorContext(ctx, "key_contact grant revoke publish failed — grant retained in index for retry",
+			"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason,
 			"error", err, "fga_revoke_failed_dangling_tuple", true)
 		return
 	}
 	if flushErr := p.Flush(ctx); flushErr != nil {
-		slog.ErrorContext(ctx, "key_contact grant revoke flush failed on unregistered email — delivery indeterminate, grant retained in index for retry",
-			"uid", uid, "membership_uid", stored.MembershipUID,
+		slog.ErrorContext(ctx, "key_contact grant revoke flush failed — delivery indeterminate, grant retained in index for retry",
+			"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason,
 			"error", flushErr, "fga_revoke_failed_dangling_tuple", true)
 		return
 	}
-	slog.InfoContext(ctx, "key_contact grant revoked — email resolved no registered account",
-		"uid", uid, "membership_uid", stored.MembershipUID)
+	slog.InfoContext(ctx, "key_contact grant revoked",
+		"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason)
 
 	current, found, err := idx.Get(ctx, uid)
 	if err != nil || !found {

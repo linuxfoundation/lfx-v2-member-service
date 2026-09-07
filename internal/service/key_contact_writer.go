@@ -83,6 +83,10 @@ type keyContactWriterOrchestrator struct {
 	userReader              port.UserReader
 	orgSettings             OrgSettingsPrincipalWriter
 	grantIndex              port.KeyContactGrantIndex
+	// keyContactsByMembership lists sibling key contacts for the
+	// Inactive-revoke check via a fresh fetch, not the stale
+	// membership-group cache. Nil disables the sibling check.
+	keyContactsByMembership port.KeyContactsByMembershipReader
 }
 
 // KeyContactWriterOption configures a keyContactWriterOrchestrator.
@@ -90,6 +94,10 @@ type KeyContactWriterOption func(*keyContactWriterOrchestrator)
 
 func WithKCStorage(r port.MemberReader) KeyContactWriterOption {
 	return func(o *keyContactWriterOrchestrator) { o.storage = r }
+}
+
+func WithKCSiblingReader(r port.KeyContactsByMembershipReader) KeyContactWriterOption {
+	return func(o *keyContactWriterOrchestrator) { o.keyContactsByMembership = r }
 }
 
 func WithKCWriter(w port.KeyContactWriter) KeyContactWriterOption {
@@ -309,13 +317,13 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 	var definitiveMiss bool
 	kc.Username, definitiveMiss = o.resolveUsernameForContact(ctx, "", kc.Email)
 	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionCreated)
-	PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, kc)
+	PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, kc, siblingListerFor(o.keyContactsByMembership))
 	if definitiveMiss {
 		// The email never resolved to a registered account. There is nothing
 		// to revoke on a brand-new contact — no grant was ever published for
 		// it — but the index may still hold a stale entry from a prior,
 		// now-superseded contact at this membership+email pair.
-		revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, kc.UID)
+		revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, kc.UID, reasonEmailUnregistered)
 	}
 	o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
 
@@ -374,7 +382,7 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 	if emailChanging {
 		// Paired FGA: put new username first (avoid no-access window), then remove old.
 		newKC.Username, _ = o.resolveUsernameForContact(ctx, "", newKC.Email)
-		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
+		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, siblingListerFor(o.keyContactsByMembership))
 		// This revoke is intentionally unconditional, even though
 		// PublishKeyContactFGA's recordKeyContactGrant also revokes a superseded
 		// grant when the index already holds one — a duplicate member_remove is
@@ -419,9 +427,9 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			// (see resolveUsernameForContact) — publishing it would reassert FGA
 			// access for an account just confirmed unregistered. Skip the put
 			// and revoke any grant still recorded for this contact instead.
-			revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, newKC.UID)
+			revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, newKC.UID, reasonEmailUnregistered)
 		} else {
-			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
+			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, siblingListerFor(o.keyContactsByMembership))
 		}
 		if in.Role != nil && *in.Role != current.Role {
 			o.remapOrgDashboardRole(ctx, newKC)

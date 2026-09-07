@@ -17,11 +17,8 @@ import (
 
 const internalTestMembershipUID = "00000000-0000-0000-0000-000000000010"
 
-// White-box tests for revokeKeyContactGrantIfUnregistered / clearRevokedGrant
-// (unexported — the definitive-miss revoke path added for LFXV2-2999). Kept
-// in a package-internal test file since these helpers are wired directly
-// into the writer/CDC/backfill call sites and are not part of the package's
-// exported surface (unlike PublishKeyContactFGA).
+// White-box tests for revokeKeyContactGrantIfNoLongerLive and
+// clearRevokedGrant. Both are unexported, so these tests live in-package.
 
 // internalRemoveMessages returns the member_remove payloads captured by a
 // mock.MockMemberPublisher, in publication order.
@@ -40,17 +37,17 @@ func internalRemoveMessages(t *testing.T, msgs []any) []fgatypes.GenericMemberDa
 	return out
 }
 
-func TestRevokeKeyContactGrantIfUnregistered_NoRecordedGrant_NoPublish(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_NoRecordedGrant_NoPublish(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	assert.Nil(t, pub.LastAccessData, "no grant was ever recorded, so there is nothing to revoke")
 	assert.Empty(t, grants.Deletes, "and no index entry to clear")
 }
 
-func TestRevokeKeyContactGrantIfUnregistered_RecordedGrant_RevokesAndClears(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_RecordedGrant_RevokesAndClears(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -58,7 +55,7 @@ func TestRevokeKeyContactGrantIfUnregistered_RecordedGrant_RevokesAndClears(t *t
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.Len(t, removes, 1, "the recorded grant must be revoked")
@@ -68,10 +65,10 @@ func TestRevokeKeyContactGrantIfUnregistered_RecordedGrant_RevokesAndClears(t *t
 	assert.Equal(t, []string{"kc-1"}, grants.Deletes, "the confirmed-revoked entry must be cleared")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_PublishFailure_RetainsEntry covers
+// TestRevokeKeyContactGrantIfNoLongerLive_PublishFailure_RetainsEntry covers
 // an unconfirmed revoke: it must not be treated as done — the entry must
 // survive so a later reactive trigger (or backfill) can retry it.
-func TestRevokeKeyContactGrantIfUnregistered_PublishFailure_RetainsEntry(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_PublishFailure_RetainsEntry(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	pub.SetAccessError(assert.AnError)
 	grants := &mock.MockKeyContactGrantIndex{
@@ -80,16 +77,16 @@ func TestRevokeKeyContactGrantIfUnregistered_PublishFailure_RetainsEntry(t *test
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	assert.Empty(t, grants.Deletes, "an unconfirmed publish must leave the entry in place for retry")
 	assert.Equal(t, internalTestMembershipUID, grants.Entries["kc-1"].MembershipUID, "the grant must still be addressable")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_FlushFailure_RetainsEntry covers the
+// TestRevokeKeyContactGrantIfNoLongerLive_FlushFailure_RetainsEntry covers the
 // other half: Access succeeding only means the message reached the local NATS
 // connection, not the broker — an unconfirmed Flush must not clear the entry.
-func TestRevokeKeyContactGrantIfUnregistered_FlushFailure_RetainsEntry(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_FlushFailure_RetainsEntry(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	pub.SetFlushError(assert.AnError)
 	grants := &mock.MockKeyContactGrantIndex{
@@ -98,19 +95,19 @@ func TestRevokeKeyContactGrantIfUnregistered_FlushFailure_RetainsEntry(t *testin
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.NotEmpty(t, removes, "the revoke was handed to NATS even though delivery was never confirmed")
 	assert.Empty(t, grants.Deletes, "an unconfirmed flush must leave the entry in place for retry")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke
+// TestRevokeKeyContactGrantIfNoLongerLive_PreservesUnrelatedPendingRevoke
 // covers an unrelated, still-outstanding PendingRevoke marker on the entry
 // (from a concurrent supersede): it must survive — it addresses a different
 // tuple than the one this call just confirmed revoked, and is only ever
 // cleared by its own confirmed revoke.
-func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_PreservesUnrelatedPendingRevoke(t *testing.T) {
 	pending := port.KeyContactGrantRef{MembershipUID: "asset-superseded", Username: "carol"}
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
@@ -119,7 +116,7 @@ func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.Len(t, removes, 1, "only the live pair is revoked by this call")
@@ -133,14 +130,14 @@ func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *
 	assert.Equal(t, pending, *entry.PendingRevoke)
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_AbortsBeforePublish
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReplacement_AbortsBeforePublish
 // covers a concurrent writer that already replaced this pair (e.g. the email
 // was corrected and a new grant published) between this call's read and its
 // claim: the claim's revision-conditional rewrite must fail as a conflict, so
 // the function aborts before ever publishing a revoke for the pair it read —
 // the replacement must not be discarded, and no stale member_remove must be
 // sent for a pair that no longer describes what is live.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_AbortsBeforePublish(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReplacement_AbortsBeforePublish(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	original := port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1}
 	grants := &mock.MockKeyContactGrantIndex{
@@ -155,21 +152,21 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_AbortsBeforeP
 		return original, true, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	assert.Nil(t, pub.LastAccessData, "the claim must fail before any revoke is published for the stale read")
 	assert.Equal(t, "asset-new", grants.Entries["kc-1"].MembershipUID, "the newer pair must not be discarded")
 	assert.Empty(t, grants.Deletes, "the claim conflict must abort before reaching the clear step")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentReconfirmation_AbortsBeforePublish
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReconfirmation_AbortsBeforePublish
 // covers the exact race this claim step closes: a concurrent writer
 // reconfirms the *same* pair (recordKeyContactGrant's unchanged-pair branch,
 // which now always touches the revision) between this call's read and its
 // claim. Without the touch, the claim would see the same stale revision and
 // could not distinguish this from no concurrent activity at all, letting a
 // stale revoke through for a pair another writer just reasserted as live.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReconfirmation_AbortsBeforePublish(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReconfirmation_AbortsBeforePublish(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	original := port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1}
 	grants := &mock.MockKeyContactGrantIndex{
@@ -183,19 +180,19 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReconfirmation_AbortsBefo
 		return original, true, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	assert.Nil(t, pub.LastAccessData, "a concurrent reconfirmation of the same pair must abort the revoke, not just the later clear")
 	assert.Equal(t, uint64(2), grants.Entries["kc-1"].Revision, "the reconfirmed entry must be left exactly as the concurrent writer left it")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevision
+// TestRevokeKeyContactGrantIfNoLongerLive_ClaimSucceeds_ClearUsesAdvancedRevision
 // covers the happy path once the claim is in place: the claim's own Put
 // advances the revision, so the final clear must use that advanced revision
 // (re-read after Flush, since Put does not return it) rather than the
 // revision originally observed by Get — using the stale revision there would
 // make every clear fail as a spurious conflict against its own claim.
-func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevision(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ClaimSucceeds_ClearUsesAdvancedRevision(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -203,7 +200,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.Len(t, removes, 1, "the claim must not block the legitimate revoke it protects")
@@ -214,7 +211,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 	assert.False(t, found, "the entry must be fully cleared once the clear's CAS uses the claim's advanced revision")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut
 // covers the race the claim step does NOT close: a concurrent writer's own
 // CAS (recordKeyContactGrant reconfirming the same pair) can still land
 // after this call's claim commits — the claim only protects the window up
@@ -224,7 +221,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 // assumption doesn't hold against a bucket-wide revision counter) and, since
 // the pair is unchanged, repair the possibly-just-removed tuple with a
 // compensating member_put rather than only skipping the index clear.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -245,7 +242,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClai
 		return entry, found, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	require.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
 		"the revoke's remove must still be published, followed by a repair put once the race is detected")
@@ -256,13 +253,13 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClai
 	assert.Equal(t, uint64(99), grants.Entries["kc-1"].Revision, "the concurrent writer's generation must be left untouched")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair
 // covers the sibling case: a *different* pair supersedes this entry after
 // the claim (not a same-pair reconfirmation). That writer's own
 // supersede-revoke already addresses the pair this call read, so no repair
 // or clear is needed here — touching either would race that writer's own
 // generation.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -279,7 +276,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_Af
 		return entry, found, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, "kc-1", reasonEmailUnregistered)
 
 	require.Equal(t, []string{"access", "flush"}, pub.CallOrder, "only the original remove must publish — no repair for a pair this call never revoked")
 	assert.Empty(t, grants.Deletes, "the entry must not be cleared — it belongs to the superseding writer's generation now")

@@ -44,7 +44,7 @@ func TestPublishKeyContactFGA_RecordsGrantOnColdIndex(t *testing.T) {
 		UID:           "kc-1",
 		MembershipUID: "asset-1",
 		Username:      "alice",
-	})
+	}, nil)
 
 	assert.Equal(t, port.KeyContactGrant{MembershipUID: "asset-1", Username: "alice", Revision: 1},
 		grants.Entries["kc-1"])
@@ -59,7 +59,7 @@ func TestPublishKeyContactFGA_NoUsernameRecordsNothing(t *testing.T) {
 	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
 		UID:           "kc-pending",
 		MembershipUID: "asset-1",
-	})
+	}, nil)
 
 	assert.Empty(t, pub.accessMsgs, "a pending contact has no grant to publish")
 	assert.Empty(t, grants.Puts, "and nothing to record")
@@ -77,11 +77,11 @@ func TestPublishKeyContactFGA_UnchangedGrantTouchesRevisionButPublishesNothing(t
 		UID:           "kc-1",
 		MembershipUID: "asset-1",
 		Username:      "alice",
-	})
+	}, nil)
 
 	assert.Empty(t, removeMessages(t, pub), "an unchanged grant supersedes nothing")
-	// The index is still touched — a revision-conditional rewrite of the same
-	// pair — so a concurrent revokeKeyContactGrantIfUnregistered claiming a
+	// The index is still touched (a revision-conditional rewrite of the same
+	// pair), so a concurrent revokeKeyContactGrantIfNoLongerLive claiming a
 	// stale read of this entry sees the advanced revision and aborts rather
 	// than firing a stale revoke for a pair just reconfirmed live.
 	require.Len(t, grants.Puts, 1, "an unchanged pair must still advance the revision for a concurrent revoke to detect")
@@ -101,7 +101,7 @@ func TestPublishKeyContactFGA_ReparentRevokesPreviousMembership(t *testing.T) {
 		UID:           "kc-1",
 		MembershipUID: "asset-new",
 		Username:      "alice",
-	})
+	}, nil)
 
 	removes := removeMessages(t, pub)
 	require.Len(t, removes, 1, "the grant on the previous membership must be revoked")
@@ -122,7 +122,7 @@ func TestPublishKeyContactFGA_UsernameChangeRevokesPreviousUser(t *testing.T) {
 		UID:           "kc-1",
 		MembershipUID: "asset-1",
 		Username:      "bob",
-	})
+	}, nil)
 
 	removes := removeMessages(t, pub)
 	require.Len(t, removes, 1, "the previous user's grant must be revoked")
@@ -161,7 +161,7 @@ func TestPublishKeyContactFGA_RetriesIndexWriteOnConflict(t *testing.T) {
 		UID:           "kc-1",
 		MembershipUID: "asset-1",
 		Username:      "bob",
-	})
+	}, nil)
 
 	// Two reads for the rejected write's retry, plus one more when
 	// clearPendingRevoke re-reads the entry to clear the PendingRevoke marker
@@ -191,7 +191,7 @@ func TestPublishKeyContactFGA_PutFailure_DoesNotRevokeSupersededGrant(t *testing
 		UID:           "kc-1",
 		MembershipUID: "asset-new",
 		Username:      "alice",
-	})
+	}, nil)
 
 	assert.Empty(t, removeMessages(t, pub),
 		"the old grant must not be revoked when the replacement failed to record")
@@ -218,7 +218,7 @@ func TestPublishKeyContactFGA_SupersededRevokePublishFailure_PreservesPendingRev
 		UID:           "kc-1",
 		MembershipUID: "asset-new",
 		Username:      "alice",
-	})
+	}, nil)
 
 	entry := grants.Entries["kc-1"]
 	assert.Equal(t, "asset-new", entry.MembershipUID, "the replacement must still be recorded")
@@ -247,7 +247,7 @@ func TestPublishKeyContactFGA_SupersededRevokeFlushFailure_PreservesPendingRevok
 		UID:           "kc-1",
 		MembershipUID: "asset-new",
 		Username:      "alice",
-	})
+	}, nil)
 
 	require.NotEmpty(t, removeMessages(t, pub),
 		"the revoke was handed to NATS even though delivery was never confirmed")
@@ -277,7 +277,7 @@ func TestPublishKeyContactFGA_UnchangedGrantDoesNotRetryPendingRevoke(t *testing
 		UID:           "kc-1",
 		MembershipUID: "asset-new",
 		Username:      "alice",
-	})
+	}, nil)
 
 	assert.Empty(t, removeMessages(t, pub),
 		"the tuple address may still be justified by another key-contact record and must not be retried blindly")
@@ -292,9 +292,199 @@ func TestPublishKeyContactFGA_NilIndexPublishesUnchanged(t *testing.T) {
 		UID:           "kc-1",
 		MembershipUID: "asset-1",
 		Username:      "alice",
-	})
+	}, nil)
 
 	require.Len(t, pub.accessMsgs, 1, "an unwired index must not change publish behaviour")
+}
+
+// ── Status gating ──────────────────────────────────────────────────────────────
+
+func TestPublishKeyContactFGA_InactiveStatus_NoPublishNoRecord(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, nil)
+
+	assert.Empty(t, pub.accessMsgs, "an inactive key contact must never receive a live member_put")
+	assert.Empty(t, grants.Puts, "and nothing is recorded for it")
+}
+
+func TestPublishKeyContactFGA_InactiveStatusCaseInsensitive_NoPublish(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Username:      "alice",
+		Status:        "inactive",
+	}, nil)
+
+	assert.Empty(t, pub.accessMsgs, "the status gate must match case-insensitively")
+	assert.Empty(t, grants.Puts)
+}
+
+func TestPublishKeyContactFGA_DeactivatedContact_RevokesExistingGrant(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		},
+	}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, nil)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "deactivating a contact with an existing grant must revoke it, not reconfirm it")
+	assert.Equal(t, "asset-1", removes[0].UID)
+	assert.Equal(t, "alice", removes[0].Username)
+	_, found := grants.Entries["kc-1"]
+	assert.False(t, found, "the index entry must be cleared once the revoke is confirmed delivered")
+}
+
+func TestPublishKeyContactFGA_ActiveStatus_PublishesNormally(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Username:      "alice",
+		Status:        "Active",
+	}, nil)
+
+	require.Len(t, pub.accessMsgs, 1, "an active key contact must still publish its grant")
+	assert.Equal(t, port.KeyContactGrant{MembershipUID: "asset-1", Username: "alice", Revision: 1},
+		grants.Entries["kc-1"])
+}
+
+// ── Reference-aware revoke (shared tuples) ────────────────────────────────────
+
+// fakeMembershipLister is a local double for the unexported
+// membershipKeyContactLister; structural typing means no mock export is needed.
+type fakeMembershipLister struct {
+	siblings []*model.KeyContact
+	err      error
+}
+
+func (f *fakeMembershipLister) ListKeyContactsForMembership(_ context.Context, _ string) ([]*model.KeyContact, error) {
+	return f.siblings, f.err
+}
+
+func TestPublishKeyContactFGA_InactiveWithLiveSibling_SkipsRevokeClearsOwnEntry(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		},
+	}
+	lister := &fakeMembershipLister{siblings: []*model.KeyContact{
+		{UID: "kc-2", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"},
+	}}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	assert.Empty(t, removeMessages(t, pub),
+		"a still-Active sibling on the same membership still justifies the tuple")
+	_, found := grants.Entries["kc-1"]
+	assert.False(t, found, "this record's own index entry must still be cleared")
+}
+
+func TestPublishKeyContactFGA_InactiveWithNoLiveSibling_RevokesAsBefore(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		},
+	}
+	lister := &fakeMembershipLister{siblings: []*model.KeyContact{
+		{UID: "kc-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Inactive"},
+	}}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "no live sibling means the tuple must still be revoked")
+	assert.Equal(t, "asset-1", removes[0].UID)
+	assert.Equal(t, "alice", removes[0].Username)
+	_, found := grants.Entries["kc-1"]
+	assert.False(t, found)
+}
+
+func TestPublishKeyContactFGA_SiblingScanError_SkipsRevokeEntirely(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		},
+	}
+	lister := &fakeMembershipLister{err: assert.AnError}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	assert.Empty(t, removeMessages(t, pub),
+		"a failed sibling scan must never strip a possibly still-justified tuple")
+	assert.Empty(t, grants.Deletes, "nor mutate the index on uncertain information")
+	assert.Equal(t, port.KeyContactGrant{MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		grants.Entries["kc-1"], "the entry must be left exactly as it was")
+}
+
+func TestPublishKeyContactFGA_SiblingFilteredOut_StillRevokes(t *testing.T) {
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		},
+	}
+	lister := &fakeMembershipLister{siblings: []*model.KeyContact{
+		// Same UID as kc itself: not a sibling.
+		{UID: "kc-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"},
+		// Inactive sibling: does not justify the tuple.
+		{UID: "kc-2", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Inactive"},
+		// Different email: a different tuple entirely.
+		{UID: "kc-3", MembershipUID: "asset-1", Email: "bob@example.com", Status: "Active"},
+	}}
+
+	svc.PublishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-1",
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "none of the returned siblings actually justify the tuple, so it must still be revoked")
+	assert.Equal(t, "asset-1", removes[0].UID)
+	assert.Equal(t, "alice", removes[0].Username)
 }
 
 // ── API writer paths ──────────────────────────────────────────────────────────

@@ -153,14 +153,29 @@ func (s *InviteAcceptedService) resolveKeyContactsInOrg(ctx context.Context, org
 			"org_uid", orgUID, "error", err)
 		return
 	}
+	lister := sliceKeyContactLister(contacts)
 	for _, kc := range contacts {
 		if normalizeSettingsEmail(kc.Email) != normalizedEmail {
 			continue
 		}
 		kc.Username = strings.TrimPrefix(acceptedBy, legacyAuth0UsernamePrefix)
-		PublishKeyContactFGA(ctx, s.publisher, s.grantIndex, kc)
+		PublishKeyContactFGA(ctx, s.publisher, s.grantIndex, kc, lister)
 		PublishKeyContactIndexer(ctx, s.publisher, kc, indexerConstants.ActionUpdated)
 	}
+}
+
+// Adapts an already-fetched org-wide key-contact slice to
+// membershipKeyContactLister, so the sibling check costs no extra I/O.
+type sliceKeyContactLister []*model.KeyContact
+
+func (s sliceKeyContactLister) ListKeyContactsForMembership(_ context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	var out []*model.KeyContact
+	for _, kc := range s {
+		if kc.MembershipUID == membershipUID {
+			out = append(out, kc)
+		}
+	}
+	return out, nil
 }
 
 // promoteInviteInOrg attempts to find and promote all pending entries matching

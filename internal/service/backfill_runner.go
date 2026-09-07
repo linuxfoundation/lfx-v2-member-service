@@ -113,6 +113,11 @@ type Runner struct {
 	// the per-item reindexItem path (preserving pre-batch behavior).
 	membershipBatch port.MembershipBatchReader
 	keyContactBatch port.KeyContactBatchReader
+
+	// keyContactsByMembership lists sibling key contacts for the
+	// Inactive-revoke check via a fresh fetch, not the stale
+	// membership-group cache. Nil disables the sibling check.
+	keyContactsByMembership port.KeyContactsByMembershipReader
 }
 
 // RunnerOption configures optional Runner collaborators. The avatar-enrichment path (the
@@ -164,6 +169,13 @@ func WithMembershipBatchReader(b port.MembershipBatchReader) RunnerOption {
 // key_contact records in targeted (items) reindex.
 func WithKeyContactBatchReader(b port.KeyContactBatchReader) RunnerOption {
 	return func(r *Runner) { r.keyContactBatch = b }
+}
+
+// WithRunnerKeyContactsByMembershipReader wires the fresh-fetch reader used to
+// list a membership's sibling key contacts before revoking an Inactive one's
+// FGA grant.
+func WithRunnerKeyContactsByMembershipReader(r port.KeyContactsByMembershipReader) RunnerOption {
+	return func(runner *Runner) { runner.keyContactsByMembership = r }
 }
 
 // WithRepairQuotaThreshold overrides the cdc_repair quota gate threshold
@@ -417,7 +429,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 						log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					}
-					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
+					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
 					published++
 				}
 			}
@@ -696,12 +708,12 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-			PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
+			PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
 			return outcomeRetry
 		}
 		kc.ProjectUID = resolvedUID
 		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
 		return outcomeIssued
 
 	case entityTypeB2BOrgSettings:
@@ -867,7 +879,7 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 		}
-		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc)
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
 		published++
 	}
 
@@ -890,7 +902,7 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 	if err != nil {
 		if errs.IsNotFound(err) {
 			// A definitive miss: revoke any grant still recorded for this contact.
-			revokeKeyContactGrantIfUnregistered(ctx, r.publisher, r.grantIndex, kc.UID)
+			revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, kc.UID, reasonEmailUnregistered)
 		} else {
 			// Transport-level failure — not evidence the email is unregistered;
 			// leave Username empty and any existing grant untouched.

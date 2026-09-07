@@ -1101,6 +1101,9 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 	restored := 0
 	published := false
 	var restoreErr error
+	// contacts is already every key contact on this membership, so the
+	// sibling-check lister costs no extra Salesforce/cache read here.
+	lister := sliceKeyContactLister(contacts)
 	for _, contact := range contacts {
 		if contact.Username == "" && contact.Email != "" {
 			if o.userReader == nil {
@@ -1123,7 +1126,7 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 		if contact.Username == "" {
 			continue
 		}
-		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact)
+		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact, lister)
 		published = published || contactPublished
 		if contactErr != nil {
 			restoreErr = errors.Join(restoreErr, contactErr)
@@ -1240,7 +1243,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				// A definitive miss: the email no longer resolves to any registered
 				// account (e.g. a rename or deregistration since the last time this
 				// contact was granted). Revoke any grant still recorded for it.
-				revokeKeyContactGrantIfUnregistered(ctx, o.publisher, o.grantIndex, kc.UID)
+				revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, kc.UID, reasonEmailUnregistered)
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
 				// leave Username empty and any existing grant untouched.
@@ -1266,7 +1269,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 
 	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
-	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc)
+	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc, siblingListerFor(o.keyContactsByMembership))
 
 	// Provision org-dashboard access silently for registered contacts when the
 	// indexer path ran (project_uid resolved). kc.Username is non-empty only when

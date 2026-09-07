@@ -553,11 +553,16 @@ func (m *MockKeyContactWriterWithOK) CreateKeyContact(_ context.Context, input m
 	if input.Role != nil {
 		role = *input.Role
 	}
+	status := ""
+	if input.Status != nil {
+		status = *input.Status
+	}
 	return &model.KeyContact{
 		UID:           "00000000-0000-0000-0000-000000000099",
 		MembershipUID: input.MembershipUID,
 		Email:         email,
 		Role:          role,
+		Status:        status,
 		B2BOrgUID:     input.AccountSFID,
 		UpdatedAt:     time.Now(),
 	}, nil
@@ -572,11 +577,16 @@ func (m *MockKeyContactWriterWithOK) UpdateKeyContact(_ context.Context, uid str
 	if input.Role != nil {
 		role = *input.Role
 	}
+	status := ""
+	if input.Status != nil {
+		status = *input.Status
+	}
 	return &model.KeyContact{
 		UID:           uid,
 		MembershipUID: input.MembershipUID,
 		Email:         email,
 		Role:          role,
+		Status:        status,
 		B2BOrgUID:     input.AccountSFID,
 		UpdatedAt:     time.Now(),
 	}, nil

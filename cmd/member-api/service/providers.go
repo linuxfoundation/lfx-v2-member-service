@@ -637,6 +637,9 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
 			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
+			// Fresh-fetch sibling reader for the Inactive-revoke check (never
+			// served from the stale membership-group cache).
+			usecaseSvc.WithRunnerKeyContactsByMembershipReader(salesforce.NewKeyContactRepo(sfClient)),
 			// A key_contact reindex populates the grant index for contacts whose
 			// grant predates it.
 			usecaseSvc.WithKeyContactGrantIndex(nats.NewKeyContactGrantIndex(nc)),
@@ -715,7 +718,12 @@ func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
 
 // KeyContactWriterUseCase constructs the KeyContactWriter use-case orchestrator.
 func KeyContactWriterUseCase(ctx context.Context) usecaseSvc.KeyContactWriter {
-	return usecaseSvc.NewKeyContactWriter(
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	opts := []usecaseSvc.KeyContactWriterOption{
 		usecaseSvc.WithKCStorage(MemberReaderImpl(ctx)),
 		usecaseSvc.WithKCWriter(KeyContactWriterImpl(ctx)),
 		usecaseSvc.WithKCProjectMembershipReader(ProjectMembershipReaderImpl(ctx)),
@@ -723,7 +731,21 @@ func KeyContactWriterUseCase(ctx context.Context) usecaseSvc.KeyContactWriter {
 		usecaseSvc.WithKCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithKCOrgSettings(OrgSettingsWriterUseCase(ctx)),
 		usecaseSvc.WithKCGrantIndex(KeyContactGrantIndexImpl(ctx)),
-	)
+	}
+
+	switch repoSource {
+	case "mock":
+		// No fresh-fetch reader in mock mode: the sibling check stays disabled.
+	case "salesforce":
+		// Fresh-fetch sibling reader for the Inactive-revoke check (never
+		// served from the stale membership-group cache).
+		sObjectClientInit(ctx)
+		opts = append(opts, usecaseSvc.WithKCSiblingReader(salesforce.NewKeyContactRepo(sfClient)))
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+	}
+
+	return usecaseSvc.NewKeyContactWriter(opts...)
 }
 
 // InviteSenderImpl returns the port.InviteSender implementation selected by the
