@@ -924,20 +924,23 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 }
 
 // batchedSiblingLister prefetches, in one Salesforce query, the key contacts of
-// every membership an Inactive contact in kcs may sibling-check. Returns nil
-// when no reader is wired or no contact needs the check.
+// every membership in kcs: Active contacts consult the lister too (supersede
+// revokes), so all statuses are covered. A membership outside the prefetch (a
+// reparented old pair) falls back to a live per-membership read rather than
+// reading as falsely sibling-free. Returns nil only when no reader is wired.
 func batchedSiblingLister(ctx context.Context, reader port.KeyContactsByMembershipReader, users port.UserReader, kcs []*model.KeyContact) membershipKeyContactLister {
 	if reader == nil {
 		return nil
 	}
+	live := keyContactsByMembershipLister{reader: reader}
 	uidSet := make(map[string]struct{})
 	for _, kc := range kcs {
-		if kc.MembershipUID != "" && strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
+		if kc.MembershipUID != "" {
 			uidSet[kc.MembershipUID] = struct{}{}
 		}
 	}
 	if len(uidSet) == 0 {
-		return nil
+		return withEmailResolver(live, users)
 	}
 	uids := make([]string, 0, len(uidSet))
 	for uid := range uidSet {
@@ -949,7 +952,11 @@ func batchedSiblingLister(ctx context.Context, reader port.KeyContactsByMembersh
 		// the revoke), instead of a nil lister disabling the check entirely.
 		return failedKeyContactLister{err: err}
 	}
-	return withEmailResolver(mappedKeyContactLister(grouped), users)
+	return withEmailResolver(coverageAwareLister{
+		covered:  uidSet,
+		inner:    mappedKeyContactLister(grouped),
+		fallback: live,
+	}, users)
 }
 
 // failedKeyContactLister reports a prefetch failure on every lookup.

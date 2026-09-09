@@ -1058,7 +1058,9 @@ func TestCDCConsumer_ProjectRoleDelete_SiblingScanError_KeepsEntryNoRevoke(t *te
 		svc.WithCDCUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "jdoe", nil })),
 	)
 
-	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+	// An unconfirmed revoke on a delete also holds the replay cursor: only
+	// redelivery ever retries a deleted contact.
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", &fakeReplayStore{})
 
 	assert.Empty(t, pub.accessMessages,
 		"an uncertain sibling scan must not revoke a possibly still-justified tuple")

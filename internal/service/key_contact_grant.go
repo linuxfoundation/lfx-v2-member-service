@@ -11,6 +11,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -96,6 +97,48 @@ func withEmailResolver(lister membershipKeyContactLister, users port.UserReader)
 	return resolvingSiblingLister{membershipKeyContactLister: lister, users: users}
 }
 
+// errSiblingScanUncovered reports a sibling lookup for a membership the
+// lister's prefetched data does not cover, making the scan inconclusive.
+var errSiblingScanUncovered = errors.New("membership not covered by prefetched sibling data")
+
+// coverageAwareLister serves covered memberships from inner. An uncovered one
+// goes to fallback, or errors so the scan reads inconclusive, not falsely certain.
+type coverageAwareLister struct {
+	covered  map[string]struct{}
+	inner    membershipKeyContactLister
+	fallback membershipKeyContactLister
+}
+
+func (l coverageAwareLister) ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	if _, ok := l.covered[membershipUID]; ok {
+		return l.inner.ListKeyContactsForMembership(ctx, membershipUID)
+	}
+	if l.fallback != nil {
+		return l.fallback.ListKeyContactsForMembership(ctx, membershipUID)
+	}
+	return nil, fmt.Errorf("%w: %s", errSiblingScanUncovered, membershipUID)
+}
+
+// sliceSiblingLister adapts an already-fetched contacts slice. A membership
+// absent from the slice reads as uncovered: served live via reader, else inconclusive.
+func sliceSiblingLister(contacts []*model.KeyContact, reader port.KeyContactsByMembershipReader, users port.UserReader) membershipKeyContactLister {
+	covered := make(map[string]struct{}, len(contacts))
+	for _, kc := range contacts {
+		if kc.MembershipUID != "" {
+			covered[kc.MembershipUID] = struct{}{}
+		}
+	}
+	var fallback membershipKeyContactLister
+	if reader != nil {
+		fallback = keyContactsByMembershipLister{reader: reader}
+	}
+	return withEmailResolver(coverageAwareLister{
+		covered:  covered,
+		inner:    sliceKeyContactLister(contacts),
+		fallback: fallback,
+	}, users)
+}
+
 // PublishKeyContactFGA emits an FGA member_put for accepted key contacts
 // (non-empty username + membershipUID). Pending contacts have no FGA tuple.
 // Used by the CDC consumer, the key_contact writer, the backfill runner, and the
@@ -123,14 +166,21 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 	if strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
 		// An inactive contact must never hold a live tuple: revoke any
 		// recorded grant instead of publishing a put.
-		if kc.MembershipUID != "" && kc.Email != "" && idx != nil {
+		if idx != nil {
 			stored, found, err := idx.Get(ctx, kc.UID)
 			if err != nil {
 				slog.WarnContext(ctx, "key_contact grant index read failed: skipping revoke to avoid stripping a possibly still-justified tuple",
 					"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
 				return false, nil
 			}
-			if !found || stored.MembershipUID == "" || stored.Username == "" {
+			if found && stored.PendingRevoke != nil {
+				// Deactivation is the last scheduled visit to this entry: drain
+				// the superseded pair's revoke now or it stays orphaned. A
+				// failed or uncertain drain keeps the marker as the address.
+				_ = revokeSupersededKeyContactGrant(ctx, p, idx, lister, kc.UID, *stored.PendingRevoke)
+			}
+			if kc.MembershipUID != "" && kc.Email != "" &&
+				(!found || stored.MembershipUID == "" || stored.Username == "") {
 				// A cold index (a miss, or a marker-only pair already cleared)
 				// leaves the record's own pair as the only revocable address.
 				if kc.Username != "" {

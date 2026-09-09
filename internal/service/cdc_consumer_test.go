@@ -705,7 +705,9 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 // would create a crash/disconnect window where the member_remove is lost and
 // a replayed CDC delete can no longer address the tuple because its only
 // address is already gone. Flush must be confirmed first, and a failed flush
-// must leave the entry in place for the next delivery attempt to use.
+// must leave the entry in place for the next delivery attempt to use. The
+// unconfirmed revoke also holds the replay cursor: nothing but redelivery
+// would ever retry a deleted contact.
 func TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry(t *testing.T) {
 	kcUID := sfid("kc-uid-flushfail")
 	membershipUID := sfid("asset-flushfail-parent")
@@ -728,7 +730,8 @@ func TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry(t *test
 		svc.WithCDCKeyContactGrantIndex(grants),
 	)
 
-	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+	replay := &fakeReplayStore{}
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
 
 	require.NotEmpty(t, pub.accessMessages, "the revoke was handed to NATS even though delivery was never confirmed")
 	assert.Empty(t, grants.Deletes,

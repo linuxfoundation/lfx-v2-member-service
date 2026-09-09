@@ -273,7 +273,8 @@ func (o *CDCConsumer) processWithAuthorizationRetry(
 				"error", handleErr,
 			)
 		}
-		if !errors.Is(handleErr, errPurgeUnrecorded) && !errors.Is(handleErr, errRestoreIncomplete) {
+		if !errors.Is(handleErr, errPurgeUnrecorded) && !errors.Is(handleErr, errRestoreIncomplete) &&
+			!errors.Is(handleErr, errKeyContactRevokeIncomplete) {
 			return nil
 		}
 
@@ -505,6 +506,11 @@ var errPurgeUnrecorded = errors.New("delete_access purge lost with no recovery m
 // /admin/reindex does not rebuild these per-user relations, so replay must stop.
 var errRestoreIncomplete = errors.New("authorization restore incomplete")
 
+// errKeyContactRevokeIncomplete marks a CDC key_contact delete whose recorded
+// grant was not confirmed revoked. The Salesforce record is gone, so no later
+// upsert or reindex retries it: replay must stop and redeliver the event.
+var errKeyContactRevokeIncomplete = errors.New("key_contact delete revoke incomplete")
+
 // deleteAccessMarkerTimeout bounds the detached recovery-marker write in
 // recordFailedDeleteAccess. It matches the replay-cursor Save timeout in Run
 // because both must still complete while the handler context is being
@@ -627,11 +633,13 @@ func partitionRecordIDs(ctx context.Context, entity string, event model.CDCEvent
 // the caller to batch-process. Shared by all three entity top-level handlers.
 //
 // Every delete failure is logged and the loop continues, so one bad ID never
-// costs the rest of the batch. Only errPurgeUnrecorded is also returned: a
-// purge that reached neither the broker nor the repair bucket has no repair
-// route left except redelivery, which requires the replay cursor to stop. Any
-// other failure stays logged-and-continue as before, so a repairable error
-// cannot stall the stream.
+// costs the rest of the batch. Only errPurgeUnrecorded and
+// errKeyContactRevokeIncomplete are also returned: a purge that reached
+// neither the broker nor the repair bucket, or a key_contact revoke left
+// unconfirmed for a record that is already gone, has no repair route left
+// except redelivery, which requires the replay cursor to stop. Any other
+// failure stays logged-and-continue as before, so a repairable error cannot
+// stall the stream.
 func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event model.CDCEvent,
 	deleteHandler func(context.Context, string) error) ([]string, error) {
 	deleteIDs, upsertIDs := partitionRecordIDs(ctx, entity, event)
@@ -640,7 +648,7 @@ func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event m
 		if err := deleteHandler(ctx, id); err != nil {
 			slog.ErrorContext(ctx, "cdc: handler failed",
 				"entity", entity, "uid", id, "change_type", event.ChangeType, "error", err)
-			if errors.Is(err, errPurgeUnrecorded) {
+			if errors.Is(err, errPurgeUnrecorded) || errors.Is(err, errKeyContactRevokeIncomplete) {
 				unrecorded = errors.Join(unrecorded, err)
 			}
 		}
@@ -1102,8 +1110,9 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 	published := false
 	var restoreErr error
 	// contacts is already every key contact on this membership, so the
-	// sibling-check lister costs no extra Salesforce/cache read here.
-	lister := withEmailResolver(sliceKeyContactLister(contacts), o.userReader)
+	// sibling-check lister costs no extra Salesforce/cache read here. Another
+	// membership (a superseded pair) is uncovered and falls back to a live read.
+	lister := sliceSiblingLister(contacts, o.keyContactsByMembership, o.userReader)
 	for _, contact := range contacts {
 		if contact.Username == "" && contact.Email != "" {
 			if o.userReader == nil {
@@ -1180,8 +1189,8 @@ func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
 
 func (o *CDCConsumer) handleProjectRole(ctx context.Context, event model.CDCEvent) error {
 	// See handleAccount: upserts run before the error is returned. This entity
-	// publishes no delete_access, so the error is always nil today; returning it
-	// keeps the three handlers uniform rather than silently diverging.
+	// publishes no delete_access; the returned error is non-nil only for an
+	// unconfirmed key_contact revoke (errKeyContactRevokeIncomplete).
 	upsertIDs, err := o.dispatchEntity(ctx, "Project_Role__c", event, o.handleProjectRoleDelete)
 	if len(upsertIDs) > 0 {
 		o.handleProjectRoleUpsertBatch(ctx, upsertIDs, event.ChangeType)
@@ -1331,7 +1340,7 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// The record is already gone in Salesforce, so the stored pair's email
 	// cannot be recovered: justification runs by resolution alone. The choke
 	// point flushes before the entry is cleared, the same as the API delete.
-	outcome, _ := revokeKeyContactPairIfUnjustified(ctx, o.publisher, siblingListerFor(o.keyContactsByMembership, o.userReader), keyContactPairRevoke{
+	outcome, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, siblingListerFor(o.keyContactsByMembership, o.userReader), keyContactPairRevoke{
 		membershipUID: grant.MembershipUID,
 		username:      grant.Username,
 		excludeUID:    uid,
@@ -1340,8 +1349,10 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	})
 	if outcome == revokeUncertain || outcome == revokeFailed {
 		// Keep the index entry: it is the only record of what still needs
-		// revoking, and the contact is gone so nothing will rebuild it.
-		return nil
+		// revoking, and the contact is gone so nothing will rebuild it. The
+		// sentinel holds the replay cursor so redelivery retries this revoke.
+		return fmt.Errorf("revoke key_contact grant for %s: %w",
+			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
 	}
 	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",

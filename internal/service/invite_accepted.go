@@ -153,7 +153,9 @@ func (s *InviteAcceptedService) resolveKeyContactsInOrg(ctx context.Context, org
 			"org_uid", orgUID, "error", err)
 		return
 	}
-	lister := sliceKeyContactLister(contacts)
+	// No membership reader is wired here, so a membership outside this org
+	// slice reads as uncovered and the revoke fails safe (skips).
+	lister := sliceSiblingLister(contacts, nil, nil)
 	for _, kc := range contacts {
 		if normalizeSettingsEmail(kc.Email) != normalizedEmail {
 			continue
@@ -164,8 +166,9 @@ func (s *InviteAcceptedService) resolveKeyContactsInOrg(ctx context.Context, org
 	}
 }
 
-// Adapts an already-fetched org-wide key-contact slice to
-// membershipKeyContactLister, so the sibling check costs no extra I/O.
+// Adapts an already-fetched key-contact slice to membershipKeyContactLister,
+// so the sibling check costs no extra I/O. Wrap it via sliceSiblingLister:
+// bare, it reads any membership outside the slice as certainly sibling-free.
 type sliceKeyContactLister []*model.KeyContact
 
 func (s sliceKeyContactLister) ListKeyContactsForMembership(_ context.Context, membershipUID string) ([]*model.KeyContact, error) {
