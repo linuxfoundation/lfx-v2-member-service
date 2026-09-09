@@ -788,12 +788,17 @@ func TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries(t *tes
 	assert.Equal(t, "jdoe", removeData.Username)
 }
 
-// TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndExhaustsRetries
+// TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_HoldsReplayCursor
 // covers the other side of the same finding: once every retry attempt fails,
-// the handler must still fall back to the (known-useless) unaddressed revoke
-// rather than blocking the batch — but only after exhausting the retry
-// budget, not on the first error.
-func TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndExhaustsRetries(t *testing.T) {
+// the index may still hold the exact address needed to revoke this grant, so
+// the handler must hold the replay cursor for redelivery to retry rather than
+// silently falling back to the (known-useless) unaddressed revoke, but only
+// after exhausting the retry budget, not on the first error.
+//
+// Updated from the previous "falls back and exhausts retries" expectation as
+// part of U1: an exhausted read failure is now distinguished from a genuine
+// miss and holds the cursor instead of advancing it.
+func TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_HoldsReplayCursor(t *testing.T) {
 	kcUID := sfid("kc-uid-downtime")
 
 	pub := &subjectCapturingPublisher{}
@@ -817,18 +822,12 @@ func TestCDCConsumer_ProjectRole_Delete_IndexReadFailsAllAttempts_FallsBackAndEx
 	)
 
 	replay := &fakeReplayStore{}
-	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
 
-	assert.Equal(t, 3, calls, "must exhaust the retry budget, not give up on the first error")
-	assert.Equal(t, []byte("r8down"), replay.saved, "the batch must not be blocked by an exhausted retry")
-
-	require.NotEmpty(t, pub.accessMessages)
-	removeMsg, ok := pub.accessMessages[0].(fgatypes.GenericFGAMessage)
-	require.True(t, ok)
-	removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
-	require.True(t, ok)
-	assert.Equal(t, kcUID, removeData.UID,
-		"once retries are exhausted, the handler still falls back to the unaddressed revoke rather than blocking")
+	assert.GreaterOrEqual(t, calls, 3, "must exhaust the retry budget, not give up on the first error")
+	assert.Zero(t, calls%3, "each redelivery attempt exhausts the same fixed retry budget")
+	assert.Empty(t, pub.accessMessages,
+		"an exhausted read failure must not fall back to an unaddressed revoke")
 }
 
 // TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex covers the second

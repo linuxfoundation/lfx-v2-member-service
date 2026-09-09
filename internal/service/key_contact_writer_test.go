@@ -1064,6 +1064,126 @@ func TestKeyContactWriter_Delete_SiblingScanUncertain_ReturnsErrorNotSuccess(t *
 	assert.Empty(t, removeMessages(t, pub), "nothing was proven unjustified, so nothing must be published")
 }
 
+// TestKeyContactWriter_Delete_StalePairJustifiedByUnindexedSibling_TransfersOwnership
+// covers U4: a stale indexed pair justified by a sibling that does not yet
+// durably own the index entry must transfer ownership to that sibling before
+// the stale entry clears.
+func TestKeyContactWriter_Delete_StalePairJustifiedByUnindexedSibling_TransfersOwnership(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: "membership-old", Username: "bob-old", Revision: 1},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{
+		Contacts: []*model.KeyContact{
+			{UID: "sib-uid", MembershipUID: "membership-old", Email: "bob@example.com", Status: "Active"},
+		},
+	}
+	users := userReaderFunc(func(_ context.Context, email string) (string, error) {
+		if strings.EqualFold(email, "bob@example.com") {
+			return "bob-old", nil
+		}
+		return "alice", nil
+	})
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(users),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err)
+	require.Len(t, grants.Puts, 1, "the justifying sibling must durably own the stale pair before the entry clears")
+	assert.Equal(t, "sib-uid", grants.Puts[0].UID)
+	assert.Equal(t, "membership-old", grants.Puts[0].MembershipUID)
+	assert.Equal(t, "bob-old", grants.Puts[0].Username)
+	assert.Contains(t, grants.Deletes, testKCUID, "the stale entry clears once transferred")
+}
+
+// TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry covers the
+// other side of U4: when the justifying sibling already owns a conflicting
+// index entry, the transfer fails and the stale entry must be preserved.
+func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: "membership-old", Username: "bob-old", Revision: 1},
+			"sib-uid": {MembershipUID: "other-membership", Username: "someone-else", Revision: 5},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{
+		Contacts: []*model.KeyContact{
+			{UID: "sib-uid", MembershipUID: "membership-old", Email: "bob@example.com", Status: "Active"},
+		},
+	}
+	users := userReaderFunc(func(_ context.Context, email string) (string, error) {
+		if strings.EqualFold(email, "bob@example.com") {
+			return "bob-old", nil
+		}
+		return "alice", nil
+	})
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(users),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err, "the delete itself still succeeds; only the stale entry's clear is skipped")
+	assert.Empty(t, grants.Deletes, "a failed transfer must leave the stale entry as the pair's only durable address")
+}
+
+// TestKeyContactWriter_Delete_MainPairTransferFails_ReturnsError covers U5: a
+// failed durable-address transfer for the main pair must fail the delete
+// instead of silently skipping the index clear.
+func TestKeyContactWriter_Delete_MainPairTransferFails_ReturnsError(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"sib-uid": {MembershipUID: "other-membership", Username: "someone-else", Revision: 2},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{
+		Contacts: []*model.KeyContact{
+			{UID: "sib-uid", MembershipUID: testMembershipUID, Email: "alice@example.com", Status: "Active"},
+		},
+	}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "a failed durable-address transfer must fail the delete, not silently skip the index clear")
+	assert.Empty(t, removeMessages(t, pub), "the pair was justified, so no remove should have been published")
+}
+
 func TestKeyContactWriter_Update_EmailChange_DoesNotFlush(t *testing.T) {
 	oldKC := &model.KeyContact{
 		UID: testKCUID, MembershipUID: testMembershipUID,

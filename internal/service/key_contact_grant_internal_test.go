@@ -11,9 +11,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 )
+
+// funcUsernameResolver implements usernameByEmailResolver with a function, so
+// a stubSiblingLister can gain the resolver capability revokeSupersededKeyContactGrant's
+// justification check type-asserts for.
+type funcUsernameResolver func(ctx context.Context, email string) (string, error)
+
+func (f funcUsernameResolver) UsernameByEmail(ctx context.Context, email string) (string, error) {
+	return f(ctx, email)
+}
 
 const internalTestMembershipUID = "00000000-0000-0000-0000-000000000010"
 
@@ -332,4 +342,68 @@ func TestRecordKeyContactGrant_MarkerOnlyEntry_CarriesPendingRevokeForward(t *te
 	assert.Equal(t, "bob", entry.Username)
 	require.NotNil(t, entry.PendingRevoke, "the real marker must survive, not be overwritten by an empty superseded ref")
 	assert.Equal(t, pending, *entry.PendingRevoke)
+}
+
+// ── U3: revokeSupersededKeyContactGrant durable-address transfer ─────────────
+
+// TestRevokeSupersededKeyContactGrant_UnindexedSiblingJustifies_TransfersBeforeClearing
+// covers U3: a superseded pair justified by a sibling that does not yet
+// durably own the index must transfer ownership to that sibling before the
+// PendingRevoke marker clears.
+func TestRevokeSupersededKeyContactGrant_UnindexedSiblingJustifies_TransfersBeforeClearing(t *testing.T) {
+	superseded := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := mock.NewMockMemberPublisher()
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "asset-new", Username: "bob", PendingRevoke: &superseded, Revision: 1},
+	}}
+
+	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, lister, "kc-1", superseded)
+
+	require.NoError(t, err)
+	require.Len(t, idx.Puts, 2, "the sibling must be given a durable entry before the marker clears")
+	assert.Equal(t, "sib-1", idx.Puts[0].UID)
+	assert.Equal(t, "asset-1", idx.Puts[0].MembershipUID)
+	assert.Equal(t, "alice", idx.Puts[0].Username)
+	entry, found := idx.Entries["kc-1"]
+	require.True(t, found)
+	assert.Nil(t, entry.PendingRevoke, "the marker must clear once the sibling durably owns the pair")
+}
+
+// TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors
+// covers the other side of U3: when the justifying sibling already owns a
+// conflicting index entry, the transfer fails and the marker must be
+// retained with an error returned, not silently cleared.
+func TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors(t *testing.T) {
+	superseded := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := mock.NewMockMemberPublisher()
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1":  {MembershipUID: "asset-new", Username: "bob", PendingRevoke: &superseded, Revision: 1},
+		"sib-1": {MembershipUID: "other-asset", Username: "someone-else", Revision: 9},
+	}}
+
+	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, lister, "kc-1", superseded)
+
+	require.Error(t, err, "a failed durable-address transfer must not be reported as a successful clear")
+	entry, found := idx.Entries["kc-1"]
+	require.True(t, found)
+	require.NotNil(t, entry.PendingRevoke, "the marker must be retained as the retry address until the transfer succeeds")
+	assert.Equal(t, superseded, *entry.PendingRevoke)
 }

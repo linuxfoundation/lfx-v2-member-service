@@ -1337,8 +1337,15 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// The CDC event carries only the key contact's own SFID and the Salesforce
 	// record is already gone, so the grant index is the only place the membership
 	// object and granted username can be recovered from.
-	grant, indexed := o.lookupKeyContactGrant(ctx, uid)
-	if !indexed {
+	grant, found, lookupErr := o.lookupKeyContactGrant(ctx, uid)
+	if lookupErr != nil {
+		// Retries exhausted: the index may still hold the exact address
+		// needed to revoke this grant, but the read itself failed. Hold the
+		// replay cursor so redelivery retries the lookup.
+		return fmt.Errorf("read key_contact grant index for %s: %w",
+			uid, errors.Join(lookupErr, errKeyContactRevokeIncomplete))
+	}
+	if !found || ((grant.MembershipUID == "" || grant.Username == "") && grant.PendingRevoke == nil) {
 		// Pre-index contact, or a grant that was never recorded. Retained for
 		// parity with the behaviour that predates the index, though fga-sync
 		// rejects a remove with an empty username without cleaning anything up:
@@ -1358,10 +1365,17 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		return nil
 	}
 
+	lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
+
+	// Marker-only entry: the live pair was already revoked and cleared, and
+	// only the PendingRevoke marker for a superseded pair remains.
+	if grant.MembershipUID == "" || grant.Username == "" {
+		return o.revokeKeyContactMarkerOnDelete(ctx, uid, grant, lister)
+	}
+
 	// The record is already gone in Salesforce, so the stored pair's email
 	// cannot be recovered: justification runs by resolution alone. The choke
 	// point flushes before the entry is cleared, the same as the API delete.
-	lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
 	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
 		membershipUID: grant.MembershipUID,
 		username:      grant.Username,
@@ -1382,7 +1396,77 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// owns the pair.
 	if outcome == revokeUnneeded && justifiedBy != nil &&
 		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, grant.MembershipUID, grant.Username) {
-		return nil
+		// A failed transfer leaves the entry keyed by the just-deleted UID,
+		// which nothing else will ever revisit: hold the replay cursor.
+		return fmt.Errorf("transfer durable revoke address for key_contact %s: %w", uid, errKeyContactRevokeIncomplete)
+	}
+
+	// The live pair is settled. A PendingRevoke marker for a superseded pair
+	// must be drained too before the entry can be deleted outright.
+	if grant.PendingRevoke != nil {
+		return o.drainKeyContactMarkerAndDelete(ctx, uid, grant, lister)
+	}
+	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
+			"uid", uid, "error", err)
+	}
+	return nil
+}
+
+// revokeKeyContactMarkerOnDelete handles a CDC delete for an index entry
+// whose live pair was already revoked and cleared, leaving only a
+// PendingRevoke marker for a superseded pair. It revokes that pending pair
+// using the marker's own membership and username, then clears the entry.
+func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister membershipKeyContactLister) error {
+	marker := grant.PendingRevoke
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
+		membershipUID: marker.MembershipUID,
+		username:      marker.Username,
+		excludeUID:    uid,
+		reason:        "key contact deleted in Salesforce (pending revoke marker)",
+		flush:         true,
+		recheck:       lister,
+	})
+	if outcome == revokeUncertain || outcome == revokeFailed {
+		return fmt.Errorf("revoke key_contact pending marker for %s: %w",
+			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
+	}
+	if outcome == revokeUnneeded && justifiedBy != nil &&
+		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
+		return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker: %w",
+			uid, errKeyContactRevokeIncomplete)
+	}
+	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after marker revoke",
+			"uid", uid, "error", err)
+	}
+	return nil
+}
+
+// drainKeyContactMarkerAndDelete drains a PendingRevoke marker after the
+// entry's live pair was already revoked, then deletes the entry. If the
+// drain fails or is uncertain, the entry is rewritten with the live pair
+// cleared but the marker intact (mirroring clearRevokedGrant), preserving the
+// marker as a retry address rather than deleting the entry outright.
+func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister membershipKeyContactLister) error {
+	marker := grant.PendingRevoke
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
+		membershipUID: marker.MembershipUID,
+		username:      marker.Username,
+		excludeUID:    uid,
+		reason:        "key contact deleted in Salesforce (draining superseded marker)",
+		flush:         true,
+		recheck:       lister,
+	})
+	drainFailed := outcome == revokeUncertain || outcome == revokeFailed
+	if !drainFailed && outcome == revokeUnneeded && justifiedBy != nil &&
+		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
+		drainFailed = true
+	}
+	if drainFailed {
+		clearRevokedGrant(ctx, o.grantIndex, uid, grant)
+		return fmt.Errorf("drain key_contact pending marker for %s: %w",
+			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
 	}
 	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
@@ -1401,28 +1485,26 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 // ridden out must not be treated the same as "no grant was ever recorded."
 const maxGrantIndexReadAttempts = 3
 
-// lookupKeyContactGrant returns the grant recorded for uid. It reports false
-// when the index is not wired or holds no entry — both mean, correctly, that
-// the caller has no addressable grant to revoke. A read failure is retried
-// (see maxGrantIndexReadAttempts); only once retries are exhausted does it
-// also report false, logged distinctly from a genuine miss so it is
-// alertable as a fresh dangling tuple rather than the accepted pre-index gap.
-func (o *CDCConsumer) lookupKeyContactGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool) {
+// lookupKeyContactGrant returns the grant recorded for uid. found reports
+// whether an entry exists at all, even a marker-only one with an empty live
+// pair; the grant is returned raw, not blanked. err is non-nil only once
+// maxGrantIndexReadAttempts is exhausted, distinguishing a read failure
+// (the index may still hold the address needed to revoke this grant) from a
+// genuine miss, so the caller can hold the replay cursor instead of silently
+// falling back to an unaddressed revoke.
+func (o *CDCConsumer) lookupKeyContactGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool, error) {
 	if o.grantIndex == nil {
-		return port.KeyContactGrant{}, false
+		return port.KeyContactGrant{}, false, nil
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxGrantIndexReadAttempts; attempt++ {
 		grant, found, err := o.grantIndex.Get(ctx, uid)
 		if err == nil {
-			if !found || grant.MembershipUID == "" || grant.Username == "" {
-				return port.KeyContactGrant{}, false
-			}
-			return grant, true
+			return grant, found, nil
 		}
 		lastErr = err
 	}
-	slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete after retries — falling back to unaddressed revoke",
+	slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete after retries",
 		"uid", uid, "error", lastErr, "attempts", maxGrantIndexReadAttempts, "fga_revoke_failed_dangling_tuple", true)
-	return port.KeyContactGrant{}, false
+	return port.KeyContactGrant{}, false, lastErr
 }

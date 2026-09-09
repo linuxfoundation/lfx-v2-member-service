@@ -520,14 +520,20 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	if grantErr == nil && grantFound && (grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
 		// The stored pair's email is unknown here: justification runs by
 		// resolution alone. A failed or uncertain revoke preserves the entry.
-		if _, _, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+		staleOutcome, staleJustifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 			membershipUID: grant.MembershipUID,
 			username:      grant.Username,
 			excludeUID:    in.UID,
 			reason:        "key contact deleted (stale indexed pair)",
 			flush:         false,
 			recheck:       lister,
-		}); revokeErr != nil {
+		})
+		if revokeErr != nil {
+			indexedPairRevokeFailed = true
+		} else if staleOutcome == revokeUnneeded && staleJustifiedBy != nil && o.grantIndex != nil &&
+			!pairDurablyOwned(ctx, o.grantIndex, staleJustifiedBy, grant.MembershipUID, grant.Username) {
+			// A live sibling justifies the stale pair, but the stale entry is
+			// its only durable address until the sibling durably owns it.
 			indexedPairRevokeFailed = true
 		}
 	}
@@ -559,11 +565,14 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	}
 
 	// A live sibling justified the pair: this entry may be the pair's only
-	// durable address, so it must not be cleared below until the sibling
-	// durably owns the pair.
+	// durable address. A failed transfer here means the retained entry is
+	// keyed by the just-deleted UID, which nothing will ever revisit: that
+	// must fail the delete, not just skip the index clear.
 	if outcome == revokeUnneeded && justifiedBy != nil && o.grantIndex != nil &&
 		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, kc.MembershipUID, username) {
-		indexedPairRevokeFailed = true
+		slog.ErrorContext(ctx, "key contact deleted but durable revoke address transfer failed",
+			"uid", in.UID, "membership_uid", kc.MembershipUID, "manual_recovery_required", true)
+		return pkgerrors.NewUnexpected("key contact deleted but durable revoke address transfer failed: retry the delete", nil)
 	}
 
 	// Clear the recorded grant now that the revoke is confirmed delivered or

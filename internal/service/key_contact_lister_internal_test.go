@@ -353,3 +353,175 @@ func TestHandleProjectRoleDelete_ConfirmedRevoke_AdvancesAndClears(t *testing.T)
 	require.NoError(t, err)
 	assert.Contains(t, grants.Deletes, "kc-1", "a confirmed revoke must clear the index entry")
 }
+
+// ── U1: exhausted grant-index read failure ────────────────────────────────────
+
+func TestLookupKeyContactGrant_ReadFailureExhausted_ReturnsError(t *testing.T) {
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			return port.KeyContactGrant{}, false, assert.AnError
+		},
+	}
+	o := &CDCConsumer{grantIndex: grants}
+
+	_, found, err := o.lookupKeyContactGrant(context.Background(), "kc-1")
+
+	require.Error(t, err, "a read failure exhausted across every retry attempt must be reported, not swallowed")
+	assert.False(t, found)
+	assert.Equal(t, maxGrantIndexReadAttempts, calls, "must retry up to the bounded attempt budget")
+}
+
+func TestHandleProjectRoleDelete_IndexReadFailureExhausted_HoldsReplayCursorWithoutFallback(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			return port.KeyContactGrant{}, false, assert.AnError
+		},
+	}
+	o := &CDCConsumer{
+		publisher:               pub,
+		cacheInvalidator:        &mock.MockCacheInvalidator{},
+		grantIndex:              grants,
+		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
+	}
+
+	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+
+	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete,
+		"an exhausted read failure must hold the replay cursor, not fall back to an unaddressed revoke")
+	assert.Nil(t, pub.LastAccessData,
+		"no unaddressed revoke must be published while the read failure is unresolved")
+}
+
+// ── U1: marker-only entry (live pair already cleared) ─────────────────────────
+
+func TestHandleProjectRoleDelete_MarkerOnlyEntry_RevokesPendingPairAndDeletes(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"}, Revision: 1},
+	}}
+	o := &CDCConsumer{
+		publisher:               mock.NewMockMemberPublisher(),
+		cacheInvalidator:        &mock.MockCacheInvalidator{},
+		grantIndex:              grants,
+		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
+	}
+
+	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+
+	require.NoError(t, err)
+	assert.Contains(t, grants.Deletes, "kc-1",
+		"a marker-only entry must clear once the pending pair's revoke is published")
+}
+
+func TestHandleProjectRoleDelete_MarkerOnlyEntry_FailedRevoke_HoldsCursor(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"}, Revision: 1},
+	}}
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	o := &CDCConsumer{
+		publisher:               pub,
+		cacheInvalidator:        &mock.MockCacheInvalidator{},
+		grantIndex:              grants,
+		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
+	}
+
+	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+
+	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
+	_, found := grants.Entries["kc-1"]
+	assert.True(t, found, "a failed marker revoke must preserve the entry as the retry address")
+}
+
+// ── U1: full entry that also carries a marker ─────────────────────────────────
+
+func TestHandleProjectRoleDelete_LivePairWithMarker_DrainsBothAndDeletes(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "alice",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"},
+			Revision:      1,
+		},
+	}}
+	o := &CDCConsumer{
+		publisher:               mock.NewMockMemberPublisher(),
+		cacheInvalidator:        &mock.MockCacheInvalidator{},
+		grantIndex:              grants,
+		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
+	}
+
+	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+
+	require.NoError(t, err)
+	assert.Contains(t, grants.Deletes, "kc-1",
+		"both the live pair and its marker must drain before the entry clears")
+}
+
+func TestRevokeKeyContactMarkerOnDelete_Success_DeletesEntry(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"}, Revision: 1},
+	}}
+	o := &CDCConsumer{publisher: mock.NewMockMemberPublisher(), grantIndex: grants}
+	grant := grants.Entries["kc-1"]
+
+	err := o.revokeKeyContactMarkerOnDelete(context.Background(), "kc-1", grant, stubSiblingLister{})
+
+	require.NoError(t, err)
+	assert.Contains(t, grants.Deletes, "kc-1")
+}
+
+func TestRevokeKeyContactMarkerOnDelete_Uncertain_HoldsCursor(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"}, Revision: 1},
+	}}
+	o := &CDCConsumer{publisher: mock.NewMockMemberPublisher(), grantIndex: grants}
+	grant := grants.Entries["kc-1"]
+
+	err := o.revokeKeyContactMarkerOnDelete(context.Background(), "kc-1", grant, stubSiblingLister{err: assert.AnError})
+
+	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
+	_, found := grants.Entries["kc-1"]
+	assert.True(t, found, "an uncertain scan must preserve the entry as the retry address")
+}
+
+func TestDrainKeyContactMarkerAndDelete_Success_DeletesEntry(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "alice",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"},
+			Revision:      1,
+		},
+	}}
+	o := &CDCConsumer{publisher: mock.NewMockMemberPublisher(), grantIndex: grants}
+	grant := grants.Entries["kc-1"]
+
+	err := o.drainKeyContactMarkerAndDelete(context.Background(), "kc-1", grant, stubSiblingLister{})
+
+	require.NoError(t, err)
+	assert.Contains(t, grants.Deletes, "kc-1")
+}
+
+func TestDrainKeyContactMarkerAndDelete_DrainFails_PreservesMarkerHoldsCursor(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "alice",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"},
+			Revision:      1,
+		},
+	}}
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	o := &CDCConsumer{publisher: pub, grantIndex: grants}
+	grant := grants.Entries["kc-1"]
+
+	err := o.drainKeyContactMarkerAndDelete(context.Background(), "kc-1", grant, stubSiblingLister{})
+
+	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
+	stored, found := grants.Entries["kc-1"]
+	require.True(t, found, "the marker must be preserved so a later delete can retry the drain")
+	assert.Empty(t, stored.MembershipUID, "the live pair was already confirmed revoked and must stay cleared")
+	require.NotNil(t, stored.PendingRevoke, "the undrained marker must remain as the retry address")
+	assert.Equal(t, "asset-2", stored.PendingRevoke.MembershipUID)
+}

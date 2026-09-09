@@ -536,11 +536,16 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 // The superseded pair's email is unknown here, so justification runs by
 // resolution alone. On an uncertain scan the marker is kept and an error
 // returned, holding CDC replay; a justified pair clears the marker unpublished.
+//
+// On revokeUnneeded, a live sibling justifies the pair, but the marker is the
+// pair's only durable address until that sibling's own index entry is
+// confirmed to cover it (pairDurablyOwned): otherwise clearing the marker
+// would drop the only durable address for a pair that still has a live tuple.
 func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, uid string, superseded port.KeyContactGrantRef) error {
 	if superseded.MembershipUID == "" || superseded.Username == "" {
 		return nil
 	}
-	outcome, _, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
 		membershipUID: superseded.MembershipUID,
 		username:      superseded.Username,
 		excludeUID:    uid,
@@ -552,6 +557,11 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 		return fmt.Errorf("verify superseded key_contact pair for %s: %w", uid, revokeErr)
 	case revokeFailed:
 		return fmt.Errorf("pending key_contact revoke for %s: %w", uid, revokeErr)
+	case revokeUnneeded:
+		if justifiedBy != nil && idx != nil &&
+			!pairDurablyOwned(ctx, idx, justifiedBy, superseded.MembershipUID, superseded.Username) {
+			return fmt.Errorf("transfer durable revoke address for superseded key_contact %s", uid)
+		}
 	}
 
 	if err := clearPendingRevoke(ctx, idx, uid, superseded); err != nil {
