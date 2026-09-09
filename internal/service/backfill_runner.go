@@ -911,7 +911,9 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 	if err != nil {
 		if errs.IsNotFound(err) {
 			// A definitive miss: revoke any grant still recorded for this contact.
-			revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, siblingListerFor(r.keyContactsByMembership, r.userReader), kc.UID, "", "", reasonEmailUnregistered)
+			// Best-effort: this runner has no per-contact retry path, the next
+			// backfill or CDC pass revisits an unrevoked grant.
+			_ = revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, siblingListerFor(r.keyContactsByMembership, r.userReader), kc.UID, "", "", reasonEmailUnregistered)
 		} else {
 			// Transport-level failure — not evidence the email is unregistered;
 			// leave Username empty and any existing grant untouched.

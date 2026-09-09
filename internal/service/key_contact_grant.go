@@ -175,16 +175,19 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 			if err != nil {
 				slog.WarnContext(ctx, "key_contact grant index read failed: skipping revoke to avoid stripping a possibly still-justified tuple",
 					"uid", kc.UID, "membership_uid", kc.MembershipUID, "error", err)
-				return false, nil
+				return false, fmt.Errorf("read key_contact grant index for %s: %w", kc.UID, err)
 			}
 			if found && stored.PendingRevoke != nil {
 				// Deactivation is the last scheduled visit to this entry: drain
 				// the superseded pair's revoke now or it stays orphaned. A
-				// failed or uncertain drain keeps the marker as the address.
-				_ = revokeSupersededKeyContactGrant(ctx, p, idx, lister, kc.UID, *stored.PendingRevoke)
+				// failed or uncertain drain keeps the marker as the address,
+				// so the CDC replay cursor must hold until it is confirmed.
+				if drainErr := revokeSupersededKeyContactGrant(ctx, p, idx, lister, kc.UID, *stored.PendingRevoke); drainErr != nil {
+					return false, fmt.Errorf("drain superseded key_contact grant for %s: %w", kc.UID, drainErr)
+				}
 			}
-			if kc.MembershipUID != "" && kc.Email != "" &&
-				(!found || stored.MembershipUID == "" || stored.Username == "") {
+			usable := found && stored.MembershipUID != "" && stored.Username != ""
+			if kc.MembershipUID != "" && kc.Email != "" && !usable {
 				// A cold index (a miss, or a marker-only pair already cleared)
 				// leaves the record's own pair as the only revocable address.
 				if kc.Username != "" {
@@ -210,8 +213,36 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 				// retries this path again.
 				return false, nil
 			}
+			if usable && kc.Username != "" && kc.MembershipUID != "" &&
+				(stored.MembershipUID != kc.MembershipUID || stored.Username != kc.Username) {
+				// The indexed pair is stale: an earlier reparent or rename
+				// published the current pair's member_put, but the index
+				// update that would have recorded it failed. The current
+				// pair is unindexed, so this revoke is its only address; it
+				// runs before the stored pair below, which may clear or
+				// claim the entry.
+				outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
+					membershipUID: kc.MembershipUID,
+					username:      kc.Username,
+					excludeUID:    kc.UID,
+					email:         kc.Email,
+					reason:        reasonInactiveStatus,
+					flush:         true,
+				})
+				switch outcome {
+				case revokeUncertain, revokeFailed:
+					// The stored pair's own revoke can wait for redelivery.
+					return false, fmt.Errorf("revoke inactive key_contact current pair for %s: %w", kc.UID, revokeErr)
+				case revokeUnneeded:
+					if justifiedBy != nil && !pairDurablyOwned(ctx, idx, justifiedBy, kc.MembershipUID, kc.Username) {
+						return false, fmt.Errorf("transfer durable revoke address for inactive key_contact %s current pair", kc.UID)
+					}
+				}
+			}
 		}
-		revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, lister, kc.UID, kc.Username, kc.Email, reasonInactiveStatus)
+		if err := revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, lister, kc.UID, kc.Username, kc.Email, reasonInactiveStatus); err != nil {
+			return false, fmt.Errorf("revoke inactive key_contact stored pair for %s: %w", kc.UID, err)
+		}
 		return false, nil
 	}
 	if kc.Username == "" || kc.MembershipUID == "" {
@@ -582,6 +613,35 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	return nil
 }
 
+// drainKeyContactPendingRevoke revokes marker's pair ahead of an index entry
+// clear, so an unrelated PendingRevoke is never dropped unaddressed by
+// whichever caller is about to remove or rewrite the entry that carries it.
+// It does not touch the index entry itself; the caller decides how to clear
+// or preserve it based on the returned error. A nil error means the marker's
+// pair is either revoked-and-confirmed or still justified by a durably owned
+// sibling; a non-nil error means the marker must be preserved as the retry
+// address.
+func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, excludeUID string, marker port.KeyContactGrantRef, reason string) error {
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
+		membershipUID: marker.MembershipUID,
+		username:      marker.Username,
+		excludeUID:    excludeUID,
+		reason:        reason,
+		flush:         true,
+		recheck:       lister,
+	})
+	switch outcome {
+	case revokeUncertain, revokeFailed:
+		return fmt.Errorf("drain key_contact pending revoke marker for %s: %w", excludeUID, revokeErr)
+	case revokeUnneeded:
+		if justifiedBy != nil && idx != nil &&
+			!pairDurablyOwned(ctx, idx, justifiedBy, marker.MembershipUID, marker.Username) {
+			return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker", excludeUID)
+		}
+	}
+	return nil
+}
+
 // revokeKeyContactGrantIfNoLongerLive revokes a key contact's recorded grant
 // and clears the index entry once the revoke is confirmed delivered. reason
 // is logged only.
@@ -616,18 +676,27 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 // pair is still the same one this call just tried to revoke, the remove may
 // have undone a grant just reconfirmed live, so this repairs it with a
 // compensating member_put rather than only skipping the index clear.
-func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, uid, liveUsername, liveEmail, reason string) {
+//
+// It returns an error whenever an authorization removal may still be needed
+// but is not confirmed delivered, or a durable retry address may have been
+// lost: an index read failure, an uncertain sibling scan, a hard claim
+// failure, or a failed publish/flush. A claim CAS conflict, or the entry
+// being overtaken right after the claim, returns nil, another writer already
+// owns the entry so there is nothing left for this call to do. A failure
+// clearing the index after a confirmed revoke also stays nil (log-only): the
+// revoke itself succeeded, only stale bookkeeping remains.
+func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, uid, liveUsername, liveEmail, reason string) error {
 	if idx == nil || uid == "" {
-		return
+		return nil
 	}
 	stored, found, err := idx.Get(ctx, uid)
 	if err != nil {
 		slog.WarnContext(ctx, "key_contact grant index read failed — cannot check for a stale grant to revoke",
 			"uid", uid, "reason", reason, "error", err)
-		return
+		return fmt.Errorf("read key_contact grant index for %s: %w", uid, err)
 	}
 	if !found || stored.MembershipUID == "" || stored.Username == "" {
-		return
+		return nil
 	}
 
 	// Justify before the claim: an uncertain scan must leave the entry
@@ -646,53 +715,59 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 	if justifyErr != nil {
 		slog.WarnContext(ctx, "key_contact sibling scan failed: skipping revoke to avoid stripping a possibly still-justified tuple",
 			"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason, "error", justifyErr)
-		return
+		return fmt.Errorf("sibling scan for key_contact %s: %w", uid, justifyErr)
 	}
 	if justifiedBy != nil {
 		// A live sibling keeps the tuple, but this entry may be the pair's
 		// only durable address: clearing it before the sibling durably owns
 		// the pair would leave a live tuple with no address at all.
 		if !pairDurablyOwned(ctx, idx, justifiedBy, stored.MembershipUID, stored.Username) {
-			return
+			return fmt.Errorf("transfer durable revoke address for key_contact %s", uid)
 		}
 		clearRevokedGrant(ctx, idx, uid, stored)
-		return
+		return nil
 	}
 
 	if claimErr := idx.Put(ctx, uid, stored); claimErr != nil {
 		if pkgerrors.IsConflict(claimErr) {
+			// Another writer already touched or replaced the entry: it now
+			// owns whatever revoke is needed, not this call.
 			slog.WarnContext(ctx, "key_contact grant changed concurrently — skipping revoke to avoid denying a possibly-reasserted grant",
 				"uid", uid, "membership_uid", stored.MembershipUID)
-		} else {
-			slog.WarnContext(ctx, "key_contact grant index claim failed — cannot safely revoke",
-				"uid", uid, "membership_uid", stored.MembershipUID, "error", claimErr)
+			return nil
 		}
-		return
+		slog.WarnContext(ctx, "key_contact grant index claim failed — cannot safely revoke",
+			"uid", uid, "membership_uid", stored.MembershipUID, "error", claimErr)
+		return fmt.Errorf("claim key_contact grant index for %s: %w", uid, claimErr)
 	}
 
 	claimed, found, err := idx.Get(ctx, uid)
 	if err != nil || !found {
 		slog.WarnContext(ctx, "key_contact grant index read failed after claim — cannot safely revoke",
 			"uid", uid, "membership_uid", stored.MembershipUID, "error", err)
-		return
+		return fmt.Errorf("read key_contact grant index for %s after claim: %w", uid, err)
 	}
 	if claimed.MembershipUID != stored.MembershipUID || claimed.Username != stored.Username {
 		// Overtaken between the claim committing and this read: treat like a
 		// claim conflict — something else already owns this entry.
 		slog.WarnContext(ctx, "key_contact grant changed concurrently right after claim — skipping revoke",
 			"uid", uid, "membership_uid", stored.MembershipUID)
-		return
+		return nil
 	}
 
 	// On a failed or indeterminate publish the claimed entry is retained as
 	// the retry address.
-	if publishKeyContactRemove(ctx, p, req) != nil {
-		return
+	if pubErr := publishKeyContactRemove(ctx, p, req); pubErr != nil {
+		return fmt.Errorf("revoke key_contact grant for %s: %w", uid, pubErr)
 	}
 
 	current, found, err := idx.Get(ctx, uid)
 	if err != nil || !found {
-		return
+		// The revoke itself was already confirmed delivered above; only the
+		// index bookkeeping is unverifiable here.
+		slog.WarnContext(ctx, "key_contact grant index read failed after confirmed revoke: index bookkeeping unverifiable",
+			"uid", uid, "membership_uid", stored.MembershipUID, "error", err)
+		return nil
 	}
 	if current.Revision != claimed.Revision {
 		if current.MembershipUID == stored.MembershipUID && current.Username == stored.Username {
@@ -705,18 +780,19 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 				slog.ErrorContext(ctx, "key_contact grant repair failed after a concurrent same-pair regrant raced this revoke: tuple may be incorrectly absent",
 					"uid", uid, "membership_uid", stored.MembershipUID,
 					"error", repairErr, "fga_revoke_failed_dangling_tuple", true)
-				return
+				return fmt.Errorf("repair key_contact grant for %s: %w", uid, repairErr)
 			}
 			slog.WarnContext(ctx, "key_contact grant repaired — a concurrent regrant for the same pair raced this revoke's publish",
 				"uid", uid, "membership_uid", stored.MembershipUID)
-			return
+			return nil
 		}
 		// A different pair now occupies this entry: something else
 		// superseded it entirely, and that writer's own supersede-revoke
 		// already addresses our pair — nothing to repair or clear here.
-		return
+		return nil
 	}
 	clearRevokedGrant(ctx, idx, uid, current)
+	return nil
 }
 
 // pairDurablyOwned reports whether the {membershipUID, username} pair has a

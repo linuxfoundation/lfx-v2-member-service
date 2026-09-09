@@ -1278,7 +1278,9 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				// contact was granted). Revoke any grant still recorded for it.
 				// A live lister, not the batched one: an un-prefetched membership
 				// would read as empty siblings and fake certainty.
-				revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, siblingListerFor(o.keyContactsByMembership, o.userReader), kc.UID, "", "", reasonEmailUnregistered)
+				// Best-effort: processKeyContact has no per-contact error path
+				// back to the batch, the next CDC event or backfill retries.
+				_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, siblingListerFor(o.keyContactsByMembership, o.userReader), kc.UID, "", "", reasonEmailUnregistered)
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
 				// leave Username empty and any existing grant untouched.

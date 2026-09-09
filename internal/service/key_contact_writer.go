@@ -322,8 +322,9 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 		// The email never resolved to a registered account. There is nothing
 		// to revoke on a brand-new contact — no grant was ever published for
 		// it — but the index may still hold a stale entry from a prior,
-		// now-superseded contact at this membership+email pair.
-		revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, kc.UID, kc.Username, "", reasonEmailUnregistered)
+		// now-superseded contact at this membership+email pair. Best-effort:
+		// this new contact was created successfully regardless of this cleanup.
+		_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, kc.UID, kc.Username, "", reasonEmailUnregistered)
 	}
 	o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
 
@@ -433,7 +434,9 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			// (see resolveUsernameForContact) — publishing it would reassert FGA
 			// access for an account just confirmed unregistered. Skip the put
 			// and revoke any grant still recorded for this contact instead.
-			revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, newKC.UID, newKC.Username, "", reasonEmailUnregistered)
+			// Not propagated, matching the paired-FGA revoke above: the SF
+			// update already succeeded, and this path accepts unflushed loss.
+			_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, newKC.UID, newKC.Username, "", reasonEmailUnregistered)
 		} else {
 			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister)
 		}
@@ -588,6 +591,21 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 		return pkgerrors.NewUnexpected("key contact deleted but durable revoke address transfer failed: retry the delete", nil)
 	}
 
+	// A PendingRevoke marker for a superseded pair, unrelated to the live pair
+	// just settled above, must be drained before the entry is erased outright:
+	// the CDC delete path drains markers the same way, but once this Delete
+	// clears the whole entry there is no longer an address for the marker's
+	// pair, and the later CDC delete would see a genuine miss.
+	if grantErr == nil && grantFound && !indexedPairRevokeFailed && grant.PendingRevoke != nil {
+		if drainErr := drainKeyContactPendingRevoke(ctx, o.memberPublisher, o.grantIndex, lister, in.UID,
+			*grant.PendingRevoke, "key contact deleted (pending revoke marker)"); drainErr != nil {
+			// Preserve the entry: clear the live pair but keep the marker as
+			// the only remaining address for its still-unconfirmed revoke.
+			clearRevokedGrant(ctx, o.grantIndex, in.UID, grant)
+			return pkgerrors.NewUnexpected("failed to drain pending revoke marker for deleted key contact", drainErr)
+		}
+	}
+
 	// Clear the recorded grant now that the revoke is confirmed delivered or
 	// proven unnecessary. This runs whether or not a member_remove was
 	// published: when no username could be resolved from either source there is
@@ -600,7 +618,8 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// paths above (grant read, uncertain scan, failed revoke) all deliberately
 	// return or skip before this point, and indexedPairRevokeFailed above skips
 	// this clear specifically, all keeping the entry as the only record of a
-	// grant still needing manual follow-up.
+	// grant still needing manual follow-up. Any PendingRevoke marker was
+	// already drained above, so clearing the whole entry here is safe.
 	if grantErr == nil && !indexedPairRevokeFailed && o.grantIndex != nil {
 		if err := o.grantIndex.Delete(ctx, in.UID, grant.Revision); err != nil {
 			slog.WarnContext(ctx, "key contact grant index cleanup failed after delete",

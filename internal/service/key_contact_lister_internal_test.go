@@ -30,6 +30,14 @@ func (s stubSiblingLister) ListKeyContactsForMembership(context.Context, string)
 	return s.siblings, s.err
 }
 
+// byMembershipSiblingLister answers each membership with only its own
+// siblings, unlike stubSiblingLister which answers every membership alike.
+type byMembershipSiblingLister map[string][]*model.KeyContact
+
+func (b byMembershipSiblingLister) ListKeyContactsForMembership(_ context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	return b[membershipUID], nil
+}
+
 // ── coverageAwareLister ───────────────────────────────────────────────────────
 
 func TestCoverageAwareLister_CoveredEmptyMembership_IsCertain(t *testing.T) {
@@ -317,6 +325,169 @@ func TestPublishKeyContactFGA_ColdIndexInactiveTransferFails_ReturnsError(t *tes
 
 	require.Error(t, err, "a failed durable-address transfer must hold CDC replay")
 	assert.False(t, published)
+}
+
+// ── W2: index read failure and stored-pair revoke flush failure ─────────────
+
+// TestPublishKeyContactFGA_IndexReadFailure_ReturnsError covers the top of
+// the Inactive branch: an index read failure must hold CDC replay, not
+// silently skip the revoke as if nothing were recorded.
+func TestPublishKeyContactFGA_IndexReadFailure_ReturnsError(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{GetErr: assert.AnError}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: internalTestMembershipUID,
+		Username:      "alice",
+		Status:        "Inactive",
+	}, nil)
+
+	require.Error(t, err, "an unreadable index must hold CDC replay rather than silently skip the revoke")
+	assert.False(t, published)
+	assert.Nil(t, pub.LastAccessData, "nothing must be published while the index is unreadable")
+}
+
+// TestPublishKeyContactFGA_InactiveIndexedContact_StoredPairFlushFails_ReturnsError
+// covers the stored-pair revoke's flush failure now propagating: an
+// unconfirmed revoke must hold CDC replay, not report false success.
+func TestPublishKeyContactFGA_InactiveIndexedContact_StoredPairFlushFails_ReturnsError(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	pub.SetFlushError(assert.AnError)
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: internalTestMembershipUID,
+		Username:      "alice",
+		Status:        "Inactive",
+	}, stubSiblingLister{})
+
+	require.Error(t, err, "an unconfirmed stored-pair revoke must hold CDC replay")
+	assert.False(t, published)
+	_, found := grants.Entries["kc-1"]
+	assert.True(t, found, "the unconfirmed entry must remain as the retry address")
+}
+
+// ── W1: usable-but-stale indexed pair ────────────────────────────────────────
+
+// capturingPublisher records every Access payload, in order, on top of
+// mock.MockMemberPublisher's error injection and Flush counting.
+type capturingPublisher struct {
+	*mock.MockMemberPublisher
+	accessMsgs []any
+}
+
+func newCapturingPublisher() *capturingPublisher {
+	return &capturingPublisher{MockMemberPublisher: mock.NewMockMemberPublisher()}
+}
+
+func (p *capturingPublisher) Access(ctx context.Context, subject string, msg any) error {
+	err := p.MockMemberPublisher.Access(ctx, subject, msg)
+	p.accessMsgs = append(p.accessMsgs, msg)
+	return err
+}
+
+// TestPublishKeyContactFGA_InactiveUsableStalePair_RevokesBothPairs covers
+// W1: an earlier reparent or rename published the current pair's member_put,
+// but the index update that would have recorded it failed, leaving the
+// index pointing at a different, still-usable pair. Deactivation must revoke
+// both: the unindexed current pair (its only address) and the stored pair.
+func TestPublishKeyContactFGA_InactiveUsableStalePair_RevokesBothPairs(t *testing.T) {
+	pub := newCapturingPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-old", Username: "old-bob", Revision: 5},
+		},
+	}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "new-carol",
+		Email:         "carol@example.com",
+		Status:        "Inactive",
+	}, stubSiblingLister{})
+
+	require.NoError(t, err)
+	assert.False(t, published)
+	removes := internalRemoveMessages(t, pub.accessMsgs)
+	require.Len(t, removes, 2, "both the current and stored pairs must be revoked")
+	assert.Equal(t, "asset-new", removes[0].UID, "the unindexed current pair is revoked first")
+	assert.Equal(t, "new-carol", removes[0].Username)
+	assert.Equal(t, "asset-old", removes[1].UID, "the stored pair is revoked afterward")
+	assert.Equal(t, "old-bob", removes[1].Username)
+	_, found := grants.Entries["kc-1"]
+	assert.False(t, found, "the stored pair's entry is cleared once its own revoke confirms")
+}
+
+// TestPublishKeyContactFGA_InactiveUsableStalePair_CurrentPairRevokeFails_ReturnsError
+// covers W1's failure path: when the current (unindexed) pair's revoke is
+// uncertain or fails, the stored pair's own revoke can wait for redelivery:
+// the whole call must report an error and never reach the stored pair.
+func TestPublishKeyContactFGA_InactiveUsableStalePair_CurrentPairRevokeFails_ReturnsError(t *testing.T) {
+	pub := newCapturingPublisher()
+	pub.SetAccessError(assert.AnError)
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-old", Username: "old-bob", Revision: 5},
+		},
+	}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "new-carol",
+		Email:         "carol@example.com",
+		Status:        "Inactive",
+	}, stubSiblingLister{})
+
+	require.Error(t, err, "a failed current-pair revoke must hold CDC replay")
+	assert.False(t, published)
+	assert.Len(t, pub.accessMsgs, 1, "the stored pair's revoke must not run once the current pair fails")
+	entry, found := grants.Entries["kc-1"]
+	require.True(t, found, "the stored pair's entry must survive untouched for its own future retry")
+	assert.Equal(t, "asset-old", entry.MembershipUID)
+}
+
+// TestPublishKeyContactFGA_InactiveUsableStalePair_CurrentPairJustified_StillProcessesStoredPair
+// covers W1's justified-by-sibling path for the current pair: ownership
+// transfers to the justifying sibling, and the stored pair is still
+// processed afterward rather than being skipped.
+func TestPublishKeyContactFGA_InactiveUsableStalePair_CurrentPairJustified_StillProcessesStoredPair(t *testing.T) {
+	pub := newCapturingPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: "asset-old", Username: "old-bob", Revision: 5},
+		},
+	}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: "asset-new", Email: "carol@example.com", Status: "Active"}
+	lister := byMembershipSiblingLister{"asset-new": {sib}}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: "asset-new",
+		Username:      "new-carol",
+		Email:         "carol@example.com",
+		Status:        "Inactive",
+	}, lister)
+
+	require.NoError(t, err)
+	assert.False(t, published)
+	removes := internalRemoveMessages(t, pub.accessMsgs)
+	require.Len(t, removes, 1, "the justified current pair is not revoked, only the stored pair is")
+	assert.Equal(t, "asset-old", removes[0].UID)
+	assert.Equal(t, "old-bob", removes[0].Username)
+	sibEntry, found := grants.Entries["sib-1"]
+	require.True(t, found, "the justifying sibling must be given a durable entry for the current pair")
+	assert.Equal(t, "asset-new", sibEntry.MembershipUID)
+	assert.Equal(t, "new-carol", sibEntry.Username)
+	_, found = grants.Entries["kc-1"]
+	assert.False(t, found, "the stored pair's entry is cleared once its own revoke confirms")
 }
 
 // ── revokeKeyContactPairIfUnjustified recheck (T4) ────────────────────────────
