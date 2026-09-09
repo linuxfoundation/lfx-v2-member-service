@@ -39,6 +39,14 @@ func (b byMembershipSiblingLister) ListKeyContactsForMembership(_ context.Contex
 	return b[membershipUID], nil
 }
 
+// callHandleProjectRoleDelete drives a single-UID CDC delete through
+// projectRoleDeleteBatcher, the same path a real delete event takes, so
+// these unit tests exercise the batch-of-one case rather than reimplementing
+// the pre-pass lookup here.
+func callHandleProjectRoleDelete(o *CDCConsumer, ctx context.Context, uid string) error {
+	return o.projectRoleDeleteBatcher(ctx, []string{uid})(ctx, uid)
+}
+
 // ── coverageAwareLister ───────────────────────────────────────────────────────
 
 func TestCoverageAwareLister_CoveredEmptyMembership_IsCertain(t *testing.T) {
@@ -511,8 +519,13 @@ func TestRevokeKeyContactPairIfUnjustified_RecheckFindsRace_RepairsGrant(t *test
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, revokePublished, outcome, "the remove itself succeeded and is still reported as published")
-	assert.Nil(t, justifiedBy, "revokePublished never carries a justifying sibling")
+	// The remove plus a successful compensating put nets out to a live tuple
+	// justified by the racing sibling: this is revokeUnneeded semantics, not
+	// revokePublished, so every caller runs the durable-ownership transfer
+	// before clearing its own entry instead of racing the transfer.
+	assert.Equal(t, revokeUnneeded, outcome, "a successful repair reports the pair as justified by the racing sibling")
+	require.NotNil(t, justifiedBy, "the racing sibling that justified the repaired pair must be carried out")
+	assert.Equal(t, "kc-new", justifiedBy.UID)
 	assert.Equal(t, 2, pub.FlushCount, "the remove and the compensating put must each be flushed")
 	assert.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
 		"a raced grant must be repaired with a compensating member_put after the remove")
@@ -701,7 +714,7 @@ func TestHandleProjectRoleDelete_UncertainRevoke_HoldsReplayCursor(t *testing.T)
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{Err: assert.AnError},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete,
 		"an inconclusive sibling scan must hold the replay cursor for redelivery")
@@ -719,7 +732,7 @@ func TestHandleProjectRoleDelete_FailedRevoke_HoldsReplayCursor(t *testing.T) {
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
 }
@@ -733,7 +746,7 @@ func TestHandleProjectRoleDelete_ConfirmedRevoke_AdvancesAndClears(t *testing.T)
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	require.NoError(t, err)
 	assert.Contains(t, grants.Deletes, "kc-1", "a confirmed revoke must clear the index entry")
@@ -772,7 +785,7 @@ func TestHandleProjectRoleDelete_IndexReadFailureExhausted_HoldsReplayCursorWith
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete,
 		"an exhausted read failure must hold the replay cursor, not fall back to an unaddressed revoke")
@@ -793,7 +806,7 @@ func TestHandleProjectRoleDelete_MarkerOnlyEntry_RevokesPendingPairAndDeletes(t 
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	require.NoError(t, err)
 	assert.Contains(t, grants.Deletes, "kc-1",
@@ -813,7 +826,7 @@ func TestHandleProjectRoleDelete_MarkerOnlyEntry_FailedRevoke_HoldsCursor(t *tes
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
 	_, found := grants.Entries["kc-1"]
@@ -837,7 +850,7 @@ func TestHandleProjectRoleDelete_LivePairWithMarker_DrainsBothAndDeletes(t *test
 		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
 	}
 
-	err := o.handleProjectRoleDelete(context.Background(), "kc-1")
+	err := callHandleProjectRoleDelete(o, context.Background(), "kc-1")
 
 	require.NoError(t, err)
 	assert.Contains(t, grants.Deletes, "kc-1",
@@ -851,7 +864,7 @@ func TestRevokeKeyContactMarkerOnDelete_Success_DeletesEntry(t *testing.T) {
 	o := &CDCConsumer{publisher: mock.NewMockMemberPublisher(), grantIndex: grants}
 	grant := grants.Entries["kc-1"]
 
-	err := o.revokeKeyContactMarkerOnDelete(context.Background(), "kc-1", grant, stubSiblingLister{})
+	err := o.revokeKeyContactMarkerOnDelete(context.Background(), "kc-1", grant, stubSiblingLister{}, stubSiblingLister{})
 
 	require.NoError(t, err)
 	assert.Contains(t, grants.Deletes, "kc-1")
@@ -864,7 +877,7 @@ func TestRevokeKeyContactMarkerOnDelete_Uncertain_HoldsCursor(t *testing.T) {
 	o := &CDCConsumer{publisher: mock.NewMockMemberPublisher(), grantIndex: grants}
 	grant := grants.Entries["kc-1"]
 
-	err := o.revokeKeyContactMarkerOnDelete(context.Background(), "kc-1", grant, stubSiblingLister{err: assert.AnError})
+	err := o.revokeKeyContactMarkerOnDelete(context.Background(), "kc-1", grant, stubSiblingLister{err: assert.AnError}, stubSiblingLister{})
 
 	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
 	_, found := grants.Entries["kc-1"]
@@ -882,7 +895,7 @@ func TestDrainKeyContactMarkerAndDelete_Success_DeletesEntry(t *testing.T) {
 	o := &CDCConsumer{publisher: mock.NewMockMemberPublisher(), grantIndex: grants}
 	grant := grants.Entries["kc-1"]
 
-	err := o.drainKeyContactMarkerAndDelete(context.Background(), "kc-1", grant, stubSiblingLister{})
+	err := o.drainKeyContactMarkerAndDelete(context.Background(), "kc-1", grant, stubSiblingLister{}, stubSiblingLister{})
 
 	require.NoError(t, err)
 	assert.Contains(t, grants.Deletes, "kc-1")
@@ -901,7 +914,7 @@ func TestDrainKeyContactMarkerAndDelete_DrainFails_PreservesMarkerHoldsCursor(t 
 	o := &CDCConsumer{publisher: pub, grantIndex: grants}
 	grant := grants.Entries["kc-1"]
 
-	err := o.drainKeyContactMarkerAndDelete(context.Background(), "kc-1", grant, stubSiblingLister{})
+	err := o.drainKeyContactMarkerAndDelete(context.Background(), "kc-1", grant, stubSiblingLister{}, stubSiblingLister{})
 
 	assert.ErrorIs(t, err, errKeyContactRevokeIncomplete)
 	stored, found := grants.Entries["kc-1"]

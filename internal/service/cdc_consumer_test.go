@@ -159,6 +159,51 @@ func (r *fakeB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []str
 	return map[string][]string{}, r.batchErr
 }
 
+// sequencedSiblingReader returns a different contact set on each successive
+// call, cycling through responses, so a test can simulate a sibling
+// appearing between the batched scan (an even-indexed call) and a later live
+// recheck (the next, odd-indexed call) without a real race. Cycling (rather
+// than a fixed list that runs out) keeps the same scan/recheck pattern on
+// every redelivery a held replay cursor triggers.
+type sequencedSiblingReader struct {
+	responses [][]*model.KeyContact
+	calls     int
+}
+
+func (r *sequencedSiblingReader) FetchKeyContactsByAssetSFIDs(
+	_ context.Context,
+	assetSFIDs []string,
+) (map[string][]*model.KeyContact, error) {
+	idx := r.calls % len(r.responses)
+	r.calls++
+	contacts := r.responses[idx]
+	grouped := make(map[string][]*model.KeyContact, len(assetSFIDs))
+	for _, sfid := range assetSFIDs {
+		grouped[sfid] = nil
+	}
+	for _, c := range contacts {
+		grouped[c.MembershipUID] = append(grouped[c.MembershipUID], c)
+	}
+	return grouped, nil
+}
+
+// callRecordingSiblingReader wraps a mock.MockKeyContactsByMembershipReader
+// and records the exact assetSFIDs slice passed to each individual call, so a
+// test can tell one call batching several memberships together apart from
+// several single-membership calls that add up to the same flat total.
+type callRecordingSiblingReader struct {
+	inner *mock.MockKeyContactsByMembershipReader
+	calls [][]string
+}
+
+func (r *callRecordingSiblingReader) FetchKeyContactsByAssetSFIDs(
+	ctx context.Context,
+	assetSFIDs []string,
+) (map[string][]*model.KeyContact, error) {
+	r.calls = append(r.calls, slices.Clone(assetSFIDs))
+	return r.inner.FetchKeyContactsByAssetSFIDs(ctx, assetSFIDs)
+}
+
 // subjectCapturingPublisher captures subjects and message payloads for
 // both indexer and access publish calls.
 type subjectCapturingPublisher struct {
@@ -696,6 +741,145 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 		"the grant entry must be cleared once the revoke is published")
 	assert.Equal(t, 1, pub.flushCount,
 		"delivery must be confirmed before the only recorded address is cleared")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_MultiRecordBatch_OneSiblingFetch covers
+// the batching finding: a single Project_Role__c delete event naming multiple
+// deleted key contacts on different memberships must share one Salesforce
+// sibling fetch across the whole batch, not one fetch per deleted record, and
+// each deleted contact must still get its own correct revoke decision.
+func TestCDCConsumer_ProjectRole_Delete_MultiRecordBatch_OneSiblingFetch(t *testing.T) {
+	kcUID1 := sfid("kc-uid-batch-1")
+	kcUID2 := sfid("kc-uid-batch-2")
+	membershipUID1 := sfid("asset-batch-1")
+	membershipUID2 := sfid("asset-batch-2")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID1: {MembershipUID: membershipUID1, Username: "alice", Revision: 1},
+			kcUID2: {MembershipUID: membershipUID2, Username: "bob", Revision: 1},
+		},
+	}
+	siblingReader := &callRecordingSiblingReader{inner: &mock.MockKeyContactsByMembershipReader{}}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID1, kcUID2}, ReplayID: []byte("r-batch")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblingReader),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	// Recheck stays a live, per-remove lister by design (one call per
+	// successful remove), so the two removes here each add one single-
+	// membership recheck call. What must be batched is the sibling SCAN: it
+	// must show up as exactly one call naming both memberships together,
+	// not two single-membership scan calls (which would make four calls
+	// total instead of three).
+	var batchedCalls int
+	for _, call := range siblingReader.calls {
+		if len(call) == 2 {
+			batchedCalls++
+			assert.ElementsMatch(t, []string{membershipUID1, membershipUID2}, call,
+				"the batched scan call must cover every membership referenced by the deleted contacts' grant entries")
+		}
+	}
+	assert.Equal(t, 1, batchedCalls,
+		"the sibling scan must be a single call batching both memberships, not one call per deleted record")
+	assert.Len(t, siblingReader.calls, 3,
+		"expected exactly one batched scan call plus one live recheck call per successful remove")
+
+	assert.ElementsMatch(t, []string{kcUID1, kcUID2}, grants.Deletes,
+		"both entries must still be cleared once each revoke is published")
+	require.Len(t, pub.accessMessages, 2)
+	gotMemberships := make([]string, 0, 2)
+	for _, msg := range pub.accessMessages {
+		removeMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		require.True(t, ok)
+		assert.Equal(t, "member_remove", removeMsg.Operation)
+		removeData, ok := removeMsg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok)
+		gotMemberships = append(gotMemberships, removeData.UID)
+	}
+	assert.ElementsMatch(t, []string{membershipUID1, membershipUID2}, gotMemberships,
+		"each deleted contact must still revoke the membership its own grant entry recorded")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_RepairedRace_TransferFailure_HoldsCursor
+// covers finding 1's caller-level contract: when the post-remove recheck
+// finds a racing sibling and repairs the tuple, the outcome is revokeUnneeded
+// carrying that sibling, not revokePublished, so this delete handler must run
+// the durable-ownership transfer (pairDurablyOwned) before it may clear the
+// original entry. If that transfer fails, the original entry, the only
+// address that still exists for this pair, must NOT be cleared, and the
+// replay cursor must be held for redelivery to retry.
+func TestCDCConsumer_ProjectRole_Delete_RepairedRace_TransferFailure_HoldsCursor(t *testing.T) {
+	kcUID := sfid("kc-uid-race")
+	kcNewUID := sfid("kc-uid-race-new")
+	membershipUID := sfid("asset-race")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 3},
+		},
+		// The racing sibling kcNewUID owns no entry yet: pairDurablyOwned must
+		// create one via Put to durably transfer ownership. Force that Put to
+		// fail so the transfer itself fails.
+		PutErr: assert.AnError,
+	}
+	// Call 0 is the batched scan: no live sibling yet, so the remove proceeds.
+	// Call 1 is the live recheck after the remove publishes: a racing grant
+	// to kcNewUID has landed on the same membership in the meantime.
+	siblingReader := &sequencedSiblingReader{
+		responses: [][]*model.KeyContact{
+			nil,
+			{{UID: kcNewUID, MembershipUID: membershipUID, Email: "alice@example.com", Status: "Active"}},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r-race")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblingReader),
+		svc.WithCDCUserReader(&fakeUserReader{sub: "alice"}),
+	)
+
+	replay := &fakeReplayStore{}
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
+
+	assert.Empty(t, grants.Deletes,
+		"the original entry is the pair's only known address until the transfer to the racing sibling succeeds, so it must not be cleared")
+
+	// The remove and the compensating repair put must both have been
+	// published: the repair itself succeeded, only the durable-ownership
+	// transfer afterward failed.
+	var sawRemove, sawRepairPut bool
+	for _, msg := range pub.accessMessages {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		require.True(t, ok)
+		switch fgaMsg.Operation {
+		case "member_remove":
+			sawRemove = true
+		case "member_put":
+			sawRepairPut = true
+		}
+	}
+	assert.True(t, sawRemove, "the initial revoke must still be published before the recheck runs")
+	assert.True(t, sawRepairPut, "the recheck must repair the raced grant with a compensating member_put")
 }
 
 // TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry verifies

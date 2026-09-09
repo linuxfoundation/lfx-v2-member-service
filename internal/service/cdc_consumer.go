@@ -628,9 +628,11 @@ func partitionRecordIDs(ctx context.Context, entity string, event model.CDCEvent
 	return
 }
 
-// dispatchEntity normalizes and partitions event record IDs, runs each delete
-// ID through deleteHandler (logging failures), and returns the upsert IDs for
-// the caller to batch-process. Shared by all three entity top-level handlers.
+// dispatchEntity runs each ID in deleteIDs through deleteHandler (logging
+// failures). Callers partition the event's record IDs themselves (via
+// partitionRecordIDs) so a caller that needs the delete list before dispatch,
+// batching sibling lookups across it, can build deleteHandler from it first.
+// Shared by all three entity top-level handlers.
 //
 // Every delete failure is logged and the loop continues, so one bad ID never
 // costs the rest of the batch. Only errPurgeUnrecorded and
@@ -640,9 +642,8 @@ func partitionRecordIDs(ctx context.Context, entity string, event model.CDCEvent
 // except redelivery, which requires the replay cursor to stop. Any other
 // failure stays logged-and-continue as before, so a repairable error cannot
 // stall the stream.
-func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event model.CDCEvent,
-	deleteHandler func(context.Context, string) error) ([]string, error) {
-	deleteIDs, upsertIDs := partitionRecordIDs(ctx, entity, event)
+func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event model.CDCEvent, deleteIDs []string,
+	deleteHandler func(context.Context, string) error) error {
 	var unrecorded error
 	for _, id := range deleteIDs {
 		if err := deleteHandler(ctx, id); err != nil {
@@ -653,7 +654,7 @@ func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event m
 			}
 		}
 	}
-	return upsertIDs, unrecorded
+	return unrecorded
 }
 
 // logBatchFetchError logs a handler failure for each ID in a batch when the
@@ -670,7 +671,8 @@ func logBatchFetchError(ctx context.Context, entity string, ids []string, change
 func (o *CDCConsumer) handleAccount(ctx context.Context, event model.CDCEvent) error {
 	// The upserts run before the error is returned: a lost purge on one ID must
 	// not suppress unrelated work carried in the same event.
-	upsertIDs, err := o.dispatchEntity(ctx, "Account", event, o.handleAccountDelete)
+	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Account", event)
+	err := o.dispatchEntity(ctx, "Account", event, deleteIDs, o.handleAccountDelete)
 	if len(upsertIDs) > 0 {
 		err = errors.Join(err, o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType))
 	}
@@ -886,7 +888,8 @@ func (o *CDCConsumer) publishAccountDeleteIndex(ctx context.Context, uid string)
 
 func (o *CDCConsumer) handleAsset(ctx context.Context, event model.CDCEvent) error {
 	// See handleAccount: upserts run before the error is returned.
-	upsertIDs, err := o.dispatchEntity(ctx, "Asset", event, o.handleAssetDelete)
+	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Asset", event)
+	err := o.dispatchEntity(ctx, "Asset", event, deleteIDs, o.handleAssetDelete)
 	if len(upsertIDs) > 0 {
 		err = errors.Join(err, o.handleAssetUpsertBatch(ctx, upsertIDs, event.ChangeType))
 	}
@@ -1210,7 +1213,14 @@ func (o *CDCConsumer) handleProjectRole(ctx context.Context, event model.CDCEven
 	// See handleAccount: upserts run before the error is returned. This entity
 	// publishes no delete_access; the returned error is non-nil only for an
 	// unconfirmed key_contact revoke (errKeyContactRevokeIncomplete).
-	upsertIDs, dispatchErr := o.dispatchEntity(ctx, "Project_Role__c", event, o.handleProjectRoleDelete)
+	//
+	// The delete IDs are batched into one deleteHandler up front so a
+	// multi-record delete event shares a single sibling fetch across every
+	// referenced membership, instead of one Salesforce read per deleted
+	// record (projectRoleDeleteBatcher).
+	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Project_Role__c", event)
+	deleteHandler := o.projectRoleDeleteBatcher(ctx, deleteIDs)
+	dispatchErr := o.dispatchEntity(ctx, "Project_Role__c", event, deleteIDs, deleteHandler)
 	var upsertBatchErr error
 	if len(upsertIDs) > 0 {
 		upsertBatchErr = o.handleProjectRoleUpsertBatch(ctx, upsertIDs, event.ChangeType)
@@ -1248,7 +1258,16 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 	// IDs absent from the SOQL result are soft-deleted — route to delete.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(contacts, func(kc *model.KeyContact) string { return kc.UID }, convErrSFIDs)
-	absentErr := o.handleAbsentAsDelete(ctx, "Project_Role__c", upsertIDs, returned, o.handleProjectRoleDelete)
+	absentIDs := make([]string, 0, len(upsertIDs)-len(returned))
+	for _, id := range upsertIDs {
+		if _, found := returned[id]; !found {
+			absentIDs = append(absentIDs, id)
+		}
+	}
+	// Same batching as the genuine-delete path: one sibling fetch shared
+	// across every membership referenced by the absent IDs' grant entries.
+	absentDeleteHandler := o.projectRoleDeleteBatcher(ctx, absentIDs)
+	absentErr := o.handleAbsentAsDelete(ctx, "Project_Role__c", upsertIDs, returned, absentDeleteHandler)
 
 	action := indexerConstants.ActionUpdated
 	if changeType == model.CDCChangeCreate {
@@ -1331,7 +1350,51 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 }
 
-func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) error {
+// keyContactGrantLookup carries one grant-index read's result, captured once
+// per deleted UID by projectRoleDeleteBatcher's pre-pass so the per-record
+// delete handler below never re-reads the same entry.
+type keyContactGrantLookup struct {
+	grant port.KeyContactGrant
+	found bool
+	err   error
+}
+
+// projectRoleDeleteBatcher builds one deleteHandler for the whole batch of
+// key_contact UIDs in ids: it reads each UID's grant-index entry once (a
+// local KV read, not the Salesforce query this exists to batch), collects
+// every membership referenced by those entries (a live pair's own membership
+// and any PendingRevoke marker's) and fetches all of their siblings in a
+// single Salesforce call, instead of the one-fetch-per-record
+// cost siblingListerFor would otherwise pay for each deleted contact. A
+// single-ID delete event runs the same path with a batch of one.
+//
+// The returned lister is for the sibling SCAN only; recheck stays a live,
+// per-record lister built inside handleProjectRoleDelete, since recheck only
+// runs after a remove actually publishes and that per-remove live read is
+// the accepted budget.
+func (o *CDCConsumer) projectRoleDeleteBatcher(ctx context.Context, ids []string) func(context.Context, string) error {
+	lookups := make(map[string]keyContactGrantLookup, len(ids))
+	memberships := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		grant, found, err := o.lookupKeyContactGrant(ctx, id)
+		lookups[id] = keyContactGrantLookup{grant: grant, found: found, err: err}
+		if err != nil || !found {
+			continue
+		}
+		if grant.MembershipUID != "" {
+			memberships[grant.MembershipUID] = struct{}{}
+		}
+		if grant.PendingRevoke != nil && grant.PendingRevoke.MembershipUID != "" {
+			memberships[grant.PendingRevoke.MembershipUID] = struct{}{}
+		}
+	}
+	lister := batchedSiblingListerForMemberships(ctx, o.keyContactsByMembership, o.userReader, memberships)
+	return func(ctx context.Context, id string) error {
+		return o.handleProjectRoleDelete(ctx, id, lookups[id], lister)
+	}
+}
+
+func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string, lookup keyContactGrantLookup, lister membershipKeyContactLister) error {
 	if err := o.cacheInvalidator.InvalidateKeyContact(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact cache invalidation failed on delete",
 			"uid", uid, "error", err)
@@ -1345,7 +1408,7 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// The CDC event carries only the key contact's own SFID and the Salesforce
 	// record is already gone, so the grant index is the only place the membership
 	// object and granted username can be recovered from.
-	grant, found, lookupErr := o.lookupKeyContactGrant(ctx, uid)
+	grant, found, lookupErr := lookup.grant, lookup.found, lookup.err
 	if lookupErr != nil {
 		// Retries exhausted: the index may still hold the exact address
 		// needed to revoke this grant, but the read itself failed. Hold the
@@ -1373,12 +1436,15 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		return nil
 	}
 
-	lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
+	// recheck must be LIVE, never the batched scan lister: it only runs after
+	// a remove actually publishes, so one live read per remove stays within
+	// the accepted per-record budget even though the scan above is batched.
+	live := siblingListerFor(o.keyContactsByMembership, o.userReader)
 
 	// Marker-only entry: the live pair was already revoked and cleared, and
 	// only the PendingRevoke marker for a superseded pair remains.
 	if grant.MembershipUID == "" || grant.Username == "" {
-		return o.revokeKeyContactMarkerOnDelete(ctx, uid, grant, lister)
+		return o.revokeKeyContactMarkerOnDelete(ctx, uid, grant, lister, live)
 	}
 
 	// The record is already gone in Salesforce, so the stored pair's email
@@ -1390,7 +1456,7 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		excludeUID:    uid,
 		reason:        "key contact deleted in Salesforce",
 		flush:         true,
-		recheck:       lister,
+		recheck:       live,
 	})
 	if outcome == revokeUncertain || outcome == revokeFailed {
 		// Keep the index entry: it is the only record of what still needs
@@ -1420,7 +1486,7 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// The live pair is settled. A PendingRevoke marker for a superseded pair
 	// must be drained too before the entry can be deleted outright.
 	if grant.PendingRevoke != nil {
-		return o.drainKeyContactMarkerAndDelete(ctx, uid, grant, lister)
+		return o.drainKeyContactMarkerAndDelete(ctx, uid, grant, lister, live)
 	}
 	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
@@ -1433,7 +1499,9 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 // whose live pair was already revoked and cleared, leaving only a
 // PendingRevoke marker for a superseded pair. It revokes that pending pair
 // using the marker's own membership and username, then clears the entry.
-func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister membershipKeyContactLister) error {
+// lister serves the sibling scan (the batch-wide prefetch); recheck must be a
+// LIVE lister, mirroring handleProjectRoleDelete's own recheck.
+func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister, recheck membershipKeyContactLister) error {
 	marker := grant.PendingRevoke
 	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
 		membershipUID: marker.MembershipUID,
@@ -1441,7 +1509,7 @@ func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid st
 		excludeUID:    uid,
 		reason:        "key contact deleted in Salesforce (pending revoke marker)",
 		flush:         true,
-		recheck:       lister,
+		recheck:       recheck,
 	})
 	if outcome == revokeUncertain || outcome == revokeFailed {
 		return fmt.Errorf("revoke key_contact pending marker for %s: %w",
@@ -1472,7 +1540,9 @@ func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid st
 // drain fails or is uncertain, the entry is rewritten with the live pair
 // cleared but the marker intact (mirroring clearRevokedGrant), preserving the
 // marker as a retry address rather than deleting the entry outright.
-func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister membershipKeyContactLister) error {
+// lister serves the sibling scan (the batch-wide prefetch); recheck must be a
+// LIVE lister, mirroring handleProjectRoleDelete's own recheck.
+func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister, recheck membershipKeyContactLister) error {
 	marker := grant.PendingRevoke
 	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
 		membershipUID: marker.MembershipUID,
@@ -1480,7 +1550,7 @@ func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid st
 		excludeUID:    uid,
 		reason:        "key contact deleted in Salesforce (draining superseded marker)",
 		flush:         true,
-		recheck:       lister,
+		recheck:       recheck,
 	})
 	drainFailed := outcome == revokeUncertain || outcome == revokeFailed
 	if !drainFailed && outcome == revokeUnneeded && justifiedBy != nil {

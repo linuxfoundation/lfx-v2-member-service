@@ -404,11 +404,17 @@ func publishKeyContactRemove(ctx context.Context, p port.MemberPublisher, req ke
 // scan against that live lister: a different contact UID can grant the same
 // pair between the first scan and this publish, and the remove would
 // otherwise strip access that was just re-granted. A recheck that finds the
-// pair justified again publishes a compensating member_put. The remove itself
-// did deliver, but if the recheck read fails, or a racing sibling is found
-// and the compensating put (or its flush) fails, the outcome is
-// revokeUncertain, not revokePublished: the caller must preserve retry state
-// rather than report a revoke that may have stripped live access.
+// pair justified again publishes a compensating member_put. If that repair
+// (and its flush) succeeds, the net effect of the remove plus the repair is a
+// live tuple justified by the racing sibling, so the outcome is
+// revokeUnneeded with justifiedBy set to that sibling, not revokePublished:
+// every caller already runs the durable-ownership transfer on revokeUnneeded
+// and preserves retry state if that transfer fails, which is exactly what
+// must happen here before the original entry can be cleared. If the recheck
+// read fails, or the racing sibling is found but the compensating put or its
+// flush fails, the outcome is revokeUncertain instead: the caller must
+// preserve retry state rather than report a revoke that may have stripped
+// live access.
 func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublisher, lister membershipKeyContactLister, req keyContactPairRevoke) (keyContactRevokeOutcome, *model.KeyContact, error) {
 	if req.username == "" {
 		return revokeUnneeded, nil, nil
@@ -451,6 +457,11 @@ func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublish
 			}
 			slog.WarnContext(ctx, "key_contact grant repaired: a concurrent grant raced this revoke and was reapplied",
 				"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
+			// The remove plus a successful compensating put nets out to a live
+			// tuple justified by the racing sibling: report the same outcome
+			// as if the scan had found it justified up front, so the caller
+			// runs the durable-ownership transfer before clearing this entry.
+			return revokeUnneeded, racedBy, nil
 		}
 	}
 	return revokePublished, nil, nil

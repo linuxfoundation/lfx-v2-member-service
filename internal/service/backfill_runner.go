@@ -934,21 +934,32 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 // reparented old pair) falls back to a live per-membership read rather than
 // reading as falsely sibling-free. Returns nil only when no reader is wired.
 func batchedSiblingLister(ctx context.Context, reader port.KeyContactsByMembershipReader, users port.UserReader, kcs []*model.KeyContact) membershipKeyContactLister {
-	if reader == nil {
-		return nil
-	}
-	live := keyContactsByMembershipLister{reader: reader}
-	uidSet := make(map[string]struct{})
+	uidSet := make(map[string]struct{}, len(kcs))
 	for _, kc := range kcs {
 		if kc.MembershipUID != "" {
 			uidSet[kc.MembershipUID] = struct{}{}
 		}
 	}
-	if len(uidSet) == 0 {
+	return batchedSiblingListerForMemberships(ctx, reader, users, uidSet)
+}
+
+// batchedSiblingListerForMemberships prefetches, in one Salesforce query, the
+// key contacts of every membership in memberships. Unlike batchedSiblingLister
+// it takes the membership UIDs directly, for callers (a CDC delete batch) that
+// know which memberships need checking from grant-index entries rather than
+// from already-fetched KeyContact records. A membership outside the prefetch
+// falls back to a live per-membership read rather than reading as falsely
+// sibling-free. Returns nil only when no reader is wired.
+func batchedSiblingListerForMemberships(ctx context.Context, reader port.KeyContactsByMembershipReader, users port.UserReader, memberships map[string]struct{}) membershipKeyContactLister {
+	if reader == nil {
+		return nil
+	}
+	live := keyContactsByMembershipLister{reader: reader}
+	if len(memberships) == 0 {
 		return withEmailResolver(live, users)
 	}
-	uids := make([]string, 0, len(uidSet))
-	for uid := range uidSet {
+	uids := make([]string, 0, len(memberships))
+	for uid := range memberships {
 		uids = append(uids, uid)
 	}
 	grouped, err := reader.FetchKeyContactsByAssetSFIDs(ctx, uids)
@@ -958,7 +969,7 @@ func batchedSiblingLister(ctx context.Context, reader port.KeyContactsByMembersh
 		return failedKeyContactLister{err: err}
 	}
 	return withEmailResolver(coverageAwareLister{
-		covered:  uidSet,
+		covered:  memberships,
 		inner:    mappedKeyContactLister(grouped),
 		fallback: live,
 	}, users)
