@@ -459,6 +459,83 @@ func TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors(t 
 	assert.Equal(t, superseded, *entry.PendingRevoke)
 }
 
+// ── Z0: drainKeyContactPendingRevoke reassert on the justified branch ───────────
+
+// internalPutMessages returns the member_put payloads captured by a
+// mock.MockMemberPublisher, in publication order.
+func internalPutMessages(t *testing.T, msgs []any) []fgatypes.GenericMemberData {
+	t.Helper()
+	var out []fgatypes.GenericMemberData
+	for _, msg := range msgs {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		if !ok || fgaMsg.Operation != "member_put" {
+			continue
+		}
+		data, ok := fgaMsg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok)
+		out = append(out, data)
+	}
+	return out
+}
+
+// TestDrainKeyContactPendingRevoke_Justified_ReassertsPutBeforeTransfer covers
+// finding B's rejected-rebuttal gap: when a live sibling justifies the
+// marker's pair, drainKeyContactPendingRevoke must publish a confirmed
+// member_put reasserting that pair before transferring durable ownership, so
+// redelivery actually executes the repair instead of only skipping cleanup.
+func TestDrainKeyContactPendingRevoke_Justified_ReassertsPutBeforeTransfer(t *testing.T) {
+	marker := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: marker.MembershipUID, Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := newCapturingPublisher()
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{}}
+
+	err := drainKeyContactPendingRevoke(context.Background(), pub, idx, lister, "kc-1", marker, "test")
+
+	require.NoError(t, err)
+	puts := internalPutMessages(t, pub.accessMsgs)
+	require.Len(t, puts, 1, "the marker's pair must be reasserted with a member_put")
+	assert.Equal(t, marker.MembershipUID, puts[0].UID)
+	assert.Equal(t, marker.Username, puts[0].Username)
+	assert.Equal(t, 1, pub.FlushCount, "the reassert put must be confirmed with a flush")
+	entry, found := idx.Entries["sib-1"]
+	require.True(t, found, "ownership must transfer to the justifying sibling after the reassert")
+	assert.Equal(t, marker.MembershipUID, entry.MembershipUID)
+	assert.Equal(t, marker.Username, entry.Username)
+}
+
+// TestDrainKeyContactPendingRevoke_Justified_ReassertFails_ReturnsError covers
+// the other side: when the reassert put fails, the drain must return an
+// error so the marker is preserved as the retry address, and ownership must
+// not be transferred on top of an unconfirmed reassert.
+func TestDrainKeyContactPendingRevoke_Justified_ReassertFails_ReturnsError(t *testing.T) {
+	marker := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: marker.MembershipUID, Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{}}
+
+	err := drainKeyContactPendingRevoke(context.Background(), pub, idx, lister, "kc-1", marker, "test")
+
+	require.Error(t, err, "a failed reassert put must be reported so the marker is preserved")
+	assert.Empty(t, idx.Puts, "ownership must not transfer when the reassert put was not confirmed")
+}
+
 // ── Z1: a second supersede must not overwrite an undrained marker ──────────────
 
 func TestRecordKeyContactGrant_SecondSupersede_DrainsExistingMarkerFirst(t *testing.T) {

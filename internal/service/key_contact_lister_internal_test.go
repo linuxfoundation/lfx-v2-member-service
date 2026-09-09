@@ -521,7 +521,12 @@ func TestRevokeKeyContactPairIfUnjustified_RecheckFindsRace_RepairsGrant(t *test
 	assert.Equal(t, "member_put", put.Operation, "the last publish must be the compensating put, not the remove")
 }
 
-func TestRevokeKeyContactPairIfUnjustified_RecheckError_OutcomeUnchanged(t *testing.T) {
+// TestRevokeKeyContactPairIfUnjustified_RecheckError_ReturnsUncertain covers
+// finding A/B: a failed post-remove recheck must not report a successful
+// revoke, since a racing sibling grant might have been raced and not
+// repaired. The remove itself already delivered, so no compensating put is
+// attempted, but the outcome must let the caller preserve retry state.
+func TestRevokeKeyContactPairIfUnjustified_RecheckError_ReturnsUncertain(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	recheck := stubSiblingLister{err: assert.AnError}
 
@@ -534,11 +539,52 @@ func TestRevokeKeyContactPairIfUnjustified_RecheckError_OutcomeUnchanged(t *test
 		recheck:       recheck,
 	})
 
-	require.NoError(t, err, "a failed recheck must not change the outcome or error of the already-published remove")
-	assert.Equal(t, revokePublished, outcome)
+	require.Error(t, err, "a failed recheck must be reported so the caller preserves retry state")
+	assert.Equal(t, revokeUncertain, outcome)
 	assert.Nil(t, justifiedBy)
 	assert.Equal(t, 1, pub.FlushCount, "a recheck error must not publish a compensating put")
 	assert.Equal(t, []string{"access", "flush"}, pub.CallOrder)
+}
+
+// nthAccessFailsPublisher fails the n-th Access call (1-indexed) and succeeds
+// every other call, letting a test target the compensating put specifically
+// without also failing the original remove.
+type nthAccessFailsPublisher struct {
+	*mock.MockMemberPublisher
+	n     int
+	count int
+}
+
+func (p *nthAccessFailsPublisher) Access(ctx context.Context, subject string, msg any) error {
+	p.count++
+	if p.count == p.n {
+		return assert.AnError
+	}
+	return p.MockMemberPublisher.Access(ctx, subject, msg)
+}
+
+// TestRevokeKeyContactPairIfUnjustified_RecheckRaced_RepairFails_ReturnsUncertain
+// covers finding A/B: when the recheck finds a racing sibling but the
+// compensating put fails, the outcome must be revokeUncertain, not
+// revokePublished, so callers do not clear retry state while access is down.
+func TestRevokeKeyContactPairIfUnjustified_RecheckRaced_RepairFails_ReturnsUncertain(t *testing.T) {
+	pub := &nthAccessFailsPublisher{MockMemberPublisher: mock.NewMockMemberPublisher(), n: 2}
+	sib := &model.KeyContact{UID: "kc-racer", Email: "alice@example.com", Status: "Active"}
+	recheck := stubSiblingLister{siblings: []*model.KeyContact{sib}}
+
+	outcome, justifiedBy, err := revokeKeyContactPairIfUnjustified(context.Background(), pub, stubSiblingLister{}, keyContactPairRevoke{
+		membershipUID: "asset-1",
+		username:      "alice",
+		email:         "alice@example.com",
+		excludeUID:    "kc-target",
+		reason:        "test",
+		flush:         true,
+		recheck:       recheck,
+	})
+
+	require.Error(t, err, "a failed compensating put must be reported so the caller preserves retry state")
+	assert.Equal(t, revokeUncertain, outcome)
+	assert.Equal(t, sib, justifiedBy, "the racing sibling is reported so the caller knows who justified the pair")
 }
 
 // ── pairDurablyOwned (T5) ──────────────────────────────────────────────────────

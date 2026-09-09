@@ -1038,8 +1038,18 @@ func TestCDCConsumer_ProjectRoleDelete_LiveSiblingResolvesToGrantedUser_SkipsRev
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
 
-	assert.Empty(t, pub.accessMessages,
-		"a live sibling still justifies the tuple: the CDC delete must not revoke it")
+	var puts int
+	for _, msg := range pub.accessMessages {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		require.True(t, ok)
+		assert.NotEqual(t, "member_remove", fgaMsg.Operation,
+			"a live sibling still justifies the tuple: the CDC delete must not revoke it")
+		if fgaMsg.Operation == "member_put" {
+			puts++
+		}
+	}
+	assert.Equal(t, 1, puts,
+		"the justified pair must be reasserted with a confirmed put before the entry clears")
 	assert.Equal(t, []string{kcUID}, grants.Deletes,
 		"the deleted contact's own entry must still be cleared — nothing will revisit it")
 }

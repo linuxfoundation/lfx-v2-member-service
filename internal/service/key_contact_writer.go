@@ -540,9 +540,14 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 			indexedPairRevokeFailed = true
 		} else if staleOutcome == revokeUnneeded && staleJustifiedBy != nil && o.grantIndex != nil &&
 			!pairDurablyOwned(ctx, o.grantIndex, staleJustifiedBy, grant.MembershipUID, grant.Username) {
-			// A live sibling justifies the stale pair, but the stale entry is
-			// its only durable address until the sibling durably owns it.
-			indexedPairRevokeFailed = true
+			// A live sibling justifies the stale pair, but a failed transfer
+			// leaves the stale entry, keyed by the just-deleted UID, as the
+			// pair's only durable address: nothing will ever revisit it. Fail
+			// the delete rather than silently succeed with the Salesforce
+			// record already gone.
+			slog.ErrorContext(ctx, "key contact deleted but stale indexed pair durable revoke address transfer failed",
+				"uid", in.UID, "membership_uid", grant.MembershipUID, "manual_recovery_required", true)
+			return pkgerrors.NewUnexpected("key contact deleted but durable revoke address transfer failed for stale indexed pair: retry the delete", nil)
 		}
 	}
 

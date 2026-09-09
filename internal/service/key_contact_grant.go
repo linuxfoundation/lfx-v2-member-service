@@ -392,8 +392,11 @@ func publishKeyContactRemove(ctx context.Context, p port.MemberPublisher, req ke
 // scan against that live lister: a different contact UID can grant the same
 // pair between the first scan and this publish, and the remove would
 // otherwise strip access that was just re-granted. A recheck that finds the
-// pair justified again publishes a compensating member_put; the outcome
-// stays revokePublished either way, since the remove itself did succeed.
+// pair justified again publishes a compensating member_put. The remove itself
+// did deliver, but if the recheck read fails, or a racing sibling is found
+// and the compensating put (or its flush) fails, the outcome is
+// revokeUncertain, not revokePublished: the caller must preserve retry state
+// rather than report a revoke that may have stripped live access.
 func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublisher, lister membershipKeyContactLister, req keyContactPairRevoke) (keyContactRevokeOutcome, *model.KeyContact, error) {
 	if req.username == "" {
 		return revokeUnneeded, nil, nil
@@ -420,7 +423,9 @@ func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublish
 			slog.ErrorContext(ctx, "key_contact post-revoke recheck failed: tuple may be incorrectly absent until the next backfill",
 				"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason,
 				"error", recheckErr, "fga_remove_raced_possible_lost_grant", true)
-		} else if racedBy != nil {
+			return revokeUncertain, nil, fmt.Errorf("post-revoke recheck for key_contact %s: %w", req.excludeUID, recheckErr)
+		}
+		if racedBy != nil {
 			repairMsg := BuildKeyContactFGAPutMessage(req.membershipUID, req.username)
 			repairErr := p.Access(ctx, fgaconstants.GenericMemberPutSubject, repairMsg)
 			if repairErr == nil {
@@ -430,10 +435,10 @@ func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublish
 				slog.ErrorContext(ctx, "key_contact post-revoke repair failed: tuple may be incorrectly absent until the next backfill",
 					"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason,
 					"error", repairErr, "fga_remove_raced_possible_lost_grant", true)
-			} else {
-				slog.WarnContext(ctx, "key_contact grant repaired: a concurrent grant raced this revoke and was reapplied",
-					"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
+				return revokeUncertain, racedBy, fmt.Errorf("post-revoke repair for key_contact %s: %w", req.excludeUID, repairErr)
 			}
+			slog.WarnContext(ctx, "key_contact grant repaired: a concurrent grant raced this revoke and was reapplied",
+				"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
 		}
 	}
 	return revokePublished, nil, nil
@@ -617,6 +622,31 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	return nil
 }
 
+// reassertKeyContactPendingRevokePair publishes a confirmed (flushed)
+// member_put reasserting a PendingRevoke marker's pair before that marker's
+// ownership transfers or is dropped. A pending-revoke marker means a remove
+// may have been published for the pair without a confirmed compensating
+// repair, so the tuple's live presence is unknown; reasserting it is
+// idempotent and guarantees the repair executes on this retry path instead of
+// depending on some future unrelated touch. A failed put or flush returns an
+// error so the caller preserves the marker as the retry address.
+func reassertKeyContactPendingRevokePair(ctx context.Context, p port.MemberPublisher, excludeUID, membershipUID, username string) error {
+	msg := BuildKeyContactFGAPutMessage(membershipUID, username)
+	if err := p.Access(ctx, fgaconstants.GenericMemberPutSubject, msg); err != nil {
+		slog.ErrorContext(ctx, "key_contact pending revoke marker reassert publish failed",
+			"uid", excludeUID, "membership_uid", membershipUID, "error", err, "fga_remove_raced_possible_lost_grant", true)
+		return fmt.Errorf("reassert key_contact pending revoke pair for %s: %w", excludeUID, err)
+	}
+	if err := p.Flush(ctx); err != nil {
+		slog.ErrorContext(ctx, "key_contact pending revoke marker reassert flush failed",
+			"uid", excludeUID, "membership_uid", membershipUID, "error", err, "fga_remove_raced_possible_lost_grant", true)
+		return fmt.Errorf("flush key_contact pending revoke reassert for %s: %w", excludeUID, err)
+	}
+	slog.InfoContext(ctx, "key_contact pending revoke marker reasserted before drop",
+		"uid", excludeUID, "membership_uid", membershipUID)
+	return nil
+}
+
 // drainKeyContactPendingRevoke revokes marker's pair ahead of an index entry
 // clear, so an unrelated PendingRevoke is never dropped unaddressed by
 // whichever caller is about to remove or rewrite the entry that carries it.
@@ -625,6 +655,9 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 // pair is either revoked-and-confirmed or still justified by a durably owned
 // sibling; a non-nil error means the marker must be preserved as the retry
 // address.
+//
+// On the justified branch, the marker's pair is reasserted with a confirmed
+// member_put before ownership transfers: see reassertKeyContactPendingRevokePair.
 func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, excludeUID string, marker port.KeyContactGrantRef, reason string) error {
 	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
 		membershipUID: marker.MembershipUID,
@@ -638,9 +671,13 @@ func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, i
 	case revokeUncertain, revokeFailed:
 		return fmt.Errorf("drain key_contact pending revoke marker for %s: %w", excludeUID, revokeErr)
 	case revokeUnneeded:
-		if justifiedBy != nil && idx != nil &&
-			!pairDurablyOwned(ctx, idx, justifiedBy, marker.MembershipUID, marker.Username) {
-			return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker", excludeUID)
+		if justifiedBy != nil {
+			if reassertErr := reassertKeyContactPendingRevokePair(ctx, p, excludeUID, marker.MembershipUID, marker.Username); reassertErr != nil {
+				return fmt.Errorf("drain key_contact pending revoke marker for %s: %w", excludeUID, reassertErr)
+			}
+			if idx != nil && !pairDurablyOwned(ctx, idx, justifiedBy, marker.MembershipUID, marker.Username) {
+				return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker", excludeUID)
+			}
 		}
 	}
 	return nil

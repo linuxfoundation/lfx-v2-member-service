@@ -1398,11 +1398,19 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// A live sibling justified the pair: this entry may be the pair's only
 	// durable address, so it must not be cleared until the sibling durably
 	// owns the pair.
-	if outcome == revokeUnneeded && justifiedBy != nil &&
-		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, grant.MembershipUID, grant.Username) {
-		// A failed transfer leaves the entry keyed by the just-deleted UID,
-		// which nothing else will ever revisit: hold the replay cursor.
-		return fmt.Errorf("transfer durable revoke address for key_contact %s: %w", uid, errKeyContactRevokeIncomplete)
+	if outcome == revokeUnneeded && justifiedBy != nil {
+		// A prior delivery may have removed the tuple and failed its repair:
+		// reassert the pair with a confirmed put before settling it.
+		if err := reassertKeyContactPendingRevokePair(ctx, o.publisher, uid,
+			grant.MembershipUID, grant.Username); err != nil {
+			return fmt.Errorf("reassert key_contact grant for %s: %w",
+				uid, errors.Join(err, errKeyContactRevokeIncomplete))
+		}
+		if !pairDurablyOwned(ctx, o.grantIndex, justifiedBy, grant.MembershipUID, grant.Username) {
+			// A failed transfer leaves the entry keyed by the just-deleted UID,
+			// which nothing else will ever revisit: hold the replay cursor.
+			return fmt.Errorf("transfer durable revoke address for key_contact %s: %w", uid, errKeyContactRevokeIncomplete)
+		}
 	}
 
 	// The live pair is settled. A PendingRevoke marker for a superseded pair
@@ -1435,10 +1443,18 @@ func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid st
 		return fmt.Errorf("revoke key_contact pending marker for %s: %w",
 			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
 	}
-	if outcome == revokeUnneeded && justifiedBy != nil &&
-		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
-		return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker: %w",
-			uid, errKeyContactRevokeIncomplete)
+	if outcome == revokeUnneeded && justifiedBy != nil {
+		// The marked pair may have had an unconfirmed remove: reassert it
+		// with a confirmed put before dropping the marker.
+		if err := reassertKeyContactPendingRevokePair(ctx, o.publisher, uid,
+			marker.MembershipUID, marker.Username); err != nil {
+			return fmt.Errorf("reassert key_contact pending marker for %s: %w",
+				uid, errors.Join(err, errKeyContactRevokeIncomplete))
+		}
+		if !pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
+			return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker: %w",
+				uid, errKeyContactRevokeIncomplete)
+		}
 	}
 	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after marker revoke",
@@ -1463,9 +1479,14 @@ func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid st
 		recheck:       lister,
 	})
 	drainFailed := outcome == revokeUncertain || outcome == revokeFailed
-	if !drainFailed && outcome == revokeUnneeded && justifiedBy != nil &&
-		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
-		drainFailed = true
+	if !drainFailed && outcome == revokeUnneeded && justifiedBy != nil {
+		// Same reassert-before-drop rule as revokeKeyContactMarkerOnDelete:
+		// the marked pair's tuple presence is unknown after a raced remove.
+		if reassertKeyContactPendingRevokePair(ctx, o.publisher, uid,
+			marker.MembershipUID, marker.Username) != nil ||
+			!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
+			drainFailed = true
+		}
 	}
 	if drainFailed {
 		clearRevokedGrant(ctx, o.grantIndex, uid, grant)

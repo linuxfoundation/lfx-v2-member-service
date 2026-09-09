@@ -1131,7 +1131,9 @@ func TestKeyContactWriter_Delete_StalePairJustifiedByUnindexedSibling_TransfersO
 
 // TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry covers the
 // other side of U4: when the justifying sibling already owns a conflicting
-// index entry, the transfer fails and the stale entry must be preserved.
+// index entry, the transfer fails, the stale entry must be preserved, and the
+// delete must fail rather than leave the deleted UID as the pair's only
+// address (finding C).
 func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testing.T) {
 	kc := kcForFGA()
 	storage := newSeededStorage(kc)
@@ -1166,7 +1168,7 @@ func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testin
 
 	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
 
-	require.NoError(t, err, "the delete itself still succeeds; only the stale entry's clear is skipped")
+	require.Error(t, err, "a failed durable-address transfer for the stale pair must fail the delete so the client retries")
 	assert.Empty(t, grants.Deletes, "a failed transfer must leave the stale entry as the pair's only durable address")
 }
 
