@@ -4010,6 +4010,39 @@ func TestCDCConsumer_Asset_Undelete_GrantIndexFailureHoldsReplayCursor(t *testin
 	requireAuthorizationRetry(t, consumer, "/data/AssetChangeEvent", replay)
 }
 
+// TestCDCConsumer_Asset_Undelete_InactiveColdIndexRevokeFailureHoldsReplayCursor
+// covers V2: a restored membership whose Inactive key contact has no grant
+// index entry and whose own-pair revoke fails must hold the replay cursor,
+// not advance it past a possibly still-live tuple.
+func TestCDCConsumer_Asset_Undelete_InactiveColdIndexRevokeFailureHoldsReplayCursor(t *testing.T) {
+	membershipUID := sfid("pm-inactive-cold")
+	pm := restoredMembership(membershipUID)
+	contacts := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{
+			UID: sfid("kc-inactive-cold"), MembershipUID: membershipUID,
+			Email: "alice@example.com", Username: "alice", Status: "Inactive",
+		},
+	}}
+
+	pub := &subjectCapturingPublisher{accessErr: errors.New("nats: connection closed")}
+	replay := &fakeReplayStore{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{
+			Entity: "Asset", ChangeType: model.CDCChangeUndelete,
+			RecordIDs: []string{membershipUID}, ReplayID: []byte("inactive-cold"),
+		}}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCKeyContactGrantIndex(&mock.MockKeyContactGrantIndex{}),
+		svc.WithCDCKeyContactsByMembershipReader(contacts),
+	)
+
+	requireAuthorizationRetry(t, consumer, "/data/AssetChangeEvent", replay)
+}
+
 func TestCDCConsumer_Asset_Undelete_ConfirmedRevokeMarkerClearFailureAdvancesCursor(t *testing.T) {
 	membershipUID := sfid("pm-clear-fail")
 	contactUID := sfid("kc-clear-fail")

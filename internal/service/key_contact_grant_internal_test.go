@@ -344,6 +344,57 @@ func TestRecordKeyContactGrant_MarkerOnlyEntry_CarriesPendingRevokeForward(t *te
 	assert.Equal(t, pending, *entry.PendingRevoke)
 }
 
+// ── V3: liveEmail direct-match gate requires a positive username match ──────
+
+// TestRevokeKeyContactGrantIfNoLongerLive_EmptyLiveUsername_SiblingSameEmailDoesNotFalselyJustify
+// covers V3: an empty liveUsername means resolution failed, not that the
+// stored username owns liveEmail. A sibling sharing liveEmail must not
+// falsely justify the stored pair by direct email match; only resolution can
+// justify it, and here resolution proves the sibling is a different person,
+// so the revoke must proceed.
+func TestRevokeKeyContactGrantIfNoLongerLive_EmptyLiveUsername_SiblingSameEmailDoesNotFalselyJustify(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "old-alice", Revision: 1},
+		},
+	}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: internalTestMembershipUID, Email: "carol@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "carol@example.com" {
+			return "carol", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, lister, "kc-1", "", "carol@example.com", reasonEmailUnregistered)
+
+	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
+	require.Len(t, removes, 1, "an empty liveUsername must not let a same-email sibling justify the stored pair by direct match")
+	assert.Equal(t, "old-alice", removes[0].Username)
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes)
+}
+
+// TestRevokeKeyContactGrantIfNoLongerLive_PositiveUsernameMatch_LiveEmailJustifiesBySibling
+// covers V3's positive case: when liveUsername positively matches the stored
+// username, liveEmail may still justify the pair by direct match against a
+// sibling carrying that email, with no resolver needed.
+func TestRevokeKeyContactGrantIfNoLongerLive_PositiveUsernameMatch_LiveEmailJustifiesBySibling(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: internalTestMembershipUID, Email: "alice@example.com", Status: "Active"}
+	lister := stubSiblingLister{siblings: []*model.KeyContact{sib}}
+
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, lister, "kc-1", "alice", "alice@example.com", reasonEmailUnregistered)
+
+	assert.Nil(t, pub.LastAccessData, "a positive username match must still let liveEmail justify the pair by direct match")
+}
+
 // ── U3: revokeSupersededKeyContactGrant durable-address transfer ─────────────
 
 // TestRevokeSupersededKeyContactGrant_UnindexedSiblingJustifies_TransfersBeforeClearing

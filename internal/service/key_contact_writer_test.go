@@ -87,6 +87,26 @@ func (p *accessPayloadPublisher) Access(_ context.Context, subject string, msg a
 	return nil
 }
 
+// flushFailsOnCallPublisher fails only the Nth Flush call (1-indexed),
+// letting an earlier or later flush in the same Delete succeed normally.
+type flushFailsOnCallPublisher struct {
+	trackingPublisher
+	failOnCall int
+	flushCalls int
+}
+
+func (p *flushFailsOnCallPublisher) Flush(ctx context.Context) error {
+	p.mu.Lock()
+	p.flushCalls++
+	call := p.flushCalls
+	p.mu.Unlock()
+	_ = p.trackingPublisher.Flush(ctx)
+	if call == p.failOnCall {
+		return pkgerrors.NewUnexpected("flush failed", nil)
+	}
+	return nil
+}
+
 // errorFGARemovePublisher fails the immediate publish of an FGA remove — the
 // message never reaches NATS — to test error propagation.
 type errorFGARemovePublisher struct{ trackingPublisher }
@@ -1379,6 +1399,174 @@ func TestKeyContactWriter_Update_EmailUnchangedBranch_DefinitiveMiss_RevokesReco
 // covers a transport-level lookup failure: it must not be treated as
 // evidence the email is unregistered, so a still-valid recorded grant must
 // survive.
+// TestKeyContactWriter_Delete_StalePairFlushFails_PreservesEntryDeleteStillSucceeds
+// covers V4: the stale-pair revoke now flushes (flush:true) instead of
+// relying on the main pair's own flush. A flush failure there must preserve
+// the index entry as the retry address, and the user-visible delete must
+// still succeed.
+func TestKeyContactWriter_Delete_StalePairFlushFails_PreservesEntryDeleteStillSucceeds(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &flushFailsOnCallPublisher{failOnCall: 1}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: "membership-old", Username: "bob-old", Revision: 1},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err, "the record is already deleted; an indeterminate stale-pair flush must not fail the API call")
+	assert.Equal(t, 2, pub.flushCalls, "the stale pair and the main pair must each flush independently")
+	assert.Empty(t, grants.Deletes, "an unconfirmed stale-pair flush must preserve the entry as the retry address")
+	entry, found := grants.Entries[testKCUID]
+	require.True(t, found)
+	assert.Equal(t, "membership-old", entry.MembershipUID, "the stale pair must remain the recorded retry address")
+	assert.Equal(t, "bob-old", entry.Username)
+}
+
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleEntryRecordsCurrentPairAsPending
+// covers V5: the main pair's revoke fails after the Salesforce record is
+// already deleted. With the index holding a stale pair, the failure must not
+// leave the current pair with no durable retry address: recordKeyContactGrant
+// must swap the entry to the current pair, carrying the stale pair forward as
+// PendingRevoke, before the revoke error is returned.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleEntryRecordsCurrentPairAsPending(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &errorFGARemovePublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "the revoke failure must still surface to the caller")
+	assert.Empty(t, grants.Deletes, "the entry must never be cleared on a failed revoke")
+	entry, found := grants.Entries[testKCUID]
+	require.True(t, found, "the current pair must be recorded as a durable retry address")
+	assert.Equal(t, testMembershipUID, entry.MembershipUID)
+	assert.Equal(t, "alice", entry.Username)
+}
+
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsPendingRevoke
+// covers V5's stale-pair composition: an index entry describing a different
+// pair than the one about to be revoked must, once recordKeyContactGrant
+// swaps in the current pair, carry that stale pair forward as PendingRevoke
+// rather than losing its only durable address.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsPendingRevoke(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &errorFGARemovePublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: "membership-old", Username: "bob-old", Revision: 1},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err)
+	entry, found := grants.Entries[testKCUID]
+	require.True(t, found, "the current pair must be recorded as a durable retry address")
+	assert.Equal(t, testMembershipUID, entry.MembershipUID, "the entry must swap to the current pair")
+	assert.Equal(t, "alice", entry.Username)
+	require.NotNil(t, entry.PendingRevoke, "the superseded stale pair must ride forward as a marker")
+	assert.Equal(t, "membership-old", entry.PendingRevoke.MembershipUID)
+	assert.Equal(t, "bob-old", entry.PendingRevoke.Username)
+}
+
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_NoIndexEntry_RecordsCurrentPair
+// covers V5 with no index entry at all: the revoke failure must still leave a
+// durable retry address behind for the current pair.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_NoIndexEntry_RecordsCurrentPair(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &errorFGARemovePublisher{}
+	grants := &mock.MockKeyContactGrantIndex{}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err)
+	entry, found := grants.Entries[testKCUID]
+	require.True(t, found, "a durable retry address must be recorded even with no prior entry")
+	assert.Equal(t, testMembershipUID, entry.MembershipUID)
+	assert.Equal(t, "alice", entry.Username)
+	assert.Nil(t, entry.PendingRevoke, "there was no prior pair to supersede")
+}
+
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_RecordFailure_StillReturnsRevokeError
+// covers V5's failure composition: when recordKeyContactGrant itself cannot
+// write the retry address, the original revoke error must still be returned
+// rather than a recording error masking it.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_RecordFailure_StillReturnsRevokeError(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &errorFGARemovePublisher{}
+	grants := &mock.MockKeyContactGrantIndex{PutErr: assert.AnError}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "the original revoke failure must still surface even when recording the retry address also fails")
+}
+
 func TestKeyContactWriter_Update_EmailUnchangedBranch_TransientFailure_LeavesGrantUntouched(t *testing.T) {
 	current := &model.KeyContact{
 		UID: testKCUID, MembershipUID: testMembershipUID,

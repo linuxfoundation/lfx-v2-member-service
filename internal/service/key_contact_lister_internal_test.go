@@ -221,6 +221,104 @@ func TestPublishKeyContactFGA_InactiveUncertainDrain_RetainsMarker(t *testing.T)
 	assert.Equal(t, pending, entry.PendingRevoke)
 }
 
+// ── V2: cold-index Inactive revoke must hold CDC replay on failure ───────────
+
+// TestPublishKeyContactFGA_ColdIndexInactiveRevokeFailed_ReturnsError covers
+// V2: a cold index (no entry) with an Inactive record whose own-pair revoke
+// fails must return an error so CDC restoration does not advance replay past
+// an unaddressed live tuple.
+func TestPublishKeyContactFGA_ColdIndexInactiveRevokeFailed_ReturnsError(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	grants := &mock.MockKeyContactGrantIndex{}
+	lister := stubSiblingLister{}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: internalTestMembershipUID,
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	require.Error(t, err, "a failed revoke on a cold index must be reported so CDC replay is held")
+	assert.False(t, published)
+}
+
+// TestPublishKeyContactFGA_ColdIndexInactiveRevokeUncertain_ReturnsError
+// covers the sibling-scan-uncertain half of V2.
+func TestPublishKeyContactFGA_ColdIndexInactiveRevokeUncertain_ReturnsError(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{}
+	lister := stubSiblingLister{err: assert.AnError}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: internalTestMembershipUID,
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	require.Error(t, err, "an inconclusive sibling scan on a cold index must also hold replay")
+	assert.False(t, published)
+	assert.Nil(t, pub.LastAccessData, "nothing must be published while the scan is uncertain")
+}
+
+// TestPublishKeyContactFGA_ColdIndexInactiveJustifiedBySibling_TransfersOwnership
+// covers V2's success path: a live sibling justifies the pair, and that
+// sibling is given a durable index entry of its own since the cold index has
+// none. No error, since the pair now has a durable address elsewhere.
+func TestPublishKeyContactFGA_ColdIndexInactiveJustifiedBySibling_TransfersOwnership(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{}
+	lister := stubSiblingLister{siblings: []*model.KeyContact{
+		{UID: "sib-1", MembershipUID: internalTestMembershipUID, Email: "alice@example.com", Status: "Active"},
+	}}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: internalTestMembershipUID,
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	require.NoError(t, err)
+	assert.False(t, published)
+	assert.Nil(t, pub.LastAccessData, "the justifying sibling keeps the tuple, so nothing is revoked")
+	require.Len(t, grants.Puts, 1, "the justifying sibling must be given a durable entry")
+	assert.Equal(t, "sib-1", grants.Puts[0].UID)
+	assert.Equal(t, internalTestMembershipUID, grants.Puts[0].MembershipUID)
+	assert.Equal(t, "alice", grants.Puts[0].Username)
+}
+
+// TestPublishKeyContactFGA_ColdIndexInactiveTransferFails_ReturnsError covers
+// V2's ownership-transfer failure: the justifying sibling already owns a
+// conflicting entry, so the transfer fails and CDC replay must be held.
+func TestPublishKeyContactFGA_ColdIndexInactiveTransferFails_ReturnsError(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"sib-1": {MembershipUID: "other-asset", Username: "someone-else", Revision: 3},
+		},
+	}
+	lister := stubSiblingLister{siblings: []*model.KeyContact{
+		{UID: "sib-1", MembershipUID: internalTestMembershipUID, Email: "alice@example.com", Status: "Active"},
+	}}
+
+	published, err := publishKeyContactFGA(context.Background(), pub, grants, &model.KeyContact{
+		UID:           "kc-1",
+		MembershipUID: internalTestMembershipUID,
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}, lister)
+
+	require.Error(t, err, "a failed durable-address transfer must hold CDC replay")
+	assert.False(t, published)
+}
+
 // ── revokeKeyContactPairIfUnjustified recheck (T4) ────────────────────────────
 
 func TestRevokeKeyContactPairIfUnjustified_RecheckFindsRace_RepairsGrant(t *testing.T) {

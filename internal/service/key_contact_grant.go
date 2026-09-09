@@ -188,7 +188,7 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 				// A cold index (a miss, or a marker-only pair already cleared)
 				// leaves the record's own pair as the only revocable address.
 				if kc.Username != "" {
-					revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
+					outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
 						membershipUID: kc.MembershipUID,
 						username:      kc.Username,
 						excludeUID:    kc.UID,
@@ -196,7 +196,18 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 						reason:        reasonInactiveStatus,
 						flush:         true,
 					})
+					switch outcome {
+					case revokeUncertain, revokeFailed:
+						return false, fmt.Errorf("revoke inactive key_contact pair for %s: %w", kc.UID, revokeErr)
+					case revokeUnneeded:
+						if justifiedBy != nil && !pairDurablyOwned(ctx, idx, justifiedBy, kc.MembershipUID, kc.Username) {
+							return false, fmt.Errorf("transfer durable revoke address for inactive key_contact %s", kc.UID)
+						}
+					}
 				}
+				// Do not persist an index entry for the record's own pair: the
+				// record still exists in Salesforce, so CDC or backfill re-touch
+				// retries this path again.
 				return false, nil
 			}
 		}
@@ -579,9 +590,10 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 // sibling that still justifies the stored pair clears only this record's entry
 // (so a later delete cannot revoke the sibling's access), and an uncertain
 // scan leaves the entry exactly as read, publishing nothing. liveUsername and
-// liveEmail are the contact's current identity: only when the stored pair
-// belongs to that identity may liveEmail justify it by direct match; a stale
-// pair recorded for a different username is checked by resolution alone.
+// liveEmail are the contact's current identity: only when liveUsername is
+// known and positively matches the stored username may liveEmail justify the
+// pair by direct match; otherwise (including an unresolved liveUsername) the
+// pair is checked by resolution alone.
 //
 // A contact with no recorded grant, or one whose recorded pair is already
 // empty, produces no publish — there is nothing to revoke.
@@ -627,7 +639,7 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 		reason:        reason,
 		flush:         true,
 	}
-	if liveUsername == "" || stored.Username == liveUsername {
+	if liveUsername != "" && stored.Username == liveUsername {
 		req.email = liveEmail
 	}
 	justifiedBy, justifyErr := keyContactPairJustified(ctx, lister, req)

@@ -520,12 +520,15 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	if grantErr == nil && grantFound && (grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
 		// The stored pair's email is unknown here: justification runs by
 		// resolution alone. A failed or uncertain revoke preserves the entry.
+		// flush:true so delivery is confirmed independently of the main pair's
+		// own flush below, which can now exit via revokeUnneeded without ever
+		// flushing this one.
 		staleOutcome, staleJustifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 			membershipUID: grant.MembershipUID,
 			username:      grant.Username,
 			excludeUID:    in.UID,
 			reason:        "key contact deleted (stale indexed pair)",
-			flush:         false,
+			flush:         true,
 			recheck:       lister,
 		})
 		if revokeErr != nil {
@@ -555,12 +558,22 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 		recheck:       lister,
 	})
 	switch outcome {
-	case revokeFailed:
-		return pkgerrors.NewUnexpected("failed to publish FGA revocation for deleted key contact", revokeErr)
-	case revokeUncertain:
-		// The scan could not prove the pair unjustified: leave the index entry
-		// as the only address for a later retry. The record is already deleted,
-		// so report the revoke failure rather than a false success.
+	case revokeFailed, revokeUncertain:
+		// The Salesforce record is already gone, so the index entry recorded
+		// here is the only future retry address for this pair. Record it
+		// before returning the error so a later CDC delete event can still
+		// address the revoke.
+		if o.grantIndex != nil && username != "" {
+			if recordErr := recordKeyContactGrant(ctx, o.memberPublisher, o.grantIndex, lister, in.UID, kc.MembershipUID, username); recordErr != nil {
+				slog.ErrorContext(ctx, "key contact grant index record failed after revoke error: no durable retry address for this pair",
+					"uid", in.UID, "membership_uid", kc.MembershipUID, "error", recordErr, "manual_recovery_required", true)
+			}
+		}
+		if outcome == revokeFailed {
+			return pkgerrors.NewUnexpected("failed to publish FGA revocation for deleted key contact", revokeErr)
+		}
+		// The scan could not prove the pair unjustified. The record is already
+		// deleted, so report the revoke failure rather than a false success.
 		return pkgerrors.NewUnexpected("sibling scan inconclusive for deleted key contact: revocation not published", revokeErr)
 	}
 

@@ -785,7 +785,12 @@ func TestPublishKeyContactFGA_InactiveColdIndexWithLiveSibling_NoRevoke(t *testi
 
 	assert.Empty(t, removeMessages(t, pub),
 		"a live sibling still justifies the tuple even when no index entry exists")
-	assert.Empty(t, grants.Puts)
+	// V2 fix: a justifying sibling with no durable entry of its own must be
+	// given one, so the pair still has a durable revoke address afterward.
+	require.Len(t, grants.Puts, 1, "the justifying sibling must be given a durable entry")
+	assert.Equal(t, "kc-2", grants.Puts[0].UID)
+	assert.Equal(t, "asset-1", grants.Puts[0].MembershipUID)
+	assert.Equal(t, "alice", grants.Puts[0].Username)
 	assert.Empty(t, grants.Deletes)
 }
 
