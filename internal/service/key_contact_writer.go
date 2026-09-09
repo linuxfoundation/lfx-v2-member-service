@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -489,7 +490,8 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// FGA remove: propagate a publication failure — dangling permissions are not
 	// auto-repairable. Publication succeeding is not revocation succeeding; it
 	// only means fga-sync has been told, and it converges asynchronously.
-	username, _ := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
+	resolved, _ := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
+	username := resolved
 
 	// Read the recorded grant once: it supplies a username fallback when live
 	// lookup comes up empty, and its revision (when the read succeeds) is what
@@ -551,11 +553,19 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// The choke point flushes here so a crash cannot discard a revocation this
 	// call has already reported as done: that confirms the server received the
 	// message, not that OpenFGA converged.
+	// email only justifies a sibling directly when username came from live
+	// resolution, i.e. it is the live identity's own pair. A username copied
+	// from grant.Username after live resolution came up empty must not let a
+	// same-email sibling with a different, now-unregistered LFID justify it.
+	pairEmail := ""
+	if resolved != "" {
+		pairEmail = kc.Email
+	}
 	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 		membershipUID: kc.MembershipUID,
 		username:      username,
 		excludeUID:    in.UID,
-		email:         kc.Email,
+		email:         pairEmail,
 		reason:        "key contact deleted",
 		flush:         true,
 		recheck:       lister,
@@ -567,9 +577,30 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 		// before returning the error so a later CDC delete event can still
 		// address the revoke.
 		if o.grantIndex != nil && username != "" {
-			if recordErr := recordKeyContactGrant(ctx, o.memberPublisher, o.grantIndex, lister, in.UID, kc.MembershipUID, username); recordErr != nil {
-				slog.ErrorContext(ctx, "key contact grant index record failed after revoke error: no durable retry address for this pair",
-					"uid", in.UID, "membership_uid", kc.MembershipUID, "error", recordErr, "manual_recovery_required", true)
+			skipRecord := false
+			if grantErr == nil && grantFound && grant.PendingRevoke != nil &&
+				(grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
+				// recordKeyContactGrant would supersede the stale live pair into
+				// the single marker slot, dropping this existing marker's pair
+				// unaddressed. Drain it first so its revoke address survives.
+				marker := *grant.PendingRevoke
+				if drainErr := drainKeyContactPendingRevoke(ctx, o.memberPublisher, o.grantIndex, lister, in.UID,
+					marker, "key contact deleted (pending revoke marker before recovery record)"); drainErr != nil {
+					skipRecord = true
+					slog.ErrorContext(ctx, "key contact grant index record skipped: pending revoke marker could not be drained, no durable retry address for this pair",
+						"uid", in.UID, "membership_uid", kc.MembershipUID, "error", drainErr, "manual_recovery_required", true)
+					revokeErr = errors.Join(revokeErr, drainErr)
+				} else if clearErr := clearPendingRevoke(ctx, o.grantIndex, in.UID, marker); clearErr != nil {
+					// The drain was confirmed delivered; this is bookkeeping only.
+					slog.WarnContext(ctx, "key contact grant index pending-revoke marker clear failed after confirmed drain",
+						"uid", in.UID, "error", clearErr)
+				}
+			}
+			if !skipRecord {
+				if recordErr := recordKeyContactGrant(ctx, o.memberPublisher, o.grantIndex, lister, in.UID, kc.MembershipUID, username); recordErr != nil {
+					slog.ErrorContext(ctx, "key contact grant index record failed after revoke error: no durable retry address for this pair",
+						"uid", in.UID, "membership_uid", kc.MembershipUID, "error", recordErr, "manual_recovery_required", true)
+				}
 			}
 		}
 		if outcome == revokeFailed {

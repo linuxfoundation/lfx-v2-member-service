@@ -1751,3 +1751,185 @@ func TestKeyContactWriter_Update_EmailUnchangedBranch_TransientFailure_LeavesGra
 	assert.Empty(t, removeMessages(t, pub), "a transient lookup failure must not revoke a still-valid grant")
 	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
 }
+
+// ── X1: index-fallback username must not accept email-only justification ────
+
+// TestKeyContactWriter_Delete_IndexFallbackUsername_SameEmailSiblingDoesNotJustify
+// covers X1: when live resolution of the contact's own email comes up empty
+// (a definitive miss) and the username used for the main-pair revoke falls
+// back to the grant index's recorded username, a sibling that merely shares
+// the same (unregistered) email must not directly justify that pair. Direct
+// email justification is reserved for a pair whose username came from live
+// resolution; the fallback username's own email is not proof the sibling is
+// the same registered person.
+func TestKeyContactWriter_Delete_IndexFallbackUsername_SameEmailSiblingDoesNotJustify(t *testing.T) {
+	kc := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "dup@example.com", Username: "",
+	}
+	storage := newSeededStorage(kc)
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: testMembershipUID, Username: "old-lfid", Revision: 1},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "sib-uid", MembershipUID: testMembershipUID, Email: "dup@example.com", Status: "Active"},
+	}}
+	users := userReaderFunc(func(_ context.Context, _ string) (string, error) {
+		// The shared email resolves to no registered account at all, for
+		// both this contact and its duplicate-email sibling.
+		return "", pkgerrors.NewNotFound("no such user")
+	})
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(users),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err)
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1,
+		"the stale LFID's own pair must be revoked, not falsely justified by a same-email sibling that itself resolves to no registered account")
+	assert.Equal(t, testMembershipUID, removes[0].UID)
+	assert.Equal(t, "old-lfid", removes[0].Username)
+	assert.Equal(t, []string{testKCUID}, grants.Deletes, "the confirmed-revoked entry must be cleared")
+}
+
+// TestKeyContactWriter_Delete_LiveResolvedUsername_SameEmailSiblingJustifies is
+// the positive control for X1: when the username comes from live resolution
+// (not the index fallback), a sibling record sharing that same email still
+// directly justifies the pair, preserving prior behavior.
+func TestKeyContactWriter_Delete_LiveResolvedUsername_SameEmailSiblingJustifies(t *testing.T) {
+	kc := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID,
+		Email: "alice@example.com", Username: "alice",
+	}
+	storage := newSeededStorage(kc)
+	pub := &accessPayloadPublisher{}
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "sib-uid", MembershipUID: testMembershipUID, Email: "alice@example.com", Status: "Active"},
+	}}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err)
+	assert.Empty(t, removeMessages(t, pub),
+		"a live-resolved username's own email may still directly justify a same-email sibling")
+}
+
+// ── X2: a PendingRevoke marker must be drained, not dropped, before a ────────
+// ── main-pair revoke failure records a new supersede over it ────────────────
+
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_ExistingMarkerDrainedBeforeRecord
+// covers X2's success path: the entry holds a stale live pair plus an
+// existing PendingRevoke marker for an unrelated pair, and the main-pair
+// revoke fails. Before recordKeyContactGrant would supersede the stale live
+// pair into that single marker slot (dropping the existing marker's pair
+// unaddressed), the existing marker must be drained: its own member_remove
+// must be published.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_ExistingMarkerDrainedBeforeRecord(t *testing.T) {
+	kc := kcForFGA() // MembershipUID: testMembershipUID, Username: "alice"
+	storage := newSeededStorage(kc)
+	pub := &nthRemoveFailsPublisher{failOnRemove: 2}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {
+				MembershipUID: "membership-old", Username: "bob-old", Revision: 1,
+				PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "membership-older", Username: "carol-older"},
+			},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "the main-pair revoke failure must still surface to the caller")
+
+	var drainedMarker bool
+	for _, raw := range pub.accessMsgs {
+		msg, ok := raw.(fgatypes.GenericFGAMessage)
+		require.True(t, ok)
+		data, ok := msg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok)
+		if data.UID == "membership-older" && data.Username == "carol-older" {
+			drainedMarker = true
+		}
+	}
+	assert.True(t, drainedMarker,
+		"the existing marker's pair must be revoked (drained) before recordKeyContactGrant runs, not silently overwritten")
+
+	entry, found := grants.Entries[testKCUID]
+	require.True(t, found)
+	if entry.PendingRevoke != nil {
+		assert.NotEqual(t, "membership-older", entry.PendingRevoke.MembershipUID,
+			"the old marker must not still occupy the marker slot: it was drained, not overwritten in place")
+	}
+}
+
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_MarkerDrainFails_SkipsRecord
+// covers X2's failure path: when the existing marker's own drain cannot be
+// confirmed, recordKeyContactGrant must not run at all (it would drop the
+// marker's only durable address). The entry must be left exactly as read.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_MarkerDrainFails_SkipsRecord(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &errorFGARemovePublisher{} // fails every FGA member_remove publish
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {
+				MembershipUID: "membership-old", Username: "bob-old", Revision: 1,
+				PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "membership-older", Username: "carol-older"},
+			},
+		},
+	}
+	siblings := &mock.MockKeyContactsByMembershipReader{}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCGrantIndex(grants),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "the delete must still report an error")
+	entry, found := grants.Entries[testKCUID]
+	require.True(t, found, "the entry must be preserved, not cleared")
+	assert.Equal(t, "membership-old", entry.MembershipUID, "the live pair must be left exactly as read")
+	assert.Equal(t, "bob-old", entry.Username)
+	require.NotNil(t, entry.PendingRevoke, "the existing marker must not be dropped when its drain fails")
+	assert.Equal(t, "membership-older", entry.PendingRevoke.MembershipUID)
+	assert.Equal(t, "carol-older", entry.PendingRevoke.Username)
+}
