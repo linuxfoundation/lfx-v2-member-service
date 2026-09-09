@@ -160,13 +160,23 @@ func sliceSiblingLister(contacts []*model.KeyContact, reader port.KeyContactsByM
 // mode), leaving the publish behaviour unchanged.
 //
 // lister may be nil, which disables the sibling check.
-func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister membershipKeyContactLister) {
-	_, _ = publishKeyContactFGA(ctx, p, idx, kc, lister)
+//
+// recheck is an optional trailing live sibling lister (never a snapshot),
+// re-run after a remove publishes to catch a different-UID regrant racing the
+// scan against lister. Omit it where no live reader is available; passing it
+// is variadic only so existing callers compile unchanged.
+func PublishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister membershipKeyContactLister, recheck ...membershipKeyContactLister) {
+	var live membershipKeyContactLister
+	if len(recheck) > 0 {
+		live = recheck[0]
+	}
+	_, _ = publishKeyContactFGA(ctx, p, idx, kc, lister, live)
 }
 
 // publishKeyContactFGA is the error-reporting form used by CDC restoration,
 // where any unrecorded or unconfirmed grant must hold the replay cursor.
-func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister membershipKeyContactLister) (bool, error) {
+// recheck must be a LIVE lister, or nil where none can be constructed.
+func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, kc *model.KeyContact, lister, recheck membershipKeyContactLister) (bool, error) {
 	if strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
 		// An inactive contact must never hold a live tuple: revoke any
 		// recorded grant instead of publishing a put.
@@ -182,7 +192,7 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 				// the superseded pair's revoke now or it stays orphaned. A
 				// failed or uncertain drain keeps the marker as the address,
 				// so the CDC replay cursor must hold until it is confirmed.
-				if drainErr := revokeSupersededKeyContactGrant(ctx, p, idx, lister, kc.UID, *stored.PendingRevoke); drainErr != nil {
+				if drainErr := revokeSupersededKeyContactGrant(ctx, p, idx, lister, recheck, kc.UID, *stored.PendingRevoke); drainErr != nil {
 					return false, fmt.Errorf("drain superseded key_contact grant for %s: %w", kc.UID, drainErr)
 				}
 			}
@@ -198,6 +208,7 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 						email:         kc.Email,
 						reason:        reasonInactiveStatus,
 						flush:         true,
+						recheck:       recheck,
 					})
 					switch outcome {
 					case revokeUncertain, revokeFailed:
@@ -228,6 +239,7 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 					email:         kc.Email,
 					reason:        reasonInactiveStatus,
 					flush:         true,
+					recheck:       recheck,
 				})
 				switch outcome {
 				case revokeUncertain, revokeFailed:
@@ -240,7 +252,7 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 				}
 			}
 		}
-		if err := revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, lister, kc.UID, kc.Username, kc.Email, reasonInactiveStatus); err != nil {
+		if err := revokeKeyContactGrantIfNoLongerLive(ctx, p, idx, lister, recheck, kc.UID, kc.Username, kc.Email, reasonInactiveStatus); err != nil {
 			return false, fmt.Errorf("revoke inactive key_contact stored pair for %s: %w", kc.UID, err)
 		}
 		return false, nil
@@ -262,7 +274,7 @@ func publishKeyContactFGA(ctx context.Context, p port.MemberPublisher, idx port.
 		"uid", kc.UID, "membership_uid", kc.MembershipUID,
 		"subject", fgaconstants.GenericMemberPutSubject)
 
-	return true, recordKeyContactGrant(ctx, p, idx, lister, kc.UID, kc.MembershipUID, kc.Username)
+	return true, recordKeyContactGrant(ctx, p, idx, lister, recheck, kc.UID, kc.MembershipUID, kc.Username)
 }
 
 // keyContactPairRevoke describes one FGA key_contact pair a caller believes
@@ -473,7 +485,11 @@ func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublish
 // Every failure is logged and returned. The exported publish wrapper preserves
 // best-effort behavior for ordinary writers; CDC restoration uses the returned
 // error to hold replay until the grant and its future revoke address are safe.
-func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, uid, membershipUID, username string) error {
+//
+// recheck must be a LIVE lister, or nil where none can be constructed; it is
+// threaded through to the superseded-grant revoke so a different-UID regrant
+// racing the (possibly snapshot) lister scan is still caught.
+func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister, recheck membershipKeyContactLister, uid, membershipUID, username string) error {
 	if idx == nil || uid == "" || membershipUID == "" || username == "" {
 		return nil
 	}
@@ -536,7 +552,7 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 				// revoke was confirmed. Its slot is needed for the pair
 				// superseded now, so drain it first: overwriting it would
 				// discard the old pair's only revoke address.
-				if drainErr := drainKeyContactPendingRevoke(ctx, p, idx, lister, uid,
+				if drainErr := drainKeyContactPendingRevoke(ctx, p, idx, lister, recheck, uid,
 					*stored.PendingRevoke, "key contact grant superseded twice"); drainErr != nil {
 					return fmt.Errorf("drain pending revoke before new supersede for %s: %w", uid, drainErr)
 				}
@@ -550,7 +566,7 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 		putErr := idx.Put(ctx, uid, newGrant)
 		if putErr == nil {
 			if superseded != nil {
-				return revokeSupersededKeyContactGrant(ctx, p, idx, lister, uid, *superseded)
+				return revokeSupersededKeyContactGrant(ctx, p, idx, lister, recheck, uid, *superseded)
 			}
 			return nil
 		}
@@ -592,7 +608,10 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 // pair's only durable address until that sibling's own index entry is
 // confirmed to cover it (pairDurablyOwned): otherwise clearing the marker
 // would drop the only durable address for a pair that still has a live tuple.
-func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, uid string, superseded port.KeyContactGrantRef) error {
+//
+// recheck must be a LIVE lister, or nil where none can be constructed; it
+// closes the window where a different-UID regrant races this revoke's publish.
+func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister, recheck membershipKeyContactLister, uid string, superseded port.KeyContactGrantRef) error {
 	if superseded.MembershipUID == "" || superseded.Username == "" {
 		return nil
 	}
@@ -602,6 +621,7 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 		excludeUID:    uid,
 		reason:        "superseded by a new grant",
 		flush:         true,
+		recheck:       recheck,
 	})
 	switch outcome {
 	case revokeUncertain:
@@ -658,14 +678,18 @@ func reassertKeyContactPendingRevokePair(ctx context.Context, p port.MemberPubli
 //
 // On the justified branch, the marker's pair is reasserted with a confirmed
 // member_put before ownership transfers: see reassertKeyContactPendingRevokePair.
-func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, excludeUID string, marker port.KeyContactGrantRef, reason string) error {
+//
+// recheck must be a LIVE lister, or nil where none can be constructed; unlike
+// lister, which may be a snapshot, recheck is what actually closes the
+// different-UID regrant race, so callers must not pass a snapshot for it.
+func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister, recheck membershipKeyContactLister, excludeUID string, marker port.KeyContactGrantRef, reason string) error {
 	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
 		membershipUID: marker.MembershipUID,
 		username:      marker.Username,
 		excludeUID:    excludeUID,
 		reason:        reason,
 		flush:         true,
-		recheck:       lister,
+		recheck:       recheck,
 	})
 	switch outcome {
 	case revokeUncertain, revokeFailed:
@@ -726,7 +750,12 @@ func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, i
 // owns the entry so there is nothing left for this call to do. A failure
 // clearing the index after a confirmed revoke also stays nil (log-only): the
 // revoke itself succeeded, only stale bookkeeping remains.
-func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister membershipKeyContactLister, uid, liveUsername, liveEmail, reason string) error {
+//
+// recheck must be a LIVE lister, or nil where none can be constructed: after
+// the remove publishes, it is used to re-run justification and catch a
+// different-UID regrant racing the (possibly snapshot) lister scan, mirroring
+// revokeKeyContactPairIfUnjustified's own post-remove recheck.
+func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPublisher, idx port.KeyContactGrantIndex, lister, recheck membershipKeyContactLister, uid, liveUsername, liveEmail, reason string) error {
 	if idx == nil || uid == "" {
 		return nil
 	}
@@ -800,6 +829,31 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 	// the retry address.
 	if pubErr := publishKeyContactRemove(ctx, p, req); pubErr != nil {
 		return fmt.Errorf("revoke key_contact grant for %s: %w", uid, pubErr)
+	}
+
+	if recheck != nil {
+		racedBy, recheckErr := keyContactPairJustified(ctx, recheck, req)
+		if recheckErr != nil {
+			slog.ErrorContext(ctx, "key_contact post-revoke recheck failed: tuple may be incorrectly absent until the next backfill",
+				"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason,
+				"error", recheckErr, "fga_remove_raced_possible_lost_grant", true)
+			return fmt.Errorf("post-revoke recheck for key_contact %s: %w", uid, recheckErr)
+		}
+		if racedBy != nil {
+			repairMsg := BuildKeyContactFGAPutMessage(stored.MembershipUID, stored.Username)
+			repairErr := p.Access(ctx, fgaconstants.GenericMemberPutSubject, repairMsg)
+			if repairErr == nil {
+				repairErr = p.Flush(ctx)
+			}
+			if repairErr != nil {
+				slog.ErrorContext(ctx, "key_contact post-revoke repair failed: tuple may be incorrectly absent until the next backfill",
+					"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason,
+					"error", repairErr, "fga_remove_raced_possible_lost_grant", true)
+				return fmt.Errorf("post-revoke repair for key_contact %s: %w", uid, repairErr)
+			}
+			slog.WarnContext(ctx, "key_contact grant repaired: a concurrent grant raced this revoke and was reapplied",
+				"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason)
+		}
 	}
 
 	current, found, err := idx.Get(ctx, uid)

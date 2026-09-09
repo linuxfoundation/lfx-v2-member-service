@@ -248,7 +248,7 @@ func TestPublishKeyContactFGA_ColdIndexInactiveRevokeFailed_ReturnsError(t *test
 		Email:         "alice@example.com",
 		Username:      "alice",
 		Status:        "Inactive",
-	}, lister)
+	}, lister, lister)
 
 	require.Error(t, err, "a failed revoke on a cold index must be reported so CDC replay is held")
 	assert.False(t, published)
@@ -267,7 +267,7 @@ func TestPublishKeyContactFGA_ColdIndexInactiveRevokeUncertain_ReturnsError(t *t
 		Email:         "alice@example.com",
 		Username:      "alice",
 		Status:        "Inactive",
-	}, lister)
+	}, lister, lister)
 
 	require.Error(t, err, "an inconclusive sibling scan on a cold index must also hold replay")
 	assert.False(t, published)
@@ -291,7 +291,7 @@ func TestPublishKeyContactFGA_ColdIndexInactiveJustifiedBySibling_TransfersOwner
 		Email:         "alice@example.com",
 		Username:      "alice",
 		Status:        "Inactive",
-	}, lister)
+	}, lister, lister)
 
 	require.NoError(t, err)
 	assert.False(t, published)
@@ -322,7 +322,7 @@ func TestPublishKeyContactFGA_ColdIndexInactiveTransferFails_ReturnsError(t *tes
 		Email:         "alice@example.com",
 		Username:      "alice",
 		Status:        "Inactive",
-	}, lister)
+	}, lister, lister)
 
 	require.Error(t, err, "a failed durable-address transfer must hold CDC replay")
 	assert.False(t, published)
@@ -342,7 +342,7 @@ func TestPublishKeyContactFGA_IndexReadFailure_ReturnsError(t *testing.T) {
 		MembershipUID: internalTestMembershipUID,
 		Username:      "alice",
 		Status:        "Inactive",
-	}, nil)
+	}, nil, nil)
 
 	require.Error(t, err, "an unreadable index must hold CDC replay rather than silently skip the revoke")
 	assert.False(t, published)
@@ -366,7 +366,7 @@ func TestPublishKeyContactFGA_InactiveIndexedContact_StoredPairFlushFails_Return
 		MembershipUID: internalTestMembershipUID,
 		Username:      "alice",
 		Status:        "Inactive",
-	}, stubSiblingLister{})
+	}, stubSiblingLister{}, stubSiblingLister{})
 
 	require.Error(t, err, "an unconfirmed stored-pair revoke must hold CDC replay")
 	assert.False(t, published)
@@ -412,7 +412,7 @@ func TestPublishKeyContactFGA_InactiveUsableStalePair_RevokesBothPairs(t *testin
 		Username:      "new-carol",
 		Email:         "carol@example.com",
 		Status:        "Inactive",
-	}, stubSiblingLister{})
+	}, stubSiblingLister{}, stubSiblingLister{})
 
 	require.NoError(t, err)
 	assert.False(t, published)
@@ -445,7 +445,7 @@ func TestPublishKeyContactFGA_InactiveUsableStalePair_CurrentPairRevokeFails_Ret
 		Username:      "new-carol",
 		Email:         "carol@example.com",
 		Status:        "Inactive",
-	}, stubSiblingLister{})
+	}, stubSiblingLister{}, stubSiblingLister{})
 
 	require.Error(t, err, "a failed current-pair revoke must hold CDC replay")
 	assert.False(t, published)
@@ -475,7 +475,7 @@ func TestPublishKeyContactFGA_InactiveUsableStalePair_CurrentPairJustified_Still
 		Username:      "new-carol",
 		Email:         "carol@example.com",
 		Status:        "Inactive",
-	}, lister)
+	}, lister, lister)
 
 	require.NoError(t, err)
 	assert.False(t, published)
@@ -585,6 +585,75 @@ func TestRevokeKeyContactPairIfUnjustified_RecheckRaced_RepairFails_ReturnsUncer
 	require.Error(t, err, "a failed compensating put must be reported so the caller preserves retry state")
 	assert.Equal(t, revokeUncertain, outcome)
 	assert.Equal(t, sib, justifiedBy, "the racing sibling is reported so the caller knows who justified the pair")
+}
+
+// TestRevokeSupersededKeyContactGrant_RecheckFindsRace_RepairsGrant covers the
+// Finding 1 gap where this call site previously passed no recheck lister at
+// all: a different contact UID can grant the superseded pair between the
+// first (possibly snapshot) scan and this revoke's publish, and the remove
+// would otherwise strip access that was just re-granted.
+func TestRevokeSupersededKeyContactGrant_RecheckFindsRace_RepairsGrant(t *testing.T) {
+	superseded := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	pub := mock.NewMockMemberPublisher()
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "asset-new", Username: "bob", PendingRevoke: &superseded, Revision: 1},
+	}}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	// The first scan sees no live sibling, but a racing writer grants the
+	// superseded pair to a new contact UID before the live recheck runs.
+	recheck := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{
+		{UID: "kc-new", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"},
+	}}, users)
+
+	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, stubSiblingLister{}, recheck, "kc-1", superseded)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
+		"the superseded pair's remove must publish, then the raced regrant must be repaired with a compensating put")
+	putMsg, ok := pub.LastAccessData.(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_put", putMsg.Operation, "the last publish must be the compensating put, not the remove")
+}
+
+// TestRevokeKeyContactGrantIfNoLongerLive_RecheckFindsRace_RepairsGrant covers
+// the Finding 1 gap in the Inactive index-driven revoke path: a different
+// contact UID can grant the stored pair between the first scan and this
+// revoke's publish, and the remove would otherwise strip access that was
+// just re-granted.
+func TestRevokeKeyContactGrantIfNoLongerLive_RecheckFindsRace_RepairsGrant(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	// The first scan sees no live sibling, but a racing writer grants the
+	// same pair to a different contact UID before the live recheck runs.
+	recheck := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{
+		{UID: "kc-new", MembershipUID: internalTestMembershipUID, Email: "alice@example.com", Status: "Active"},
+	}}, users)
+
+	err := revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, stubSiblingLister{}, recheck, "kc-1", "", "", reasonEmailUnregistered)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
+		"the revoke must publish, then the raced regrant found by the live recheck must be repaired with a compensating put")
+	putMsg, ok := pub.LastAccessData.(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_put", putMsg.Operation, "the last publish must be the compensating put, not the original remove")
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes,
+		"the entry still clears: the recheck repairs the tuple but does not restore the stale index address")
 }
 
 // ── pairDurablyOwned (T5) ──────────────────────────────────────────────────────

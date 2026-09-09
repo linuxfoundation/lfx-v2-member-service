@@ -626,6 +626,19 @@ func (w *failingKeyContactWriter) DeleteKeyContact(_ context.Context, _ string, 
 	return w.err
 }
 
+// countingKeyContactWriter is a port.KeyContactWriter that records how many
+// times DeleteKeyContact was called, so tests can assert that grant-index
+// settlement failures block the Salesforce delete rather than racing it.
+type countingKeyContactWriter struct {
+	mock.MockKeyContactWriterWithOK
+	deleteCalls int
+}
+
+func (w *countingKeyContactWriter) DeleteKeyContact(ctx context.Context, membershipUID, uid string) error {
+	w.deleteCalls++
+	return w.MockKeyContactWriterWithOK.DeleteKeyContact(ctx, membershipUID, uid)
+}
+
 // ── Org-dashboard provisioning tests (Tasks 4, 5, 6) ─────────────────────────
 
 const testOrgSFID = "001000000000000AAA"
@@ -1108,10 +1121,11 @@ func TestKeyContactWriter_Delete_StalePairJustifiedByUnindexedSibling_TransfersO
 		}
 		return "alice", nil
 	})
+	kcWriter := &countingKeyContactWriter{}
 
 	w := svc.NewKeyContactWriter(
 		svc.WithKCStorage(storage),
-		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCWriter(kcWriter),
 		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
 		svc.WithKCPublisher(pub),
 		svc.WithKCUserReader(users),
@@ -1127,6 +1141,7 @@ func TestKeyContactWriter_Delete_StalePairJustifiedByUnindexedSibling_TransfersO
 	assert.Equal(t, "membership-old", grants.Puts[0].MembershipUID)
 	assert.Equal(t, "bob-old", grants.Puts[0].Username)
 	assert.Contains(t, grants.Deletes, testKCUID, "the stale entry clears once transferred")
+	assert.Equal(t, 1, kcWriter.deleteCalls, "settlement must succeed before the Salesforce delete runs, and the happy path still deletes")
 }
 
 // TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry covers the
@@ -1155,10 +1170,11 @@ func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testin
 		}
 		return "alice", nil
 	})
+	kcWriter := &countingKeyContactWriter{}
 
 	w := svc.NewKeyContactWriter(
 		svc.WithKCStorage(storage),
-		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCWriter(kcWriter),
 		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
 		svc.WithKCPublisher(pub),
 		svc.WithKCUserReader(users),
@@ -1170,6 +1186,7 @@ func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testin
 
 	require.Error(t, err, "a failed durable-address transfer for the stale pair must fail the delete so the client retries")
 	assert.Empty(t, grants.Deletes, "a failed transfer must leave the stale entry as the pair's only durable address")
+	assert.Equal(t, 0, kcWriter.deleteCalls, "settlement failure must block the Salesforce delete so a client retry can re-run it")
 }
 
 // TestKeyContactWriter_Delete_MainPairTransferFails_ReturnsError covers U5: a
@@ -1401,12 +1418,12 @@ func TestKeyContactWriter_Update_EmailUnchangedBranch_DefinitiveMiss_RevokesReco
 // covers a transport-level lookup failure: it must not be treated as
 // evidence the email is unregistered, so a still-valid recorded grant must
 // survive.
-// TestKeyContactWriter_Delete_StalePairFlushFails_PreservesEntryDeleteStillSucceeds
-// covers V4: the stale-pair revoke now flushes (flush:true) instead of
-// relying on the main pair's own flush. A flush failure there must preserve
-// the index entry as the retry address, and the user-visible delete must
-// still succeed.
-func TestKeyContactWriter_Delete_StalePairFlushFails_PreservesEntryDeleteStillSucceeds(t *testing.T) {
+// TestKeyContactWriter_Delete_StalePairFlushFails_FailsBeforeSalesforceDelete
+// covers V4 under the pre-delete settlement ordering: the stale-pair revoke
+// flushes independently (flush:true), and an unconfirmed flush now fails the
+// delete before the Salesforce record is removed, so the client retry can
+// re-run the settlement against a record that still exists.
+func TestKeyContactWriter_Delete_StalePairFlushFails_FailsBeforeSalesforceDelete(t *testing.T) {
 	kc := kcForFGA()
 	storage := newSeededStorage(kc)
 	pub := &flushFailsOnCallPublisher{failOnCall: 1}
@@ -1416,10 +1433,11 @@ func TestKeyContactWriter_Delete_StalePairFlushFails_PreservesEntryDeleteStillSu
 		},
 	}
 	siblings := &mock.MockKeyContactsByMembershipReader{}
+	kcWriter := &countingKeyContactWriter{}
 
 	w := svc.NewKeyContactWriter(
 		svc.WithKCStorage(storage),
-		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCWriter(kcWriter),
 		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
 		svc.WithKCPublisher(pub),
 		svc.WithKCUserReader(resolvesTo("alice")),
@@ -1429,8 +1447,8 @@ func TestKeyContactWriter_Delete_StalePairFlushFails_PreservesEntryDeleteStillSu
 
 	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
 
-	require.NoError(t, err, "the record is already deleted; an indeterminate stale-pair flush must not fail the API call")
-	assert.Equal(t, 2, pub.flushCalls, "the stale pair and the main pair must each flush independently")
+	require.Error(t, err, "an unconfirmed stale-pair flush must fail the delete while the record still exists")
+	assert.Equal(t, 0, kcWriter.deleteCalls, "the Salesforce delete must not run after a failed settlement")
 	assert.Empty(t, grants.Deletes, "an unconfirmed stale-pair flush must preserve the entry as the retry address")
 	entry, found := grants.Entries[testKCUID]
 	require.True(t, found)
@@ -1475,25 +1493,28 @@ func TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleEntryRecordsCurrentPa
 	assert.Equal(t, "alice", entry.Username)
 }
 
-// TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsPendingRevoke
-// covers V5's stale-pair composition: an index entry describing a different
-// pair than the one about to be revoked must, once recordKeyContactGrant
-// swaps in the current pair, carry that stale pair forward as PendingRevoke
-// rather than losing its only durable address.
-func TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsPendingRevoke(t *testing.T) {
+// TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsCurrentPair
+// covers V5's stale-pair composition under the pre-delete settlement
+// ordering: the stale pair is confirmed-revoked before the Salesforce delete,
+// so when the main pair's own revoke then fails, recordKeyContactGrant must
+// record the current pair as the durable retry address. The stale pair needs
+// no marker: its revoke was already confirmed during settlement.
+func TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsCurrentPair(t *testing.T) {
 	kc := kcForFGA()
 	storage := newSeededStorage(kc)
-	pub := &errorFGARemovePublisher{}
+	// Only the main pair's remove fails; the stale pair's settlement succeeds.
+	pub := &failOnMembershipRemovePublisher{failMembershipUID: testMembershipUID}
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
 			testKCUID: {MembershipUID: "membership-old", Username: "bob-old", Revision: 1},
 		},
 	}
 	siblings := &mock.MockKeyContactsByMembershipReader{}
+	kcWriter := &countingKeyContactWriter{}
 
 	w := svc.NewKeyContactWriter(
 		svc.WithKCStorage(storage),
-		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCWriter(kcWriter),
 		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
 		svc.WithKCPublisher(pub),
 		svc.WithKCUserReader(resolvesTo("alice")),
@@ -1503,14 +1524,12 @@ func TestKeyContactWriter_Delete_MainPairRevokeFailed_StaleIndexedPair_RecordsPe
 
 	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
 
-	require.Error(t, err)
+	require.Error(t, err, "the main pair's revoke failure must still surface to the caller")
+	assert.Equal(t, 1, kcWriter.deleteCalls, "the stale pair settled, so the Salesforce delete must have run")
 	entry, found := grants.Entries[testKCUID]
 	require.True(t, found, "the current pair must be recorded as a durable retry address")
 	assert.Equal(t, testMembershipUID, entry.MembershipUID, "the entry must swap to the current pair")
 	assert.Equal(t, "alice", entry.Username)
-	require.NotNil(t, entry.PendingRevoke, "the superseded stale pair must ride forward as a marker")
-	assert.Equal(t, "membership-old", entry.PendingRevoke.MembershipUID)
-	assert.Equal(t, "bob-old", entry.PendingRevoke.Username)
 }
 
 // TestKeyContactWriter_Delete_MainPairRevokeFailed_NoIndexEntry_RecordsCurrentPair

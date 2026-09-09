@@ -1129,6 +1129,7 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 	// sibling-check lister costs no extra Salesforce/cache read here. Another
 	// membership (a superseded pair) is uncovered and falls back to a live read.
 	lister := sliceSiblingLister(contacts, o.keyContactsByMembership, o.userReader)
+	live := siblingListerFor(o.keyContactsByMembership, o.userReader)
 	for _, contact := range contacts {
 		if contact.Username == "" && contact.Email != "" {
 			if o.userReader == nil {
@@ -1153,7 +1154,7 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 			// still goes through: its revoke addresses the recorded pair.
 			continue
 		}
-		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact, lister)
+		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact, lister, live)
 		published = published || contactPublished
 		if contactErr != nil {
 			restoreErr = errors.Join(restoreErr, contactErr)
@@ -1270,6 +1271,11 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 // processKeyContact handles LFID resolution, publish, and silent org-dashboard
 // provisioning for a single key contact within a CDC upsert batch.
 func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContact, action indexerConstants.MessageAction, lister membershipKeyContactLister) {
+	// A live lister, not the batched one: an un-prefetched membership would
+	// read as empty siblings and fake certainty. Also passed as the post-remove
+	// recheck below, so a different-UID regrant racing the batched scan is caught.
+	live := siblingListerFor(o.keyContactsByMembership, o.userReader)
+
 	// Attempt LFID resolution when the contact has no stored username. CDC is a
 	// passive sync and must never send emails — provisioning is always silent.
 	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
@@ -1278,11 +1284,9 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				// A definitive miss: the email no longer resolves to any registered
 				// account (e.g. a rename or deregistration since the last time this
 				// contact was granted). Revoke any grant still recorded for it.
-				// A live lister, not the batched one: an un-prefetched membership
-				// would read as empty siblings and fake certainty.
 				// Best-effort: processKeyContact has no per-contact error path
 				// back to the batch, the next CDC event or backfill retries.
-				_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, siblingListerFor(o.keyContactsByMembership, o.userReader), kc.UID, "", "", reasonEmailUnregistered)
+				_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered)
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
 				// leave Username empty and any existing grant untouched.
@@ -1308,7 +1312,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 
 	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
-	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc, lister)
+	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc, lister, live)
 
 	// Provision org-dashboard access silently for registered contacts when the
 	// indexer path ran (project_uid resolved). kc.Username is non-empty only when

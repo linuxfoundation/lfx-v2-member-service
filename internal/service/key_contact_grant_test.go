@@ -659,10 +659,10 @@ func TestKeyContactWriter_Delete_StaleIndexedPairRevokeFailure_PreservesEntry(t 
 	w := newKCWriterWithGrantIndex(newSeededStorage(kc), &seededPMReader{}, pub, userReaderFunc(
 		func(_ context.Context, _ string) (string, error) { return "alice", nil }), grants)
 
-	require.NoError(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
+	require.Error(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
 		MembershipUID: testMembershipUID,
 		UID:           "kc-1",
-	}))
+	}), "an unsettled stale pair must fail the delete before the Salesforce record is gone")
 
 	assert.Empty(t, grants.Deletes,
 		"the entry must be preserved when the stale indexed pair's revoke failed to publish")
