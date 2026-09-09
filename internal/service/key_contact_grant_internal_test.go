@@ -458,3 +458,70 @@ func TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors(t 
 	require.NotNil(t, entry.PendingRevoke, "the marker must be retained as the retry address until the transfer succeeds")
 	assert.Equal(t, superseded, *entry.PendingRevoke)
 }
+
+// ── Z1: a second supersede must not overwrite an undrained marker ──────────────
+
+func TestRecordKeyContactGrant_SecondSupersede_DrainsExistingMarkerFirst(t *testing.T) {
+	pub := newCapturingPublisher()
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "p1",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-0", Username: "p0"},
+			Revision:      2,
+		},
+	}}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, stubSiblingLister{}, "kc-1", "asset-2", "p2")
+
+	require.NoError(t, err)
+	removes := internalRemoveMessages(t, pub.accessMsgs)
+	require.Len(t, removes, 2, "both the old marker's pair and the newly superseded pair must be revoked")
+	assert.Equal(t, "asset-0", removes[0].UID, "the old marker must drain before its slot is reused")
+	assert.Equal(t, "asset-1", removes[1].UID)
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-2", entry.MembershipUID)
+	assert.Equal(t, "p2", entry.Username)
+}
+
+func TestRecordKeyContactGrant_SecondSupersede_DrainFails_PreservesMarker(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "p1",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-0", Username: "p0"},
+			Revision:      2,
+		},
+	}}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, stubSiblingLister{}, "kc-1", "asset-2", "p2")
+
+	require.Error(t, err, "a failed drain must be reported, not silently overwritten")
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-1", entry.MembershipUID, "the entry must be left exactly as read")
+	require.NotNil(t, entry.PendingRevoke)
+	assert.Equal(t, "asset-0", entry.PendingRevoke.MembershipUID,
+		"the undrained marker is the old pair's only address and must survive")
+}
+
+func TestRecordKeyContactGrant_MarkerNamesIncomingPair_DroppedWithoutRevoke(t *testing.T) {
+	pub := newCapturingPublisher()
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "p1",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "p2"},
+			Revision:      2,
+		},
+	}}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, stubSiblingLister{}, "kc-1", "asset-2", "p2")
+
+	require.NoError(t, err)
+	for _, r := range internalRemoveMessages(t, pub.accessMsgs) {
+		assert.NotEqual(t, "asset-2", r.UID,
+			"a marker re-justified by the incoming grant must be dropped, never revoked")
+	}
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-2", entry.MembershipUID)
+	assert.Equal(t, "p2", entry.Username)
+}

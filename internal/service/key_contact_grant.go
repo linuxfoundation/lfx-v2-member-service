@@ -525,16 +525,20 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 			newGrant.PendingRevoke = stored.PendingRevoke
 		} else if found {
 			superseded = &port.KeyContactGrantRef{MembershipUID: stored.MembershipUID, Username: stored.Username}
-			if stored.PendingRevoke != nil {
-				// The previous supersede's revoke was never confirmed
-				// delivered before this one landed — this requires two
-				// reparents/renames of the same contact inside one Flush
-				// round trip, vanishingly rare, but overwriting it here would
-				// discard the only remaining address for that older grant.
-				slog.ErrorContext(ctx, "key_contact grant index pending revoke overwritten by a newer supersede before it was confirmed delivered — dangling tuple requires manual cleanup",
-					"uid", uid, "membership_uid", stored.PendingRevoke.MembershipUID,
-					"fga_revoke_failed_dangling_tuple", true)
+			if stored.PendingRevoke != nil &&
+				(stored.PendingRevoke.MembershipUID != membershipUID || stored.PendingRevoke.Username != username) {
+				// A second supersede landed before the previous marker's
+				// revoke was confirmed. Its slot is needed for the pair
+				// superseded now, so drain it first: overwriting it would
+				// discard the old pair's only revoke address.
+				if drainErr := drainKeyContactPendingRevoke(ctx, p, idx, lister, uid,
+					*stored.PendingRevoke, "key contact grant superseded twice"); drainErr != nil {
+					return fmt.Errorf("drain pending revoke before new supersede for %s: %w", uid, drainErr)
+				}
 			}
+			// A marker naming the incoming live pair is re-justified by this
+			// very grant: drop it without revoking, the entry's live pair
+			// becomes its durable address again.
 			newGrant.PendingRevoke = superseded
 		}
 
