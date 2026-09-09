@@ -1148,7 +1148,9 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 				contact.Username = username
 			}
 		}
-		if contact.Username == "" {
+		if contact.Username == "" && !strings.EqualFold(contact.Status, constants.RoleStatusInactive) {
+			// No put can be published without an LFID. An Inactive contact
+			// still goes through: its revoke addresses the recorded pair.
 			continue
 		}
 		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact, lister)

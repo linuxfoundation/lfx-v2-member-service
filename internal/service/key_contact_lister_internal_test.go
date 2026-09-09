@@ -15,6 +15,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
+	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
 // White-box tests for the coverage-aware sibling listers, the Inactive-path
@@ -793,4 +794,60 @@ func TestDrainKeyContactMarkerAndDelete_DrainFails_PreservesMarkerHoldsCursor(t 
 	assert.Empty(t, stored.MembershipUID, "the live pair was already confirmed revoked and must stay cleared")
 	require.NotNil(t, stored.PendingRevoke, "the undrained marker must remain as the retry address")
 	assert.Equal(t, "asset-2", stored.PendingRevoke.MembershipUID)
+}
+
+// ── Y1: restore path must not skip deregistered Inactive contacts ─────────────
+
+// notFoundUserReader satisfies port.UserReader with a definitive miss.
+type notFoundUserReader struct{}
+
+func (notFoundUserReader) UsernameByEmail(context.Context, string) (string, error) {
+	return "", pkgerrors.NewNotFound("no LFID for email")
+}
+
+func (notFoundUserReader) UserMetadataByPrincipal(context.Context, string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, pkgerrors.NewNotFound("no metadata")
+}
+
+func TestRestoreKeyContactGrants_InactiveUnresolvedUsername_RevokesRecordedPair(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 1},
+	}}
+	pub := mock.NewMockMemberPublisher()
+	o := &CDCConsumer{
+		publisher:               pub,
+		grantIndex:              grants,
+		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
+		userReader:              notFoundUserReader{},
+	}
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: "asset-1", Email: "gone@example.org", Status: "Inactive"}
+
+	_, err := o.restoreKeyContactGrants(context.Background(), "asset-1", []*model.KeyContact{kc})
+
+	require.NoError(t, err)
+	assert.NotNil(t, pub.LastAccessData,
+		"an Inactive contact with an unresolvable email must still revoke its recorded pair")
+	assert.Contains(t, grants.Deletes, "kc-1",
+		"the recorded grant must clear once the revoke is confirmed")
+}
+
+func TestRestoreKeyContactGrants_ActiveUnresolvedUsername_StillSkipped(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "asset-1", Username: "alice", Revision: 1},
+	}}
+	pub := mock.NewMockMemberPublisher()
+	o := &CDCConsumer{
+		publisher:               pub,
+		grantIndex:              grants,
+		keyContactsByMembership: &mock.MockKeyContactsByMembershipReader{},
+		userReader:              notFoundUserReader{},
+	}
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: "asset-1", Email: "gone@example.org", Status: "Active"}
+
+	_, err := o.restoreKeyContactGrants(context.Background(), "asset-1", []*model.KeyContact{kc})
+
+	require.NoError(t, err)
+	assert.Nil(t, pub.LastAccessData,
+		"an Active contact with no LFID publishes nothing on restore")
+	assert.Empty(t, grants.Deletes, "the recorded grant stays for a later definitive-miss revoke")
 }
