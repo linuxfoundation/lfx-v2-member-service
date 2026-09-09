@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
+
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
@@ -217,6 +219,91 @@ func TestPublishKeyContactFGA_InactiveUncertainDrain_RetainsMarker(t *testing.T)
 	entry, found := grants.Entries["kc-1"]
 	require.True(t, found, "the marker is the revoke's only address and must survive")
 	assert.Equal(t, pending, entry.PendingRevoke)
+}
+
+// ── revokeKeyContactPairIfUnjustified recheck (T4) ────────────────────────────
+
+func TestRevokeKeyContactPairIfUnjustified_RecheckFindsRace_RepairsGrant(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	// The first scan sees no live sibling, but a racing writer grants the same
+	// pair to kc-new before the recheck runs.
+	recheck := stubSiblingLister{siblings: []*model.KeyContact{
+		{UID: "kc-new", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"},
+	}}
+
+	outcome, justifiedBy, err := revokeKeyContactPairIfUnjustified(context.Background(), pub, stubSiblingLister{}, keyContactPairRevoke{
+		membershipUID: "asset-1",
+		username:      "alice",
+		email:         "alice@example.com",
+		reason:        "test",
+		flush:         true,
+		recheck:       recheck,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, revokePublished, outcome, "the remove itself succeeded and is still reported as published")
+	assert.Nil(t, justifiedBy, "revokePublished never carries a justifying sibling")
+	assert.Equal(t, 2, pub.FlushCount, "the remove and the compensating put must each be flushed")
+	assert.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
+		"a raced grant must be repaired with a compensating member_put after the remove")
+	put, ok := pub.LastAccessData.(fgatypes.GenericFGAMessage)
+	require.True(t, ok)
+	assert.Equal(t, "member_put", put.Operation, "the last publish must be the compensating put, not the remove")
+}
+
+func TestRevokeKeyContactPairIfUnjustified_RecheckError_OutcomeUnchanged(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	recheck := stubSiblingLister{err: assert.AnError}
+
+	outcome, justifiedBy, err := revokeKeyContactPairIfUnjustified(context.Background(), pub, stubSiblingLister{}, keyContactPairRevoke{
+		membershipUID: "asset-1",
+		username:      "alice",
+		email:         "alice@example.com",
+		reason:        "test",
+		flush:         true,
+		recheck:       recheck,
+	})
+
+	require.NoError(t, err, "a failed recheck must not change the outcome or error of the already-published remove")
+	assert.Equal(t, revokePublished, outcome)
+	assert.Nil(t, justifiedBy)
+	assert.Equal(t, 1, pub.FlushCount, "a recheck error must not publish a compensating put")
+	assert.Equal(t, []string{"access", "flush"}, pub.CallOrder)
+}
+
+// ── pairDurablyOwned (T5) ──────────────────────────────────────────────────────
+
+func TestPairDurablyOwned_UnindexedSibling_WritesEntry(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{}}
+	sib := &model.KeyContact{UID: "kc-sib"}
+
+	owned := pairDurablyOwned(context.Background(), grants, sib, "asset-1", "alice")
+
+	assert.True(t, owned, "an unindexed sibling must have the pair written for it")
+	assert.Equal(t, "asset-1", grants.Entries["kc-sib"].MembershipUID)
+	assert.Equal(t, "alice", grants.Entries["kc-sib"].Username)
+}
+
+func TestPairDurablyOwned_SiblingHoldsDifferentPair_Retains(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-sib": {MembershipUID: "asset-2", Username: "bob", Revision: 5},
+	}}
+	sib := &model.KeyContact{UID: "kc-sib"}
+
+	owned := pairDurablyOwned(context.Background(), grants, sib, "asset-1", "alice")
+
+	assert.False(t, owned, "a sibling already owning a different pair must not be overwritten")
+	assert.Equal(t, port.KeyContactGrant{MembershipUID: "asset-2", Username: "bob", Revision: 5}, grants.Entries["kc-sib"],
+		"the sibling's own entry must be untouched")
+}
+
+func TestPairDurablyOwned_IndexReadFailure_Retains(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{GetErr: assert.AnError}
+	sib := &model.KeyContact{UID: "kc-sib"}
+
+	owned := pairDurablyOwned(context.Background(), grants, sib, "asset-1", "alice")
+
+	assert.False(t, owned, "an index read failure must not be treated as durable ownership")
 }
 
 // ── CDC delete replay-cursor hold ─────────────────────────────────────────────

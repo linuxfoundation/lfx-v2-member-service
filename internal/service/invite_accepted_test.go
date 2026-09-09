@@ -7,8 +7,10 @@ import (
 	"context"
 	"testing"
 
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	inviteapi "github.com/linuxfoundation/lfx-v2-invite-service/pkg/api"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
@@ -314,6 +316,115 @@ func TestInviteAcceptedService_Handle_NoKeyContactMatch_NoFGAGrant(t *testing.T)
 		}
 	}
 	assert.Equal(t, 0, accessCount, "no FGA grant when email does not match any key contact")
+}
+
+// TestInviteAcceptedService_Handle_SupersededSiblingSameEmail_NoRemove covers a
+// contact that moved from membership A to B: the grant index still points at
+// A, and another same-email contact remains on A in the org's contact slice.
+// The accepted-email resolver must let the supersede-revoke recognize A as
+// still justified, so no member_remove is published for it.
+func TestInviteAcceptedService_Handle_SupersededSiblingSameEmail_NoRemove(t *testing.T) {
+	const orgUID = "001000000000000AAA"
+	const movedUID = "kc-moved"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A", Username: "alice", Revision: 1},
+		},
+	}
+
+	kcs := []*model.KeyContact{
+		// The moved contact: same UID the index has recorded, now on m-B.
+		{UID: movedUID, MembershipUID: "m-B", Email: "alice@example.com", Status: "Active"},
+		// A sibling still on the old membership, same email, live.
+		{UID: "kc-sibling", MembershipUID: "m-A", Email: "alice@example.com", Status: "Active"},
+	}
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(&stubKCOrgReader{contacts: kcs}),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	for _, msg := range pub.accessMessages {
+		removeData, ok := msg.(fgatypes.GenericMemberData)
+		if !ok {
+			continue
+		}
+		assert.NotEqual(t, "m-A", removeData.UID,
+			"the old membership is still justified by the same-email sibling; it must not be revoked")
+	}
+}
+
+// TestInviteAcceptedService_Handle_SupersededSiblingDifferentEmail_Inconclusive
+// covers the fail-safe side: a sibling on the old membership with a different
+// email is not known to the accepted-email resolver, so the scan must read
+// as inconclusive and skip the revoke rather than strip a possibly-justified
+// tuple.
+func TestInviteAcceptedService_Handle_SupersededSiblingDifferentEmail_Inconclusive(t *testing.T) {
+	const orgUID = "001000000000000AAA"
+	const movedUID = "kc-moved-2"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A2", Username: "alice", Revision: 1},
+		},
+	}
+
+	kcs := []*model.KeyContact{
+		{UID: movedUID, MembershipUID: "m-B2", Email: "alice@example.com", Status: "Active"},
+		// A different person entirely, still on the old membership.
+		{UID: "kc-other", MembershipUID: "m-A2", Email: "carol@example.com", Status: "Active"},
+	}
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(&stubKCOrgReader{contacts: kcs}),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	for _, msg := range pub.accessMessages {
+		removeData, ok := msg.(fgatypes.GenericMemberData)
+		if !ok {
+			continue
+		}
+		assert.NotEqual(t, "m-A2", removeData.UID,
+			"an unresolvable sibling must make the scan inconclusive, not certain the pair is unjustified")
+	}
+	stored, found, err := grants.Get(context.Background(), movedUID)
+	require.NoError(t, err)
+	require.True(t, found, "the marker/entry must be retained so a later pass can retry the revoke")
+	assert.NotNil(t, stored.PendingRevoke, "the superseded pair's address must survive an inconclusive scan")
 }
 
 func TestInviteAcceptedService_Handle_NilKeyContactDeps_NoPanic(t *testing.T) {

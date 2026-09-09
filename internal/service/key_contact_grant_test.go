@@ -469,7 +469,8 @@ func TestPublishKeyContactFGA_SiblingFilteredOut_StillRevokes(t *testing.T) {
 		{UID: "kc-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"},
 		// Inactive sibling: does not justify the tuple.
 		{UID: "kc-2", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Inactive"},
-		// Different email: a different tuple entirely.
+		// Different email, no resolver on this lister: neither confirmed to
+		// belong to alice nor ruled out, so the scan reads as uncertain.
 		{UID: "kc-3", MembershipUID: "asset-1", Email: "bob@example.com", Status: "Active"},
 	}}
 
@@ -481,10 +482,13 @@ func TestPublishKeyContactFGA_SiblingFilteredOut_StillRevokes(t *testing.T) {
 		Status:        "Inactive",
 	}, lister)
 
-	removes := removeMessages(t, pub)
-	require.Len(t, removes, 1, "none of the returned siblings actually justify the tuple, so it must still be revoked")
-	assert.Equal(t, "asset-1", removes[0].UID)
-	assert.Equal(t, "alice", removes[0].Username)
+	// An eligible sibling that cannot be resolved to a username (no resolver
+	// wired) is no longer treated as "certainly a different person": the
+	// scan must read as uncertain and skip the revoke, fail safe.
+	assert.Empty(t, removeMessages(t, pub),
+		"an unresolvable eligible sibling must make the scan uncertain, not certain the tuple is unjustified")
+	assert.Equal(t, port.KeyContactGrant{MembershipUID: "asset-1", Username: "alice", Revision: 3},
+		grants.Entries["kc-1"], "the entry must be left exactly as it was")
 }
 
 // ── API writer paths ──────────────────────────────────────────────────────────

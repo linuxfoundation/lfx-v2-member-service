@@ -520,12 +520,13 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	if grantErr == nil && grantFound && (grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
 		// The stored pair's email is unknown here: justification runs by
 		// resolution alone. A failed or uncertain revoke preserves the entry.
-		if _, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+		if _, _, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 			membershipUID: grant.MembershipUID,
 			username:      grant.Username,
 			excludeUID:    in.UID,
 			reason:        "key contact deleted (stale indexed pair)",
 			flush:         false,
+			recheck:       lister,
 		}); revokeErr != nil {
 			indexedPairRevokeFailed = true
 		}
@@ -538,21 +539,31 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// The choke point flushes here so a crash cannot discard a revocation this
 	// call has already reported as done: that confirms the server received the
 	// message, not that OpenFGA converged.
-	outcome, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 		membershipUID: kc.MembershipUID,
 		username:      username,
 		excludeUID:    in.UID,
 		email:         kc.Email,
 		reason:        "key contact deleted",
 		flush:         true,
+		recheck:       lister,
 	})
 	switch outcome {
 	case revokeFailed:
 		return pkgerrors.NewUnexpected("failed to publish FGA revocation for deleted key contact", revokeErr)
 	case revokeUncertain:
 		// The scan could not prove the pair unjustified: leave the index entry
-		// as the only address for a later retry.
-		return nil
+		// as the only address for a later retry. The record is already deleted,
+		// so report the revoke failure rather than a false success.
+		return pkgerrors.NewUnexpected("sibling scan inconclusive for deleted key contact: revocation not published", revokeErr)
+	}
+
+	// A live sibling justified the pair: this entry may be the pair's only
+	// durable address, so it must not be cleared below until the sibling
+	// durably owns the pair.
+	if outcome == revokeUnneeded && justifiedBy != nil && o.grantIndex != nil &&
+		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, kc.MembershipUID, username) {
+		indexedPairRevokeFailed = true
 	}
 
 	// Clear the recorded grant now that the revoke is confirmed delivered or

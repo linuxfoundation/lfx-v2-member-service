@@ -872,6 +872,47 @@ func TestCDCConsumer_ProjectRole_AbsentFromSOQL_UsesGrantIndex(t *testing.T) {
 	assert.Equal(t, []string{kcUID}, grants.Deletes)
 }
 
+// TestCDCConsumer_ProjectRole_AbsentFromSOQL_FlushFailure_HoldsReplayCursor
+// covers handleAbsentAsDelete propagating an unconfirmed key_contact revoke:
+// the Salesforce record is already gone (absent from the upsert batch) and
+// nothing will retry it except redelivery, so the replay cursor must hold
+// exactly as it does for an explicit DELETE event.
+func TestCDCConsumer_ProjectRole_AbsentFromSOQL_FlushFailure_HoldsReplayCursor(t *testing.T) {
+	kcUID := sfid("kc-uid-absentflush")
+	membershipUID := sfid("asset-absentflush-parent")
+
+	pub := &subjectCapturingPublisher{flushErr: assert.AnError}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "asmith", Revision: 2},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r8cflush")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		// The batch reader returns no contact for the requested SFID, which the
+		// consumer treats as a soft delete via handleAbsentAsDelete.
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	replay := &fakeReplayStore{}
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
+
+	require.NotEmpty(t, pub.accessMessages, "the revoke was handed to NATS even though delivery was never confirmed")
+	assert.Empty(t, grants.Deletes,
+		"an unconfirmed flush on the absent-from-SOQL path must not clear the only recorded address")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.True(t, found, "the entry must survive so a retry can still address the revoke")
+}
+
 // ── Error resilience ──────────────────────────────────────────────────────────
 
 func TestCDCConsumer_UnhandledEntity_SkipsAndAdvancesReplay(t *testing.T) {

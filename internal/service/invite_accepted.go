@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -153,17 +154,42 @@ func (s *InviteAcceptedService) resolveKeyContactsInOrg(ctx context.Context, org
 			"org_uid", orgUID, "error", err)
 		return
 	}
+	username := strings.TrimPrefix(acceptedBy, legacyAuth0UsernamePrefix)
 	// No membership reader is wired here, so a membership outside this org
-	// slice reads as uncovered and the revoke fails safe (skips).
-	lister := sliceSiblingLister(contacts, nil, nil)
+	// slice reads as uncovered and the revoke fails safe (skips). The
+	// accepted email is the one mapping this handler actually knows: it
+	// lets a sibling on the same email resolve as still-justified instead
+	// of only reading as inconclusive.
+	lister := sliceSiblingLister(contacts, nil, acceptedEmailResolver{email: normalizedEmail, username: username})
 	for _, kc := range contacts {
 		if normalizeSettingsEmail(kc.Email) != normalizedEmail {
 			continue
 		}
-		kc.Username = strings.TrimPrefix(acceptedBy, legacyAuth0UsernamePrefix)
+		kc.Username = username
 		PublishKeyContactFGA(ctx, s.publisher, s.grantIndex, kc, lister)
 		PublishKeyContactIndexer(ctx, s.publisher, kc, indexerConstants.ActionUpdated)
 	}
+}
+
+// acceptedEmailResolver resolves only the email this invite was accepted
+// for, to the username that acceptance just registered. It implements
+// usernameByEmailResolver, not the full port.UserReader: no other email's
+// registration status is known here, so any other email must read as
+// inconclusive rather than a definitive miss.
+type acceptedEmailResolver struct {
+	email    string // already normalized
+	username string
+}
+
+// UsernameByEmail returns username for the accepted email (case-insensitive
+// via normalizeSettingsEmail), and a plain error, never pkgerrors.IsNotFound,
+// for every other email: keyContactPairJustified treats it as uncertain
+// rather than a definitive miss.
+func (r acceptedEmailResolver) UsernameByEmail(_ context.Context, email string) (string, error) {
+	if normalizeSettingsEmail(email) == r.email {
+		return r.username, nil
+	}
+	return "", fmt.Errorf("acceptedEmailResolver: registration status unknown for %s", redaction.RedactEmail(email))
 }
 
 // Adapts an already-fetched key-contact slice to membershipKeyContactLister,

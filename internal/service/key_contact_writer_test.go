@@ -1040,6 +1040,30 @@ func TestKeyContactWriter_Delete_FGARemovePublishError_SkipsFlush(t *testing.T) 
 		"nothing was published, so there is no delivery to confirm")
 }
 
+// TestKeyContactWriter_Delete_SiblingScanUncertain_ReturnsErrorNotSuccess
+// covers T6: an inconclusive sibling scan on delete must report failure, not
+// a false success, since the record is already gone and nothing will retry it.
+func TestKeyContactWriter_Delete_SiblingScanUncertain_ReturnsErrorNotSuccess(t *testing.T) {
+	kc := kcForFGA()
+	storage := newSeededStorage(kc)
+	pub := &accessPayloadPublisher{}
+	siblings := &mock.MockKeyContactsByMembershipReader{Err: assert.AnError}
+
+	w := svc.NewKeyContactWriter(
+		svc.WithKCStorage(storage),
+		svc.WithKCWriter(mock.NewMockKeyContactWriterWithOK()),
+		svc.WithKCProjectMembershipReader(&seededPMReader{pm: &model.ProjectMembership{}}),
+		svc.WithKCPublisher(pub),
+		svc.WithKCUserReader(resolvesTo("alice")),
+		svc.WithKCSiblingReader(siblings),
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.Error(t, err, "an inconclusive sibling scan must not be reported as a successful delete")
+	assert.Empty(t, removeMessages(t, pub), "nothing was proven unjustified, so nothing must be published")
+}
+
 func TestKeyContactWriter_Update_EmailChange_DoesNotFlush(t *testing.T) {
 	oldKC := &model.KeyContact{
 		UID: testKCUID, MembershipUID: testMembershipUID,

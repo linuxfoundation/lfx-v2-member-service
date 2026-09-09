@@ -63,7 +63,7 @@ func (l keyContactsByMembershipLister) ListKeyContactsForMembership(ctx context.
 // no reader is wired (disabling the check). A non-nil users adds the
 // email-to-username resolution keyContactPairJustified needs for pairs whose
 // email is unknown.
-func siblingListerFor(r port.KeyContactsByMembershipReader, users port.UserReader) membershipKeyContactLister {
+func siblingListerFor(r port.KeyContactsByMembershipReader, users usernameByEmailResolver) membershipKeyContactLister {
 	if r == nil {
 		return nil
 	}
@@ -77,11 +77,15 @@ type usernameByEmailResolver interface {
 	UsernameByEmail(ctx context.Context, email string) (string, error)
 }
 
-// resolvingSiblingLister pairs a sibling lister with the user reader, exposing
-// the usernameByEmailResolver capability keyContactPairJustified asserts for.
+// resolvingSiblingLister pairs a sibling lister with an email-to-username
+// resolver, exposing the usernameByEmailResolver capability
+// keyContactPairJustified asserts for. users only needs to satisfy the narrow
+// resolver interface, not the full port.UserReader: port.UserReader values
+// satisfy it automatically, and a caller with only a resolver (e.g. one
+// tied to a single accepted invite) can plug in without implementing the rest.
 type resolvingSiblingLister struct {
 	membershipKeyContactLister
-	users port.UserReader
+	users usernameByEmailResolver
 }
 
 func (l resolvingSiblingLister) UsernameByEmail(ctx context.Context, email string) (string, error) {
@@ -90,7 +94,7 @@ func (l resolvingSiblingLister) UsernameByEmail(ctx context.Context, email strin
 
 // withEmailResolver adds the email-to-username resolution capability to a
 // sibling lister; a nil lister or users leaves it unchanged.
-func withEmailResolver(lister membershipKeyContactLister, users port.UserReader) membershipKeyContactLister {
+func withEmailResolver(lister membershipKeyContactLister, users usernameByEmailResolver) membershipKeyContactLister {
 	if lister == nil || users == nil {
 		return lister
 	}
@@ -121,7 +125,7 @@ func (l coverageAwareLister) ListKeyContactsForMembership(ctx context.Context, m
 
 // sliceSiblingLister adapts an already-fetched contacts slice. A membership
 // absent from the slice reads as uncovered: served live via reader, else inconclusive.
-func sliceSiblingLister(contacts []*model.KeyContact, reader port.KeyContactsByMembershipReader, users port.UserReader) membershipKeyContactLister {
+func sliceSiblingLister(contacts []*model.KeyContact, reader port.KeyContactsByMembershipReader, users usernameByEmailResolver) membershipKeyContactLister {
 	covered := make(map[string]struct{}, len(contacts))
 	for _, kc := range contacts {
 		if kc.MembershipUID != "" {
@@ -228,6 +232,13 @@ type keyContactPairRevoke struct {
 	email         string // email known to belong to username; "" when unknown
 	reason        string // logged only
 	flush         bool   // confirm broker delivery before reporting success
+
+	// recheck, when non-nil, is a LIVE (never prefetched) sibling lister used to
+	// re-run justification after the remove publishes, closing the window where
+	// a different contact UID grants the same pair between the scan and the
+	// publish. Leave nil when no live reader is available (invite path) or the
+	// caller cannot supply one (revokeSupersededKeyContactGrant).
+	recheck membershipKeyContactLister
 }
 
 // keyContactRevokeOutcome reports what revokeKeyContactPairIfUnjustified did.
@@ -246,29 +257,41 @@ const (
 	revokeFailed
 )
 
-// keyContactPairJustified reports whether a live (non-Inactive) sibling record
-// on the membership, excluding the record being removed, still justifies the
-// pair: by carrying req.email when it is known, or by an email that resolves
-// to req.username when the lister exposes usernameByEmailResolver. An error
-// means uncertainty and the caller must not revoke.
-func keyContactPairJustified(ctx context.Context, lister membershipKeyContactLister, req keyContactPairRevoke) (bool, error) {
+// errSiblingUnresolvable reports a live sibling on the membership whose email
+// could not be checked against req.username because the lister carries no
+// email resolver, making the scan inconclusive rather than falsely certain.
+var errSiblingUnresolvable = errors.New("live sibling could not be resolved to a username")
+
+// keyContactPairJustified reports the live (non-Inactive) sibling record on
+// the membership, excluding the record being removed, that still justifies
+// the pair: by carrying req.email when it is known, or by an email that
+// resolves to req.username when the lister exposes usernameByEmailResolver. A
+// nil sibling means not justified. An error means uncertainty and the caller
+// must not revoke. A resolver NotFound error is a definitive miss and does
+// not itself cause uncertainty; an eligible sibling that cannot be checked at
+// all (no resolver wired) does.
+func keyContactPairJustified(ctx context.Context, lister membershipKeyContactLister, req keyContactPairRevoke) (*model.KeyContact, error) {
 	if lister == nil || req.username == "" {
-		return false, nil
+		return nil, nil
 	}
 	siblings, err := lister.ListKeyContactsForMembership(ctx, req.membershipUID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	resolver, _ := lister.(usernameByEmailResolver)
+	unresolvable := false
 	for _, sib := range siblings {
 		if sib.UID == req.excludeUID || sib.Email == "" ||
 			strings.EqualFold(sib.Status, constants.RoleStatusInactive) {
 			continue
 		}
 		if req.email != "" && strings.EqualFold(sib.Email, req.email) {
-			return true, nil
+			return sib, nil
 		}
 		if resolver == nil {
+			// An eligible sibling that cannot be checked reads as "possibly
+			// this person", not "certainly a different person".
+			unresolvable = true
 			continue
 		}
 		resolved, resolveErr := resolver.UsernameByEmail(ctx, sib.Email)
@@ -276,13 +299,16 @@ func keyContactPairJustified(ctx context.Context, lister membershipKeyContactLis
 			if pkgerrors.IsNotFound(resolveErr) {
 				continue
 			}
-			return false, resolveErr
+			return nil, resolveErr
 		}
 		if resolved == req.username {
-			return true, nil
+			return sib, nil
 		}
 	}
-	return false, nil
+	if unresolvable {
+		return nil, fmt.Errorf("key_contact sibling scan for %s: %w", req.membershipUID, errSiblingUnresolvable)
+	}
+	return nil, nil
 }
 
 // publishKeyContactRemove is the only function that emits a key_contact FGA
@@ -317,26 +343,58 @@ func publishKeyContactRemove(ctx context.Context, p port.MemberPublisher, req ke
 // sibling-justification decision, the fail-safe on an uncertain scan, and the
 // publish. Index bookkeeping stays with the caller, which alone knows whether
 // an entry may be cleared for each outcome. The returned error is non-nil for
-// revokeUncertain and revokeFailed.
-func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublisher, lister membershipKeyContactLister, req keyContactPairRevoke) (keyContactRevokeOutcome, error) {
+// revokeUncertain and revokeFailed. justifiedBy is the sibling that justified
+// the pair on revokeUnneeded, and nil for every other outcome.
+//
+// When req.recheck is set, a successful publish is followed by re-running the
+// scan against that live lister: a different contact UID can grant the same
+// pair between the first scan and this publish, and the remove would
+// otherwise strip access that was just re-granted. A recheck that finds the
+// pair justified again publishes a compensating member_put; the outcome
+// stays revokePublished either way, since the remove itself did succeed.
+func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublisher, lister membershipKeyContactLister, req keyContactPairRevoke) (keyContactRevokeOutcome, *model.KeyContact, error) {
 	if req.username == "" {
-		return revokeUnneeded, nil
+		return revokeUnneeded, nil, nil
 	}
-	justified, err := keyContactPairJustified(ctx, lister, req)
+	justifiedBy, err := keyContactPairJustified(ctx, lister, req)
 	if err != nil {
 		slog.WarnContext(ctx, "key_contact sibling scan failed: skipping revoke to avoid stripping a possibly still-justified tuple",
 			"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason, "error", err)
-		return revokeUncertain, fmt.Errorf("sibling scan for key_contact %s: %w", req.excludeUID, err)
+		return revokeUncertain, nil, fmt.Errorf("sibling scan for key_contact %s: %w", req.excludeUID, err)
 	}
-	if justified {
+	if justifiedBy != nil {
 		slog.DebugContext(ctx, "key_contact pair still justified by a live sibling: skipping revoke",
 			"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
-		return revokeUnneeded, nil
+		return revokeUnneeded, justifiedBy, nil
 	}
 	if pubErr := publishKeyContactRemove(ctx, p, req); pubErr != nil {
-		return revokeFailed, pubErr
+		return revokeFailed, nil, pubErr
 	}
-	return revokePublished, nil
+	if req.recheck != nil {
+		recheckRevoke := req
+		recheckRevoke.recheck = nil
+		racedBy, recheckErr := keyContactPairJustified(ctx, req.recheck, recheckRevoke)
+		if recheckErr != nil {
+			slog.ErrorContext(ctx, "key_contact post-revoke recheck failed: tuple may be incorrectly absent until the next backfill",
+				"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason,
+				"error", recheckErr, "fga_remove_raced_possible_lost_grant", true)
+		} else if racedBy != nil {
+			repairMsg := BuildKeyContactFGAPutMessage(req.membershipUID, req.username)
+			repairErr := p.Access(ctx, fgaconstants.GenericMemberPutSubject, repairMsg)
+			if repairErr == nil {
+				repairErr = p.Flush(ctx)
+			}
+			if repairErr != nil {
+				slog.ErrorContext(ctx, "key_contact post-revoke repair failed: tuple may be incorrectly absent until the next backfill",
+					"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason,
+					"error", repairErr, "fga_remove_raced_possible_lost_grant", true)
+			} else {
+				slog.WarnContext(ctx, "key_contact grant repaired: a concurrent grant raced this revoke and was reapplied",
+					"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
+			}
+		}
+	}
+	return revokePublished, nil, nil
 }
 
 // recordKeyContactGrant stores the grant just published for key contact uid and
@@ -482,7 +540,7 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	if superseded.MembershipUID == "" || superseded.Username == "" {
 		return nil
 	}
-	outcome, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
+	outcome, _, revokeErr := revokeKeyContactPairIfUnjustified(ctx, p, lister, keyContactPairRevoke{
 		membershipUID: superseded.MembershipUID,
 		username:      superseded.Username,
 		excludeUID:    uid,
@@ -562,15 +620,19 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 	if liveUsername == "" || stored.Username == liveUsername {
 		req.email = liveEmail
 	}
-	justified, justifyErr := keyContactPairJustified(ctx, lister, req)
+	justifiedBy, justifyErr := keyContactPairJustified(ctx, lister, req)
 	if justifyErr != nil {
 		slog.WarnContext(ctx, "key_contact sibling scan failed: skipping revoke to avoid stripping a possibly still-justified tuple",
 			"uid", uid, "membership_uid", stored.MembershipUID, "reason", reason, "error", justifyErr)
 		return
 	}
-	if justified {
-		// A live sibling keeps the tuple; clear only this record's entry so
-		// a later delete cannot revoke the sibling's access.
+	if justifiedBy != nil {
+		// A live sibling keeps the tuple, but this entry may be the pair's
+		// only durable address: clearing it before the sibling durably owns
+		// the pair would leave a live tuple with no address at all.
+		if !pairDurablyOwned(ctx, idx, justifiedBy, stored.MembershipUID, stored.Username) {
+			return
+		}
 		clearRevokedGrant(ctx, idx, uid, stored)
 		return
 	}
@@ -633,6 +695,36 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 		return
 	}
 	clearRevokedGrant(ctx, idx, uid, current)
+}
+
+// pairDurablyOwned reports whether the {membershipUID, username} pair has a
+// durable address in the index other than the entry being cleared: either
+// sib already owns an entry for that exact pair, or it owns no entry at all
+// and one is created for it here. A sibling entry recording a different pair,
+// or any Get/Put failure, returns false: the caller must not clear its own
+// entry, since it would then be the only address left for a pair that still
+// has a live tuple.
+func pairDurablyOwned(ctx context.Context, idx port.KeyContactGrantIndex, sib *model.KeyContact, membershipUID, username string) bool {
+	stored, found, err := idx.Get(ctx, sib.UID)
+	if err != nil {
+		slog.WarnContext(ctx, "key_contact grant index read failed for justifying sibling: retaining this entry as the pair's only durable address",
+			"sibling_uid", sib.UID, "membership_uid", membershipUID, "error", err)
+		return false
+	}
+	if found {
+		if stored.MembershipUID == membershipUID && stored.Username == username {
+			return true
+		}
+		slog.WarnContext(ctx, "key_contact grant index justifying sibling already owns a different entry: retaining this entry as the pair's only durable address",
+			"sibling_uid", sib.UID, "membership_uid", membershipUID)
+		return false
+	}
+	if putErr := idx.Put(ctx, sib.UID, port.KeyContactGrant{MembershipUID: membershipUID, Username: username}); putErr != nil {
+		slog.WarnContext(ctx, "key_contact grant index write failed for justifying sibling: retaining this entry as the pair's only durable address",
+			"sibling_uid", sib.UID, "membership_uid", membershipUID, "error", putErr)
+		return false
+	}
+	return true
 }
 
 // clearRevokedGrant removes the just-revoked, confirmed-delivered grant from
