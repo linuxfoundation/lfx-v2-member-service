@@ -1821,6 +1821,111 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMiss_RevokesRecordedGrant
 	assert.Equal(t, []string{sfid("kc-res-4")}, grants.Deletes, "the confirmed-revoked entry must be cleared")
 }
 
+// TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMissRevokeFailure_HoldsReplayCursor
+// covers PRRT_kwDORegyoM6gyyLJ: a definitive-miss revoke failure must hold the
+// replay cursor (wrapped as errKeyContactRevokeIncomplete) so the failed
+// contact ID is redelivered, instead of relying on a later event or backfill.
+func TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMissRevokeFailure_HoldsReplayCursor(t *testing.T) {
+	kcUID := sfid("kc-res-6")
+	kc := &model.KeyContact{
+		UID: kcUID, MembershipUID: "pm-6",
+		B2BOrgUID: "001000000000006AAA", Email: "renamed6@example.com",
+	}
+	pub := &subjectCapturingPublisher{
+		beforeAccess: func(subject string, _ any) error {
+			if subject == fgaconstants.GenericMemberRemoveSubject {
+				return assert.AnError
+			}
+			return nil
+		},
+	}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: "pm-6", Username: "old-alice6", Revision: 1},
+		},
+	}
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCUserReader(&fakeUserReader{err: pkgerrors.NewNotFound("no such user")}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	replay := &fakeReplayStore{}
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
+
+	assert.True(t, pub.hasAccess(fgaconstants.GenericMemberRemoveSubject), "the revoke attempt must have been made")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.True(t, found, "a failed revoke must leave the grant entry intact for retry")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMissRevokeFailure_SucceedsOnceCleared
+// covers the recovery half of PRRT_kwDORegyoM6gyyLJ: once the transient
+// publish failure clears, the held replay cursor's redelivery must complete
+// the revoke and clear the grant entry.
+func TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMissRevokeFailure_SucceedsOnceCleared(t *testing.T) {
+	kcUID := sfid("kc-res-7")
+	kc := &model.KeyContact{
+		UID: kcUID, MembershipUID: "pm-7",
+		B2BOrgUID: "001000000000007AAA", Email: "renamed7@example.com",
+	}
+	var removeAttempts int
+	pub := &subjectCapturingPublisher{
+		beforeAccess: func(subject string, _ any) error {
+			if subject == fgaconstants.GenericMemberRemoveSubject {
+				removeAttempts++
+				if removeAttempts == 1 {
+					return assert.AnError
+				}
+			}
+			return nil
+		},
+	}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: "pm-7", Username: "old-alice7", Revision: 1},
+		},
+	}
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCUserReader(&fakeUserReader{err: pkgerrors.NewNotFound("no such user")}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 2, removeAttempts, "the revoke must be retried once the first failure is observed")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.False(t, found, "once the revoke succeeds, the entry must be cleared")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_InactiveContact_SkipsProvisionReconciles
+// covers PRRT_kwDORegyoM6gyyLm: an Inactive contact upsert must not re-assert
+// org-dashboard access, and must reconcile using remaining active siblings.
+func TestCDCConsumer_ProjectRole_Upsert_InactiveContact_SkipsProvisionReconciles(t *testing.T) {
+	orgUID := "001000000000008AAA"
+	kc := &model.KeyContact{
+		UID: sfid("kc-inactive-provision"), MembershipUID: "pm-8",
+		B2BOrgUID: orgUID, Email: "dana@example.com",
+		Username: "dana-sub", Status: "Inactive", Role: "Billing Contact",
+	}
+	pub := &subjectCapturingPublisher{}
+	spy := &spyOrgSettings{}
+	storage := newSeededStorage(kc) // no other active siblings for dana@example.com
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCOrgSettings(spy),
+		svc.WithCDCStorage(storage),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, spy.adds, "AddPrincipal must NOT be called for an Inactive contact")
+	require.Len(t, spy.removes, 1, "RemovePrincipal must be called when no active sibling shares the email")
+	assert.Equal(t, "dana@example.com", spy.removes[0].Email)
+}
+
 // TestCDCConsumer_ProjectRole_Upsert_EmailTransientFailure_LeavesGrantUntouched
 // covers a transport-level lookup failure: it is not evidence the email is
 // unregistered and must not trigger a revoke of a still-valid grant.

@@ -89,6 +89,9 @@ type CDCConsumer struct {
 	userReader              port.UserReader
 	orgSettings             OrgSettingsPrincipalWriter
 	settingsReader          port.B2BOrgSettingsReader
+	// storage supplies ListKeyContactsForOrg for org-dashboard reconciliation
+	// when an Inactive contact's provisioning is skipped. Nil disables the scan.
+	storage port.MemberReader
 
 	// refreshMu guards lastRefreshAttemptAt so failed/attempted refreshes are
 	// throttled to at most once per staleness window even under concurrent calls.
@@ -186,6 +189,13 @@ func WithCDCUserReader(r port.UserReader) CDCConsumerOption {
 
 func WithCDCOrgSettings(w OrgSettingsPrincipalWriter) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.orgSettings = w }
+}
+
+// WithCDCStorage injects the reader used to scan an org's key contacts for
+// org-dashboard reconciliation when an Inactive contact's provisioning is
+// skipped. Nil disables reconciliation; the gate on Inactive still applies.
+func WithCDCStorage(r port.MemberReader) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.storage = r }
 }
 
 // NewCDCConsumer constructs a CDCConsumer. The quota-skip threshold is read
@@ -1387,15 +1397,18 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 
 	// Attempt LFID resolution when the contact has no stored username. CDC is a
 	// passive sync and must never send emails — provisioning is always silent.
+	var revokeErr error
 	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
 		if username, usernameErr := o.userReader.UsernameByEmail(ctx, kc.Email); usernameErr != nil {
 			if pkgerrors.IsNotFound(usernameErr) {
 				// A definitive miss: the email no longer resolves to any registered
 				// account (e.g. a rename or deregistration since the last time this
 				// contact was granted). Revoke any grant still recorded for it.
-				// Best-effort: processKeyContact has no per-contact error path
-				// back to the batch, the next CDC event or backfill retries.
-				_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered)
+				// Wrapped so a failure holds the cursor and the ID is retried.
+				if err := revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered); err != nil {
+					revokeErr = fmt.Errorf("revoke key_contact grant for unregistered email %s: %w",
+						kc.UID, errors.Join(err, errKeyContactRevokeIncomplete))
+				}
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
 				// leave Username empty and any existing grant untouched.
@@ -1438,10 +1451,13 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 		}
 	}
 
-	// Provision org-dashboard access silently for registered contacts when the
-	// indexer path ran (project_uid resolved). kc.Username is non-empty only when
-	// UsernameByEmail resolved a trusted LFID — unregistered contacts remain pending.
-	if projectUIDResolved && kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
+	inactive := strings.EqualFold(kc.Status, constants.RoleStatusInactive)
+
+	// Provision org-dashboard access silently for registered, non-Inactive
+	// contacts when the indexer path ran (project_uid resolved). kc.Username is
+	// non-empty only when UsernameByEmail resolved a trusted LFID, unregistered
+	// contacts remain pending.
+	if projectUIDResolved && kc.Username != "" && !inactive && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
 		if _, provErr := o.orgSettings.AddPrincipal(ctx, B2BOrgSettingsAddPrincipal{
 			OrgUID:               kc.B2BOrgUID,
 			Email:                kc.Email,
@@ -1452,9 +1468,14 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 			slog.WarnContext(ctx, "cdc: key contact org-dashboard provision failed (best-effort)",
 				"uid", kc.UID, "error", provErr)
 		}
+	} else if inactive && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
+		// Reconcile using remaining active siblings instead of re-asserting
+		// access for a contact whose key_contact tuple was just revoked.
+		// Best-effort: derived access, repairable, never holds the cursor.
+		reconcileOrgDashboardAccess(ctx, o.orgSettings, o.storage, kc)
 	}
 
-	return pubErr
+	return errors.Join(pubErr, revokeErr)
 }
 
 // keyContactGrantLookup carries one grant-index read's result, captured once

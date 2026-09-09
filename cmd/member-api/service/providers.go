@@ -1034,6 +1034,9 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		usecaseSvc.WithCDCB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 		usecaseSvc.WithCDCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithCDCOrgSettings(OrgSettingsWriterUseCase(ctx)),
+		// Org-dashboard reconciliation scan for Inactive contacts, same reader
+		// the API writer orchestrator uses for ListKeyContactsForOrg.
+		usecaseSvc.WithCDCStorage(MemberReaderImpl(ctx)),
 	)
 
 	return consumer, replayStore, pubsubClient

@@ -882,6 +882,88 @@ func TestKeyContactWriter_Update_EmailChange_ProvisionNewRevokeOld(t *testing.T)
 	assert.Equal(t, "old@example.com", spy.removes[0].Email)
 }
 
+func TestKeyContactWriter_Create_Inactive_NoProvision(t *testing.T) {
+	// Reviewer PRRT_kwDORegyoM6gyyL8: an Inactive create must never call
+	// AddPrincipal, the contact never held a live key_contact tuple to match.
+	pm := &model.ProjectMembership{UID: testMembershipUID, B2BOrgUID: testOrgSFID}
+	spy := &spyOrgSettings{}
+	storage := newSeededStorage()
+	inactive := constants.RoleStatusInactive
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: pm}, &trackingPublisher{},
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "eve-sub", nil }),
+		spy,
+	)
+
+	_, err := w.Create(context.Background(), svc.KeyContactCreateInput{
+		MembershipUID: testMembershipUID, FirstName: "Eve", LastName: "Stone",
+		Email: "eve@example.com", Role: "Technical Contact", Status: &inactive, SendInvite: false,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, spy.adds, "AddPrincipal must NOT be called for an Inactive create")
+}
+
+func TestKeyContactWriter_Update_StatusOnly_ActiveToInactive_ReconcilesNoRemapNoProvision(t *testing.T) {
+	// Reviewer PRRT_kwDORegyoM6gyyL8: a status-only Active->Inactive update must
+	// run the active-sibling dashboard reconciliation, not remap or provision.
+	kc := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "frank@example.com", Status: "Active", Role: "Technical Contact",
+	}
+	storage := newSeededStorage(kc)
+	spy := &spyOrgSettings{}
+	inactive := constants.RoleStatusInactive
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: &model.ProjectMembership{}},
+		&trackingPublisher{},
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "frank-sub", nil }),
+		spy,
+	)
+
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID,
+		Status: &inactive,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, spy.removes, 1, "RemovePrincipal must be called when the contact turns Inactive with no active sibling")
+	assert.Equal(t, "frank@example.com", spy.removes[0].Email)
+	assert.Empty(t, spy.adds, "AddPrincipal must NOT be called for a contact turning Inactive")
+	assert.Empty(t, spy.roleChanges, "ChangePrincipalRole (remap) must NOT be called for a contact turning Inactive")
+}
+
+func TestKeyContactWriter_Update_EmailChange_NewInactive_SkipsNewProvisionReconcilesOld(t *testing.T) {
+	// Reviewer PRRT_kwDORegyoM6gyyL8: an email-changing update whose new record
+	// is Inactive must not provision the new email; the old email is still
+	// reconciled via the existing revokeOrDowngradeOrgDashboardRole(current) call.
+	oldKC := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "old2@example.com", Status: "Active", Role: "Technical Contact",
+		FirstName: "Grace", LastName: "Hopper",
+	}
+	storage := newSeededStorage(oldKC)
+	spy := &spyOrgSettings{}
+	inactive := constants.RoleStatusInactive
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: &model.ProjectMembership{UID: testMembershipUID, B2BOrgUID: testOrgSFID}},
+		&trackingPublisher{},
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "new-sub2", nil }),
+		spy,
+	)
+
+	newEmail := "new2@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID,
+		Email: &newEmail, Status: &inactive, SendInvite: false,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, spy.adds, "AddPrincipal must NOT be called for the new email when the record is Inactive")
+	require.Len(t, spy.removes, 1, "old email must be revoked (last active contact)")
+	assert.Equal(t, "old2@example.com", spy.removes[0].Email)
+}
+
 func TestKeyContactWriter_Delete_LastActive_RevokesOrgAccess(t *testing.T) {
 	// Delete when email is the only active contact in org → RemovePrincipal called.
 	kc := &model.KeyContact{

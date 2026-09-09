@@ -213,7 +213,37 @@ func (o *keyContactWriterOrchestrator) revokeOrDowngradeOrgDashboardRole(ctx con
 	if !o.orgDashboardReady(kc) || o.storage == nil {
 		return
 	}
-	contacts, err := o.storage.ListKeyContactsForOrg(ctx, kc.B2BOrgUID)
+	reconcileOrgDashboardAccess(ctx, o.orgSettings, o.storage, kc)
+}
+
+// orgKeyContactLister lists an org's key contacts for org-dashboard
+// reconciliation. Satisfied by port.MemberReader (API path) and any narrower
+// reader wired for the same purpose on the CDC path.
+type orgKeyContactLister interface {
+	ListKeyContactsForOrg(ctx context.Context, orgSFID string) ([]*model.KeyContact, error)
+}
+
+// reconcileOrgDashboardAccess reconciles org-dashboard access for a key
+// contact that no longer warrants its own provisioning (removed, email
+// changed, or turned Inactive). It scans all OTHER active key contacts for
+// kc.Email in the org and takes one of three actions:
+//
+//   - No remaining active contacts → RemovePrincipal (full revoke).
+//   - Remaining max role < departing role → ChangePrincipalRole to max remaining
+//     (downgrade; e.g. Voting Contact deleted while Billing Contact stays active).
+//   - Remaining max role ≥ departing role → no-op (access level unchanged).
+//
+// Fails safe: nil inputs or a scan error → skip rather than revoke prematurely.
+// ChangePrincipalRole NotFound → swallowed (contact never provisioned).
+// ChangePrincipalRole Conflict → swallowed (assertNotRemovingLastAdmin guard; access stays elevated).
+// Shared by the API writer orchestrator and the CDC consumer so both paths
+// reconcile identically; callers own any cursor/error-propagation semantics,
+// since this function itself only logs (best-effort).
+func reconcileOrgDashboardAccess(ctx context.Context, orgSettings OrgSettingsPrincipalWriter, lister orgKeyContactLister, kc *model.KeyContact) {
+	if orgSettings == nil || lister == nil || kc.B2BOrgUID == "" || kc.Email == "" {
+		return
+	}
+	contacts, err := lister.ListKeyContactsForOrg(ctx, kc.B2BOrgUID)
 	if err != nil {
 		slog.WarnContext(ctx, "key contact org scan failed; skipping dashboard action (best-effort)",
 			"org_uid", kc.B2BOrgUID, "error", err)
@@ -238,7 +268,7 @@ func (o *keyContactWriterOrchestrator) revokeOrDowngradeOrgDashboardRole(ctx con
 	switch {
 	case maxRemainingRole == "":
 		// No other active contacts — full revoke.
-		if _, err := o.orgSettings.RemovePrincipal(ctx, B2BOrgSettingsRemovePrincipal{
+		if _, err := orgSettings.RemovePrincipal(ctx, B2BOrgSettingsRemovePrincipal{
 			OrgUID: kc.B2BOrgUID, Email: kc.Email,
 		}); err != nil && !pkgerrors.IsNotFound(err) && !pkgerrors.IsConflict(err) {
 			slog.WarnContext(ctx, "key contact org-dashboard revoke failed (best-effort)",
@@ -250,7 +280,7 @@ func (o *keyContactWriterOrchestrator) revokeOrDowngradeOrgDashboardRole(ctx con
 		// NotFound: contact was never provisioned → no-op.
 		// Conflict: last-writer guard fired (org must keep ≥1 admin) → swallow,
 		// access stays elevated rather than stranding the org without an admin.
-		if _, err := o.orgSettings.ChangePrincipalRole(ctx, B2BOrgSettingsChangeRole{
+		if _, err := orgSettings.ChangePrincipalRole(ctx, B2BOrgSettingsChangeRole{
 			OrgUID: kc.B2BOrgUID, Email: kc.Email, InvitedAs: maxRemainingRole,
 		}); err != nil && !pkgerrors.IsNotFound(err) && !pkgerrors.IsConflict(err) {
 			slog.WarnContext(ctx, "key contact org-dashboard role downgrade failed (best-effort)",
@@ -327,7 +357,15 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 		// this new contact was created successfully regardless of this cleanup.
 		_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, lister, kc.UID, kc.Username, "", reasonEmailUnregistered)
 	}
-	o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
+	// Status: coalesce to the input value since the mock echoes "" for a
+	// status it does not persist. An Inactive create must never provision.
+	status := kc.Status
+	if status == "" {
+		status = derefPtrStr(in.Status)
+	}
+	if !strings.EqualFold(status, constants.RoleStatusInactive) {
+		o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
+	}
 
 	return kc, nil
 }
@@ -415,17 +453,24 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 				recheck:       lister,
 			})
 		}
-		// Role: nil means no change — coalesce to the current value since the
-		// mock can't re-fetch from SF and returns "" for unchanged fields.
+		// Role/Status: nil means no change, coalesce to the current value since
+		// the mock can't re-fetch from SF and returns "" for unchanged fields.
 		newKC.Role = derefOrStr(in.Role, current.Role)
-		o.provisionOrgDashboardAccess(ctx, newKC, in.SendInvite)
+		newKC.Status = derefOrStr(in.Status, current.Status)
+		if strings.EqualFold(newKC.Status, constants.RoleStatusInactive) {
+			// The new email never had a principal provisioned for it, nothing
+			// more to do there. The old email is reconciled below regardless.
+		} else {
+			o.provisionOrgDashboardAccess(ctx, newKC, in.SendInvite)
+		}
 		o.revokeOrDowngradeOrgDashboardRole(ctx, current)
 	} else {
-		// Email/Role: nil input means unchanged — mock returns "" for nil fields; coalesce.
+		// Email/Role/Status: nil input means unchanged, mock returns "" for nil fields; coalesce.
 		if newKC.Email == "" {
 			newKC.Email = current.Email
 		}
 		newKC.Role = derefOrStr(in.Role, current.Role)
+		newKC.Status = derefOrStr(in.Status, current.Status)
 		lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
 		var definitiveMiss bool
 		newKC.Username, definitiveMiss = o.resolveUsernameForContact(ctx, current.Username, newKC.Email)
@@ -442,7 +487,16 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		} else {
 			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister, lister)
 		}
-		if in.Role != nil && *in.Role != current.Role {
+
+		becomingInactive := strings.EqualFold(newKC.Status, constants.RoleStatusInactive) &&
+			!strings.EqualFold(current.Status, constants.RoleStatusInactive)
+		switch {
+		case becomingInactive:
+			// The tuple was just withdrawn; reconcile using remaining active siblings.
+			o.revokeOrDowngradeOrgDashboardRole(ctx, newKC)
+		case strings.EqualFold(newKC.Status, constants.RoleStatusInactive):
+			// Already Inactive: no principal exists to remap.
+		case in.Role != nil && *in.Role != current.Role:
 			o.remapOrgDashboardRole(ctx, newKC)
 		}
 	}
