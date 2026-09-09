@@ -1103,7 +1103,7 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 	var restoreErr error
 	// contacts is already every key contact on this membership, so the
 	// sibling-check lister costs no extra Salesforce/cache read here.
-	lister := sliceKeyContactLister(contacts)
+	lister := withEmailResolver(sliceKeyContactLister(contacts), o.userReader)
 	for _, contact := range contacts {
 		if contact.Username == "" && contact.Email != "" {
 			if o.userReader == nil {
@@ -1223,8 +1223,11 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 		action = indexerConstants.ActionCreated
 	}
 
+	// One prefetch serves every Inactive contact's sibling check on this page,
+	// instead of a per-contact Salesforce query.
+	lister := batchedSiblingLister(ctx, o.keyContactsByMembership, o.userReader, contacts)
 	for _, kc := range contacts {
-		o.processKeyContact(ctx, kc, action)
+		o.processKeyContact(ctx, kc, action, lister)
 	}
 
 	slog.InfoContext(ctx, "cdc: project_role batch published",
@@ -1234,7 +1237,7 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 
 // processKeyContact handles LFID resolution, publish, and silent org-dashboard
 // provisioning for a single key contact within a CDC upsert batch.
-func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContact, action indexerConstants.MessageAction) {
+func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContact, action indexerConstants.MessageAction, lister membershipKeyContactLister) {
 	// Attempt LFID resolution when the contact has no stored username. CDC is a
 	// passive sync and must never send emails — provisioning is always silent.
 	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
@@ -1243,7 +1246,9 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				// A definitive miss: the email no longer resolves to any registered
 				// account (e.g. a rename or deregistration since the last time this
 				// contact was granted). Revoke any grant still recorded for it.
-				revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, kc.UID, reasonEmailUnregistered)
+				// A live lister, not the batched one: an un-prefetched membership
+				// would read as empty siblings and fake certainty.
+				revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, siblingListerFor(o.keyContactsByMembership, o.userReader), kc.UID, "", "", reasonEmailUnregistered)
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
 				// leave Username empty and any existing grant untouched.
@@ -1269,7 +1274,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 
 	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
-	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc, siblingListerFor(o.keyContactsByMembership))
+	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc, lister)
 
 	// Provision org-dashboard access silently for registered contacts when the
 	// indexer path ran (project_uid resolved). kc.Username is non-empty only when
@@ -1303,47 +1308,44 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// record is already gone, so the grant index is the only place the membership
 	// object and granted username can be recovered from.
 	grant, indexed := o.lookupKeyContactGrant(ctx, uid)
-	removeMsg := BuildKeyContactFGARemoveMessage(grant.MembershipUID, grant.Username)
 	if !indexed {
 		// Pre-index contact, or a grant that was never recorded. Retained for
 		// parity with the behaviour that predates the index, though fga-sync
 		// rejects a remove with an empty username without cleaning anything up:
 		// this contact's grant, if any, is already dangling either way.
-		removeMsg = BuildKeyContactFGARemoveMessage(uid, "")
+		removeMsg := BuildKeyContactFGARemoveMessage(uid, "")
 		slog.WarnContext(ctx, "cdc: key_contact delete has no recorded grant — revoke cannot be addressed",
 			"uid", uid, "fga_revoke_failed_dangling_tuple", true)
+		if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, removeMsg); err != nil {
+			// fga_revoke_failed_dangling_tuple=true signals a dangling FGA tuple:
+			// the key_contact was deleted in Salesforce but the FGA relation was not
+			// revoked. Unlike publish_failed_for_backfill_repair, this cannot be
+			// recovered by /admin/reindex — requires a targeted FGA sync or
+			// re-sending the remove message manually.
+			slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke failed — dangling tuple requires manual cleanup",
+				"uid", uid, "error", err, "fga_revoke_failed_dangling_tuple", true)
+		}
+		return nil
 	}
 
-	if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, removeMsg); err != nil {
-		// fga_revoke_failed_dangling_tuple=true signals a dangling FGA tuple:
-		// the key_contact was deleted in Salesforce but the FGA relation was not
-		// revoked. Unlike publish_failed_for_backfill_repair, this cannot be
-		// recovered by /admin/reindex — requires a targeted FGA sync or
-		// re-sending the remove message manually.
-		slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke failed — dangling tuple requires manual cleanup",
-			"uid", uid, "error", err, "fga_revoke_failed_dangling_tuple", true)
+	// The record is already gone in Salesforce, so the stored pair's email
+	// cannot be recovered: justification runs by resolution alone. The choke
+	// point flushes before the entry is cleared, the same as the API delete.
+	outcome, _ := revokeKeyContactPairIfUnjustified(ctx, o.publisher, siblingListerFor(o.keyContactsByMembership, o.userReader), keyContactPairRevoke{
+		membershipUID: grant.MembershipUID,
+		username:      grant.Username,
+		excludeUID:    uid,
+		reason:        "key contact deleted in Salesforce",
+		flush:         true,
+	})
+	if outcome == revokeUncertain || outcome == revokeFailed {
 		// Keep the index entry: it is the only record of what still needs
 		// revoking, and the contact is gone so nothing will rebuild it.
 		return nil
 	}
-
-	// Access only hands the revoke to the local NATS connection; it does not
-	// confirm the broker received it. Flush before clearing the index entry
-	// below, the same as the API delete path: without it, a crash or
-	// disconnect in the window between Access and actual broker delivery
-	// loses the member_remove while this call has already erased the only
-	// {membership_uid, username} record needed to retry it — and unlike a
-	// live contact, a deleted one gets no other chance to.
-	if indexed {
-		if flushErr := o.publisher.Flush(ctx); flushErr != nil {
-			slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke flush failed — delivery indeterminate, keeping index entry",
-				"uid", uid, "error", flushErr, "fga_revoke_failed_dangling_tuple", true)
-			return nil
-		}
-		if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
-			slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
-				"uid", uid, "error", err)
-		}
+	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
+			"uid", uid, "error", err)
 	}
 	return nil
 }

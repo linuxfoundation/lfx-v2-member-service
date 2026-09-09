@@ -1066,7 +1066,7 @@ func TestKeyContactWriter_Update_EmailChange_DoesNotFlush(t *testing.T) {
 	require.NotEqual(t, -1, firstCallIndex(calls, fgaconstants.GenericMemberRemoveSubject),
 		"email change must still revoke the superseded username")
 	assert.Equal(t, -1, firstCallIndex(calls, "flush"),
-		"the email-change path shares publishFGARemove with delete but must stay publish-only")
+		"the email-change path shares the revoke choke point with delete but must stay publish-only")
 }
 
 func TestKeyContactWriter_Update_UnchangedUsername_EmitsNoFGARemove(t *testing.T) {

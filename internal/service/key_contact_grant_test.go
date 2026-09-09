@@ -880,3 +880,188 @@ func TestKeyContactWriter_Update_EmailChange_NoLiveSibling_StillRemovesOldPair(t
 	assert.Equal(t, testMembershipUID, removes[0].UID)
 	assert.Equal(t, "alice", removes[0].Username)
 }
+
+func TestKeyContactWriter_Update_EmailChange_IndexedOldPairSharedByLiveSibling_NoSupersededRevoke(t *testing.T) {
+	current := &model.KeyContact{
+		UID: "kc-1", MembershipUID: testMembershipUID, Email: "old@example.com", Username: "alice",
+	}
+	pub := &accessPayloadPublisher{}
+	// The index already records the old pair, so recordKeyContactGrant would
+	// treat it as superseded and revoke it before the old-pair guard runs.
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+	}}
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "kc-2", MembershipUID: testMembershipUID, Email: "old@example.com", Status: "Active"},
+	}}
+	usernames := map[string]string{"old@example.com": "alice", "new@example.com": "bob"}
+
+	w := newKCWriterWithSiblingReader(newSeededStorage(current), pub,
+		userReaderFunc(func(_ context.Context, email string) (string, error) { return usernames[email], nil }),
+		grants, siblings)
+
+	newEmail := "new@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: "kc-1", Email: &newEmail,
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, removeMessages(t, pub),
+		"a live sibling still justifies the indexed old pair: neither the superseded nor the explicit remove may fire")
+	assert.Equal(t, "bob", grants.Entries["kc-1"].Username, "the new grant must still be recorded")
+	assert.Equal(t, testMembershipUID, grants.Entries["kc-1"].MembershipUID)
+}
+
+func TestKeyContactWriter_Update_EmailChange_IndexedOldPairNoLiveSibling_StillRevokesOldPair(t *testing.T) {
+	current := &model.KeyContact{
+		UID: "kc-1", MembershipUID: testMembershipUID, Email: "old@example.com", Username: "alice",
+	}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+	}}
+	// Only the updated record itself carries the old email, so the indexed
+	// old pair is unjustified and must still be revoked.
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "kc-1", MembershipUID: testMembershipUID, Email: "old@example.com", Status: "Active"},
+	}}
+	usernames := map[string]string{"old@example.com": "alice", "new@example.com": "bob"}
+
+	w := newKCWriterWithSiblingReader(newSeededStorage(current), pub,
+		userReaderFunc(func(_ context.Context, email string) (string, error) { return usernames[email], nil }),
+		grants, siblings)
+
+	newEmail := "new@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: "kc-1", Email: &newEmail,
+	})
+	require.NoError(t, err)
+
+	removes := removeMessages(t, pub)
+	require.NotEmpty(t, removes, "with no live sibling the indexed old pair must still be revoked")
+	for _, rm := range removes {
+		assert.Equal(t, testMembershipUID, rm.UID)
+		assert.Equal(t, "alice", rm.Username, "only the old pair may be revoked")
+	}
+	assert.Equal(t, "bob", grants.Entries["kc-1"].Username, "the new grant must still be recorded")
+}
+
+// ── Delete paths: sibling-aware revoke ────────────────────────────────────────
+
+func TestKeyContactWriter_Delete_LiveSiblingSharesEmail_SkipsRevokeClearsEntry(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: testMembershipUID, Email: "alice@example.com"}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+	}}
+	// A live sibling record still holds the deleted contact's email, so the
+	// shared tuple must survive the delete.
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "kc-2", MembershipUID: testMembershipUID, Email: "alice@example.com", Status: "Active"},
+	}}
+
+	w := newKCWriterWithSiblingReader(newSeededStorage(kc), pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil }),
+		grants, siblings)
+
+	require.NoError(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
+		MembershipUID: testMembershipUID, UID: "kc-1",
+	}))
+
+	assert.Empty(t, removeMessages(t, pub),
+		"a live sibling still justifies the tuple: deleting one record must not revoke it")
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes,
+		"the deleted contact's own entry must still be cleared — nothing will revisit it")
+}
+
+func TestKeyContactWriter_Delete_NoLiveSibling_StillRevokes(t *testing.T) {
+	kc := &model.KeyContact{UID: "kc-1", MembershipUID: testMembershipUID, Email: "alice@example.com"}
+	pub := &accessPayloadPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: testMembershipUID, Username: "alice", Revision: 1},
+	}}
+	// The only other record is Inactive, so nothing justifies the tuple.
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: "kc-2", MembershipUID: testMembershipUID, Email: "alice@example.com", Status: "Inactive"},
+	}}
+
+	w := newKCWriterWithSiblingReader(newSeededStorage(kc), pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil }),
+		grants, siblings)
+
+	require.NoError(t, w.Delete(context.Background(), svc.KeyContactDeleteInput{
+		MembershipUID: testMembershipUID, UID: "kc-1",
+	}))
+
+	removes := removeMessages(t, pub)
+	require.Len(t, removes, 1, "with no live sibling the delete must still revoke the tuple")
+	assert.Equal(t, testMembershipUID, removes[0].UID)
+	assert.Equal(t, "alice", removes[0].Username)
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes)
+}
+
+func TestCDCConsumer_ProjectRoleDelete_LiveSiblingResolvesToGrantedUser_SkipsRevokeClearsEntry(t *testing.T) {
+	kcUID := sfid("kc-uid-sibkeep")
+	membershipUID := sfid("asset-sibkeep")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 7},
+	}}
+	// A live sibling on the same membership resolves to the granted username,
+	// so the tuple is still justified after this record's delete.
+	siblings := &mock.MockKeyContactsByMembershipReader{Contacts: []*model.KeyContact{
+		{UID: sfid("kc-uid-sibling"), MembershipUID: membershipUID, Email: "jdoe@example.com", Status: "Active"},
+	}}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("rsib1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblings),
+		svc.WithCDCUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "jdoe", nil })),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, pub.accessMessages,
+		"a live sibling still justifies the tuple: the CDC delete must not revoke it")
+	assert.Equal(t, []string{kcUID}, grants.Deletes,
+		"the deleted contact's own entry must still be cleared — nothing will revisit it")
+}
+
+func TestCDCConsumer_ProjectRoleDelete_SiblingScanError_KeepsEntryNoRevoke(t *testing.T) {
+	kcUID := sfid("kc-uid-sibscanerr")
+	membershipUID := sfid("asset-sibscanerr")
+
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 7},
+	}}
+	siblings := &mock.MockKeyContactsByMembershipReader{Err: assert.AnError}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("rsib2")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblings),
+		svc.WithCDCUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "jdoe", nil })),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, pub.accessMessages,
+		"an uncertain sibling scan must not revoke a possibly still-justified tuple")
+	assert.Empty(t, grants.Deletes,
+		"the entry must be kept: it is the only remaining address for a later retry")
+}

@@ -419,7 +419,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			}
 			var lister membershipKeyContactLister
 			if !req.DryRun {
-				lister = r.batchedSiblingLister(ctx, kcs)
+				lister = batchedSiblingLister(ctx, r.keyContactsByMembership, r.userReader, kcs)
 			}
 			for _, kc := range kcs {
 				total++
@@ -708,16 +708,17 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			return outcomeIssued
 		}
 		r.resolveKeyContactUsername(ctx, log, kc)
+		lister := siblingListerFor(r.keyContactsByMembership, r.userReader)
 		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
-			PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
+			PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister)
 			return outcomeRetry
 		}
 		kc.ProjectUID = resolvedUID
 		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, siblingListerFor(r.keyContactsByMembership))
+		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister)
 		return outcomeIssued
 
 	case entityTypeB2BOrgSettings:
@@ -871,7 +872,7 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 	var published int
 	var lister membershipKeyContactLister
 	if !req.DryRun {
-		lister = r.batchedSiblingLister(ctx, contacts)
+		lister = batchedSiblingLister(ctx, r.keyContactsByMembership, r.userReader, contacts)
 	}
 	for _, kc := range contacts {
 		if req.DryRun {
@@ -910,7 +911,7 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 	if err != nil {
 		if errs.IsNotFound(err) {
 			// A definitive miss: revoke any grant still recorded for this contact.
-			revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, kc.UID, reasonEmailUnregistered)
+			revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, siblingListerFor(r.keyContactsByMembership, r.userReader), kc.UID, "", "", reasonEmailUnregistered)
 		} else {
 			// Transport-level failure — not evidence the email is unregistered;
 			// leave Username empty and any existing grant untouched.
@@ -925,8 +926,8 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 // batchedSiblingLister prefetches, in one Salesforce query, the key contacts of
 // every membership an Inactive contact in kcs may sibling-check. Returns nil
 // when no reader is wired or no contact needs the check.
-func (r *Runner) batchedSiblingLister(ctx context.Context, kcs []*model.KeyContact) membershipKeyContactLister {
-	if r.keyContactsByMembership == nil {
+func batchedSiblingLister(ctx context.Context, reader port.KeyContactsByMembershipReader, users port.UserReader, kcs []*model.KeyContact) membershipKeyContactLister {
+	if reader == nil {
 		return nil
 	}
 	uidSet := make(map[string]struct{})
@@ -942,13 +943,13 @@ func (r *Runner) batchedSiblingLister(ctx context.Context, kcs []*model.KeyConta
 	for uid := range uidSet {
 		uids = append(uids, uid)
 	}
-	grouped, err := r.keyContactsByMembership.FetchKeyContactsByAssetSFIDs(ctx, uids)
+	grouped, err := reader.FetchKeyContactsByAssetSFIDs(ctx, uids)
 	if err != nil {
 		// Surface the error per lookup so the revoke path fails safe (skips
 		// the revoke), instead of a nil lister disabling the check entirely.
 		return failedKeyContactLister{err: err}
 	}
-	return mappedKeyContactLister(grouped)
+	return withEmailResolver(mappedKeyContactLister(grouped), users)
 }
 
 // failedKeyContactLister reports a prefetch failure on every lookup.
