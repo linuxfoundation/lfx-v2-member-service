@@ -925,6 +925,91 @@ func TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry(t *test
 	assert.True(t, found, "the entry must survive so a retry can still address the revoke")
 }
 
+// TestCDCConsumer_ProjectRole_Delete_MultiRecordBatch_FailedSubsetRetry_DoesNotRedoSettledID
+// covers PRRT_kwDORegyoM6gyN2t (FIX 2): a multi-ID delete event where one ID
+// settles fully on the first attempt and another fails with the sentinel must
+// not redo the settled ID's work on redelivery. Retrying the whole original
+// event would re-read the settled ID's already-deleted grant index entry,
+// fall into the no-recorded-grant branch, and publish a spurious
+// empty-username remove with a fga_revoke_failed_dangling_tuple alert,
+// repeatedly, until the other ID recovers.
+func TestCDCConsumer_ProjectRole_Delete_MultiRecordBatch_FailedSubsetRetry_DoesNotRedoSettledID(t *testing.T) {
+	kcUIDA := sfid("kc-uid-subset-a")
+	kcUIDB := sfid("kc-uid-subset-b")
+	membershipUIDA := sfid("asset-subset-a")
+	membershipUIDB := sfid("asset-subset-b")
+
+	var removeAttemptsB int
+	pub := &subjectCapturingPublisher{
+		beforeAccess: func(subject string, msg any) error {
+			if subject != fgaconstants.GenericMemberRemoveSubject {
+				return nil
+			}
+			fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+			if !ok {
+				return nil
+			}
+			removeData, ok := fgaMsg.Data.(fgatypes.GenericMemberData)
+			if !ok || removeData.UID != membershipUIDB {
+				return nil
+			}
+			removeAttemptsB++
+			if removeAttemptsB == 1 {
+				return assert.AnError
+			}
+			return nil
+		},
+	}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUIDA: {MembershipUID: membershipUIDA, Username: "alice", Revision: 1},
+			kcUIDB: {MembershipUID: membershipUIDB, Username: "bob", Revision: 1},
+		},
+	}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUIDA, kcUIDB}, ReplayID: []byte("r-subset")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.ElementsMatch(t, []string{kcUIDA, kcUIDB}, grants.Deletes,
+		"both entries must be cleared once each settles")
+	assert.Equal(t, 2, removeAttemptsB, "the failed ID must be retried until it succeeds")
+
+	var removeCountA int
+	var sawDanglingFallbackForA bool
+	for _, msg := range pub.accessMessages {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		if !ok || fgaMsg.Operation != "member_remove" {
+			continue
+		}
+		removeData, ok := fgaMsg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok)
+		if removeData.UID == membershipUIDA {
+			removeCountA++
+		}
+		// The no-recorded-grant fallback builds its message with the deleted
+		// key contact's own UID and an empty username, since it has no
+		// address left to revoke: the signature of a settled ID being
+		// wrongly redone after its entry was already deleted.
+		if removeData.UID == kcUIDA && removeData.Username == "" {
+			sawDanglingFallbackForA = true
+		}
+	}
+	assert.Equal(t, 1, removeCountA, "the settled ID's remove must not be redone by the retry of the failed subset")
+	assert.False(t, sawDanglingFallbackForA,
+		"a settled ID must not be re-read as an absent grant and hit the dangling-tuple fallback on retry")
+}
+
 // TestCDCConsumer_ProjectRole_Delete_TransientIndexReadFailure_Retries verifies
 // that a grant-index read failure must not be collapsed into an
 // ordinary miss on the first try — the index may still hold the exact address
@@ -1602,6 +1687,98 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailNotFound_NoGrantNoProvision(t *test
 	assert.False(t, pub.hasAccess(fgaconstants.GenericMemberPutSubject),
 		"FGA member_put must NOT be published for unresolved email")
 	assert.Empty(t, spy.adds, "AddPrincipal must not be called for unregistered contact")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_InactiveRevokeFailure_HoldsReplayCursor
+// covers PRRT_kwDORegyoM6gyN2t: an Inactive contact's recorded grant must be
+// revoked before the replay cursor advances. Discarding the error (the
+// pre-fix behaviour) would advance the cursor while the grant may remain
+// live, and the retained grant-index entry is only an address, so nothing
+// would ever retry it.
+func TestCDCConsumer_ProjectRole_Upsert_InactiveRevokeFailure_HoldsReplayCursor(t *testing.T) {
+	kcUID := sfid("kc-inactive-revoke")
+	membershipUID := sfid("asset-inactive-revoke")
+
+	kc := &model.KeyContact{
+		UID:           kcUID,
+		MembershipUID: membershipUID,
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}
+	pub := &subjectCapturingPublisher{
+		beforeAccess: func(subject string, _ any) error {
+			if subject == fgaconstants.GenericMemberRemoveSubject {
+				return assert.AnError
+			}
+			return nil
+		},
+	}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 3},
+		},
+	}
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
+	)
+
+	replay := &fakeReplayStore{}
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
+
+	assert.True(t, pub.hasAccess(fgaconstants.GenericMemberRemoveSubject),
+		"the revoke attempt must have been made")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.True(t, found, "a failed revoke must leave the grant entry intact for retry")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_InactiveRevokeFailure_SucceedsOnceCleared
+// covers the recovery half of the same finding: once the transient publish
+// failure clears, the held replay cursor's redelivery must complete the
+// revoke and clear the grant entry.
+func TestCDCConsumer_ProjectRole_Upsert_InactiveRevokeFailure_SucceedsOnceCleared(t *testing.T) {
+	kcUID := sfid("kc-inactive-revoke-clears")
+	membershipUID := sfid("asset-inactive-revoke-clears")
+
+	kc := &model.KeyContact{
+		UID:           kcUID,
+		MembershipUID: membershipUID,
+		Email:         "alice@example.com",
+		Username:      "alice",
+		Status:        "Inactive",
+	}
+	var removeAttempts int
+	pub := &subjectCapturingPublisher{
+		beforeAccess: func(subject string, _ any) error {
+			if subject == fgaconstants.GenericMemberRemoveSubject {
+				removeAttempts++
+				if removeAttempts == 1 {
+					return assert.AnError
+				}
+			}
+			return nil
+		},
+	}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 3},
+		},
+	}
+
+	consumer := newProjectRoleCDCConsumer(kc, pub,
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 2, removeAttempts, "the revoke must be retried once the first failure is observed")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.False(t, found, "once the revoke succeeds, the entry must be cleared")
 }
 
 // TestCDCConsumer_ProjectRole_Upsert_EmailDefinitiveMiss_RevokesRecordedGrant
