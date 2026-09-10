@@ -134,14 +134,18 @@ func (s *Storage) GetKeyContactsForMembership(ctx context.Context, membershipUID
 	return getCached[[]*model.KeyContact](ctx, s, keyPrefixKeyContacts+membershipUID)
 }
 
-// PutKeyContactsForMembership writes the full slice of key contacts for a
-// membership into the KV bucket as a single entry keyed by membership UID,
-// wrapped in a CachedValue envelope using the Storage TTLConfig.
-func (s *Storage) PutKeyContactsForMembership(ctx context.Context, membershipUID string, contacts []*model.KeyContact) error {
+// PutKeyContactsForMembershipAtRevision writes the full slice of key contacts
+// for a membership into the KV bucket as a single entry keyed by membership
+// UID, wrapped in a CachedValue envelope using the Storage TTLConfig. The write
+// is conditioned on revision, the KV revision the caller read the entry at
+// (0 when none existed): revision 0 does a Create, any other revision an
+// Update, and a lost race (entry created, changed, or deleted since the read)
+// returns a Conflict so a stale in-flight fetch cannot undo a CDC eviction.
+func (s *Storage) PutKeyContactsForMembershipAtRevision(ctx context.Context, membershipUID string, contacts []*model.KeyContact, revision uint64) error {
 	if contacts == nil {
 		contacts = []*model.KeyContact{}
 	}
-	return putCached(ctx, s, keyPrefixKeyContacts+membershipUID, contacts)
+	return putCachedAtRevision(ctx, s, keyPrefixKeyContacts+membershipUID, contacts, revision)
 }
 
 // DeleteKeyContactsForMembership removes the key-contacts cache entry for the

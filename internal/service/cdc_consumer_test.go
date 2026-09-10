@@ -778,6 +778,134 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 		"delivery must be confirmed before the only recorded address is cleared")
 }
 
+// TestCDCConsumer_ProjectRole_Upsert_EvictsGroupedKeyContactCache verifies that
+// a Project_Role__c upsert evicts the grouped key-contacts.{membershipUID}
+// cache the member-tiers eligibility revalidation reads, so a deactivated or
+// reassigned contact stops passing revalidation within one CDC event instead
+// of after the soft TTL.
+func TestCDCConsumer_ProjectRole_Upsert_EvictsGroupedKeyContactCache(t *testing.T) {
+	kc := &model.KeyContact{UID: sfid("kc-uid-evict"), MembershipUID: "pm-uid-evict", Username: "alice"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("kc-uid-evict")}, ReplayID: []byte("r6e")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Contains(t, evictor.KeyContactDeletedUIDs, "pm-uid-evict",
+		"the grouped key-contacts cache for the contact's membership must be evicted on a Project_Role__c upsert")
+	assert.NotEmpty(t, pub.indexer, "eviction must not block the indexer publish")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_PreGuardEvictionUsesGrantIndex verifies
+// that the grouped cache is evicted from the grant index before any Salesforce
+// fetch, so even a quota-guard skip of the re-fetch cannot leave stale
+// eligibility data behind.
+func TestCDCConsumer_ProjectRole_Upsert_PreGuardEvictionUsesGrantIndex(t *testing.T) {
+	kcUID := sfid("kc-uid-preguard")
+	membershipUID := sfid("asset-preguard")
+	kc := &model.KeyContact{UID: kcUID, MembershipUID: membershipUID, Username: "alice"}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 3},
+		},
+	}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r6f")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	// Evicted twice: once pre-guard from the grant index, once from the fetched
+	// record. Both must target the granted membership UID.
+	assert.GreaterOrEqual(t, evictor.KeyContactDeleteCalls, 2,
+		"the grant index must drive an eviction before the fetch, in addition to the post-fetch eviction")
+	for _, uid := range evictor.KeyContactDeletedUIDs {
+		assert.Equal(t, membershipUID, uid)
+	}
+}
+
+// TestCDCConsumer_ProjectRole_Delete_EvictsGroupedKeyContactCache verifies that
+// a Project_Role__c delete evicts the grouped key-contacts cache for the
+// membership recorded in the grant index, so a deleted contact cannot keep
+// passing the member-tiers revalidation until the soft TTL lapses.
+func TestCDCConsumer_ProjectRole_Delete_EvictsGroupedKeyContactCache(t *testing.T) {
+	kcUID := sfid("kc-uid-evict-del")
+	membershipUID := sfid("asset-evict-del")
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 5},
+		},
+	}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8e")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []string{membershipUID}, evictor.KeyContactDeletedUIDs,
+		"the grouped key-contacts cache for the granted membership must be evicted on delete")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_GroupedEvictionError_IsNonFatal verifies a
+// grouped-cache eviction failure is swallowed: indexer and FGA publishes still
+// happen, so a transient KV error cannot stall CDC convergence.
+func TestCDCConsumer_ProjectRole_Upsert_GroupedEvictionError_IsNonFatal(t *testing.T) {
+	kc := &model.KeyContact{UID: sfid("kc-uid-evict-err"), MembershipUID: "pm-uid-evict-err", Username: "alice"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{DeleteErr: errors.New("kv unavailable")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("kc-uid-evict-err")}, ReplayID: []byte("r6g")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.GreaterOrEqual(t, evictor.KeyContactDeleteCalls, 1)
+	assert.NotEmpty(t, pub.indexer, "a grouped-cache eviction failure must not block the indexer publish")
+	assert.True(t, pub.hasAccess(fgaconstants.GenericMemberPutSubject),
+		"a grouped-cache eviction failure must not block the FGA publish")
+}
+
 // TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry verifies
 // that Access only hands the revoke to the local NATS
 // connection, it does not confirm the broker received it. Deleting the index

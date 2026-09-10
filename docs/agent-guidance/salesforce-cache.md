@@ -38,6 +38,15 @@ read revision otherwise. A lost race (entry created, changed, or deleted
 since the read) is a `Conflict`, which the read-through cache logs and skips,
 so a fetch that started before an eviction cannot repopulate stale data.
 
+`key-contacts.{membership_uid}` entries follow the same pattern: the CDC
+consumer evicts the grouped entry on each Project_Role__c change and delete
+(via the grant index before the quota guard, and from the fetched records after
+it), so the member-tiers eligibility revalidation does not keep passing
+deactivated, reassigned, or deleted contacts until the soft TTL lapses. Their
+write-back is likewise revision-conditional
+(`PutKeyContactsForMembershipAtRevision`): a Conflict means the entry changed
+since the read, and the read-through cache logs and skips the write.
+
 ### `member-service-cache` bucket
 
 This bucket stores raw Salesforce sObject REST API responses with HTTP

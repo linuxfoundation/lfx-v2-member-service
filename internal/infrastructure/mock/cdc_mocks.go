@@ -54,18 +54,29 @@ func (c *MockCacheInvalidator) InvalidateKeyContact(_ context.Context, _ string)
 }
 
 // MockMembershipCacheEvictor is a test double for port.MembershipCacheEvictor
-// that records each DeleteMembership call and can return a configured error.
+// that records each eviction call and can return a configured error.
 type MockMembershipCacheEvictor struct {
 	DeleteCalls int
 	DeletedUIDs []string
 
-	// DeleteErr is returned by DeleteMembership when non-nil.
+	// KeyContactDeleteCalls / KeyContactDeletedUIDs record
+	// DeleteKeyContactsForMembership calls (grouped key-contacts cache).
+	KeyContactDeleteCalls int
+	KeyContactDeletedUIDs []string
+
+	// DeleteErr is returned by both eviction methods when non-nil.
 	DeleteErr error
 }
 
 func (e *MockMembershipCacheEvictor) DeleteMembership(_ context.Context, uid string) error {
 	e.DeleteCalls++
 	e.DeletedUIDs = append(e.DeletedUIDs, uid)
+	return e.DeleteErr
+}
+
+func (e *MockMembershipCacheEvictor) DeleteKeyContactsForMembership(_ context.Context, membershipUID string) error {
+	e.KeyContactDeleteCalls++
+	e.KeyContactDeletedUIDs = append(e.KeyContactDeletedUIDs, membershipUID)
 	return e.DeleteErr
 }
 

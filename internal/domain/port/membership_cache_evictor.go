@@ -13,4 +13,9 @@ type MembershipCacheEvictor interface {
 	// DeleteMembership evicts the cached membership for the given v2 UID.
 	// A missing entry is a no-op (already evicted).
 	DeleteMembership(ctx context.Context, uid string) error
+
+	// DeleteKeyContactsForMembership evicts the grouped key-contacts cache
+	// entry for the membership, so the member-tiers eligibility revalidation
+	// re-reads Salesforce on the next check. A missing entry is a no-op.
+	DeleteKeyContactsForMembership(ctx context.Context, membershipUID string) error
 }

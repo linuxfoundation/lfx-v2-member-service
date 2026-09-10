@@ -654,8 +654,9 @@ func (r *MemberReader) ListKeyContactsForMembership(ctx context.Context, members
 		case nats.CacheStatusFresh:
 			return result.Value, nil
 		case nats.CacheStatusStale:
+			readRevision := result.Revision
 			r.refreshInBackground(func(ctx context.Context) error {
-				_, fetchErr := r.fetchKeyContactsFromSalesforce(ctx, membershipUID)
+				_, fetchErr := r.fetchKeyContactsFromSalesforce(ctx, membershipUID, readRevision)
 				return fetchErr
 			})
 			return result.Value, nil
@@ -663,14 +664,20 @@ func (r *MemberReader) ListKeyContactsForMembership(ctx context.Context, members
 		// CacheStatusExpired and CacheStatusMiss fall through to Salesforce.
 	}
 
-	return r.fetchKeyContactsFromSalesforce(ctx, membershipUID)
+	// result.Revision is 0 on a miss or cache read error, making the write-back
+	// create-only; on an expired entry it conditions the overwrite.
+	return r.fetchKeyContactsFromSalesforce(ctx, membershipUID, result.Revision)
 }
 
 // fetchKeyContactsFromSalesforce fetches all key contacts for a membership from
 // Salesforce by decoding the membership UID to an Asset SFID, writes the result
-// to the KV cache, and returns it. ProjectUID is resolved from each contact's
-// ProjectSlug via the resolver.
-func (r *MemberReader) fetchKeyContactsFromSalesforce(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+// to the KV cache conditioned on readRevision (the KV revision the caller read
+// the entry at; 0 when none existed), and returns it. A Conflict on the
+// write-back means the entry was evicted or rewritten while this fetch was in
+// flight: the possibly-stale result must not repopulate the cache, so the
+// write is skipped. ProjectUID is resolved from each contact's ProjectSlug via
+// the resolver.
+func (r *MemberReader) fetchKeyContactsFromSalesforce(ctx context.Context, membershipUID string, readRevision uint64) ([]*model.KeyContact, error) {
 	sfid, err := sfuuid.Normalize18(membershipUID)
 	if err != nil {
 		// Defensive: uid was not a valid SFID — use as-is and let Salesforce reject.
@@ -697,11 +704,17 @@ func (r *MemberReader) fetchKeyContactsFromSalesforce(ctx context.Context, membe
 		}
 	}
 
-	if putErr := r.cache.PutKeyContactsForMembership(ctx, membershipUID, contacts); putErr != nil {
-		slog.WarnContext(ctx, "failed to cache key contacts after Salesforce fetch",
-			"membership_uid", membershipUID,
-			"error", putErr,
-		)
+	if putErr := r.cache.PutKeyContactsForMembershipAtRevision(ctx, membershipUID, contacts, readRevision); putErr != nil {
+		if errs.IsConflict(putErr) {
+			slog.InfoContext(ctx, "key-contacts cache write-back skipped: entry changed since read",
+				"membership_uid", membershipUID,
+			)
+		} else {
+			slog.WarnContext(ctx, "failed to cache key contacts after Salesforce fetch",
+				"membership_uid", membershipUID,
+				"error", putErr,
+			)
+		}
 	}
 
 	return contacts, nil
