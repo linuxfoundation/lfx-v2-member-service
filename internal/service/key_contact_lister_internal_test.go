@@ -629,11 +629,13 @@ func TestRevokeSupersededKeyContactGrant_RecheckFindsRace_RepairsGrant(t *testin
 	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, stubSiblingLister{}, recheck, "kc-1", superseded)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
-		"the superseded pair's remove must publish, then the raced regrant must be repaired with a compensating put")
+	// remove, then compensating put, then the settlement's confirmed reassert
+	// put before the justified marker may be cleared (PRRT_kwDORegyoM6hBOQ0).
+	assert.Equal(t, []string{"access", "flush", "access", "flush", "access", "flush"}, pub.CallOrder,
+		"the superseded pair's remove must publish, then the raced regrant repaired, then reasserted confirmed")
 	putMsg, ok := pub.LastAccessData.(fgatypes.GenericFGAMessage)
 	require.True(t, ok)
-	assert.Equal(t, "member_put", putMsg.Operation, "the last publish must be the compensating put, not the remove")
+	assert.Equal(t, "member_put", putMsg.Operation, "the last publish must be the confirmed reassert put, not the remove")
 }
 
 // TestRevokeKeyContactGrantIfNoLongerLive_RecheckFindsRace_RepairsGrant covers

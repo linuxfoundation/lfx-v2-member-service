@@ -420,7 +420,9 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			var lister, live membershipKeyContactLister
 			if !req.DryRun {
 				lister = batchedSiblingLister(ctx, r.keyContactsByMembership, r.userReader, kcs)
-				live = siblingListerFor(r.keyContactsByMembership, r.userReader)
+				// Per-record rechecks must consult the quota guard themselves:
+				// the page-level check above runs once per page.
+				live = r.quotaGuardedLiveSiblingLister()
 			}
 			for _, kc := range kcs {
 				total++
@@ -874,7 +876,9 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 	var lister, live membershipKeyContactLister
 	if !req.DryRun {
 		lister = batchedSiblingLister(ctx, r.keyContactsByMembership, r.userReader, contacts)
-		live = siblingListerFor(r.keyContactsByMembership, r.userReader)
+		// Per-record rechecks must consult the quota guard themselves:
+		// the batch-level check runs once per batch.
+		live = r.quotaGuardedLiveSiblingLister()
 	}
 	for _, kc := range contacts {
 		if req.DryRun {
@@ -915,7 +919,7 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 			// A definitive miss: revoke any grant still recorded for this contact.
 			// Best-effort: this runner has no per-contact retry path, the next
 			// backfill or CDC pass revisits an unrevoked grant.
-			liveLister := siblingListerFor(r.keyContactsByMembership, r.userReader)
+			liveLister := r.quotaGuardedLiveSiblingLister()
 			_ = revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, liveLister, liveLister, kc.UID, "", "", reasonEmailUnregistered)
 		} else {
 			// Transport-level failure — not evidence the email is unregistered;
@@ -926,6 +930,36 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 		return
 	}
 	kc.Username = username
+}
+
+// backfillQuotaGuardedLister wraps the LIVE base sibling fetch so each
+// per-record recheck consults the mid-run quota reading before spending a
+// Salesforce call. Under pressure lookups read as quota-skipped (uncertain),
+// never as sibling-free, so revokes fail safe instead of overshooting the
+// page-level guard inside large pages.
+type backfillQuotaGuardedLister struct {
+	inner membershipKeyContactLister
+	r     *Runner
+}
+
+func (l backfillQuotaGuardedLister) ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	if l.r.midRunQuotaExceeded() {
+		return nil, errQuotaGuardSkipped
+	}
+	return l.inner.ListKeyContactsForMembership(ctx, membershipUID)
+}
+
+// quotaGuardedLiveSiblingLister builds the quota-aware LIVE recheck lister for
+// backfill page loops, mirroring the CDC consumer's: the gate wraps the raw
+// fetch BELOW withEmailResolver so quota pressure reads as quota-skipped
+// rather than making every sibling unresolvable. Returns nil when no reader
+// is wired.
+func (r *Runner) quotaGuardedLiveSiblingLister() membershipKeyContactLister {
+	if r.keyContactsByMembership == nil {
+		return nil
+	}
+	gated := backfillQuotaGuardedLister{inner: keyContactsByMembershipLister{reader: r.keyContactsByMembership}, r: r}
+	return withEmailResolver(gated, r.userReader)
 }
 
 // batchedSiblingLister prefetches, in one Salesforce query, the key contacts of

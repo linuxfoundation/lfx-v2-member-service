@@ -641,12 +641,15 @@ func recordKeyContactGrant(ctx context.Context, p port.MemberPublisher, idx port
 //
 // The superseded pair's email is unknown here, so justification runs by
 // resolution alone. On an uncertain scan the marker is kept and an error
-// returned, holding CDC replay; a justified pair clears the marker unpublished.
+// returned, holding CDC replay.
 //
-// On revokeUnneeded, a live sibling justifies the pair, but the marker is the
-// pair's only durable address until that sibling's own index entry is
-// confirmed to cover it (pairDurablyOwned): otherwise clearing the marker
-// would drop the only durable address for a pair that still has a live tuple.
+// On revokeUnneeded, a sibling justifies the pair, but the prior remove may
+// already have reached the broker unconfirmed, so the pair is settled with a
+// live-validated, verified reassert (settleJustifiedPendingRevokePair) and
+// the marker is still the pair's only durable address until that sibling's
+// own index entry is confirmed to cover it (pairDurablyOwned): otherwise
+// clearing the marker would drop the only durable address for a pair that
+// still has a live tuple.
 //
 // recheck must be a LIVE lister, or nil where none can be constructed; it
 // closes the window where a different-UID regrant races this revoke's publish.
@@ -668,9 +671,19 @@ func revokeSupersededKeyContactGrant(ctx context.Context, p port.MemberPublisher
 	case revokeFailed:
 		return fmt.Errorf("pending key_contact revoke for %s: %w", uid, revokeErr)
 	case revokeUnneeded:
-		if justifiedBy != nil && idx != nil &&
-			!pairDurablyOwned(ctx, idx, justifiedBy, superseded.MembershipUID, superseded.Username) {
-			return fmt.Errorf("transfer durable revoke address for superseded key_contact %s", uid)
+		if justifiedBy != nil {
+			verified, settleErr := settleJustifiedPendingRevokePair(ctx, p, recheck, keyContactPairRevoke{
+				membershipUID: superseded.MembershipUID,
+				username:      superseded.Username,
+				excludeUID:    uid,
+				reason:        "superseded by a new grant",
+			}, justifiedBy)
+			if settleErr != nil {
+				return fmt.Errorf("settle superseded key_contact pair for %s: %w", uid, settleErr)
+			}
+			if idx != nil && !pairDurablyOwned(ctx, idx, verified, superseded.MembershipUID, superseded.Username) {
+				return fmt.Errorf("transfer durable revoke address for superseded key_contact %s", uid)
+			}
 		}
 	}
 
@@ -706,6 +719,54 @@ func reassertKeyContactPendingRevokePair(ctx context.Context, p port.MemberPubli
 	return nil
 }
 
+// settleJustifiedPendingRevokePair settles a pending-revoke pair that a
+// sibling scan found justified, before its marker may be cleared: the prior
+// remove may already have reached the broker unconfirmed, so the pair is
+// reasserted with a confirmed member_put. justifiedBy may come from a
+// snapshot lister, so when a live lister is available the justification is
+// revalidated live before the put and verified again after it; a
+// justification that is gone post-put is taken back down with a confirmed
+// remove and an error returned, so the caller preserves the marker as the
+// retry address. The returned sibling is the live-verified justifier (or
+// justifiedBy unchanged when no live lister exists) for the caller's
+// durable-ownership transfer.
+func settleJustifiedPendingRevokePair(ctx context.Context, p port.MemberPublisher, live membershipKeyContactLister, req keyContactPairRevoke, justifiedBy *model.KeyContact) (*model.KeyContact, error) {
+	req.recheck = nil
+	if live != nil {
+		liveBy, err := keyContactPairJustified(ctx, live, req)
+		if err != nil {
+			return nil, fmt.Errorf("live validation before pending revoke reassert for %s: %w", req.excludeUID, err)
+		}
+		if liveBy == nil {
+			// The snapshot justification does not hold against live state:
+			// publish nothing and keep the marker; the retried pass scans fresh.
+			return nil, fmt.Errorf("snapshot justification for key_contact %s not confirmed live: retry to settle", req.excludeUID)
+		}
+		justifiedBy = liveBy
+	}
+	if err := reassertKeyContactPendingRevokePair(ctx, p, req.excludeUID, req.membershipUID, req.username); err != nil {
+		return nil, err
+	}
+	if live != nil {
+		verified, err := keyContactPairJustified(ctx, live, req)
+		if err != nil {
+			return nil, fmt.Errorf("post-reassert verification for key_contact %s: %w", req.excludeUID, err)
+		}
+		if verified == nil {
+			takedown := req
+			takedown.flush = true
+			if takedownErr := publishKeyContactRemove(ctx, p, takedown); takedownErr != nil {
+				return nil, fmt.Errorf("post-reassert takedown for key_contact %s: %w", req.excludeUID, takedownErr)
+			}
+			slog.WarnContext(ctx, "key_contact pending revoke reassert superseded: the justifying sibling deactivated under the reassert, tuple removed again",
+				"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
+			return nil, fmt.Errorf("post-reassert justification disappeared for key_contact %s: retry to settle", req.excludeUID)
+		}
+		justifiedBy = verified
+	}
+	return justifiedBy, nil
+}
+
 // drainKeyContactPendingRevoke revokes marker's pair ahead of an index entry
 // clear, so an unrelated PendingRevoke is never dropped unaddressed by
 // whichever caller is about to remove or rewrite the entry that carries it.
@@ -715,8 +776,9 @@ func reassertKeyContactPendingRevokePair(ctx context.Context, p port.MemberPubli
 // sibling; a non-nil error means the marker must be preserved as the retry
 // address.
 //
-// On the justified branch, the marker's pair is reasserted with a confirmed
-// member_put before ownership transfers: see reassertKeyContactPendingRevokePair.
+// On the justified branch, the marker's pair is settled with a live-validated,
+// verified reassert before ownership transfers: see
+// settleJustifiedPendingRevokePair.
 //
 // recheck must be a LIVE lister, or nil where none can be constructed; unlike
 // lister, which may be a snapshot, recheck is what actually closes the
@@ -735,10 +797,16 @@ func drainKeyContactPendingRevoke(ctx context.Context, p port.MemberPublisher, i
 		return fmt.Errorf("drain key_contact pending revoke marker for %s: %w", excludeUID, revokeErr)
 	case revokeUnneeded:
 		if justifiedBy != nil {
-			if reassertErr := reassertKeyContactPendingRevokePair(ctx, p, excludeUID, marker.MembershipUID, marker.Username); reassertErr != nil {
-				return fmt.Errorf("drain key_contact pending revoke marker for %s: %w", excludeUID, reassertErr)
+			verified, settleErr := settleJustifiedPendingRevokePair(ctx, p, recheck, keyContactPairRevoke{
+				membershipUID: marker.MembershipUID,
+				username:      marker.Username,
+				excludeUID:    excludeUID,
+				reason:        reason,
+			}, justifiedBy)
+			if settleErr != nil {
+				return fmt.Errorf("drain key_contact pending revoke marker for %s: %w", excludeUID, settleErr)
 			}
-			if idx != nil && !pairDurablyOwned(ctx, idx, justifiedBy, marker.MembershipUID, marker.Username) {
+			if idx != nil && !pairDurablyOwned(ctx, idx, verified, marker.MembershipUID, marker.Username) {
 				return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker", excludeUID)
 			}
 		}
