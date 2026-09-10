@@ -996,6 +996,50 @@ func TestKeyContactWriter_Update_EmailChange_NewInactive_SkipsNewProvisionReconc
 	assert.Equal(t, "old2@example.com", spy.removes[0].Email)
 }
 
+func TestKeyContactWriter_Update_EmailChange_OldDefinitiveMiss_SameEmailSiblingDoesNotJustify(t *testing.T) {
+	// Reviewer PRRT_kwDORegyoM6g_359: when the old username is only the
+	// stripped auth0| fallback after a definitive LFID miss, a sibling holding
+	// the same old email is no proof the old tuple is justified (that email
+	// belongs to no account). The old-pair revoke must still publish.
+	oldKC := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "gone@example.com", Status: "Active", Role: "Technical Contact",
+		Username: "auth0|goneuser", FirstName: "Hana", LastName: "Cole",
+	}
+	sibling := &model.KeyContact{
+		UID: "kc-sibling-gone", MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "gone@example.com", Status: "Active", Role: "Marketing Contact",
+	}
+	storage := newSeededStorage(oldKC, sibling)
+	pub := &subjectCapturingPublisher{}
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, email string) (string, error) {
+			if strings.EqualFold(email, "fresh@example.com") {
+				return "fresh-sub", nil
+			}
+			return "", pkgerrors.NewNotFound("no registered account")
+		}),
+		&spyOrgSettings{},
+	)
+
+	newEmail := "fresh@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID, Email: &newEmail,
+	})
+
+	require.NoError(t, err)
+	found := false
+	for i, subj := range pub.access {
+		if subj == fgaconstants.GenericMemberRemoveSubject &&
+			assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGARemoveMessage(testMembershipUID, "goneuser")) {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"the old pair must be revoked despite a same-email sibling: the definitive miss disproves the email-to-username link; access calls: %v", pub.access)
+}
+
 func TestKeyContactWriter_Delete_LastActive_RevokesOrgAccess(t *testing.T) {
 	// Delete when email is the only active contact in org → RemovePrincipal called.
 	kc := &model.KeyContact{

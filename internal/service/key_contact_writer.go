@@ -441,15 +441,21 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		// regardless of whether the index-driven path also ran. It is still
 		// skipped below when a live sibling on the same membership still
 		// holds the old email, since that pair remains justified.
-		oldUsername, _ := o.resolveUsernameForContact(ctx, current.Username, current.Email)
+		oldUsername, oldMiss := o.resolveUsernameForContact(ctx, current.Username, current.Email)
 		if oldUsername != newKC.Username {
+			// On a definitive miss current.Email belongs to no account, so it
+			// cannot serve as direct proof that a sibling justifies oldUsername.
+			directEmail := current.Email
+			if oldMiss {
+				directEmail = ""
+			}
 			// Failures are logged by the choke point but not propagated: the SF
 			// update already succeeded, and this path accepts unflushed loss.
 			revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 				membershipUID: newKC.MembershipUID,
 				username:      oldUsername,
 				excludeUID:    newKC.UID,
-				email:         current.Email,
+				email:         directEmail,
 				reason:        "email changed",
 				flush:         false,
 				recheck:       lister,

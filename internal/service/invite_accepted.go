@@ -160,13 +160,17 @@ func (s *InviteAcceptedService) resolveKeyContactsInOrg(ctx context.Context, org
 	// accepted email is the one mapping this handler actually knows: it
 	// lets a sibling on the same email resolve as still-justified instead
 	// of only reading as inconclusive.
-	lister := sliceSiblingLister(contacts, nil, acceptedEmailResolver{email: normalizedEmail, username: username})
+	resolver := acceptedEmailResolver{email: normalizedEmail, username: username}
+	lister := sliceSiblingLister(contacts, nil, resolver)
+	// The prefetched slice cannot see a grant racing a superseded-pair
+	// remove, so the post-remove recheck re-reads the org live.
+	live := withEmailResolver(orgLiveSiblingLister{reader: s.keyContactReader, orgUID: orgUID}, resolver)
 	for _, kc := range contacts {
 		if normalizeSettingsEmail(kc.Email) != normalizedEmail {
 			continue
 		}
 		kc.Username = username
-		PublishKeyContactFGA(ctx, s.publisher, s.grantIndex, kc, lister)
+		PublishKeyContactFGA(ctx, s.publisher, s.grantIndex, kc, lister, live)
 		PublishKeyContactIndexer(ctx, s.publisher, kc, indexerConstants.ActionUpdated)
 	}
 }
@@ -190,6 +194,24 @@ func (r acceptedEmailResolver) UsernameByEmail(_ context.Context, email string) 
 		return r.username, nil
 	}
 	return "", fmt.Errorf("acceptedEmailResolver: registration status unknown for %s", redaction.RedactEmail(email))
+}
+
+// orgLiveSiblingLister re-reads the org's key contacts on every lookup, so a
+// post-remove recheck sees a grant racing the prefetched slice instead of the
+// stale snapshot. A membership absent from the fresh read still reads as
+// uncovered (errSiblingScanUncovered), keeping the fail-safe skip: this
+// handler has no membership-scoped reader, only the org-scoped one.
+type orgLiveSiblingLister struct {
+	reader KeyContactOrgReader
+	orgUID string
+}
+
+func (l orgLiveSiblingLister) ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	contacts, err := l.reader.ListKeyContactsForOrg(ctx, l.orgUID)
+	if err != nil {
+		return nil, err
+	}
+	return sliceSiblingLister(contacts, nil, nil).ListKeyContactsForMembership(ctx, membershipUID)
 }
 
 // Adapts an already-fetched key-contact slice to membershipKeyContactLister,
