@@ -903,11 +903,15 @@ func revokeKeyContactGrantIfNoLongerLive(ctx context.Context, p port.MemberPubli
 
 // pairDurablyOwned reports whether the {membershipUID, username} pair has a
 // durable address in the index other than the entry being cleared: either
-// sib already owns an entry for that exact pair, or it owns no entry at all
-// and one is created for it here. A sibling entry recording a different pair,
-// or any Get/Put failure, returns false: the caller must not clear its own
-// entry, since it would then be the only address left for a pair that still
-// has a live tuple.
+// sib already owns an entry for that exact pair, it owns no entry at all and
+// one is created for it here, or its entry names a different pair and is
+// stale (a reparent or rename whose index update was lost) and is reconciled
+// to the pair it currently justifies, preserving its prior pair as a
+// PendingRevoke marker so that pair's own revoke address is not dropped.
+// Only a Get/Put failure, or a sibling entry that already carries an
+// unrelated PendingRevoke marker (a slot cannot hold two), returns false: the
+// caller must not clear its own entry, since it would then be the only
+// address left for a pair that still has a live tuple.
 func pairDurablyOwned(ctx context.Context, idx port.KeyContactGrantIndex, sib *model.KeyContact, membershipUID, username string) bool {
 	stored, found, err := idx.Get(ctx, sib.UID)
 	if err != nil {
@@ -919,9 +923,31 @@ func pairDurablyOwned(ctx context.Context, idx port.KeyContactGrantIndex, sib *m
 		if stored.MembershipUID == membershipUID && stored.Username == username {
 			return true
 		}
-		slog.WarnContext(ctx, "key_contact grant index justifying sibling already owns a different entry: retaining this entry as the pair's only durable address",
+		if stored.PendingRevoke != nil {
+			// A marker already occupies the entry; a second cannot be carried
+			// in the same slot. Rare double-stale case, stays a stall.
+			slog.WarnContext(ctx, "key_contact grant index justifying sibling already owns a different entry with a pending marker: retaining this entry as the pair's only durable address",
+				"sibling_uid", sib.UID, "membership_uid", membershipUID)
+			return false
+		}
+		// The sibling's own entry is stale: reconcile it to the pair it
+		// currently justifies, carrying its prior pair forward as
+		// PendingRevoke so an existing live tuple survives as a durable
+		// address rather than being dropped; the marker-drain paths clear it.
+		reconciled := port.KeyContactGrant{
+			MembershipUID: membershipUID,
+			Username:      username,
+			Revision:      stored.Revision,
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: stored.MembershipUID, Username: stored.Username},
+		}
+		if putErr := idx.Put(ctx, sib.UID, reconciled); putErr != nil {
+			slog.WarnContext(ctx, "key_contact grant index reconcile failed for justifying sibling: retaining this entry as the pair's only durable address",
+				"sibling_uid", sib.UID, "membership_uid", membershipUID, "error", putErr)
+			return false
+		}
+		slog.WarnContext(ctx, "key_contact grant index reconciled stale justifying sibling entry to its current pair",
 			"sibling_uid", sib.UID, "membership_uid", membershipUID)
-		return false
+		return true
 	}
 	if putErr := idx.Put(ctx, sib.UID, port.KeyContactGrant{MembershipUID: membershipUID, Username: username}); putErr != nil {
 		slog.WarnContext(ctx, "key_contact grant index write failed for justifying sibling: retaining this entry as the pair's only durable address",

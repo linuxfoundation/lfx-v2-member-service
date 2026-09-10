@@ -311,13 +311,16 @@ func TestPublishKeyContactFGA_ColdIndexInactiveJustifiedBySibling_TransfersOwner
 }
 
 // TestPublishKeyContactFGA_ColdIndexInactiveTransferFails_ReturnsError covers
-// V2's ownership-transfer failure: the justifying sibling already owns a
-// conflicting entry, so the transfer fails and CDC replay must be held.
+// V2's ownership-transfer failure: the justifying sibling's own entry already
+// carries an unrelated PendingRevoke marker, so the transfer fails and CDC
+// replay must be held. A sibling entry naming a different pair with no
+// marker of its own is reconciled instead (see pairDurablyOwned).
 func TestPublishKeyContactFGA_ColdIndexInactiveTransferFails_ReturnsError(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
+	otherMarker := port.KeyContactGrantRef{MembershipUID: "yet-another-asset", Username: "dave"}
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
-			"sib-1": {MembershipUID: "other-asset", Username: "someone-else", Revision: 3},
+			"sib-1": {MembershipUID: "other-asset", Username: "someone-else", PendingRevoke: &otherMarker, Revision: 3},
 		},
 	}
 	lister := stubSiblingLister{siblings: []*model.KeyContact{
@@ -682,7 +685,7 @@ func TestPairDurablyOwned_UnindexedSibling_WritesEntry(t *testing.T) {
 	assert.Equal(t, "alice", grants.Entries["kc-sib"].Username)
 }
 
-func TestPairDurablyOwned_SiblingHoldsDifferentPair_Retains(t *testing.T) {
+func TestPairDurablyOwned_SiblingHoldsDifferentPair_ReconciledWithMarker(t *testing.T) {
 	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
 		"kc-sib": {MembershipUID: "asset-2", Username: "bob", Revision: 5},
 	}}
@@ -690,9 +693,29 @@ func TestPairDurablyOwned_SiblingHoldsDifferentPair_Retains(t *testing.T) {
 
 	owned := pairDurablyOwned(context.Background(), grants, sib, "asset-1", "alice")
 
-	assert.False(t, owned, "a sibling already owning a different pair must not be overwritten")
-	assert.Equal(t, port.KeyContactGrant{MembershipUID: "asset-2", Username: "bob", Revision: 5}, grants.Entries["kc-sib"],
-		"the sibling's own entry must be untouched")
+	assert.True(t, owned, "a stale sibling entry must be reconciled to the pair it currently justifies")
+	assert.Equal(t, port.KeyContactGrant{
+		MembershipUID: "asset-1",
+		Username:      "alice",
+		PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "bob"},
+		Revision:      6,
+	}, grants.Entries["kc-sib"], "the sibling's prior pair must be preserved as a PendingRevoke marker")
+}
+
+func TestPairDurablyOwned_SiblingHoldsMarkerAlready_Retains(t *testing.T) {
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-sib": {
+			MembershipUID: "asset-2", Username: "bob",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-3", Username: "carol"},
+			Revision:      5,
+		},
+	}}
+	sib := &model.KeyContact{UID: "kc-sib"}
+
+	owned := pairDurablyOwned(context.Background(), grants, sib, "asset-1", "alice")
+
+	assert.False(t, owned, "a sibling entry that already carries a pending marker cannot carry a second")
+	assert.Empty(t, grants.Puts, "no write should be attempted when the entry already holds a marker")
 }
 
 func TestPairDurablyOwned_IndexReadFailure_Retains(t *testing.T) {

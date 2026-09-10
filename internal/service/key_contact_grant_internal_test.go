@@ -430,9 +430,11 @@ func TestRevokeSupersededKeyContactGrant_UnindexedSiblingJustifies_TransfersBefo
 }
 
 // TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors
-// covers the other side of U3: when the justifying sibling already owns a
-// conflicting index entry, the transfer fails and the marker must be
-// retained with an error returned, not silently cleared.
+// covers the other side of U3: when the justifying sibling's own entry
+// already carries an unrelated PendingRevoke marker (a slot cannot hold two),
+// the transfer fails and the marker must be retained with an error returned,
+// not silently cleared. A sibling entry that merely names a different pair,
+// with no marker of its own, is reconciled instead (see pairDurablyOwned).
 func TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors(t *testing.T) {
 	superseded := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
 	sib := &model.KeyContact{UID: "sib-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"}
@@ -445,9 +447,10 @@ func TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors(t 
 	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
 
 	pub := mock.NewMockMemberPublisher()
+	otherMarker := port.KeyContactGrantRef{MembershipUID: "other-asset", Username: "someone-else"}
 	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
 		"kc-1":  {MembershipUID: "asset-new", Username: "bob", PendingRevoke: &superseded, Revision: 1},
-		"sib-1": {MembershipUID: "other-asset", Username: "someone-else", Revision: 9},
+		"sib-1": {MembershipUID: "other-asset", Username: "someone-else", PendingRevoke: &otherMarker, Revision: 9},
 	}}
 
 	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, lister, lister, "kc-1", superseded)

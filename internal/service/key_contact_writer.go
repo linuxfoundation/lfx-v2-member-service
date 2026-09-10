@@ -355,6 +355,8 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 		// it — but the index may still hold a stale entry from a prior,
 		// now-superseded contact at this membership+email pair. Best-effort:
 		// this new contact was created successfully regardless of this cleanup.
+		// Deliberate: a failed revoke self-heals on the record's next CDC
+		// touch, where processKeyContact holds the replay cursor until done.
 		_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, lister, kc.UID, kc.Username, "", reasonEmailUnregistered)
 	}
 	// Status: coalesce to the input value since the mock echoes "" for a
@@ -483,6 +485,8 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			// and revoke any grant still recorded for this contact instead.
 			// Not propagated, matching the paired-FGA revoke above: the SF
 			// update already succeeded, and this path accepts unflushed loss.
+			// Deliberate: a failed revoke self-heals on the record's next CDC
+			// touch, where processKeyContact holds the replay cursor until done.
 			_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, lister, newKC.UID, newKC.Username, "", reasonEmailUnregistered)
 		} else {
 			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister, lister)

@@ -1227,18 +1227,21 @@ func TestKeyContactWriter_Delete_StalePairJustifiedByUnindexedSibling_TransfersO
 }
 
 // TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry covers the
-// other side of U4: when the justifying sibling already owns a conflicting
-// index entry, the transfer fails, the stale entry must be preserved, and the
-// delete must fail rather than leave the deleted UID as the pair's only
-// address (finding C).
+// other side of U4: when the justifying sibling's own entry already carries
+// an unrelated PendingRevoke marker (a slot cannot hold two), the transfer
+// fails, the stale entry must be preserved, and the delete must fail rather
+// than leave the deleted UID as the pair's only address (finding C). A
+// sibling entry naming a different pair with no marker of its own is
+// reconciled instead (see pairDurablyOwned).
 func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testing.T) {
 	kc := kcForFGA()
 	storage := newSeededStorage(kc)
 	pub := &accessPayloadPublisher{}
+	otherMarker := port.KeyContactGrantRef{MembershipUID: "yet-another-membership", Username: "carol"}
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
 			testKCUID: {MembershipUID: "membership-old", Username: "bob-old", Revision: 1},
-			"sib-uid": {MembershipUID: "other-membership", Username: "someone-else", Revision: 5},
+			"sib-uid": {MembershipUID: "other-membership", Username: "someone-else", PendingRevoke: &otherMarker, Revision: 5},
 		},
 	}
 	siblings := &mock.MockKeyContactsByMembershipReader{
@@ -1273,14 +1276,17 @@ func TestKeyContactWriter_Delete_StalePairTransferFails_PreservesEntry(t *testin
 
 // TestKeyContactWriter_Delete_MainPairTransferFails_ReturnsError covers U5: a
 // failed durable-address transfer for the main pair must fail the delete
-// instead of silently skipping the index clear.
+// instead of silently skipping the index clear. The sibling's own entry
+// carries an unrelated PendingRevoke marker so the transfer genuinely fails
+// instead of being reconciled (see pairDurablyOwned).
 func TestKeyContactWriter_Delete_MainPairTransferFails_ReturnsError(t *testing.T) {
 	kc := kcForFGA()
 	storage := newSeededStorage(kc)
 	pub := &accessPayloadPublisher{}
+	otherMarker := port.KeyContactGrantRef{MembershipUID: "yet-another-membership", Username: "carol"}
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
-			"sib-uid": {MembershipUID: "other-membership", Username: "someone-else", Revision: 2},
+			"sib-uid": {MembershipUID: "other-membership", Username: "someone-else", PendingRevoke: &otherMarker, Revision: 2},
 		},
 	}
 	siblings := &mock.MockKeyContactsByMembershipReader{

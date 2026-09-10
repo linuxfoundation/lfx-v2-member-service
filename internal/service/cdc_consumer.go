@@ -384,12 +384,35 @@ func isRestore(ct model.CDCChangeType) bool {
 // been observed (even after an attempted refresh), this returns false
 // (fail-open).
 func (o *CDCConsumer) quotaExceeded(ctx context.Context, entity string, ids []string) bool {
-	if o.quotaGauge == nil {
+	exceeded, snap := o.quotaGuardExceeded(ctx, entity)
+	if !exceeded {
 		return false
+	}
+
+	slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair",
+		"entity", entity,
+		"record_count", len(ids),
+		"api_usage_current", snap.Current,
+		"api_usage_limit", snap.Limit,
+		"threshold", o.quotaSkipThreshold,
+		"publish_failed_for_backfill_repair", true,
+	)
+	o.recordSkippedForRepair(ctx, entity, ids)
+	return true
+}
+
+// quotaGuardExceeded is the core quota-threshold check shared by quotaExceeded
+// (the batched upsert path, which also logs and queues repair markers for the
+// skipped IDs) and quotaGuardedLister (the per-record live recheck path,
+// which has no batch of IDs to queue). entity is used only for the
+// refresh-failure log line.
+func (o *CDCConsumer) quotaGuardExceeded(ctx context.Context, entity string) (bool, port.QuotaSnapshot) {
+	if o.quotaGauge == nil {
+		return false, port.QuotaSnapshot{}
 	}
 	if o.quotaSkipThreshold >= 1 {
 		// Threshold of 1 means "never skip" — guard disabled regardless of usage.
-		return false
+		return false, port.QuotaSnapshot{}
 	}
 
 	snap := o.quotaGauge.Snapshot()
@@ -410,23 +433,50 @@ func (o *CDCConsumer) quotaExceeded(ctx context.Context, entity string, ids []st
 	if !snap.Observed() {
 		// Never observed a valid reading (and refresh, if any, did not produce
 		// one) — fail open.
-		return false
+		return false, snap
 	}
 
-	if snap.Ratio() < o.quotaSkipThreshold {
-		return false
-	}
+	return snap.Ratio() >= o.quotaSkipThreshold, snap
+}
 
-	slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair",
-		"entity", entity,
-		"record_count", len(ids),
-		"api_usage_current", snap.Current,
-		"api_usage_limit", snap.Limit,
-		"threshold", o.quotaSkipThreshold,
-		"publish_failed_for_backfill_repair", true,
-	)
-	o.recordSkippedForRepair(ctx, entity, ids)
-	return true
+// errQuotaGuardSkipped reports that a live key_contact sibling recheck was
+// skipped because the Salesforce quota guard is active. It must read as
+// uncertain, not as an empty sibling list: an empty result would fake
+// certainty that no sibling justifies the pair.
+var errQuotaGuardSkipped = errors.New("live key_contact sibling recheck skipped: Salesforce quota threshold reached")
+
+// quotaGuardedLister wraps a LIVE membershipKeyContactLister so the CDC delete
+// path's per-record recheck consults the quota guard before every Salesforce
+// fetch, instead of the O(N) unguarded calls a multi-ID delete event would
+// otherwise make. These rechecks must stay live (never prefetched), so
+// batching is not an option; consulting the guard per fetch is.
+type quotaGuardedLister struct {
+	inner membershipKeyContactLister
+	o     *CDCConsumer
+}
+
+func (l quotaGuardedLister) ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	if exceeded, _ := l.o.quotaGuardExceeded(ctx, "Project_Role__c"); exceeded {
+		return nil, errQuotaGuardSkipped
+	}
+	return l.inner.ListKeyContactsForMembership(ctx, membershipUID)
+}
+
+// quotaGuardedLiveSiblingLister builds the quota-aware LIVE recheck lister
+// used throughout the CDC key_contact delete path: the same live reader
+// siblingListerFor wraps, gated so quota pressure surfaces as an error
+// (holding the replay cursor via errKeyContactRevokeIncomplete) instead of
+// hammering Salesforce. The quota gate wraps only the base fetch, with the
+// email resolver layered on afterward exactly as siblingListerFor does: the
+// gate must not sit above withEmailResolver, or the resulting lister no
+// longer exposes usernameByEmailResolver and every sibling reads as
+// unresolvable instead of quota-skipped. Returns nil when no reader is wired.
+func (o *CDCConsumer) quotaGuardedLiveSiblingLister() membershipKeyContactLister {
+	if o.keyContactsByMembership == nil {
+		return nil
+	}
+	gated := quotaGuardedLister{inner: keyContactsByMembershipLister{reader: o.keyContactsByMembership}, o: o}
+	return withEmailResolver(gated, o.userReader)
 }
 
 // shouldAttemptQuotaRefresh reports whether the guard should issue an active
@@ -1567,7 +1617,9 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string, l
 	// recheck must be LIVE, never the batched scan lister: it only runs after
 	// a remove actually publishes, so one live read per remove stays within
 	// the accepted per-record budget even though the scan above is batched.
-	live := siblingListerFor(o.keyContactsByMembership, o.userReader)
+	// Quota-guarded so a multi-ID delete event cannot bypass the same
+	// Salesforce budget the upsert path already respects.
+	live := o.quotaGuardedLiveSiblingLister()
 
 	// Marker-only entry: the live pair was already revoked and cleared, and
 	// only the PendingRevoke marker for a superseded pair remains.
@@ -1593,21 +1645,18 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string, l
 		return fmt.Errorf("revoke key_contact grant for %s: %w",
 			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
 	}
-	// A live sibling justified the pair: this entry may be the pair's only
-	// durable address, so it must not be cleared until the sibling durably
-	// owns the pair.
+	// A live sibling justified the pair per the BATCHED snapshot scan above,
+	// but that snapshot can be stale (the sibling may have gone Inactive and
+	// completed its own revoke since the scan ran): revalidate against the
+	// LIVE lister before trusting it, and revoke instead if the snapshot no
+	// longer holds.
 	if outcome == revokeUnneeded && justifiedBy != nil {
-		// A prior delivery may have removed the tuple and failed its repair:
-		// reassert the pair with a confirmed put before settling it.
-		if err := reassertKeyContactPendingRevokePair(ctx, o.publisher, uid,
-			grant.MembershipUID, grant.Username); err != nil {
-			return fmt.Errorf("reassert key_contact grant for %s: %w",
-				uid, errors.Join(err, errKeyContactRevokeIncomplete))
-		}
-		if !pairDurablyOwned(ctx, o.grantIndex, justifiedBy, grant.MembershipUID, grant.Username) {
+		if err := o.revalidateJustifiedKeyContactPair(ctx, uid, grant.MembershipUID, grant.Username, live,
+			"key contact deleted in Salesforce"); err != nil {
 			// A failed transfer leaves the entry keyed by the just-deleted UID,
 			// which nothing else will ever revisit: hold the replay cursor.
-			return fmt.Errorf("transfer durable revoke address for key_contact %s: %w", uid, errKeyContactRevokeIncomplete)
+			return fmt.Errorf("revalidate key_contact justified pair for %s: %w",
+				uid, errors.Join(err, errKeyContactRevokeIncomplete))
 		}
 	}
 
@@ -1619,6 +1668,55 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string, l
 	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
 			"uid", uid, "error", err)
+	}
+	return nil
+}
+
+// revalidateJustifiedKeyContactPair re-confirms, against the LIVE lister,
+// that {membershipUID, username} is still justified before it is reasserted
+// and its durable address transferred. The caller's own scan lister for this
+// pair was the batched CDC snapshot, which can be stale: the sibling may have
+// gone Inactive and completed its own revoke since the scan ran. When the
+// live lister confirms a sibling, this reasserts and transfers ownership to
+// it exactly as the caller would have. When it does not, the snapshot was
+// stale: this runs the revoke path instead (live lister as both scan and
+// recheck, flushed), retaining the original entry's pair as the outcome.
+//
+// A nil error means the pair was settled, either way, and the caller's own
+// entry may be cleared. A non-nil error means it must be retained and the
+// replay cursor held.
+func (o *CDCConsumer) revalidateJustifiedKeyContactPair(ctx context.Context, uid, membershipUID, username string, live membershipKeyContactLister, reason string) error {
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, live, keyContactPairRevoke{
+		membershipUID: membershipUID,
+		username:      username,
+		excludeUID:    uid,
+		reason:        reason,
+		flush:         true,
+		recheck:       live,
+	})
+	switch outcome {
+	case revokeUncertain, revokeFailed:
+		return revokeErr
+	case revokeUnneeded:
+		if justifiedBy == nil {
+			return nil
+		}
+		return o.settleJustifiedKeyContactPair(ctx, uid, membershipUID, username, justifiedBy)
+	default:
+		// revokePublished: the pair proved unjustified live and was revoked.
+		return nil
+	}
+}
+
+// settleJustifiedKeyContactPair reasserts a live-confirmed pair before its
+// durable address transfers to sib, so a prior unconfirmed remove is
+// repaired first. A non-nil error means the caller's entry must be retained.
+func (o *CDCConsumer) settleJustifiedKeyContactPair(ctx context.Context, uid, membershipUID, username string, sib *model.KeyContact) error {
+	if err := reassertKeyContactPendingRevokePair(ctx, o.publisher, uid, membershipUID, username); err != nil {
+		return err
+	}
+	if !pairDurablyOwned(ctx, o.grantIndex, sib, membershipUID, username) {
+		return fmt.Errorf("transfer durable revoke address for key_contact %s", uid)
 	}
 	return nil
 }
@@ -1643,17 +1741,13 @@ func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid st
 		return fmt.Errorf("revoke key_contact pending marker for %s: %w",
 			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
 	}
+	// justifiedBy came from the batched snapshot scan above: revalidate live
+	// before trusting it, same reasoning as handleProjectRoleDelete.
 	if outcome == revokeUnneeded && justifiedBy != nil {
-		// The marked pair may have had an unconfirmed remove: reassert it
-		// with a confirmed put before dropping the marker.
-		if err := reassertKeyContactPendingRevokePair(ctx, o.publisher, uid,
-			marker.MembershipUID, marker.Username); err != nil {
-			return fmt.Errorf("reassert key_contact pending marker for %s: %w",
+		if err := o.revalidateJustifiedKeyContactPair(ctx, uid, marker.MembershipUID, marker.Username, recheck,
+			"key contact deleted in Salesforce (pending revoke marker)"); err != nil {
+			return fmt.Errorf("revalidate key_contact pending marker for %s: %w",
 				uid, errors.Join(err, errKeyContactRevokeIncomplete))
-		}
-		if !pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
-			return fmt.Errorf("transfer durable revoke address for key_contact %s pending marker: %w",
-				uid, errKeyContactRevokeIncomplete)
 		}
 	}
 	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
@@ -1681,12 +1775,12 @@ func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid st
 		recheck:       recheck,
 	})
 	drainFailed := outcome == revokeUncertain || outcome == revokeFailed
+	// justifiedBy came from the batched snapshot scan above: revalidate live
+	// before trusting it, same reasoning as handleProjectRoleDelete.
 	if !drainFailed && outcome == revokeUnneeded && justifiedBy != nil {
-		// Same reassert-before-drop rule as revokeKeyContactMarkerOnDelete:
-		// the marked pair's tuple presence is unknown after a raced remove.
-		if reassertKeyContactPendingRevokePair(ctx, o.publisher, uid,
-			marker.MembershipUID, marker.Username) != nil ||
-			!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, marker.MembershipUID, marker.Username) {
+		if err := o.revalidateJustifiedKeyContactPair(ctx, uid, marker.MembershipUID, marker.Username, recheck,
+			"key contact deleted in Salesforce (draining superseded marker)"); err != nil {
+			revokeErr = err
 			drainFailed = true
 		}
 	}

@@ -882,6 +882,218 @@ func TestCDCConsumer_ProjectRole_Delete_RepairedRace_TransferFailure_HoldsCursor
 	assert.True(t, sawRepairPut, "the recheck must repair the raced grant with a compensating member_put")
 }
 
+// TestCDCConsumer_ProjectRoleDelete_QuotaExhausted_SkipsLiveRecheckAndHoldsCursor
+// covers FIX 1 (PRRT_kwDORegyoM6gzNqK): the CDC delete path's per-record LIVE
+// recheck must consult the quota guard before every Salesforce fetch, not
+// just the batched scan. With the quota gauge reporting usage at the skip
+// threshold, the recheck must never reach the sibling reader at all, and the
+// resulting uncertainty must hold the replay cursor for redelivery. Once the
+// gauge reports healthy usage again, the same event must settle on redelivery
+// and clear the grant entry.
+func TestCDCConsumer_ProjectRoleDelete_QuotaExhausted_SkipsLiveRecheckAndHoldsCursor(t *testing.T) {
+	kcUID := sfid("kc-quota-main")
+	membershipUID := sfid("asset-quota-x")
+
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	// No siblings on this membership: the batched scan finds nothing, so the
+	// revoke publishes and reaches the live post-remove recheck, which is
+	// where the quota guard must intervene.
+	siblingReader := &callRecordingSiblingReader{inner: &mock.MockKeyContactsByMembershipReader{}}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100, ObservedAt: time.Now()} // exhausted, fresh
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r-quota")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblingReader),
+		svc.WithCDCUserReader(&fakeUserReader{sub: "alice"}),
+		svc.WithCDCQuotaGauge(gauge),
+	)
+
+	replay := &fakeReplayStore{}
+	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
+
+	// The 250ms retry window lets the consumer's own retry loop make more
+	// than one attempt, each contributing one batched-scan call and one
+	// member_remove publish, so only the ratio between them is deterministic:
+	// every scan call must be matched by exactly one remove, proving the
+	// quota-guarded live recheck never adds a call of its own before recovery.
+	callsBeforeRecovery := len(siblingReader.calls)
+	removesBeforeRecovery := countAccessOperations(pub.accessMessages, "member_remove")
+	assert.Positive(t, callsBeforeRecovery, "at least one attempt must reach the batched scan")
+	assert.Equal(t, callsBeforeRecovery, removesBeforeRecovery,
+		"each batched-scan call must correspond to exactly one remove, with no extra call from the quota-guarded live recheck")
+	assert.NotEmpty(t, grants.Entries, "the entry must be retained: an uncertain recheck must not be treated as a confirmed settle")
+	_, found, err := grants.Get(context.Background(), kcUID)
+	require.NoError(t, err)
+	assert.True(t, found, "the entry is the retry address and must survive the held cursor")
+
+	// Quota recovers: redelivery of the same event must now settle and clear
+	// the entry, reaching the sibling reader for its live recheck this time.
+	gauge.Current = 10
+	consumer2 := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r-quota")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblingReader),
+		svc.WithCDCUserReader(&fakeUserReader{sub: "alice"}),
+		svc.WithCDCQuotaGauge(gauge),
+	)
+	require.NoError(t, consumer2.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+	// The single successful attempt after recovery must add exactly two
+	// reader calls (the batched scan plus the now-unblocked live recheck)
+	// and exactly one more remove.
+	assert.Equal(t, callsBeforeRecovery+2, len(siblingReader.calls),
+		"the recovered redelivery must reach the sibling reader for both the scan and its live recheck")
+	assert.Equal(t, removesBeforeRecovery+1, countAccessOperations(pub.accessMessages, "member_remove"),
+		"the recovered redelivery must publish exactly one more remove")
+	assert.Empty(t, grants.Entries, "a settled revoke must clear the entry once quota allows the recheck to run")
+	assert.Equal(t, []byte("r-quota"), replay.saved)
+}
+
+// countAccessOperations counts how many published FGA access messages carry
+// the given operation, so a retry-loop test can assert on the ratio between
+// reader calls and publishes instead of a fixed, timing-dependent count.
+func countAccessOperations(messages []interface{}, operation string) int {
+	var n int
+	for _, msg := range messages {
+		if fgaMsg, ok := msg.(fgatypes.GenericFGAMessage); ok && fgaMsg.Operation == operation {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCDCConsumer_ProjectRoleDelete_BatchedSnapshotStale_LiveRevalidationRevokes
+// covers FIX 2 (PRRT_kwDORegyoM6gzNqj): a sibling that justified the pair in
+// the BATCHED snapshot scan may have gone Inactive and completed its own
+// revoke by the time the reassert would run. The live lister must be
+// consulted before trusting the snapshot; when it shows no justifying
+// sibling, the pair must actually be revoked instead of silently reasserted,
+// and the entry must clear once that revoke is confirmed.
+func TestCDCConsumer_ProjectRoleDelete_BatchedSnapshotStale_LiveRevalidationRevokes(t *testing.T) {
+	kcUID := sfid("kc-stale-main")
+	kcSibUID := sfid("kc-stale-sib")
+	membershipUID := sfid("asset-stale-x")
+
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	sib := &model.KeyContact{UID: kcSibUID, MembershipUID: membershipUID, Email: "alice@example.com", Status: "Active"}
+	// Call 0: the batched scan sees the sibling and justifies the pair. Calls
+	// 1 and 2: the live revalidation's own scan and post-revoke recheck both
+	// see no sibling, confirming the snapshot had gone stale.
+	siblingReader := &sequencedSiblingReader{
+		responses: [][]*model.KeyContact{{sib}, nil, nil},
+	}
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r-stale-snap")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblingReader),
+		svc.WithCDCUserReader(&fakeUserReader{sub: "alice"}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	var sawRemove, sawReassertPut bool
+	for _, msg := range pub.accessMessages {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		require.True(t, ok)
+		switch fgaMsg.Operation {
+		case "member_remove":
+			sawRemove = true
+		case "member_put":
+			sawReassertPut = true
+		}
+	}
+	assert.True(t, sawRemove, "a stale batched snapshot must not skip the revoke: the live lister found no justifying sibling")
+	assert.False(t, sawReassertPut, "a stale snapshot must not stand as a reassert once live revalidation finds no justifying sibling")
+	assert.Equal(t, []string{kcUID}, grants.Deletes,
+		"the entry must be cleared once the live-confirmed revoke is published")
+}
+
+// TestCDCConsumer_ProjectRoleDelete_BatchedSnapshotConfirmedLive_ReassertsAndTransfers
+// covers the inverse of FIX 2: when the live lister still confirms the
+// sibling the batched snapshot found, the pair must be reasserted and its
+// durable address transferred to that live-confirmed sibling before the
+// deleted contact's own entry clears.
+func TestCDCConsumer_ProjectRoleDelete_BatchedSnapshotConfirmedLive_ReassertsAndTransfers(t *testing.T) {
+	kcUID := sfid("kc-confirm-main")
+	kcSibUID := sfid("kc-confirm-sib")
+	membershipUID := sfid("asset-confirm-x")
+
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	sib := &model.KeyContact{UID: kcSibUID, MembershipUID: membershipUID, Email: "alice@example.com", Status: "Active"}
+	// Call 0: the batched scan sees the sibling. Call 1: the live
+	// revalidation's scan sees the same sibling, confirming the snapshot.
+	siblingReader := &sequencedSiblingReader{
+		responses: [][]*model.KeyContact{{sib}, {sib}},
+	}
+	pub := &subjectCapturingPublisher{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r-confirmed-snap")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCKeyContactsByMembershipReader(siblingReader),
+		svc.WithCDCUserReader(&fakeUserReader{sub: "alice"}),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	var sawReassertPut bool
+	for _, msg := range pub.accessMessages {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		require.True(t, ok)
+		if fgaMsg.Operation == "member_put" {
+			sawReassertPut = true
+		}
+	}
+	assert.True(t, sawReassertPut, "a live-confirmed justifying sibling must be reasserted before ownership transfers")
+	assert.Equal(t, []string{kcUID}, grants.Deletes,
+		"the deleted contact's own entry must clear once ownership durably transfers to the live-confirmed sibling")
+	sibEntry, found, err := grants.Get(context.Background(), kcSibUID)
+	require.NoError(t, err)
+	require.True(t, found, "the durable address must transfer to the live-confirmed sibling's own entry")
+	assert.Equal(t, membershipUID, sibEntry.MembershipUID)
+	assert.Equal(t, "alice", sibEntry.Username)
+}
+
 // TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry verifies
 // that Access only hands the revoke to the local NATS
 // connection, it does not confirm the broker received it. Deleting the index
