@@ -1088,6 +1088,33 @@ func TestKeyContactWriter_Delete_OtherActiveRole_SameLevel_SkipsRevoke(t *testin
 	assert.Empty(t, spy.roleChanges, "ChangePrincipalRole must NOT be called when roles are at the same level")
 }
 
+func TestKeyContactWriter_Delete_SiblingStatusUppercaseActive_SkipsRevoke(t *testing.T) {
+	// The sibling's Status is "ACTIVE": live under case-insensitive semantics,
+	// so the reconcile scan must count it and skip both remove and downgrade.
+	kc := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "alice@example.com", Status: "Active", Role: constants.RoleNameBillingContact,
+	}
+	otherKC := &model.KeyContact{
+		UID: "other-kc-uid", MembershipUID: "other-membership", B2BOrgUID: testOrgSFID,
+		Email: "alice@example.com", Status: "ACTIVE", Role: constants.RoleNameTechnicalContact,
+	}
+	storage := newSeededStorage(kc, otherKC)
+	spy := &spyOrgSettings{}
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: &model.ProjectMembership{}},
+		&trackingPublisher{},
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice-sub", nil }),
+		spy,
+	)
+
+	err := w.Delete(context.Background(), svc.KeyContactDeleteInput{MembershipUID: testMembershipUID, UID: testKCUID})
+
+	require.NoError(t, err)
+	assert.Empty(t, spy.removes, "RemovePrincipal must NOT be called when an ACTIVE (uppercase) same-level sibling remains")
+	assert.Empty(t, spy.roleChanges, "ChangePrincipalRole must NOT be called when the live sibling holds the same level")
+}
+
 func TestKeyContactWriter_Delete_VotingContact_AuditorRemains_DowngradesRole(t *testing.T) {
 	// D=writer, R=auditor: delete Voting Contact while Billing Contact stays → downgrade to auditor.
 	votingKC := &model.KeyContact{

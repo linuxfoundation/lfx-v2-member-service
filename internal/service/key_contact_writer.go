@@ -225,10 +225,11 @@ type orgKeyContactLister interface {
 
 // reconcileOrgDashboardAccess reconciles org-dashboard access for a key
 // contact that no longer warrants its own provisioning (removed, email
-// changed, or turned Inactive). It scans all OTHER active key contacts for
-// kc.Email in the org and takes one of three actions:
+// changed, or turned Inactive). It scans all OTHER live key contacts for
+// kc.Email in the org (live: any status other than case-insensitive Inactive,
+// matching the key-contact status gate) and takes one of three actions:
 //
-//   - No remaining active contacts → RemovePrincipal (full revoke).
+//   - No remaining live contacts → RemovePrincipal (full revoke).
 //   - Remaining max role < departing role → ChangePrincipalRole to max remaining
 //     (downgrade; e.g. Voting Contact deleted while Billing Contact stays active).
 //   - Remaining max role ≥ departing role → no-op (access level unchanged).
@@ -250,11 +251,13 @@ func reconcileOrgDashboardAccess(ctx context.Context, orgSettings OrgSettingsPri
 		return
 	}
 
-	// Compute the highest org-dashboard role held by any OTHER active contact
-	// with the same email. Empty string means no remaining active contacts.
+	// Compute the highest org-dashboard role held by any OTHER live contact
+	// with the same email; live means not case-insensitively Inactive, the
+	// same semantics as the key-contact status gate. Empty string means no
+	// remaining live contacts.
 	maxRemainingRole := ""
 	for _, c := range contacts {
-		if c.UID == kc.UID || c.Status != constants.RoleStatusActive || !strings.EqualFold(c.Email, kc.Email) {
+		if c.UID == kc.UID || strings.EqualFold(c.Status, constants.RoleStatusInactive) || !strings.EqualFold(c.Email, kc.Email) {
 			continue
 		}
 		r := kcRoleToOrgRole(c.Role)
