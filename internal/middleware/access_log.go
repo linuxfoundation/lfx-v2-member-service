@@ -71,6 +71,12 @@ var piiPathParams = map[string]bool{
 // in any segment by content (several routes carry a member email as a path
 // parameter).
 //
+// When no route matched, or the matched template does not align
+// segment-for-segment with the concrete path, there is no way to tell which
+// segments carry PII, so it fails closed and redacts every segment. A
+// method-mismatch 405 or a trailing-slash 404 on a PII-bearing path must not
+// log the value verbatim.
+//
 // It works on the escaped path: chi routes on the escaped form, so a value
 // containing an encoded slash (john%2Fdoe) still reaches its route as one
 // segment. Redacting the whole escaped segment, rather than splitting the
@@ -80,15 +86,29 @@ func redactPath(routeTemplate, escapedPath string) string {
 	segments := strings.Split(escapedPath, "/")
 	redacted := false
 
+	templateSegs := strings.Split(routeTemplate, "/")
+	if routeTemplate == unmatchedRoute || len(templateSegs) != len(segments) {
+		// Fail closed: unmatched or misaligned routes redact every segment.
+		for i, segment := range segments {
+			if segment == "" {
+				continue
+			}
+			if decoded, err := url.PathUnescape(segment); err == nil && strings.Contains(decoded, "@") {
+				segments[i] = redaction.RedactEmail(decoded)
+				continue
+			}
+			segments[i] = redaction.Redact(segment)
+		}
+		return strings.Join(segments, "/")
+	}
+
 	// Redact named PII parameters by position. Goa path parameters never span a
 	// slash, so a template like "/b2b_orgs/member-tiers/{username}" aligns
 	// segment-for-segment with the concrete path.
-	if templateSegs := strings.Split(routeTemplate, "/"); len(templateSegs) == len(segments) {
-		for i, ts := range templateSegs {
-			if name, ok := pathParamName(ts); ok && piiPathParams[name] {
-				segments[i] = redaction.Redact(segments[i])
-				redacted = true
-			}
+	for i, ts := range templateSegs {
+		if name, ok := pathParamName(ts); ok && piiPathParams[name] {
+			segments[i] = redaction.Redact(segments[i])
+			redacted = true
 		}
 	}
 

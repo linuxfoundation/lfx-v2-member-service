@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"strings"
 	"time"
 
@@ -102,7 +102,9 @@ func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
 		return nil, errs.NewServiceUnavailable("unmarshalling read_tuples response", err)
 	}
 	if resp.Error != "" {
-		return nil, errs.NewServiceUnavailable(fmt.Sprintf("fga-sync read_tuples reported an error: %s", resp.Error))
+		// The upstream text goes into the wrapped cause, which reaches server
+		// logs only; the response body carries just the stable message.
+		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reported an error", errors.New(resp.Error))
 	}
 	// fga-sync always sends results (empty array for no matches), so an absent
 	// or null field is a malformed reply, not "no memberships".

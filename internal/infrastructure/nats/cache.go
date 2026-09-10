@@ -56,6 +56,10 @@ type CacheResult[T any] struct {
 	Value T
 	// Status is the freshness classification of the cached value.
 	Status CacheStatus
+	// Revision is the KV entry revision the value was read at; 0 when no
+	// entry existed. Revision-conditional write-backs pass it so a fetch
+	// started before an eviction cannot repopulate stale data afterward.
+	Revision uint64
 }
 
 // TTLConfig controls the soft-TTL durations written into every CachedValue

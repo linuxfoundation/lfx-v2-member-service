@@ -558,8 +558,9 @@ func (r *MemberReader) GetMembership(ctx context.Context, membershipUID string) 
 				break
 			}
 			if result.Status == nats.CacheStatusStale {
+				readRevision := result.Revision
 				r.refreshInBackground(func(ctx context.Context) error {
-					_, fetchErr := r.fetchMembershipFromSalesforce(ctx, membershipUID)
+					_, fetchErr := r.fetchMembershipFromSalesforce(ctx, membershipUID, readRevision)
 					return fetchErr
 				})
 			}
@@ -568,13 +569,19 @@ func (r *MemberReader) GetMembership(ctx context.Context, membershipUID string) 
 		// CacheStatusExpired and CacheStatusMiss fall through to Salesforce.
 	}
 
-	return r.fetchMembershipFromSalesforce(ctx, membershipUID)
+	// result.Revision is 0 on a miss or cache read error, making the write-back
+	// create-only; on an expired or poisoned entry it conditions the overwrite.
+	return r.fetchMembershipFromSalesforce(ctx, membershipUID, result.Revision)
 }
 
 // fetchMembershipFromSalesforce fetches a single membership from Salesforce by
-// decoding the UID to a SFID, writes the result to the KV cache, and returns it.
-// ProjectUID is resolved from the membership's ProjectSlug via the resolver.
-func (r *MemberReader) fetchMembershipFromSalesforce(ctx context.Context, membershipUID string) (*model.ProjectMembership, error) {
+// decoding the UID to a SFID, writes the result to the KV cache conditioned on
+// readRevision (the KV revision the caller read the entry at; 0 when none
+// existed), and returns it. A Conflict on the write-back means the entry was
+// evicted or rewritten while this fetch was in flight: the possibly-stale
+// result must not repopulate the cache, so the write is skipped. ProjectUID is
+// resolved from the membership's ProjectSlug via the resolver.
+func (r *MemberReader) fetchMembershipFromSalesforce(ctx context.Context, membershipUID string, readRevision uint64) (*model.ProjectMembership, error) {
 	sfid, err := sfuuid.Normalize18(membershipUID)
 	if err != nil {
 		// Defensive: uid was not a valid SFID — use as-is and let Salesforce reject.
@@ -606,11 +613,17 @@ func (r *MemberReader) fetchMembershipFromSalesforce(ctx context.Context, member
 	// empty ProjectUID would poison the cache and cause all subsequent ownership
 	// checks to fail without triggering a re-fetch from Salesforce.
 	if membership.ProjectUID != "" {
-		if putErr := r.cache.PutMembership(ctx, membership); putErr != nil {
-			slog.WarnContext(ctx, "failed to cache membership after Salesforce fetch",
-				"membership_uid", membership.UID,
-				"error", putErr,
-			)
+		if putErr := r.cache.PutMembershipAtRevision(ctx, membership, readRevision); putErr != nil {
+			if errs.IsConflict(putErr) {
+				slog.InfoContext(ctx, "membership cache write-back skipped: entry changed since read",
+					"membership_uid", membership.UID,
+				)
+			} else {
+				slog.WarnContext(ctx, "failed to cache membership after Salesforce fetch",
+					"membership_uid", membership.UID,
+					"error", putErr,
+				)
+			}
 		}
 	} else {
 		slog.WarnContext(ctx, "skipping membership cache write: ProjectUID is empty",

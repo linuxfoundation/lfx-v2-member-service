@@ -92,6 +92,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 		ProjectSlug:    "linux-foundation",
 		Role:           "Primary Contact",
 		Status:         "Active",
+		Username:       "keycontact1",
 		BoardMember:    false,
 		PrimaryContact: true,
 		FirstName:      "John",

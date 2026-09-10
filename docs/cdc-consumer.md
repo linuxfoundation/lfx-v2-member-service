@@ -133,9 +133,9 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 1. **Normalise + partition** — each raw record ID is normalised to a canonical 18-char SFID (`sfuuid.Normalize18`); un-normalisable IDs are logged and skipped. IDs split into `deleteIDs` vs `upsertIDs` by change type.
 2. **Deletes** — each delete ID runs through the entity's delete handler immediately.
 3. **Upserts (batched):**
-   - **Quota guard** — skip the re-fetch if the Salesforce REST API quota is near-exhausted (see [Quota guard](#quota-guard)).
+   - **Quota guard** — skip the re-fetch if the Salesforce REST API quota is near-exhausted (see [Quota guard](#quota-guard)). **Asset only:** cache invalidation runs *before* the quota guard, so a stale membership record is dropped even when the re-fetch is skipped; the next `GetMemberTiers` read then costs one Salesforce call instead of serving a stale tier or status. Account and Project_Role__c invalidate after the guard.
    - **(Account only)** capture old record state for the reparenting diff before eviction.
-   - **Invalidate** the sObject cache entry for each ID.
+   - **Invalidate** the sObject cache entry for each ID. **Asset only:** additionally evict the soft-TTL `membership-cache` entry (`DeleteMembership`) that `GetMemberTiers` serves from. The evictor is optional (nil in mock mode), so this eviction is best-effort freshness, not a correctness guarantee.
    - **Batched SOQL re-fetch** for all IDs in one query.
    - **Absent → delete convergence** — IDs requested but missing from the SOQL result are soft-deleted / no longer qualifying, so they are routed to the delete handler. IDs present-but-unconvertible are marked "seen" so they are **not** wrongly deleted.
    - **Resolve `project_uid`** from the record's slug (Asset + Project_Role__c).
@@ -163,9 +163,18 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 
 | Change | Actions |
 |---|---|
-| Upsert | Invalidate cache → fetch memberships → resolve `project_uid` → on success: `PublishProjectMembershipIndexer` (`created`/`updated`) + `PublishProjectMembershipFGA` (`b2b_org` + `project` refs; `key_contact` excluded). On resolver failure: skip indexer, log ERROR, **OpenFGA only** (`project` relation excluded when ref absent). |
-| Delete | Invalidate cache → `PublishProjectMembershipIndexer` (`deleted`, stub — data is the UID string) → `delete_access` for the UID → **Flush**. Genuine-delete path only. On a publish failure or an unconfirmed flush, same recovery story as `b2b_org` above, recorded under `ReindexTypeProjectMembershipDeleteAccess`. |
-| Absent → convergence | Invalidate cache → `PublishProjectMembershipIndexer` (`deleted`, stub). **No FGA message.** A membership drops out of the query when `Product2.Family` flips off "Membership", which leaves a live record whose auditor cascade must survive. |
+| Upsert | Invalidate sObject cache + evict soft-TTL `membership-cache` entry (both **before** the quota guard) → fetch memberships → resolve `project_uid` → on success: `PublishProjectMembershipIndexer` (`created`/`updated`) + `PublishProjectMembershipFGA` (`b2b_org` + `project` refs; `key_contact` excluded). On resolver failure: skip indexer, log ERROR, **OpenFGA only** (`project` relation excluded when ref absent). |
+| Delete | Invalidate sObject cache + evict soft-TTL `membership-cache` entry → `PublishProjectMembershipIndexer` (`deleted`, stub — data is the UID string) → `delete_access` for the UID → **Flush**. Genuine-delete path only. On a publish failure or an unconfirmed flush, same recovery story as `b2b_org` above, recorded under `ReindexTypeProjectMembershipDeleteAccess`. |
+| Absent → convergence | Invalidate sObject cache + evict soft-TTL `membership-cache` entry → `PublishProjectMembershipIndexer` (`deleted`, stub). **No FGA message.** A membership drops out of the query when `Product2.Family` flips off "Membership", which leaves a live record whose auditor cascade must survive. |
+
+The soft-TTL eviction is a delete of the `membership-cache` KV entry, which
+bumps the key's revision. The Salesforce read-through cache writes back with a
+revision-conditional put (`PutMembershipAtRevision`: `Create` for a miss,
+`Update` at the read revision otherwise), so a fetch that started before an
+eviction cannot repopulate the cache with pre-eviction data afterward; the
+losing writer logs and skips. Eviction itself is still best-effort (evictor
+nil in mock mode, CDC events can lag or drop), so reads may serve a record up
+to its soft TTL out of date.
 
 ### Project_Role__c → `key_contact`
 
@@ -411,7 +420,7 @@ The CDC consumer touches six NATS KV buckets:
 |---|---|---|
 | `pubsub-state` | Stores the replay cursor per channel (`pubsub-replay.<channel>`). Authoritative. | none |
 | `member-service-cache` | sObject cache — the consumer **evicts** entries here on each event (never writes). | no soft-TTL |
-| `membership-cache` | Read/written by the injected `ProjectResolver` while resolving `project_uid` for `Asset` / `Project_Role__c` upserts — it looks up and populates `project-uid.<slug>` via `Storage.GetProjectUID` / `PutProjectUID`. | 6 h stale / 23 h expire |
+| `membership-cache` | Read/written by the injected `ProjectResolver` while resolving `project_uid` for `Asset` / `Project_Role__c` upserts — it looks up and populates `project-uid.<slug>` via `Storage.GetProjectUID` / `PutProjectUID`. The consumer also **evicts** `membership.<uid>` entries on every Asset upsert, delete, and absent-convergence (`DeleteMembership`, skipped when the evictor is nil) so `GetMemberTiers` does not keep serving pre-change tier/status; the read-through cache's revision-conditional write-back keeps an in-flight fetch from undoing the eviction. | 6 h stale / 23 h expire |
 | `org-settings` | Read/written when a **registered** key contact upsert succeeds `project_uid` resolution: `processKeyContact` calls `AddPrincipal` (`SuppressNotification: true`), which reads and updates the authoritative org-settings KV. Not touched on resolver failure. | none (authoritative) |
 | `cdc-repair` | The consumer **writes** one pending marker per skipped record when the quota guard skips an upsert batch (`recordSkippedForRepair` → `PutPending`). **Never read or deleted here** — `/admin/reindex {cdc_repair:true}` (a different process, the API) lists and revision-conditionally deletes markers on drain. See [CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain). Also holds two marker-only types (`b2b_org_delete_access` / `project_membership_delete_access`) written on a failed `delete_access` publish — see [Delete_access failure marker](#delete_access-failure-marker) below; these are **never** drained by `/admin/reindex {cdc_repair:true}` and must be listed/republished/removed manually. | none (authoritative), `history: 1` |
 | `key-contact-grants` | Records the `key_contact` FGA grant published per contact (`key_contact.{sfid}` → `{membership_uid, username}`). Written on every upsert that publishes a `member_put`; read on delete to address the `member_remove`, then deleted. Writes are revision-conditional. Also written by the API and by `/admin/reindex`. | none (authoritative), `history: 1` |

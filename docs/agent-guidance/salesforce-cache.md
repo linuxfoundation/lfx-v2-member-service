@@ -30,6 +30,14 @@ Prefixes are defined as the dot-delimited `keyPrefix*` constants in
 24-hour `MaxAge` (hard eviction), which is always later than the soft
 `expires_at` timestamp inside each envelope.
 
+`membership.{uid}` entries are evicted by the CDC consumer on each Asset
+change, and their write-back is revision-conditional: reads return the KV
+entry revision (`CacheResult.Revision`, 0 on a miss), and
+`PutMembershipAtRevision` does a `Create` at revision 0 or an `Update` at the
+read revision otherwise. A lost race (entry created, changed, or deleted
+since the read) is a `Conflict`, which the read-through cache logs and skips,
+so a fetch that started before an eviction cannot repopulate stale data.
+
 ### `member-service-cache` bucket
 
 This bucket stores raw Salesforce sObject REST API responses with HTTP

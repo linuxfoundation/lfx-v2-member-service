@@ -252,14 +252,18 @@ const maxMemberTierCandidates = 200
 // for the organizations the given user is a key contact of, ordered highest
 // tier first so the leading entry is the user's top tier. The FGA tuples are a
 // reverse index only; each candidate is verified against the authoritative
-// membership record. Unknown users yield an empty list, not 404, so callers
-// cannot probe which usernames exist.
+// membership record, and the user's key-contact standing is revalidated
+// against the membership's Project_Role__c records, since a published grant
+// can outlive the contact going inactive or being reassigned. Unknown users
+// yield an empty list, not 404, so callers cannot probe which usernames exist.
 //
 // Candidates read through the cached GetMembership, not the always-revalidating
 // AssembleProjectMembership, to spare Salesforce calls. Eligibility (the
 // key-contact edge) is read live from fga-sync each call and never cached
-// here; only status, end date, and tier come from the soft-TTL cache, which
-// the CDC consumer evicts on each Asset change, so the next read is fresh.
+// here; only status, end date, and tier come from the soft-TTL cache. The CDC
+// consumer evicts a cached record on each Asset change as a best-effort
+// freshness aid (it is absent in mock mode and can lag or drop events), so a
+// read may still serve a record up to its soft TTL out of date.
 func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershipservice.GetMemberTiersPayload) ([]*membershipservice.MemberOrgTierResponse, error) {
 	username := strings.TrimSpace(p.Username)
 	if username == "" {
@@ -315,6 +319,27 @@ func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershi
 			slog.WarnContext(ctx, "skipping membership without b2b_org_uid", "membership_uid", uid)
 			continue
 		}
+
+		// The FGA tuple only records that a key_contact grant was once
+		// published; the grant lifecycle can lag a contact going inactive or
+		// being reassigned. Revalidate against the authoritative
+		// Project_Role__c records before counting the organization.
+		isContact, err := s.userIsActiveKeyContact(ctx, uid, username)
+		if err != nil {
+			// Same fail-closed reasoning as the membership read above: a
+			// silent skip would omit organizations the user belongs to.
+			var unavailable pkgerrors.ServiceUnavailable
+			if !errors.As(err, &unavailable) {
+				err = pkgerrors.NewServiceUnavailable("verifying key-contact status", err)
+			}
+			return nil, wrapError(ctx, err)
+		}
+		if !isContact {
+			slog.InfoContext(ctx, "skipping membership: no active key-contact record for user",
+				"membership_uid", uid, "username", redaction.Redact(username))
+			continue
+		}
+
 		if current, ok := best[membership.B2BOrgUID]; !ok || membershipOutranks(membership, current) {
 			best[membership.B2BOrgUID] = membership
 		}
@@ -345,6 +370,28 @@ func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershi
 		res = append(res, memberOrgTierToResponse(m))
 	}
 	return res, nil
+}
+
+// userIsActiveKeyContact reports whether the username is listed as an active
+// key contact on the membership's authoritative Project_Role__c records. It
+// reads through the soft-TTL key-contacts cache, so it costs one cached read
+// per candidate and one Salesforce query on a cold membership.
+func (s *membershipServicesrvc) userIsActiveKeyContact(ctx context.Context, membershipUID, username string) (bool, error) {
+	contacts, err := s.storage.ListKeyContactsForMembership(ctx, membershipUID)
+	if err != nil {
+		return false, err
+	}
+	for _, kc := range contacts {
+		if kc == nil {
+			continue
+		}
+		// Username match is exact, mirroring the tuple parse in
+		// MembershipUIDsForUser: both compare the LFID verbatim.
+		if kc.Username == username && strings.EqualFold(kc.Status, constants.RoleStatusActive) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // membershipCountsAsActive reports whether a membership counts towards the

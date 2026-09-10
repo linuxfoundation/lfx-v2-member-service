@@ -116,8 +116,46 @@ func TestAccessLogMiddlewareReportsUnmatchedRoute(t *testing.T) {
 	if record["pattern"] != unmatchedRoute {
 		t.Errorf("got pattern %v, want %q", record["pattern"], unmatchedRoute)
 	}
-	if record["path"] != "/definitely/not/a/route" {
-		t.Errorf("got path %v, want the concrete path", record["path"])
+	// Unmatched routes fail closed: every segment is redacted because no
+	// template says which ones carry PII.
+	if record["path"] != "/def****/n****/**/r****" {
+		t.Errorf("got path %v, want every segment redacted", record["path"])
+	}
+}
+
+// A method mismatch (405) or trailing slash (404) misses the route while the
+// path still carries the LFID; the fail-closed branch must redact it.
+func TestAccessLogMiddlewareRedactsUnmatchedUsernamePaths(t *testing.T) {
+	mux := goahttp.NewMuxer()
+	mux.Use(AccessLogMiddleware())
+	mux.Handle(http.MethodGet, "/b2b_orgs/member-tiers/{username}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cases := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{"method mismatch on the real path", http.MethodPost, "/b2b_orgs/member-tiers/johndoe123"},
+		{"trailing slash", http.MethodGet, "/b2b_orgs/member-tiers/johndoe123/"},
+		{"extra segment", http.MethodGet, "/b2b_orgs/member-tiers/johndoe123/extra"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(tc.method, tc.target, nil))
+
+			record := decodeAccessLog(t, &buf)
+			path, _ := record["path"].(string)
+			if strings.Contains(path, "johndoe123") {
+				t.Errorf("path %q leaks the username on an unrouted request", path)
+			}
+		})
 	}
 }
 
@@ -152,6 +190,7 @@ func TestAccessLogMiddlewareIncludesRequestID(t *testing.T) {
 
 func TestAccessLogMiddlewareRedactsEmailInPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/b2b_orgs/123/settings/users/johndoe@example.com", nil)
+	req.Pattern = "DELETE /b2b_orgs/{uid}/settings/users/{email}"
 
 	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

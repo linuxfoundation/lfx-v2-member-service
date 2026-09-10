@@ -11,6 +11,12 @@ type base struct {
 	err     error
 }
 
+// Message returns the curated message without any wrapped cause, so callers
+// can surface stable text to clients while the full cause stays in server logs.
+func (b base) Message() string {
+	return b.message
+}
+
 // error is a method that returns the error message for the base struct
 func (b base) error() string {
 	if b.err == nil {

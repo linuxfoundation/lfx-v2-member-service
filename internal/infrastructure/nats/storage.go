@@ -87,13 +87,17 @@ func (s *Storage) GetMembership(ctx context.Context, uid string) (CacheResult[*m
 	return getCached[*model.ProjectMembership](ctx, s, keyPrefixMembership+uid)
 }
 
-// PutMembership writes a ProjectMembership to the KV bucket, keyed by its UID,
-// wrapped in a CachedValue envelope using the Storage TTLConfig.
-func (s *Storage) PutMembership(ctx context.Context, membership *model.ProjectMembership) error {
+// PutMembershipAtRevision writes a ProjectMembership to the KV bucket, keyed by
+// its UID, conditioned on the revision the caller read the entry at (0 when no
+// entry existed). A CDC eviction or concurrent rewrite between that read and
+// this write bumps the revision, so the write is rejected as Conflict instead
+// of resurrecting stale data with a fresh TTL. Callers treat Conflict as a
+// benign lost race: the next read re-fetches.
+func (s *Storage) PutMembershipAtRevision(ctx context.Context, membership *model.ProjectMembership, revision uint64) error {
 	if membership == nil {
 		return errs.NewValidation("membership cannot be nil")
 	}
-	return putCached(ctx, s, keyPrefixMembership+membership.UID, membership)
+	return putCachedAtRevision(ctx, s, keyPrefixMembership+membership.UID, membership, revision)
 }
 
 // DeleteMembership evicts the cached ProjectMembership for the UID from the
@@ -364,10 +368,56 @@ func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[
 			"key", key,
 			"error", unmarshalErr,
 		)
-		return CacheResult[T]{Status: CacheStatusMiss}, nil
+		// Keep the revision so a conditional write-back can replace the
+		// corrupt entry instead of failing its create.
+		return CacheResult[T]{Status: CacheStatusMiss, Revision: entry.Revision()}, nil
 	}
 
-	return CacheResult[T]{Value: envelope.Data, Status: envelope.Status()}, nil
+	return CacheResult[T]{Value: envelope.Data, Status: envelope.Status(), Revision: entry.Revision()}, nil
+}
+
+// putCachedAtRevision JSON-encodes value inside a CachedValue envelope and
+// writes it to key, conditioned on the entry still being at revision: 0 means
+// create-only, non-zero means the stored revision must still match. A rejected
+// write (the entry was created, rewritten, or deleted since the caller's read)
+// returns Conflict so a fetch that raced an eviction cannot write back stale
+// data.
+func putCachedAtRevision[T any](ctx context.Context, s *Storage, key string, value T, revision uint64) error {
+	if key == "" {
+		return errs.NewValidation("key cannot be empty")
+	}
+
+	kv, ok := s.client.kvStore[constants.KVBucketNameCache]
+	if !ok {
+		return errs.NewUnexpected(fmt.Sprintf("KV bucket %q not initialized", constants.KVBucketNameCache))
+	}
+
+	data, err := json.Marshal(newCachedValue(value, s.ttlConfig))
+	if err != nil {
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to marshal value for key %q in bucket %q", key, constants.KVBucketNameCache), err)
+	}
+
+	if revision == 0 {
+		if _, createErr := kv.Create(ctx, key, data); createErr != nil {
+			if errors.Is(createErr, jetstream.ErrKeyExists) {
+				return errs.NewConflict(fmt.Sprintf("cache entry %q was created concurrently", key))
+			}
+			return errs.NewUnexpected(
+				fmt.Sprintf("failed to create key %q in bucket %q", key, constants.KVBucketNameCache), createErr)
+		}
+		return nil
+	}
+	if _, updateErr := kv.Update(ctx, key, data, revision); updateErr != nil {
+		// ErrKeyExists is the wrong-last-sequence rejection; ErrKeyNotFound
+		// means the entry was deleted since the read. Both are lost races.
+		if errors.Is(updateErr, jetstream.ErrKeyExists) || errors.Is(updateErr, jetstream.ErrKeyNotFound) {
+			return errs.NewConflict(fmt.Sprintf("cache entry %q changed since read", key))
+		}
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to update key %q in bucket %q", key, constants.KVBucketNameCache), updateErr)
+	}
+	return nil
 }
 
 // putCached JSON-encodes value inside a CachedValue envelope and writes it to

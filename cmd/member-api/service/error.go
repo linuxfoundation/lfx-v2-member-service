@@ -38,8 +38,10 @@ func wrapError(ctx context.Context, err error) error {
 
 	var serviceUnavailable pkgerrors.ServiceUnavailable
 	if errors.As(err, &serviceUnavailable) {
+		// The full cause (upstream NATS, fga-sync, or Salesforce error text)
+		// stays in the server log; the 503 body carries only the stable message.
 		slog.ErrorContext(ctx, "request failed", "error", err)
-		return membershipservice.MakeServiceUnavailable(err)
+		return membershipservice.MakeServiceUnavailable(errors.New(serviceUnavailable.Message()))
 	}
 
 	var preconditionFailed pkgerrors.PreconditionFailed

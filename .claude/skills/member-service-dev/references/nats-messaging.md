@@ -109,6 +109,41 @@ the auth-service request/reply subject
 `pkg/constants/subjects.go`, called from
 `internal/infrastructure/nats/messaging_request.go`).
 
+### fga-sync read_tuples (member-tiers reverse index)
+
+`GET /b2b_orgs/member-tiers/{username}` resolves its candidate membership
+UIDs by reading the user's direct FGA tuples from `lfx-v2-fga-sync`.
+Implemented in `internal/infrastructure/nats/access_check_rpc.go`
+(`AccessCheckRPC.MembershipUIDsForUser`).
+
+| Field | Value |
+| --- | --- |
+| Subject | `lfx.access_check.read_tuples` (`fgaconstants.ReadTuplesSubject`) |
+| Owner | `lfx-v2-fga-sync` |
+| Transport | NATS core request/reply (blocking, unlike this service's fire-and-forget FGA publishes) |
+| Timeout | Caller context deadline when present, otherwise `NATS_TIMEOUT` (default 10s) |
+
+Request body (JSON, `fgatypes.ReadTuplesRequest`):
+
+```json
+{"user": "user:<username>", "object_type": "project_membership"}
+```
+
+Reply body (JSON, `fgatypes.ReadTuplesResponse`):
+
+```json
+{"results": ["project_membership:<uid>#key_contact@user:<username>", "..."], "error": ""}
+```
+
+`results` are canonical `object#relation@user` tuple strings; an empty array
+means no memberships (never omitted on success). The caller fails closed:
+any RPC failure (timeout, no responder), an empty or malformed reply, a
+non-empty `error` field (even with partial results), or a null/absent
+`results` field is a `ServiceUnavailable` (HTTP 503), never an empty list.
+Upstream error text is logged server-side only, not echoed to clients. The
+tuples are a reverse index only: eligibility and tier come from the
+authoritative membership records, which each candidate is verified against.
+
 ## KV buckets
 
 The buckets are initialized by `internal/infrastructure/nats/client.go`
