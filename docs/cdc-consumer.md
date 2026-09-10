@@ -169,9 +169,13 @@ For each event, `CDCConsumer.handle` switches on `Entity` and calls the per-enti
 
 The soft-TTL eviction is a delete of the `membership-cache` KV entry, which
 bumps the key's revision. The Salesforce read-through cache writes back with a
-revision-conditional put (`PutMembershipAtRevision`: `Create` for a miss,
-`Update` at the read revision otherwise), so a fetch that started before an
-eviction cannot repopulate the cache with pre-eviction data afterward; the
+revision-conditional put (`PutMembershipAtRevision`, always an `Update` at the
+revision observed by the read: the delete marker's revision when the miss was
+an eviction, found via `History`, or a strict expected-revision-zero write when
+the key has no history at all; `kv.Create` is deliberately not used because it
+re-reads delete markers at write time and retries over them), so a fetch that
+started before an eviction cannot repopulate the cache with pre-eviction data
+afterward; the
 losing writer logs and skips. Eviction itself is still best-effort (evictor
 nil in mock mode, CDC events can lag or drop), so reads may serve a record up
 to its soft TTL out of date.

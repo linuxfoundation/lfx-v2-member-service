@@ -32,11 +32,16 @@ Prefixes are defined as the dot-delimited `keyPrefix*` constants in
 
 `membership.{uid}` entries are evicted by the CDC consumer on each Asset
 change, and their write-back is revision-conditional: reads return the KV
-entry revision (`CacheResult.Revision`, 0 on a miss), and
-`PutMembershipAtRevision` does a `Create` at revision 0 or an `Update` at the
-read revision otherwise. A lost race (entry created, changed, or deleted
-since the read) is a `Conflict`, which the read-through cache logs and skips,
-so a fetch that started before an eviction cannot repopulate stale data.
+revision observed (`CacheResult.Revision`: the live entry's revision, the
+delete marker's revision when the miss was an eviction, found via `History`,
+or 0 when the key has no history at all), and `PutMembershipAtRevision` does
+an `Update` conditioned on that revision. Revision 0 is a strict
+expected-revision-zero write; `kv.Create` is deliberately not used because it
+re-reads delete markers at write time and retries over them, which would let a
+stale fetch overwrite an eviction that landed after its read. A lost race
+(entry created, changed, or deleted since the read) is a `Conflict`, which the
+read-through cache logs and skips, so a fetch that started before an eviction
+cannot repopulate stale data.
 
 `key-contacts.{membership_uid}` entries follow the same pattern: the CDC
 consumer evicts the grouped entry on each Project_Role__c change and delete

@@ -360,7 +360,10 @@ func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[
 	entry, err := kv.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return CacheResult[T]{Status: CacheStatusMiss}, nil
+			// A miss can be a delete tombstone. Carry the marker's revision so
+			// the write-back is conditioned on the state observed here, not on
+			// whatever marker exists at write time (see putCachedAtRevision).
+			return CacheResult[T]{Status: CacheStatusMiss, Revision: deleteMarkerRevision(ctx, kv, key)}, nil
 		}
 		return zero, errs.NewUnexpected(
 			fmt.Sprintf("failed to get key %q from bucket %q", key, constants.KVBucketNameCache), err)
@@ -380,12 +383,35 @@ func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[
 	return CacheResult[T]{Value: envelope.Data, Status: envelope.Status(), Revision: entry.Revision()}, nil
 }
 
+// deleteMarkerRevision returns the revision of the delete or purge marker that
+// is the latest operation on key, or 0 when the key has no history at all
+// (never written, or every message aged out of the stream). Called on a Get
+// miss so the caller's write-back can be conditioned on the marker it observed.
+func deleteMarkerRevision(ctx context.Context, kv jetstream.KeyValue, key string) uint64 {
+	entries, err := kv.History(ctx, key)
+	if err != nil || len(entries) == 0 {
+		return 0
+	}
+	last := entries[len(entries)-1]
+	switch last.Operation() {
+	case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
+		return last.Revision()
+	}
+	// The latest operation is a live put that landed after the Get miss.
+	// Returning 0 makes the write-back strict, so it conflicts instead of
+	// clobbering the newer value.
+	return 0
+}
+
 // putCachedAtRevision JSON-encodes value inside a CachedValue envelope and
 // writes it to key, conditioned on the entry still being at revision: 0 means
-// create-only, non-zero means the stored revision must still match. A rejected
-// write (the entry was created, rewritten, or deleted since the caller's read)
-// returns Conflict so a fetch that raced an eviction cannot write back stale
-// data.
+// the key must have no message history at all (a strict expected-revision-zero
+// write, NOT kv.Create, which re-reads delete markers at write time and would
+// retry over an eviction that landed after the caller's read), non-zero means
+// the stored revision, live entry or delete marker, must still match. A
+// rejected write (the entry was created, rewritten, or deleted since the
+// caller's read) returns Conflict so a fetch that raced an eviction cannot
+// write back stale data.
 func putCachedAtRevision[T any](ctx context.Context, s *Storage, key string, value T, revision uint64) error {
 	if key == "" {
 		return errs.NewValidation("key cannot be empty")
@@ -402,16 +428,10 @@ func putCachedAtRevision[T any](ctx context.Context, s *Storage, key string, val
 			fmt.Sprintf("failed to marshal value for key %q in bucket %q", key, constants.KVBucketNameCache), err)
 	}
 
-	if revision == 0 {
-		if _, createErr := kv.Create(ctx, key, data); createErr != nil {
-			if errors.Is(createErr, jetstream.ErrKeyExists) {
-				return errs.NewConflict(fmt.Sprintf("cache entry %q was created concurrently", key))
-			}
-			return errs.NewUnexpected(
-				fmt.Sprintf("failed to create key %q in bucket %q", key, constants.KVBucketNameCache), createErr)
-		}
-		return nil
-	}
+	// kv.Update with revision 0 publishes with an expected last subject
+	// sequence of 0: it fails on ANY existing message for the key, including a
+	// delete marker placed after the caller's read. Both branches therefore go
+	// through Update; Create is deliberately avoided (see the doc comment).
 	if _, updateErr := kv.Update(ctx, key, data, revision); updateErr != nil {
 		// ErrKeyExists is the wrong-last-sequence rejection; ErrKeyNotFound
 		// means the entry was deleted since the read. Both are lost races.
