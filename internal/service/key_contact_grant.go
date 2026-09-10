@@ -404,17 +404,21 @@ func publishKeyContactRemove(ctx context.Context, p port.MemberPublisher, req ke
 // scan against that live lister: a different contact UID can grant the same
 // pair between the first scan and this publish, and the remove would
 // otherwise strip access that was just re-granted. A recheck that finds the
-// pair justified again publishes a compensating member_put. If that repair
-// (and its flush) succeeds, the net effect of the remove plus the repair is a
-// live tuple justified by the racing sibling, so the outcome is
-// revokeUnneeded with justifiedBy set to that sibling, not revokePublished:
-// every caller already runs the durable-ownership transfer on revokeUnneeded
-// and preserves retry state if that transfer fails, which is exactly what
-// must happen here before the original entry can be cleared. If the recheck
-// read fails, or the racing sibling is found but the compensating put or its
-// flush fails, the outcome is revokeUncertain instead: the caller must
+// pair justified again publishes a compensating member_put, then re-runs the
+// live scan once more to verify the justification survived the put: the
+// racing sibling can itself deactivate between the recheck read and the put,
+// which would otherwise resurrect an unjustified tuple. If the verified
+// repair succeeds, the net effect of the remove plus the repair is a live
+// tuple justified by the racing sibling, so the outcome is revokeUnneeded
+// with justifiedBy set to that sibling, not revokePublished: every caller
+// already runs the durable-ownership transfer on revokeUnneeded and preserves
+// retry state if that transfer fails, which is exactly what must happen here
+// before the original entry can be cleared. If the recheck read fails, the
+// compensating put or its flush fails, the verification read fails, or the
+// verification finds the justification gone (the tuple is then removed again
+// before returning), the outcome is revokeUncertain instead: the caller must
 // preserve retry state rather than report a revoke that may have stripped
-// live access.
+// live access, and the retried pass settles whichever state won the race.
 func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublisher, lister membershipKeyContactLister, req keyContactPairRevoke) (keyContactRevokeOutcome, *model.KeyContact, error) {
 	if req.username == "" {
 		return revokeUnneeded, nil, nil
@@ -455,13 +459,37 @@ func revokeKeyContactPairIfUnjustified(ctx context.Context, p port.MemberPublish
 					"error", repairErr, "fga_remove_raced_possible_lost_grant", true)
 				return revokeUncertain, racedBy, fmt.Errorf("post-revoke repair for key_contact %s: %w", req.excludeUID, repairErr)
 			}
+			// Post-put verification: the racing sibling can itself deactivate
+			// between the recheck read and the put above, in which case the
+			// put just resurrected an unjustified tuple.
+			verifiedBy, verifyErr := keyContactPairJustified(ctx, req.recheck, recheckRevoke)
+			if verifyErr != nil {
+				slog.ErrorContext(ctx, "key_contact post-repair verification failed: the repaired tuple may be unjustified until retried",
+					"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason,
+					"error", verifyErr, "fga_repair_unverified_possible_dangling_tuple", true)
+				return revokeUncertain, nil, fmt.Errorf("post-repair verification for key_contact %s: %w", req.excludeUID, verifyErr)
+			}
+			if verifiedBy == nil {
+				// Justification disappeared under the repair: take the tuple
+				// back down, then still report uncertain so the caller keeps
+				// retry state and the next pass settles cleanly.
+				takedown := req
+				takedown.recheck = nil
+				takedown.flush = true
+				if takedownErr := publishKeyContactRemove(ctx, p, takedown); takedownErr != nil {
+					return revokeUncertain, nil, fmt.Errorf("post-repair takedown for key_contact %s: %w", req.excludeUID, takedownErr)
+				}
+				slog.WarnContext(ctx, "key_contact repair superseded: the racing sibling deactivated under the repair, tuple removed again",
+					"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
+				return revokeUncertain, nil, fmt.Errorf("post-repair justification disappeared for key_contact %s: retry to settle", req.excludeUID)
+			}
 			slog.WarnContext(ctx, "key_contact grant repaired: a concurrent grant raced this revoke and was reapplied",
 				"uid", req.excludeUID, "membership_uid", req.membershipUID, "reason", req.reason)
-			// The remove plus a successful compensating put nets out to a live
+			// The remove plus a verified compensating put nets out to a live
 			// tuple justified by the racing sibling: report the same outcome
 			// as if the scan had found it justified up front, so the caller
 			// runs the durable-ownership transfer before clearing this entry.
-			return revokeUnneeded, racedBy, nil
+			return revokeUnneeded, verifiedBy, nil
 		}
 	}
 	return revokePublished, nil, nil

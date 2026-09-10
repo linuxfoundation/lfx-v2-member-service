@@ -426,6 +426,10 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 
 	if emailChanging {
 		lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
+		// Role/Status: nil means no change; coalesce before the FGA publish so
+		// an unchanged Inactive contact cannot emit a member_put.
+		newKC.Role = derefOrStr(in.Role, current.Role)
+		newKC.Status = derefOrStr(in.Status, current.Status)
 		// Paired FGA: put new username first (avoid no-access window), then remove old.
 		newKC.Username, _ = o.resolveUsernameForContact(ctx, "", newKC.Email)
 		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister, lister)
@@ -464,10 +468,6 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 				recheck:       lister,
 			})
 		}
-		// Role/Status: nil means no change, coalesce to the current value since
-		// the mock can't re-fetch from SF and returns "" for unchanged fields.
-		newKC.Role = derefOrStr(in.Role, current.Role)
-		newKC.Status = derefOrStr(in.Status, current.Status)
 		if strings.EqualFold(newKC.Status, constants.RoleStatusInactive) {
 			// The new email never had a principal provisioned for it, nothing
 			// more to do there. The old email is reconciled below regardless.

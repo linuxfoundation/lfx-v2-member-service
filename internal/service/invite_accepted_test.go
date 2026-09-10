@@ -507,6 +507,91 @@ func TestInviteAcceptedService_Handle_SupersededRacingRegrant_LiveRecheckRepairs
 	assert.Greater(t, repairIdx, removeIdx, "the racing same-email grant must be repaired with a compensating member_put after the remove")
 }
 
+// scriptedKCOrgReader returns pages[0] on the first read, pages[1] on the
+// second, and the last page on every later read, so multi-stage races
+// (prefetch, recheck, post-repair verification) can each see different state.
+type scriptedKCOrgReader struct {
+	pages [][]*model.KeyContact
+	calls int
+}
+
+func (r *scriptedKCOrgReader) ListKeyContactsForOrg(_ context.Context, _ string) ([]*model.KeyContact, error) {
+	r.calls++
+	i := r.calls - 1
+	if i >= len(r.pages) {
+		i = len(r.pages) - 1
+	}
+	return r.pages[i], nil
+}
+
+// TestInviteAcceptedService_Handle_RepairRacedByDeactivation_TakedownAndRetry
+// covers PRRT_kwDORegyoM6hA42L: when the sibling that justified the
+// compensating put deactivates before the put lands, the post-put
+// verification must remove the tuple again and keep retry state.
+func TestInviteAcceptedService_Handle_RepairRacedByDeactivation_TakedownAndRetry(t *testing.T) {
+	const orgUID = "001000000000000AAB"
+	const movedUID = "kc-moved-4"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A4", Username: "alice", Revision: 1},
+		},
+	}
+
+	moved := &model.KeyContact{UID: movedUID, MembershipUID: "m-B4", Email: "alice@example.com", Status: "Active"}
+	dead := &model.KeyContact{UID: "kc-dead-4", MembershipUID: "m-A4", Email: "dead@example.com", Status: constants.RoleStatusInactive}
+	racing := &model.KeyContact{UID: "kc-race-4", MembershipUID: "m-A4", Email: "alice@example.com", Status: "Active"}
+	racingGone := &model.KeyContact{UID: "kc-race-4", MembershipUID: "m-A4", Email: "alice@example.com", Status: constants.RoleStatusInactive}
+	reader := &scriptedKCOrgReader{pages: [][]*model.KeyContact{
+		{moved, dead},             // prefetch: m-A4 covered but unjustified, remove publishes
+		{moved, dead, racing},     // post-remove recheck: racing grant found, repair put publishes
+		{moved, dead, racingGone}, // post-repair verification: justification gone, takedown must run
+	}}
+
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(reader),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, reader.calls, 3, "the repair must be verified against a fresh org read after the put")
+	removeIdx, repairIdx, takedownIdx := -1, -1, -1
+	for i, subj := range pub.access {
+		switch {
+		case subj == fgaconstants.GenericMemberRemoveSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGARemoveMessage("m-A4", "alice")) && repairIdx < 0:
+			removeIdx = i
+		case subj == fgaconstants.GenericMemberPutSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGAPutMessage("m-A4", "alice")) && removeIdx >= 0:
+			repairIdx = i
+		case subj == fgaconstants.GenericMemberRemoveSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGARemoveMessage("m-A4", "alice")) && repairIdx >= 0:
+			takedownIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, removeIdx, 0, "the superseded pair must be revoked first; access calls: %v", pub.access)
+	require.Greater(t, repairIdx, removeIdx, "the racing grant must be repaired with a compensating member_put")
+	assert.Greater(t, takedownIdx, repairIdx, "the verification must take the repaired tuple back down once its justification is gone")
+
+	stored, found, err := grants.Get(context.Background(), movedUID)
+	require.NoError(t, err)
+	require.True(t, found, "the entry must be retained so a later pass can settle the race")
+	assert.NotNil(t, stored.PendingRevoke, "the superseded pair's address must survive an uncertain repair")
+}
+
 func TestInviteAcceptedService_Handle_NilKeyContactDeps_NoPanic(t *testing.T) {
 	// Nil keyContactReader/publisher (e.g. not yet wired) must not panic.
 	store := mock.NewMockB2BOrgSettings()

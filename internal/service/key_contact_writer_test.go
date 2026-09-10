@@ -996,6 +996,37 @@ func TestKeyContactWriter_Update_EmailChange_NewInactive_SkipsNewProvisionReconc
 	assert.Equal(t, "old2@example.com", spy.removes[0].Email)
 }
 
+func TestKeyContactWriter_Update_EmailChange_AlreadyInactive_NilStatus_NoFGAPut(t *testing.T) {
+	// Reviewer PRRT_kwDORegyoM6hA423: an email-changing update that leaves
+	// Status nil on an already-Inactive contact must coalesce the effective
+	// status before the FGA publish, so no member_put can resurrect access.
+	oldKC := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "old3@example.com", Status: constants.RoleStatusInactive, Role: "Technical Contact",
+		FirstName: "Hana", LastName: "Ito",
+	}
+	storage := newSeededStorage(oldKC)
+	spy := &spyOrgSettings{}
+	pub := &subjectCapturingPublisher{}
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: &model.ProjectMembership{UID: testMembershipUID, B2BOrgUID: testOrgSFID}},
+		pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "new-sub3", nil }),
+		spy,
+	)
+
+	newEmail := "new3@example.com"
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID,
+		Email: &newEmail, SendInvite: false,
+	})
+
+	require.NoError(t, err)
+	assert.False(t, pub.hasAccess(fgaconstants.GenericMemberPutSubject),
+		"no member_put may publish when the contact stays Inactive through a nil-Status email change")
+	assert.Empty(t, spy.adds, "AddPrincipal must NOT be called while the record stays Inactive")
+}
+
 func TestKeyContactWriter_Update_EmailChange_OldDefinitiveMiss_SameEmailSiblingDoesNotJustify(t *testing.T) {
 	// Reviewer PRRT_kwDORegyoM6g_359: when the old username is only the
 	// stripped auth0| fallback after a definitive LFID miss, a sibling holding
