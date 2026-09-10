@@ -883,13 +883,13 @@ func TestCDCConsumer_ProjectRole_Delete_RepairedRace_TransferFailure_HoldsCursor
 }
 
 // TestCDCConsumer_ProjectRoleDelete_QuotaExhausted_SkipsLiveRecheckAndHoldsCursor
-// covers FIX 1 (PRRT_kwDORegyoM6gzNqK): the CDC delete path's per-record LIVE
-// recheck must consult the quota guard before every Salesforce fetch, not
-// just the batched scan. With the quota gauge reporting usage at the skip
-// threshold, the recheck must never reach the sibling reader at all, and the
-// resulting uncertainty must hold the replay cursor for redelivery. Once the
-// gauge reports healthy usage again, the same event must settle on redelivery
-// and clear the grant entry.
+// covers FIX 1 (PRRT_kwDORegyoM6gzNqK) and the prefetch gate
+// (PRRT_kwDORegyoM6hAOA4): the CDC delete path must consult the quota guard
+// before ANY Salesforce fetch, the batched sibling prefetch included. With
+// the quota gauge reporting usage at the skip threshold, the sibling reader
+// must never be reached at all, and the resulting uncertainty must hold the
+// replay cursor for redelivery. Once the gauge reports healthy usage again,
+// the same event must settle on redelivery and clear the grant entry.
 func TestCDCConsumer_ProjectRoleDelete_QuotaExhausted_SkipsLiveRecheckAndHoldsCursor(t *testing.T) {
 	kcUID := sfid("kc-quota-main")
 	membershipUID := sfid("asset-quota-x")
@@ -923,16 +923,14 @@ func TestCDCConsumer_ProjectRoleDelete_QuotaExhausted_SkipsLiveRecheckAndHoldsCu
 	replay := &fakeReplayStore{}
 	requireAuthorizationRetry(t, consumer, "/data/ProjectRoleChangeEvent", replay)
 
-	// The 250ms retry window lets the consumer's own retry loop make more
-	// than one attempt, each contributing one batched-scan call and one
-	// member_remove publish, so only the ratio between them is deterministic:
-	// every scan call must be matched by exactly one remove, proving the
-	// quota-guarded live recheck never adds a call of its own before recovery.
+	// With the prefetch itself now gated on the quota guard
+	// (PRRT_kwDORegyoM6hAOA4), an exhausted gauge must keep the sibling
+	// reader untouched entirely: no batched scan, no live recheck, and with
+	// the scan inconclusive no member_remove may publish either.
 	callsBeforeRecovery := len(siblingReader.calls)
 	removesBeforeRecovery := countAccessOperations(pub.accessMessages, "member_remove")
-	assert.Positive(t, callsBeforeRecovery, "at least one attempt must reach the batched scan")
-	assert.Equal(t, callsBeforeRecovery, removesBeforeRecovery,
-		"each batched-scan call must correspond to exactly one remove, with no extra call from the quota-guarded live recheck")
+	assert.Zero(t, callsBeforeRecovery, "the batched sibling prefetch must be skipped before spending Salesforce quota")
+	assert.Zero(t, removesBeforeRecovery, "no remove may publish while the quota guard holds the scan inconclusive")
 	assert.NotEmpty(t, grants.Entries, "the entry must be retained: an uncertain recheck must not be treated as a confirmed settle")
 	_, found, err := grants.Get(context.Background(), kcUID)
 	require.NoError(t, err)

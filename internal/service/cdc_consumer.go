@@ -1550,6 +1550,10 @@ type keyContactGrantLookup struct {
 // per-record lister built inside handleProjectRoleDelete, since recheck only
 // runs after a remove actually publishes and that per-remove live read is
 // the accepted budget.
+//
+// The prefetch consults the quota guard before fetching: under quota pressure
+// every scan reads as quota-skipped (uncertain), so unsettled deletes hold
+// the replay cursor for redelivery instead of consuming Salesforce quota.
 func (o *CDCConsumer) projectRoleDeleteBatcher(ctx context.Context, ids []string) func(context.Context, string) error {
 	lookups := make(map[string]keyContactGrantLookup, len(ids))
 	memberships := make(map[string]struct{}, len(ids))
@@ -1566,7 +1570,19 @@ func (o *CDCConsumer) projectRoleDeleteBatcher(ctx context.Context, ids []string
 			memberships[grant.PendingRevoke.MembershipUID] = struct{}{}
 		}
 	}
-	lister := batchedSiblingListerForMemberships(ctx, o.keyContactsByMembership, o.userReader, memberships)
+	var lister membershipKeyContactLister
+	if exceeded, snap := o.quotaGuardExceeded(ctx, "Project_Role__c"); exceeded && len(memberships) > 0 {
+		// Scans read as quota-skipped: uncertain, never falsely sibling-free,
+		// so unsettled deletes hold the replay cursor instead of spending quota.
+		slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached: skipping delete sibling prefetch",
+			"membership_count", len(memberships),
+			"api_usage_current", snap.Current,
+			"api_usage_limit", snap.Limit,
+			"threshold", o.quotaSkipThreshold)
+		lister = failedKeyContactLister{err: errQuotaGuardSkipped}
+	} else {
+		lister = batchedSiblingListerForMemberships(ctx, o.keyContactsByMembership, o.userReader, memberships)
+	}
 	return func(ctx context.Context, id string) error {
 		return o.handleProjectRoleDelete(ctx, id, lookups[id], lister)
 	}
