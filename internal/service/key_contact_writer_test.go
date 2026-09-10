@@ -933,6 +933,38 @@ func TestKeyContactWriter_Update_StatusOnly_ActiveToInactive_ReconcilesNoRemapNo
 	assert.Empty(t, spy.roleChanges, "ChangePrincipalRole (remap) must NOT be called for a contact turning Inactive")
 }
 
+func TestKeyContactWriter_Update_StatusOnly_InactiveToActive_ReprovisionsAndRemaps(t *testing.T) {
+	// Reviewer PRRT_kwDORegyoM6g_iUo: a status-only Inactive->Active update must
+	// restore the org-dashboard principal removed at deactivation. AddPrincipal
+	// covers the removed case; the remap raises a surviving downgraded principal.
+	kc := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "gina@example.com", Status: constants.RoleStatusInactive, Role: "Technical Contact",
+		FirstName: "Gina", LastName: "Reyes",
+	}
+	storage := newSeededStorage(kc)
+	spy := &spyOrgSettings{}
+	active := constants.RoleStatusActive
+
+	w := newKCWriterWithOrgSettings(storage, &seededPMReader{pm: &model.ProjectMembership{}},
+		&trackingPublisher{},
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "gina-sub", nil }),
+		spy,
+	)
+
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID,
+		Status: &active,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, spy.adds, 1, "AddPrincipal must be called on reactivation to restore dashboard access")
+	assert.Equal(t, "gina@example.com", spy.adds[0].Email)
+	require.Len(t, spy.roleChanges, 1, "ChangePrincipalRole must run after provision to correct a surviving downgraded principal")
+	assert.Equal(t, "gina@example.com", spy.roleChanges[0].Email)
+	assert.Empty(t, spy.removes, "RemovePrincipal must NOT be called on reactivation")
+}
+
 func TestKeyContactWriter_Update_EmailChange_NewInactive_SkipsNewProvisionReconcilesOld(t *testing.T) {
 	// Reviewer PRRT_kwDORegyoM6gyyL8: an email-changing update whose new record
 	// is Inactive must not provision the new email; the old email is still

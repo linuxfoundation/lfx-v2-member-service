@@ -494,12 +494,20 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 
 		becomingInactive := strings.EqualFold(newKC.Status, constants.RoleStatusInactive) &&
 			!strings.EqualFold(current.Status, constants.RoleStatusInactive)
+		becomingActive := !strings.EqualFold(newKC.Status, constants.RoleStatusInactive) &&
+			strings.EqualFold(current.Status, constants.RoleStatusInactive)
 		switch {
 		case becomingInactive:
 			// The tuple was just withdrawn; reconcile using remaining active siblings.
 			o.revokeOrDowngradeOrgDashboardRole(ctx, newKC)
 		case strings.EqualFold(newKC.Status, constants.RoleStatusInactive):
 			// Already Inactive: no principal exists to remap.
+		case becomingActive:
+			// Reactivation: restore the principal removed at deactivation. On
+			// Conflict (principal survived, maybe downgraded) the remap below
+			// raises it back; a remap alone would swallow NotFound.
+			o.provisionOrgDashboardAccess(ctx, newKC, in.SendInvite)
+			o.remapOrgDashboardRole(ctx, newKC)
 		case in.Role != nil && *in.Role != current.Role:
 			o.remapOrgDashboardRole(ctx, newKC)
 		}
