@@ -427,7 +427,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
-					r.resolveKeyContactUsername(ctx, log, kc)
+					r.resolveKeyContactUsername(ctx, log, kc, live)
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					if ok {
 						kc.ProjectUID = uid
@@ -710,8 +710,8 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		if req.DryRun {
 			return outcomeIssued
 		}
-		r.resolveKeyContactUsername(ctx, log, kc)
 		lister := siblingListerFor(r.keyContactsByMembership, r.userReader)
+		r.resolveKeyContactUsername(ctx, log, kc, lister)
 		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
@@ -876,16 +876,16 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 	var lister, live membershipKeyContactLister
 	if !req.DryRun {
 		lister = batchedSiblingLister(ctx, r.keyContactsByMembership, r.userReader, contacts)
-		// Per-record rechecks must consult the quota guard themselves:
-		// the batch-level check runs once per batch.
-		live = r.quotaGuardedLiveSiblingLister()
+		// Targeted reindex is the bounded incident-repair tool and stays
+		// quota-exempt, so live rechecks use the unguarded reader.
+		live = siblingListerFor(r.keyContactsByMembership, r.userReader)
 	}
 	for _, kc := range contacts {
 		if req.DryRun {
 			published++
 			continue
 		}
-		r.resolveKeyContactUsername(ctx, log, kc)
+		r.resolveKeyContactUsername(ctx, log, kc, live)
 		uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if ok {
 			kc.ProjectUID = uid
@@ -909,7 +909,10 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 // assembly, and the SFID batch reader) sets Email but never Username, so
 // without this call PublishKeyContactFGA is a guaranteed no-op for every
 // reindexed key contact — no member_put, and no grant-index entry.
-func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger, kc *model.KeyContact) {
+// The caller supplies the live sibling lister so each mode keeps its own
+// quota policy: full/filtered runs pass the guarded lister, targeted and
+// single-item repairs pass the unguarded one.
+func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger, kc *model.KeyContact, live membershipKeyContactLister) {
 	if r.userReader == nil || kc.Username != "" || kc.Email == "" {
 		return
 	}
@@ -919,8 +922,7 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 			// A definitive miss: revoke any grant still recorded for this contact.
 			// Best-effort: this runner has no per-contact retry path, the next
 			// backfill or CDC pass revisits an unrevoked grant.
-			liveLister := r.quotaGuardedLiveSiblingLister()
-			_ = revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, liveLister, liveLister, kc.UID, "", "", reasonEmailUnregistered)
+			_ = revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered)
 		} else {
 			// Transport-level failure — not evidence the email is unregistered;
 			// leave Username empty and any existing grant untouched.
