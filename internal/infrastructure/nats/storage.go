@@ -88,11 +88,13 @@ func (s *Storage) GetMembership(ctx context.Context, uid string) (CacheResult[*m
 }
 
 // PutMembershipAtRevision writes a ProjectMembership to the KV bucket, keyed by
-// its UID, conditioned on the revision the caller read the entry at (0 when no
-// entry existed). A CDC eviction or concurrent rewrite between that read and
-// this write bumps the revision, so the write is rejected as Conflict instead
-// of resurrecting stale data with a fresh TTL. Callers treat Conflict as a
-// benign lost race: the next read re-fetches.
+// its UID, conditioned on the KV revision observed at read time (a live entry's
+// revision, a delete marker's revision, or 0 when the key has no history at
+// all). Every write is a strict kv.Update at that revision, never a kv.Create
+// (see putCachedAtRevision). A CDC eviction or concurrent rewrite between that
+// read and this write bumps the revision, so the write is rejected as Conflict
+// instead of resurrecting stale data with a fresh TTL. Callers treat Conflict
+// as a benign lost race: the next read re-fetches.
 func (s *Storage) PutMembershipAtRevision(ctx context.Context, membership *model.ProjectMembership, revision uint64) error {
 	if membership == nil {
 		return errs.NewValidation("membership cannot be nil")
@@ -137,10 +139,12 @@ func (s *Storage) GetKeyContactsForMembership(ctx context.Context, membershipUID
 // PutKeyContactsForMembershipAtRevision writes the full slice of key contacts
 // for a membership into the KV bucket as a single entry keyed by membership
 // UID, wrapped in a CachedValue envelope using the Storage TTLConfig. The write
-// is conditioned on revision, the KV revision the caller read the entry at
-// (0 when none existed): revision 0 does a Create, any other revision an
-// Update, and a lost race (entry created, changed, or deleted since the read)
-// returns a Conflict so a stale in-flight fetch cannot undo a CDC eviction.
+// is conditioned on revision, the KV revision observed at read time (a live
+// entry's revision, a delete marker's revision, or 0 when the key has no
+// history at all): every write is a strict kv.Update at that revision, never a
+// kv.Create (see putCachedAtRevision), and a lost race (entry created, changed,
+// or deleted since the read) returns a Conflict so a stale in-flight fetch
+// cannot undo a CDC eviction.
 func (s *Storage) PutKeyContactsForMembershipAtRevision(ctx context.Context, membershipUID string, contacts []*model.KeyContact, revision uint64) error {
 	if contacts == nil {
 		contacts = []*model.KeyContact{}
