@@ -933,6 +933,49 @@ func TestKeyContactWriter_Update_StatusOnly_ActiveToInactive_ReconcilesNoRemapNo
 	assert.Empty(t, spy.roleChanges, "ChangePrincipalRole (remap) must NOT be called for a contact turning Inactive")
 }
 
+// TestKeyContactWriter_Update_StatusOnly_ActiveToInactive_RevokeFailure_StillReturnsSuccess
+// characterizes reviewer PRRT_kwDORegyoM6hJTGa: the API update path calls the
+// void PublishKeyContactFGA wrapper, so a failed deactivation revoke is
+// logged but not propagated. Convergence is still real: the grant survives
+// unrevoked in key-contact-grants for the next CDC touch, whose upsert path
+// uses the error-returning form and holds the replay cursor instead (see
+// TestCDCConsumer_ProjectRole_Upsert_InactiveRevokeFailure_HoldsReplayCursor).
+func TestKeyContactWriter_Update_StatusOnly_ActiveToInactive_RevokeFailure_StillReturnsSuccess(t *testing.T) {
+	kc := &model.KeyContact{
+		UID: testKCUID, MembershipUID: testMembershipUID, B2BOrgUID: testOrgSFID,
+		Email: "frank@example.com", Status: "Active", Role: "Technical Contact",
+	}
+	storage := newSeededStorage(kc)
+	pub := &errorFGARemovePublisher{} // fails every FGA member_remove publish
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			testKCUID: {MembershipUID: testMembershipUID, Username: "frank-sub", Revision: 1},
+		},
+	}
+	inactive := constants.RoleStatusInactive
+
+	w := newKCWriterWithGrantIndex(storage, &seededPMReader{pm: &model.ProjectMembership{}}, pub,
+		userReaderFunc(func(_ context.Context, _ string) (string, error) { return "frank-sub", nil }), grants)
+
+	_, err := w.Update(context.Background(), svc.KeyContactUpdateInput{
+		MembershipUID: testMembershipUID, UID: testKCUID,
+		Status: &inactive,
+	})
+
+	require.NoError(t, err, "the API update must still report success even though the FGA revoke failed")
+	var removeAttempts int
+	for _, c := range pub.calls() {
+		if strings.Contains(c, fgaconstants.GenericMemberRemoveSubject) {
+			removeAttempts++
+		}
+	}
+	assert.Equal(t, 1, removeAttempts, "the revoke must have been attempted, not silently skipped")
+	stillRecorded, found, getErr := grants.Get(context.Background(), testKCUID)
+	require.NoError(t, getErr)
+	assert.True(t, found, "an unconfirmed revoke must leave the grant recorded for a later retry")
+	assert.Equal(t, "frank-sub", stillRecorded.Username)
+}
+
 func TestKeyContactWriter_Update_StatusOnly_InactiveToActive_ReprovisionsAndRemaps(t *testing.T) {
 	// Reviewer PRRT_kwDORegyoM6g_iUo: a status-only Inactive->Active update must
 	// restore the org-dashboard principal removed at deactivation. AddPrincipal
