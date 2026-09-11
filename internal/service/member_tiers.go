@@ -19,9 +19,13 @@ import (
 )
 
 // MaxMemberTierCandidates caps how many unique reverse-index UIDs
-// HighestActiveTiers resolves per user. Each can be a Salesforce read, so past
-// the cap it fails closed rather than fan out or truncate to a wrong top tier.
-const MaxMemberTierCandidates = 200
+// HighestActiveTiers resolves per user. A fully cold candidate costs up to
+// three sequential Salesforce queries (membership read, Project_Role query,
+// primary-email query), so the cap bounds a cold request to ~75 sequential
+// queries against the shared quota. A legitimate user is a key contact on a
+// handful of memberships; past the cap the lookup fails closed rather than
+// fan out or truncate to a wrong top tier.
+const MaxMemberTierCandidates = 25
 
 // MemberTiers is the read use-case behind GET /b2b_orgs/member-tiers/{username}:
 // it resolves the highest active membership tier per B2B organization for the
