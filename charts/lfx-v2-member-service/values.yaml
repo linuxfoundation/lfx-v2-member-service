@@ -48,6 +48,10 @@ app:
   # Stable platform-wide OpenFGA team name for global organization admins.
   # This is shared across environments, like lfStaffTeamName below.
   globalOrgAdminTeamName: "global_org_admin"
+  # memberTiersCallerTeamName scopes GET /b2b_orgs/member-tiers to a dedicated
+  # caller team (least privilege for the Insights Worker). Empty falls back to
+  # globalOrgAdminTeamName.
+  memberTiersCallerTeamName: ""
   # lfStaffTeamName is the LDAP-backed OpenFGA team granted blanket auditor
   # (read-only) access on every b2b_org. It is the same in every environment,
   # so it is a real value here rather than a per-environment identifier.

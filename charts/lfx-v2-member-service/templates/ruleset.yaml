@@ -77,15 +77,16 @@ spec:
         {{- if .Values.openfga.enabled }}
         {{/*
           Machine-to-machine endpoint (Insights Cloudflare Worker, LFX One):
-          callers must be members of the global org-admin team, mirroring the
-          POST /b2b_orgs and /admin routes. Swap in a dedicated team via
-          values when caller-specific scoping is needed.
+          callers must be members of the member-tiers caller team. Set
+          app.memberTiersCallerTeamName to scope this endpoint to a dedicated
+          team (least privilege); it defaults to the global org-admin team
+          used by the POST /b2b_orgs and /admin routes.
         */}}
         - authorizer: openfga_check
           config:
             values:
               relation: member
-              object: "team:{{ .Values.app.globalOrgAdminTeamName | trim }}"
+              object: "team:{{ .Values.app.memberTiersCallerTeamName | default .Values.app.globalOrgAdminTeamName | trim }}"
         {{- else }}
         {{/*
           When OpenFGA is disabled, allow all requests.

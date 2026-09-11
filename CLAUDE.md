@@ -176,6 +176,7 @@ Key contacts are nested under their membership. GET/PUT/DELETE return 404 (not 4
 | POST   | `/b2b_orgs/{uid}/settings/users`              | Add a principal (invite or accept immediately)      | `writer` on `b2b_org:{uid}`                |
 | PUT    | `/b2b_orgs/{uid}/settings/users/{email}`      | Change a principal's role                           | `writer` on `b2b_org:{uid}`                |
 | DELETE | `/b2b_orgs/{uid}/settings/users/{email}`      | Remove a principal                                  | `writer` on `b2b_org:{uid}`                |
+| GET    | `/b2b_orgs/member-tiers/{username}`           | Highest active membership tier per org for a user (machine callers) | `member` on `team:{memberTiersCallerTeamName}` (defaults to `globalOrgAdminTeamName`) |
 
 **Settings semantics:** `nil` writers/auditors = keep existing; explicit `[]` = clear all. Entries with a `username` are `accepted` (FGA tuple emitted); without username are `pending` (no FGA tuple). The legacy `owner` relation is retired — use `writer` instead. Settings are stored in the `org-settings` NATS KV bucket (authoritative, no MaxAge TTL), separate from the Salesforce-backed `membership-cache` bucket.
 
@@ -522,6 +523,7 @@ Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/template
 - **GET `/b2b_orgs/:uid/settings`** — `auditor` on `b2b_org:{uid}` (auditor, not writer, so trusted principals can see the pending-invite list)
 - **PUT `/b2b_orgs/:uid/settings`** — `writer` on `b2b_org:{uid}`
 - **POST `/b2b_orgs/:uid/settings/users` and PUT/DELETE `/b2b_orgs/:uid/settings/users/:email`** — `writer` on `b2b_org:{uid}`
+- **GET `/b2b_orgs/member-tiers/:username`**: `member` on `team:{memberTiersCallerTeamName}` (machine callers; the value defaults to `globalOrgAdminTeamName` when unset)
 - **GET `/project_memberships/:uid`** — `auditor` on `project_membership:{uid}`
 - **GET `/project_memberships/:membership_uid/key_contacts/:uid`** — `auditor` on `project_membership:{membership_uid}`
 - **POST/PUT/DELETE `/project_memberships/:membership_uid/key_contacts...`** — `writer` on `project_membership:{membership_uid}` (POST also runs `json_content_type`)

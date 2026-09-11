@@ -222,6 +222,13 @@ func UserMembershipReaderImpl(ctx context.Context) port.UserMembershipReader {
 	}
 }
 
+// MemberTiersUseCase constructs the member-tiers read use-case wired to the
+// selected membership reader (cached Salesforce or mock) and the reverse-index
+// reader (fga-sync read_tuples RPC or mock).
+func MemberTiersUseCase(ctx context.Context) *usecaseSvc.MemberTiers {
+	return usecaseSvc.NewMemberTiers(MemberReaderImpl(ctx), UserMembershipReaderImpl(ctx))
+}
+
 // KeyContactWriterImpl initialises and returns the port.KeyContactWriter
 // implementation selected by the REPOSITORY_SOURCE environment variable:
 //

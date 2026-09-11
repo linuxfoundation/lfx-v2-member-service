@@ -139,6 +139,7 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.OrgSettingsWriterUseCase(ctx),
 		service.WorkspaceWriterUseCase(ctx),
 		service.BackfillRunnerImpl(ctx),
+		service.MemberTiersUseCase(ctx),
 	)
 
 	// A transient logo-bucket outage only degrades the logo-upload feature; it
