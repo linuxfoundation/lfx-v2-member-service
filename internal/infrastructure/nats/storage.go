@@ -82,18 +82,50 @@ func (s *Storage) PutTier(ctx context.Context, tier *model.MembershipTier) error
 // ─── ProjectMembership ───────────────────────────────────────────────────────
 
 // GetMembership retrieves a ProjectMembership by UID. Returns a CacheResult
-// whose Status is CacheStatusMiss when no entry exists for the key.
+// whose Status is CacheStatusMiss when no entry exists for the key. Misses
+// resolve the delete-marker revision because the write-back is conditional
+// (PutMembershipAtRevision).
 func (s *Storage) GetMembership(ctx context.Context, uid string) (CacheResult[*model.ProjectMembership], error) {
-	return getCached[*model.ProjectMembership](ctx, s, keyPrefixMembership+uid)
+	return getCachedForCASWriteBack[*model.ProjectMembership](ctx, s, keyPrefixMembership+uid)
 }
 
-// PutMembership writes a ProjectMembership to the KV bucket, keyed by its UID,
-// wrapped in a CachedValue envelope using the Storage TTLConfig.
-func (s *Storage) PutMembership(ctx context.Context, membership *model.ProjectMembership) error {
+// PutMembershipAtRevision writes a ProjectMembership to the KV bucket, keyed by
+// its UID, conditioned on the KV revision observed at read time (a live entry's
+// revision, a delete marker's revision, or 0 when the key has no history at
+// all). Every write is a strict kv.Update at that revision, never a kv.Create
+// (see putCachedAtRevision). A CDC eviction or concurrent rewrite between that
+// read and this write bumps the revision, so the write is rejected as Conflict
+// instead of resurrecting stale data with a fresh TTL. Callers treat Conflict
+// as a benign lost race: the next read re-fetches.
+func (s *Storage) PutMembershipAtRevision(ctx context.Context, membership *model.ProjectMembership, revision uint64) error {
 	if membership == nil {
 		return errs.NewValidation("membership cannot be nil")
 	}
-	return putCached(ctx, s, keyPrefixMembership+membership.UID, membership)
+	return putCachedAtRevision(ctx, s, keyPrefixMembership+membership.UID, membership, revision)
+}
+
+// DeleteMembership evicts the cached ProjectMembership for the UID from the
+// soft-TTL bucket so the next read re-fetches fresh; a missing key is a no-op.
+func (s *Storage) DeleteMembership(ctx context.Context, membershipUID string) error {
+	if membershipUID == "" {
+		return errs.NewValidation("membershipUID cannot be empty")
+	}
+
+	kv, ok := s.client.kvStore[constants.KVBucketNameCache]
+	if !ok {
+		return errs.NewUnexpected(fmt.Sprintf("KV bucket %q not initialized", constants.KVBucketNameCache))
+	}
+
+	key := keyPrefixMembership + membershipUID
+	if err := kv.Delete(ctx, key); err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil
+		}
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to delete key %q from bucket %q", key, constants.KVBucketNameCache), err)
+	}
+
+	return nil
 }
 
 // ─── KeyContact ──────────────────────────────────────────────────────────────
@@ -102,18 +134,26 @@ func (s *Storage) PutMembership(ctx context.Context, membership *model.ProjectMe
 // membership UID. The contacts are stored as a JSON array under the membership
 // UID key (prefixed with "key-contacts.") in the membership-cache bucket.
 // Returns a CacheResult whose Status is CacheStatusMiss when no entry exists.
+// Misses resolve the delete-marker revision because the write-back is
+// conditional (PutKeyContactsForMembershipAtRevision).
 func (s *Storage) GetKeyContactsForMembership(ctx context.Context, membershipUID string) (CacheResult[[]*model.KeyContact], error) {
-	return getCached[[]*model.KeyContact](ctx, s, keyPrefixKeyContacts+membershipUID)
+	return getCachedForCASWriteBack[[]*model.KeyContact](ctx, s, keyPrefixKeyContacts+membershipUID)
 }
 
-// PutKeyContactsForMembership writes the full slice of key contacts for a
-// membership into the KV bucket as a single entry keyed by membership UID,
-// wrapped in a CachedValue envelope using the Storage TTLConfig.
-func (s *Storage) PutKeyContactsForMembership(ctx context.Context, membershipUID string, contacts []*model.KeyContact) error {
+// PutKeyContactsForMembershipAtRevision writes the full slice of key contacts
+// for a membership into the KV bucket as a single entry keyed by membership
+// UID, wrapped in a CachedValue envelope using the Storage TTLConfig. The write
+// is conditioned on revision, the KV revision observed at read time (a live
+// entry's revision, a delete marker's revision, or 0 when the key has no
+// history at all): every write is a strict kv.Update at that revision, never a
+// kv.Create (see putCachedAtRevision), and a lost race (entry created, changed,
+// or deleted since the read) returns a Conflict so a stale in-flight fetch
+// cannot undo a CDC eviction.
+func (s *Storage) PutKeyContactsForMembershipAtRevision(ctx context.Context, membershipUID string, contacts []*model.KeyContact, revision uint64) error {
 	if contacts == nil {
 		contacts = []*model.KeyContact{}
 	}
-	return putCached(ctx, s, keyPrefixKeyContacts+membershipUID, contacts)
+	return putCachedAtRevision(ctx, s, keyPrefixKeyContacts+membershipUID, contacts, revision)
 }
 
 // DeleteKeyContactsForMembership removes the key-contacts cache entry for the
@@ -312,8 +352,22 @@ func (s *Storage) IsReady(ctx context.Context) error {
 // the membership-cache bucket. On a NATS key-not-found error it returns a
 // CacheResult with CacheStatusMiss (not an error). On any other failure it
 // returns a non-nil error. The CacheResult.Status is derived from the
-// envelope's soft-TTL timestamps.
+// envelope's soft-TTL timestamps. Misses carry Revision 0: this is for key
+// types written back unconditionally (putCached); CAS-written key types read
+// through getCachedForCASWriteBack instead.
 func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[T], error) {
+	return lookupCached[T](ctx, s, key, false)
+}
+
+// getCachedForCASWriteBack is getCached for the key types whose callers
+// write back via putCachedAtRevision (memberships and grouped key contacts):
+// on a miss it also resolves the delete-marker revision, a kv.History call,
+// so the write-back can be conditioned on the tombstone observed here.
+func getCachedForCASWriteBack[T any](ctx context.Context, s *Storage, key string) (CacheResult[T], error) {
+	return lookupCached[T](ctx, s, key, true)
+}
+
+func lookupCached[T any](ctx context.Context, s *Storage, key string, resolveTombstoneRevision bool) (CacheResult[T], error) {
 	var zero CacheResult[T]
 
 	if key == "" {
@@ -328,7 +382,16 @@ func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[
 	entry, err := kv.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return CacheResult[T]{Status: CacheStatusMiss}, nil
+			// A miss can be a delete tombstone. For CAS-written keys, carry the
+			// marker's revision so the write-back is conditioned on the state
+			// observed here (see putCachedAtRevision). The history lookup is
+			// skipped for unconditionally written keys: it costs a KV watcher
+			// per call and its result would go unused.
+			var revision uint64
+			if resolveTombstoneRevision {
+				revision = deleteMarkerRevision(ctx, kv, key)
+			}
+			return CacheResult[T]{Status: CacheStatusMiss, Revision: revision}, nil
 		}
 		return zero, errs.NewUnexpected(
 			fmt.Sprintf("failed to get key %q from bucket %q", key, constants.KVBucketNameCache), err)
@@ -340,10 +403,73 @@ func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[
 			"key", key,
 			"error", unmarshalErr,
 		)
-		return CacheResult[T]{Status: CacheStatusMiss}, nil
+		// Keep the revision so a conditional write-back can replace the
+		// corrupt entry instead of failing its create.
+		return CacheResult[T]{Status: CacheStatusMiss, Revision: entry.Revision()}, nil
 	}
 
-	return CacheResult[T]{Value: envelope.Data, Status: envelope.Status()}, nil
+	return CacheResult[T]{Value: envelope.Data, Status: envelope.Status(), Revision: entry.Revision()}, nil
+}
+
+// deleteMarkerRevision returns the revision of the delete or purge marker that
+// is the latest operation on key, or 0 when the key has no history at all
+// (never written, or every message aged out of the stream). Called on a Get
+// miss so the caller's write-back can be conditioned on the marker it observed.
+func deleteMarkerRevision(ctx context.Context, kv jetstream.KeyValue, key string) uint64 {
+	entries, err := kv.History(ctx, key)
+	if err != nil || len(entries) == 0 {
+		return 0
+	}
+	last := entries[len(entries)-1]
+	switch last.Operation() {
+	case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
+		return last.Revision()
+	}
+	// The latest operation is a live put that landed after the Get miss.
+	// Returning 0 makes the write-back strict, so it conflicts instead of
+	// clobbering the newer value.
+	return 0
+}
+
+// putCachedAtRevision JSON-encodes value inside a CachedValue envelope and
+// writes it to key, conditioned on the entry still being at revision: 0 means
+// the key must have no message history at all (a strict expected-revision-zero
+// write, NOT kv.Create, which re-reads delete markers at write time and would
+// retry over an eviction that landed after the caller's read), non-zero means
+// the stored revision, live entry or delete marker, must still match. A
+// rejected write (the entry was created, rewritten, or deleted since the
+// caller's read) returns Conflict so a fetch that raced an eviction cannot
+// write back stale data.
+func putCachedAtRevision[T any](ctx context.Context, s *Storage, key string, value T, revision uint64) error {
+	if key == "" {
+		return errs.NewValidation("key cannot be empty")
+	}
+
+	kv, ok := s.client.kvStore[constants.KVBucketNameCache]
+	if !ok {
+		return errs.NewUnexpected(fmt.Sprintf("KV bucket %q not initialized", constants.KVBucketNameCache))
+	}
+
+	data, err := json.Marshal(newCachedValue(value, s.ttlConfig))
+	if err != nil {
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to marshal value for key %q in bucket %q", key, constants.KVBucketNameCache), err)
+	}
+
+	// kv.Update with revision 0 publishes with an expected last subject
+	// sequence of 0: it fails on ANY existing message for the key, including a
+	// delete marker placed after the caller's read. Both branches therefore go
+	// through Update; Create is deliberately avoided (see the doc comment).
+	if _, updateErr := kv.Update(ctx, key, data, revision); updateErr != nil {
+		// ErrKeyExists is the wrong-last-sequence rejection; ErrKeyNotFound
+		// means the entry was deleted since the read. Both are lost races.
+		if errors.Is(updateErr, jetstream.ErrKeyExists) || errors.Is(updateErr, jetstream.ErrKeyNotFound) {
+			return errs.NewConflict(fmt.Sprintf("cache entry %q changed since read", key))
+		}
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to update key %q in bucket %q", key, constants.KVBucketNameCache), updateErr)
+	}
+	return nil
 }
 
 // putCached JSON-encodes value inside a CachedValue envelope and writes it to

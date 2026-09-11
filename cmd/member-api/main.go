@@ -131,6 +131,7 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.MemberReaderImpl(ctx),
 		service.B2BOrgReaderImpl(ctx),
 		service.ProjectMembershipReaderImpl(ctx),
+		service.UserMembershipReaderImpl(ctx),
 		service.B2BOrgSettingsReaderImpl(ctx),
 		service.B2BOrgWriterUseCase(ctx),
 		service.LogoUploaderUseCase(ctx),
@@ -138,6 +139,7 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.OrgSettingsWriterUseCase(ctx),
 		service.WorkspaceWriterUseCase(ctx),
 		service.BackfillRunnerImpl(ctx),
+		service.MemberTiersUseCase(ctx),
 	)
 
 	// A transient logo-bucket outage only degrades the logo-upload feature; it

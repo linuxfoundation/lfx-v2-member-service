@@ -141,6 +141,7 @@ type svcBuilder struct {
 	storage         port.MemberReader
 	b2bOrgReader    port.B2BOrgReader
 	pmReader        port.ProjectMembershipReader
+	umReader        port.UserMembershipReader
 	settingsR       port.B2BOrgSettingsReader
 	b2bOrgWriter    usecaseSvc.B2BOrgWriter
 	logoUploader    usecaseSvc.LogoUploader
@@ -148,6 +149,7 @@ type svcBuilder struct {
 	settingsW       usecaseSvc.OrgSettingsWriter
 	workspaceWriter usecaseSvc.WorkspaceWriter
 	runner          *usecaseSvc.Runner
+	grantIndex      port.KeyContactGrantIndex
 }
 
 type svcOpt func(*svcBuilder)
@@ -164,8 +166,14 @@ func withLogoUploaderUC(u usecaseSvc.LogoUploader) svcOpt {
 func withKeyContactWriterUC(w usecaseSvc.KeyContactWriter) svcOpt {
 	return func(b *svcBuilder) { b.kcWriter = w }
 }
+func withStorage(r port.MemberReader) svcOpt {
+	return func(b *svcBuilder) { b.storage = r }
+}
 func withPMReader(r port.ProjectMembershipReader) svcOpt {
 	return func(b *svcBuilder) { b.pmReader = r }
+}
+func withUserMembershipReader(r port.UserMembershipReader) svcOpt {
+	return func(b *svcBuilder) { b.umReader = r }
 }
 func withOrgSettingsStore(store *mock.MockB2BOrgSettings) svcOpt {
 	return func(b *svcBuilder) {
@@ -181,6 +189,9 @@ func withOrgSettingsStore(store *mock.MockB2BOrgSettings) svcOpt {
 func withBackfillRunner(r *usecaseSvc.Runner) svcOpt {
 	return func(b *svcBuilder) { b.runner = r }
 }
+func withGrantIndex(idx port.KeyContactGrantIndex) svcOpt {
+	return func(b *svcBuilder) { b.grantIndex = idx }
+}
 
 func newTestSvc(opts ...svcOpt) membershipservice.Service {
 	mockRepo := mock.NewMockMembershipRepository()
@@ -189,6 +200,7 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 		storage:      mockRepo,
 		b2bOrgReader: mock.NewMockB2BOrgReader(),
 		pmReader:     mock.NewMockProjectMembershipReader(),
+		umReader:     mock.NewMockUserMembershipReader(),
 		settingsR:    mock.NewMockB2BOrgSettings(),
 		b2bOrgWriter: stubB2BOrgWriterUC{org: sampleB2BOrg},
 		logoUploader: stubLogoUploaderUC{org: sampleB2BOrg},
@@ -199,7 +211,8 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 		o(b)
 	}
 	return NewMembershipService(b.auth, b.storage, b.b2bOrgReader,
-		b.pmReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner)
+		b.pmReader, b.umReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner,
+		usecaseSvc.NewMemberTiers(b.storage, b.umReader, b.grantIndex))
 }
 
 // ─── B2BOrg handler tests ──────────────────────────────────────────────────────
@@ -369,6 +382,568 @@ func TestGetProjectMembership_ReaderError(t *testing.T) {
 	var serviceErr *goa.ServiceError
 	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
 	assert.Equal(t, "InternalServerError", serviceErr.Name)
+}
+
+// ─── GetMemberTiers handler tests ─────────────────────────────────────────────
+
+// mapMemberReader resolves memberships from a map; unknown UIDs return
+// NotFound, and a non-nil err takes precedence over the map. The embedded
+// interface is left nil so any other port.MemberReader method panics if a
+// test reaches it unexpectedly.
+type mapMemberReader struct {
+	port.MemberReader
+	memberships map[string]*model.ProjectMembership
+	err         error
+	// keyContacts, when set, answers ListKeyContactsForMembership per
+	// membership UID; contactsErr takes precedence. When both are unset,
+	// every membership resolves one active key-contact record for "jdoe",
+	// so tier-selection tests pass revalidation without per-test fixtures.
+	keyContacts map[string][]*model.KeyContact
+	contactsErr error
+}
+
+func (m *mapMemberReader) GetMembership(_ context.Context, uid string) (*model.ProjectMembership, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if pm, ok := m.memberships[uid]; ok {
+		return pm, nil
+	}
+	return nil, pkgerrors.NewNotFound("membership not found")
+}
+
+func (m *mapMemberReader) ListKeyContactsForMembership(_ context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	if m.contactsErr != nil {
+		return nil, m.contactsErr
+	}
+	if m.keyContacts != nil {
+		return m.keyContacts[membershipUID], nil
+	}
+	return []*model.KeyContact{
+		{UID: "kc-" + membershipUID, MembershipUID: membershipUID, Username: "jdoe", Status: "Active"},
+	}, nil
+}
+
+// failingUserMembershipReader always fails, simulating an fga-sync RPC outage.
+type failingUserMembershipReader struct{}
+
+func (failingUserMembershipReader) MembershipUIDsForUser(context.Context, string) ([]string, error) {
+	return nil, pkgerrors.NewServiceUnavailable("fga-sync read_tuples RPC failed")
+}
+
+func TestGetMemberTiers_BlankUsername(t *testing.T) {
+	svc := newTestSvc()
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "   "})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "BadRequest", serviceErr.Name)
+}
+
+func TestGetMemberTiers_UnknownUserEmpty(t *testing.T) {
+	svc := newTestSvc()
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "nobody"})
+
+	require.NoError(t, err)
+	assert.Empty(t, res, "unknown users must yield an empty list, not an error")
+}
+
+func TestGetMemberTiers_Happy(t *testing.T) {
+	svc := newTestSvc()
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "keycontact1"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.Equal(t, "org-1", res[0].B2bOrgUID)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", res[0].MembershipUID)
+	assert.Equal(t, model.TierClassGold, res[0].Tier)
+	require.NotNil(t, res[0].TierName)
+	assert.Equal(t, "Gold Membership", *res[0].TierName)
+}
+
+func TestGetMemberTiers_DanglingTupleSkipped(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("keycontact1", []string{"11111111-1111-1111-1111-111111111111", "missing-uid"})
+	svc := newTestSvc(withUserMembershipReader(umr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "keycontact1"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 1, "the dangling tuple must be skipped, not fail the lookup")
+	assert.Equal(t, "org-1", res[0].B2bOrgUID)
+}
+
+func TestGetMemberTiers_HighestTierPerOrg(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-silver", "m-platinum", "m-gold", "m-expired", "m-ended"})
+	mr := &mapMemberReader{memberships: map[string]*model.ProjectMembership{
+		// org-a holds silver and platinum: platinum must win.
+		"m-silver":   {UID: "m-silver", B2BOrgUID: "org-a", CompanyName: "Alpha Corp", TierName: "Silver Membership", Status: "Active"},
+		"m-platinum": {UID: "m-platinum", B2BOrgUID: "org-a", CompanyName: "Alpha Corp", TierName: "Platinum Membership", Status: "Active"},
+		// org-b holds one active gold plus records that must be filtered out.
+		"m-gold":    {UID: "m-gold", B2BOrgUID: "org-b", CompanyName: "Beta Corp", TierName: "Gold Corporate Membership", Status: "Active"},
+		"m-expired": {UID: "m-expired", B2BOrgUID: "org-b", CompanyName: "Beta Corp", TierName: "Platinum Membership", Status: "Expired"},
+		"m-ended":   {UID: "m-ended", B2BOrgUID: "org-b", CompanyName: "Beta Corp", TierName: "Platinum Membership", Status: "Active", EndDate: "2020-01-01"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 2)
+	// Ordered highest tier first: org-a's platinum outranks org-b's gold.
+	assert.Equal(t, "org-a", res[0].B2bOrgUID)
+	assert.Equal(t, model.TierClassPlatinum, res[0].Tier)
+	assert.Equal(t, "m-platinum", res[0].MembershipUID)
+	assert.Equal(t, "org-b", res[1].B2bOrgUID)
+	assert.Equal(t, model.TierClassGold, res[1].Tier)
+	assert.Equal(t, "m-gold", res[1].MembershipUID)
+}
+
+// Entries are ordered by tier rank descending, independent of company name, so
+// a caller can read the user's highest tier across all their organizations from
+// the leading entry. Organizations sharing the top tier fall back to company
+// name. Here the higher tier sits on the alphabetically-later company, proving
+// rank drives the order rather than name.
+func TestGetMemberTiers_OrdersByHighestTierFirst(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-silver", "m-plat-z", "m-plat-m"})
+	mr := &mapMemberReader{memberships: map[string]*model.ProjectMembership{
+		// A lower tier on an alphabetically-earlier company still ranks last.
+		"m-silver": {UID: "m-silver", B2BOrgUID: "org-silver", CompanyName: "Aardvark Corp", TierName: "Silver Membership", Status: "Active"},
+		// Two orgs share the top tier; they order by company name.
+		"m-plat-z": {UID: "m-plat-z", B2BOrgUID: "org-z", CompanyName: "Zebra Corp", TierName: "Platinum Membership", Status: "Active"},
+		"m-plat-m": {UID: "m-plat-m", B2BOrgUID: "org-m", CompanyName: "Meerkat Corp", TierName: "Platinum Membership", Status: "Active"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 3)
+	assert.Equal(t, model.TierClassPlatinum, res[0].Tier)
+	require.NotNil(t, res[0].CompanyName)
+	assert.Equal(t, "Meerkat Corp", *res[0].CompanyName, "organizations at the same tier order by company name")
+	assert.Equal(t, model.TierClassPlatinum, res[1].Tier)
+	require.NotNil(t, res[1].CompanyName)
+	assert.Equal(t, "Zebra Corp", *res[1].CompanyName)
+	assert.Equal(t, model.TierClassSilver, res[2].Tier, "the lower tier ranks last despite its earlier company name")
+	assert.Equal(t, "org-silver", res[2].B2bOrgUID)
+}
+
+// The response's tier field is the normalized class, kept alongside the raw
+// product name, and per-org selection follows the full Org Lens rank order
+// synced from lf-dbt, not just platinum/gold/silver. Multi-word classes are
+// pinned to their snake_case wire value.
+func TestGetMemberTiers_TierNormalization(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-premier", "m-gold", "m-enduser"})
+	mr := &mapMemberReader{memberships: map[string]*model.ProjectMembership{
+		// org-a holds gold and premier: premier outranks gold in the Org
+		// Lens taxonomy (the old 4-class table wrongly demoted it to other).
+		"m-premier": {UID: "m-premier", B2BOrgUID: "org-a", CompanyName: "Alpha Corp", TierName: "Premier Membership", Status: "Active"},
+		"m-gold":    {UID: "m-gold", B2BOrgUID: "org-a", CompanyName: "Alpha Corp", TierName: "Gold Corporate Membership", Status: "Active"},
+		"m-enduser": {UID: "m-enduser", B2BOrgUID: "org-b", CompanyName: "Beta Corp", TierName: "End User Supporter", Status: "Active"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 2)
+	assert.Equal(t, model.TierClassPremier, res[0].Tier)
+	assert.Equal(t, "m-premier", res[0].MembershipUID)
+	require.NotNil(t, res[0].TierName)
+	assert.Equal(t, "Premier Membership", *res[0].TierName, "tier_name stays the raw product text")
+	assert.Equal(t, "end_user", res[1].Tier, "multi-word classes use the snake_case wire value")
+}
+
+func TestGetMemberTiers_ReverseIndexUnavailable(t *testing.T) {
+	svc := newTestSvc(withUserMembershipReader(failingUserMembershipReader{}))
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+}
+
+// Only NotFound marks a dangling tuple that may be skipped; any other
+// membership read failure (e.g. a Salesforce outage) must fail the whole
+// lookup rather than silently shrink the result to a subset of the user's
+// organizations. The Salesforce-backed reader reports outages as untyped
+// wrapped errors, so those must surface as ServiceUnavailable too, not as a
+// generic internal error.
+func TestGetMemberTiers_MembershipReadFailureFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "typed ServiceUnavailable passes through",
+			err:  pkgerrors.NewServiceUnavailable("salesforce unavailable"),
+		},
+		{
+			name: "untyped error is coerced to ServiceUnavailable",
+			err:  fmt.Errorf("getting membership record: %w", errors.New("dial tcp: i/o timeout")),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			umr := mock.NewMockUserMembershipReader()
+			umr.SetUserMemberships("jdoe", []string{"m-1"})
+			svc := newTestSvc(withUserMembershipReader(umr), withStorage(&mapMemberReader{err: tt.err}))
+
+			_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+			require.Error(t, err)
+			var serviceErr *goa.ServiceError
+			require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+			assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+		})
+	}
+}
+
+// countingMemberReader wraps a MemberReader and counts GetMembership calls per UID.
+type countingMemberReader struct {
+	port.MemberReader
+	calls map[string]int
+}
+
+func (c *countingMemberReader) GetMembership(ctx context.Context, uid string) (*model.ProjectMembership, error) {
+	c.calls[uid]++
+	return c.MemberReader.GetMembership(ctx, uid)
+}
+
+// A cache-missing membership read is a Salesforce round-trip, so duplicate
+// tuples in the reverse index must be deduplicated before the reads, not
+// merely deduplicated in the response.
+func TestGetMemberTiers_DuplicateTuplesReadOnce(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-1", "m-1", "m-1"})
+	mr := &countingMemberReader{
+		MemberReader: &mapMemberReader{memberships: map[string]*model.ProjectMembership{
+			"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+		}},
+		calls: map[string]int{},
+	}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.Equal(t, 1, mr.calls["m-1"], "duplicate reverse-index tuples must not multiply membership reads")
+}
+
+// A reverse index larger than any real key contact would fan out into that many
+// cache-cold Salesforce reads. GetMemberTiers must refuse it (fail closed)
+// before issuing a single membership read, not truncate to a wrong top tier.
+func TestGetMemberTiers_CandidateCapFailsClosed(t *testing.T) {
+	uids := make([]string, usecaseSvc.MaxMemberTierCandidates+1)
+	for i := range uids {
+		uids[i] = fmt.Sprintf("m-%d", i)
+	}
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", uids)
+	mr := &countingMemberReader{
+		MemberReader: &mapMemberReader{memberships: map[string]*model.ProjectMembership{}},
+		calls:        map[string]int{},
+	}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+	assert.Empty(t, mr.calls, "candidate cap must refuse before any membership read")
+}
+
+// A candidate set exactly at the cap is within bounds and resolves normally;
+// the guard trips only above it.
+func TestGetMemberTiers_CandidateCapBoundaryResolves(t *testing.T) {
+	uids := make([]string, usecaseSvc.MaxMemberTierCandidates)
+	memberships := make(map[string]*model.ProjectMembership, len(uids))
+	for i := range uids {
+		id := fmt.Sprintf("m-%d", i)
+		uids[i] = id
+		memberships[id] = &model.ProjectMembership{UID: id, B2BOrgUID: "org-" + id, TierName: "Gold Membership", Status: "Active"}
+	}
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", uids)
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(&mapMemberReader{memberships: memberships}))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	assert.Len(t, res, usecaseSvc.MaxMemberTierCandidates)
+}
+
+// A membership record without a b2b_org_uid cannot be attributed to an
+// organization; it must be skipped rather than fail the lookup or surface as
+// a malformed entry (b2b_org_uid is required in the response contract).
+func TestGetMemberTiers_SkipsMembershipWithoutOrgUID(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-orgless"})
+	mr := &mapMemberReader{memberships: map[string]*model.ProjectMembership{
+		"m-orgless": {UID: "m-orgless", TierName: "Gold Membership", Status: "Active"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	assert.Empty(t, res)
+}
+
+// A reverse-index tuple is only evidence that a key_contact grant was once
+// published. The authoritative Project_Role__c record can go inactive or be
+// reassigned to another user while the tuple lingers, so a candidate whose
+// records no longer name the user as an active contact is omitted.
+func TestGetMemberTiers_StaleGrantSkipped(t *testing.T) {
+	tests := []struct {
+		name     string
+		contacts []*model.KeyContact
+	}{
+		{
+			name: "contact went inactive",
+			contacts: []*model.KeyContact{
+				{UID: "kc-1", MembershipUID: "m-1", Username: "jdoe", Status: "Inactive"},
+			},
+		},
+		{
+			name: "contact reassigned to another user",
+			contacts: []*model.KeyContact{
+				{UID: "kc-1", MembershipUID: "m-1", Username: "someoneelse", Status: "Active"},
+			},
+		},
+		{
+			name:     "no contact records remain",
+			contacts: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			umr := mock.NewMockUserMembershipReader()
+			umr.SetUserMemberships("jdoe", []string{"m-1"})
+			mr := &mapMemberReader{
+				memberships: map[string]*model.ProjectMembership{
+					"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+				},
+				keyContacts: map[string][]*model.KeyContact{"m-1": tt.contacts},
+			}
+			svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+			res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+			require.NoError(t, err)
+			assert.Empty(t, res, "a lingering FGA tuple must not report an organization the user is no longer an active key contact of")
+		})
+	}
+}
+
+// A failed key-contact read cannot distinguish a stale grant from a live one;
+// omitting the organization would under-report and returning it unverified
+// would over-report, so the lookup fails closed as ServiceUnavailable.
+func TestGetMemberTiers_KeyContactReadFailureFailsClosed(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-1"})
+	mr := &mapMemberReader{
+		memberships: map[string]*model.ProjectMembership{
+			"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+		},
+		contactsErr: errors.New("dial tcp: i/o timeout"),
+	}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+}
+
+// Production contact records carry no Username (the SOQL projection resolves
+// emails only; usernames are resolved on the write path), so revalidation
+// must match them through the key-contact grant index rather than the
+// never-populated Username field.
+func TestGetMemberTiers_ProductionContactMatchesViaGrantIndex(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-1"})
+	mr := &mapMemberReader{
+		memberships: map[string]*model.ProjectMembership{
+			"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+		},
+		keyContacts: map[string][]*model.KeyContact{
+			"m-1": {{UID: "kc-1", MembershipUID: "m-1", Status: "Active", Email: "jdoe@example.org"}},
+		},
+	}
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "m-1", Username: "jdoe"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr), withGrantIndex(idx))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 1, "a production-shaped contact (blank Username) must match via the grant index")
+	assert.Equal(t, "org-1", res[0].B2bOrgUID)
+}
+
+func TestGetMemberTiers_ProductionContactGrantMismatchSkipped(t *testing.T) {
+	tests := []struct {
+		name string
+		idx  port.KeyContactGrantIndex
+	}{
+		{
+			name: "grant belongs to another user",
+			idx: &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+				"kc-1": {MembershipUID: "m-1", Username: "someoneelse"},
+			}},
+		},
+		{
+			name: "grant reparented to another membership",
+			idx: &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+				"kc-1": {MembershipUID: "m-2", Username: "jdoe"},
+			}},
+		},
+		{
+			name: "no grant entry for the contact",
+			idx:  &mock.MockKeyContactGrantIndex{},
+		},
+		{
+			name: "grant index not wired",
+			idx:  nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			umr := mock.NewMockUserMembershipReader()
+			umr.SetUserMemberships("jdoe", []string{"m-1"})
+			mr := &mapMemberReader{
+				memberships: map[string]*model.ProjectMembership{
+					"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+				},
+				keyContacts: map[string][]*model.KeyContact{
+					"m-1": {{UID: "kc-1", MembershipUID: "m-1", Status: "Active", Email: "jdoe@example.org"}},
+				},
+			}
+			svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr), withGrantIndex(tt.idx))
+
+			res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+			require.NoError(t, err)
+			assert.Empty(t, res, "a blank-Username contact must not count unless the grant index maps it to this user and membership")
+		})
+	}
+}
+
+// An index read failure cannot distinguish a matching grant from a stale one,
+// so the lookup fails closed as ServiceUnavailable, mirroring the key-contact
+// read failure above.
+func TestGetMemberTiers_GrantIndexReadFailureFailsClosed(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-1"})
+	mr := &mapMemberReader{
+		memberships: map[string]*model.ProjectMembership{
+			"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+		},
+		keyContacts: map[string][]*model.KeyContact{
+			"m-1": {{UID: "kc-1", MembershipUID: "m-1", Status: "Active", Email: "jdoe@example.org"}},
+		},
+	}
+	idx := &mock.MockKeyContactGrantIndex{GetErr: errors.New("dial tcp: i/o timeout")}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr), withGrantIndex(idx))
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+}
+
+// The response order is part of the public contract's determinism: at an equal
+// tier, when company names are absent (or equal), entries must still sort
+// stably, falling back to b2b_org_uid.
+func TestGetMemberTiers_SortFallsBackToOrgUID(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-2", "m-1"})
+	mr := &mapMemberReader{memberships: map[string]*model.ProjectMembership{
+		"m-2": {UID: "m-2", B2BOrgUID: "org-b", TierName: "Gold Membership", Status: "Active"},
+		"m-1": {UID: "m-1", B2BOrgUID: "org-a", TierName: "Gold Membership", Status: "Active"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 2)
+	assert.Equal(t, "org-a", res[0].B2bOrgUID)
+	assert.Equal(t, "org-b", res[1].B2bOrgUID)
+}
+
+// The public payload omits absent optional fields entirely rather than sending
+// empty strings, and always carries the normalized tier alongside the raw name.
+func TestMemberOrgTierToResponse(t *testing.T) {
+	t.Run("minimal membership sets only required fields", func(t *testing.T) {
+		resp := memberOrgTierToResponse(&model.ProjectMembership{UID: "m-1", B2BOrgUID: "org-1"})
+
+		assert.Equal(t, "org-1", resp.B2bOrgUID)
+		assert.Equal(t, "m-1", resp.MembershipUID)
+		assert.Equal(t, model.TierClassOther, resp.Tier, "an absent tier name normalizes to %q", model.TierClassOther)
+		assert.Nil(t, resp.CompanyName)
+		assert.Nil(t, resp.ProjectUID)
+		assert.Nil(t, resp.ProjectSlug)
+		assert.Nil(t, resp.TierUID)
+		assert.Nil(t, resp.TierName)
+		assert.Nil(t, resp.Status)
+		assert.Nil(t, resp.StartDate)
+		assert.Nil(t, resp.EndDate)
+	})
+
+	t.Run("full membership maps every field", func(t *testing.T) {
+		resp := memberOrgTierToResponse(&model.ProjectMembership{
+			UID:         "m-1",
+			B2BOrgUID:   "org-1",
+			CompanyName: "Acme Corp",
+			ProjectUID:  "project-1",
+			ProjectSlug: "linux-foundation",
+			TierUID:     "tier-1",
+			TierName:    "Gold Corporate Membership",
+			Status:      "Active",
+			StartDate:   "2025-01-01",
+			EndDate:     "2099-12-31",
+		})
+
+		assert.Equal(t, "org-1", resp.B2bOrgUID)
+		assert.Equal(t, "m-1", resp.MembershipUID)
+		assert.Equal(t, model.TierClassGold, resp.Tier)
+		require.NotNil(t, resp.CompanyName)
+		assert.Equal(t, "Acme Corp", *resp.CompanyName)
+		require.NotNil(t, resp.ProjectUID)
+		assert.Equal(t, "project-1", *resp.ProjectUID)
+		require.NotNil(t, resp.ProjectSlug)
+		assert.Equal(t, "linux-foundation", *resp.ProjectSlug)
+		require.NotNil(t, resp.TierUID)
+		assert.Equal(t, "tier-1", *resp.TierUID)
+		require.NotNil(t, resp.TierName)
+		assert.Equal(t, "Gold Corporate Membership", *resp.TierName)
+		require.NotNil(t, resp.Status)
+		assert.Equal(t, "Active", *resp.Status)
+		require.NotNil(t, resp.StartDate)
+		assert.Equal(t, "2025-01-01", *resp.StartDate)
+		require.NotNil(t, resp.EndDate)
+		assert.Equal(t, "2099-12-31", *resp.EndDate)
+	})
 }
 
 // ─── GetKeyContact handler tests ──────────────────────────────────────────────

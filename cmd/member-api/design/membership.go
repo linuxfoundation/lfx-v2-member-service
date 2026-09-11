@@ -545,6 +545,40 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
+	dsl.Method("get-member-tiers", func() {
+		dsl.Description("List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.")
+
+		dsl.Security(JWTAuth)
+
+		dsl.Payload(func() {
+			BearerTokenAttribute()
+			VersionAttribute()
+			dsl.Attribute("username", dsl.String, "LFID username to look up", func() {
+				dsl.MinLength(1)
+				dsl.MaxLength(255)
+				dsl.Example("jdoe")
+			})
+			dsl.Required("username")
+		})
+
+		dsl.Result(dsl.ArrayOf(MemberOrgTierResponse), "One entry per B2B organization, carrying its highest active tier, ordered highest tier first")
+
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request")
+		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
+		dsl.Error("ServiceUnavailable", dsl.ErrorResult, "Service unavailable", func() { dsl.Temporary() })
+
+		dsl.HTTP(func() {
+			dsl.GET("/b2b_orgs/member-tiers/{username}")
+			dsl.Header("bearer_token:Authorization")
+			dsl.Param("version:v")
+			dsl.Param("username")
+			dsl.Response(dsl.StatusOK)
+			dsl.Response("BadRequest", dsl.StatusBadRequest)
+			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
+			dsl.Response("ServiceUnavailable", dsl.StatusServiceUnavailable)
+		})
+	})
+
 	// ── Key Contacts (Project_Role__c) ───────────────────────────────────────
 
 	dsl.Method("get-key-contact", func() {

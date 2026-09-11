@@ -559,6 +559,86 @@ func TestCDCConsumer_Asset_Delete_PublishesIndexerOnly(t *testing.T) {
 	assert.Equal(t, sfid("pm-uid-del"), data)
 }
 
+// TestCDCConsumer_Asset_Upsert_EvictsSoftTTLMembershipCache verifies that an
+// Asset upsert evicts the soft-TTL membership cache (the cache GetMemberTiers
+// serves from) so a status/end-date/tier change stops being served as active
+// within one CDC event, keyed by the same UID the sObject cache and indexer use.
+func TestCDCConsumer_Asset_Upsert_EvictsSoftTTLMembershipCache(t *testing.T) {
+	pm := &model.ProjectMembership{UID: sfid("pm-uid-evict"), B2BOrgUID: "org-uid-1"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-uid-evict")}, ReplayID: []byte("re1")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, evictor.DeleteCalls, "soft-TTL membership cache must be evicted once on an Asset upsert")
+	assert.Equal(t, []string{sfid("pm-uid-evict")}, evictor.DeletedUIDs,
+		"eviction must target the membership UID (same identifier the sObject cache and indexer use)")
+}
+
+// TestCDCConsumer_Asset_Delete_EvictsSoftTTLMembershipCache verifies that a
+// genuine Asset delete also evicts the soft-TTL membership cache, via the shared
+// publishAssetDeleteIndex convergence point, so a removed membership stops being
+// served as an active tier.
+func TestCDCConsumer_Asset_Delete_EvictsSoftTTLMembershipCache(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeDelete, RecordIDs: []string{sfid("pm-uid-evict-del")}, ReplayID: []byte("re2")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, evictor.DeleteCalls, "soft-TTL membership cache must be evicted on an Asset delete")
+	assert.Equal(t, []string{sfid("pm-uid-evict-del")}, evictor.DeletedUIDs)
+}
+
+// TestCDCConsumer_Asset_Upsert_SoftTTLEvictionError_IsNonFatal verifies that a
+// soft-TTL eviction failure is swallowed: the indexer and FGA publish still
+// happen, so a transient KV error cannot stall CDC convergence.
+func TestCDCConsumer_Asset_Upsert_SoftTTLEvictionError_IsNonFatal(t *testing.T) {
+	pm := &model.ProjectMembership{UID: sfid("pm-uid-evict-err"), B2BOrgUID: "org-uid-1"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{DeleteErr: errors.New("kv unavailable")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-uid-evict-err")}, ReplayID: []byte("re3")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, evictor.DeleteCalls)
+	assert.NotEmpty(t, pub.indexer, "a soft-TTL eviction failure must not block the indexer publish")
+	assert.NotEmpty(t, pub.access, "a soft-TTL eviction failure must not block the FGA publish")
+}
+
 // ── Project_Role__c (key_contact) tests ──────────────────────────────────────
 
 func TestCDCConsumer_ProjectRole_Upsert_WithUsername_PublishesIndexerAndFGAMemberPut(t *testing.T) {
@@ -696,6 +776,176 @@ func TestCDCConsumer_ProjectRole_Delete_UsesGrantIndex(t *testing.T) {
 		"the grant entry must be cleared once the revoke is published")
 	assert.Equal(t, 1, pub.flushCount,
 		"delivery must be confirmed before the only recorded address is cleared")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_EvictsGroupedKeyContactCache verifies that
+// a Project_Role__c upsert evicts the grouped key-contacts.{membershipUID}
+// cache the member-tiers eligibility revalidation reads, so a deactivated or
+// reassigned contact stops passing revalidation within one CDC event instead
+// of after the soft TTL.
+func TestCDCConsumer_ProjectRole_Upsert_EvictsGroupedKeyContactCache(t *testing.T) {
+	kc := &model.KeyContact{UID: sfid("kc-uid-evict"), MembershipUID: "pm-uid-evict", Username: "alice"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("kc-uid-evict")}, ReplayID: []byte("r6e")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Contains(t, evictor.KeyContactDeletedUIDs, "pm-uid-evict",
+		"the grouped key-contacts cache for the contact's membership must be evicted on a Project_Role__c upsert")
+	assert.NotEmpty(t, pub.indexer, "eviction must not block the indexer publish")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_PreGuardEvictionUsesGrantIndex verifies
+// that the grouped cache is evicted from the grant index before any Salesforce
+// fetch, so even a quota-guard skip of the re-fetch cannot leave stale
+// eligibility data behind.
+func TestCDCConsumer_ProjectRole_Upsert_PreGuardEvictionUsesGrantIndex(t *testing.T) {
+	kcUID := sfid("kc-uid-preguard")
+	membershipUID := sfid("asset-preguard")
+	kc := &model.KeyContact{UID: kcUID, MembershipUID: membershipUID, Username: "alice"}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "alice", Revision: 3},
+		},
+	}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r6f")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	// Evicted twice: once pre-guard from the grant index, once from the fetched
+	// record. Both must target the granted membership UID.
+	assert.GreaterOrEqual(t, evictor.KeyContactDeleteCalls, 2,
+		"the grant index must drive an eviction before the fetch, in addition to the post-fetch eviction")
+	for _, uid := range evictor.KeyContactDeletedUIDs {
+		assert.Equal(t, membershipUID, uid)
+	}
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_GrantIndexReadFailure_SingleReadNonFatal
+// verifies the upsert path's grant-index lookup is a single, non-retried read
+// used only as an eviction hint: an index outage must not triple KV reads or
+// borrow the delete path's dangling-tuple alert, and the batch must still
+// converge through the fetched records.
+func TestCDCConsumer_ProjectRole_Upsert_GrantIndexReadFailure_SingleReadNonFatal(t *testing.T) {
+	kcUID := sfid("kc-uid-idx-down")
+	membershipUID := sfid("asset-idx-down")
+	// No Username, so no FGA member_put is published and its own grant-index
+	// supersession read stays out of the call count.
+	kc := &model.KeyContact{UID: kcUID, MembershipUID: membershipUID}
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			return port.KeyContactGrant{}, false, assert.AnError
+		},
+	}
+	evictor := &mock.MockMembershipCacheEvictor{}
+	replay := &fakeReplayStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r6h")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+	assert.Equal(t, 1, calls, "an upsert eviction hint gets one read, never the delete path's retry budget")
+	assert.Equal(t, []byte("r6h"), replay.saved, "an index outage must not block the upsert batch")
+	assert.Equal(t, []string{membershipUID}, evictor.KeyContactDeletedUIDs,
+		"the post-fetch eviction from the fetched record must still happen")
+}
+
+// TestCDCConsumer_ProjectRole_Delete_EvictsGroupedKeyContactCache verifies that
+// a Project_Role__c delete evicts the grouped key-contacts cache for the
+// membership recorded in the grant index, so a deleted contact cannot keep
+// passing the member-tiers revalidation until the soft TTL lapses.
+func TestCDCConsumer_ProjectRole_Delete_EvictsGroupedKeyContactCache(t *testing.T) {
+	kcUID := sfid("kc-uid-evict-del")
+	membershipUID := sfid("asset-evict-del")
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			kcUID: {MembershipUID: membershipUID, Username: "jdoe", Revision: 5},
+		},
+	}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeDelete, RecordIDs: []string{kcUID}, ReplayID: []byte("r8e")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []string{membershipUID}, evictor.KeyContactDeletedUIDs,
+		"the grouped key-contacts cache for the granted membership must be evicted on delete")
+}
+
+// TestCDCConsumer_ProjectRole_Upsert_GroupedEvictionError_IsNonFatal verifies a
+// grouped-cache eviction failure is swallowed: indexer and FGA publishes still
+// happen, so a transient KV error cannot stall CDC convergence.
+func TestCDCConsumer_ProjectRole_Upsert_GroupedEvictionError_IsNonFatal(t *testing.T) {
+	kc := &model.KeyContact{UID: sfid("kc-uid-evict-err"), MembershipUID: "pm-uid-evict-err", Username: "alice"}
+	pub := &subjectCapturingPublisher{}
+	evictor := &mock.MockMembershipCacheEvictor{DeleteErr: errors.New("kv unavailable")}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("kc-uid-evict-err")}, ReplayID: []byte("r6g")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.GreaterOrEqual(t, evictor.KeyContactDeleteCalls, 1)
+	assert.NotEmpty(t, pub.indexer, "a grouped-cache eviction failure must not block the indexer publish")
+	assert.True(t, pub.hasAccess(fgaconstants.GenericMemberPutSubject),
+		"a grouped-cache eviction failure must not block the FGA publish")
 }
 
 // TestCDCConsumer_ProjectRole_Delete_FlushFailure_PreservesIndexEntry verifies
@@ -1483,6 +1733,35 @@ func TestCDCConsumer_QuotaGuard_AboveThreshold_SkipsUpsert(t *testing.T) {
 
 	assert.Empty(t, pub.indexer, "quota exceeded must suppress indexer publish")
 	assert.Empty(t, pub.access, "quota exceeded must suppress FGA publish")
+}
+
+// Cache eviction costs no Salesforce quota, so it must still run even when
+// the quota guard defers the SOQL re-fetch — otherwise a status, end-date, or
+// tier change would keep serving stale cached data until the guard clears.
+func TestCDCConsumer_QuotaGuard_AboveThreshold_StillEvictsCache(t *testing.T) {
+	pm := &model.ProjectMembership{UID: sfid("pm-quota-evict")}
+	pub := &subjectCapturingPublisher{}
+	invalidator := &mock.MockCacheInvalidator{}
+	evictor := &mock.MockMembershipCacheEvictor{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-quota-evict")}, ReplayID: []byte("qg-evict")},
+		}},
+		&fakeB2BOrgReader{},
+		invalidator,
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 96, Limit: 100}), // 0.96 ≥ 0.95
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, pub.indexer, "quota exceeded must still suppress indexer publish")
+	assert.Equal(t, 1, invalidator.MembershipCalls, "sObject cache must still be invalidated despite the quota guard")
+	assert.Equal(t, 1, evictor.DeleteCalls, "soft-TTL membership cache must still be evicted despite the quota guard")
 }
 
 func TestCDCConsumer_QuotaGuard_AtThreshold_SkipsUpsert(t *testing.T) {

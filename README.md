@@ -92,6 +92,7 @@ Key-Value cache to minimise round-trips.
 | GET | `/b2b_orgs/{uid}` | Get a B2B org |
 | GET | `/b2b_orgs/{uid}/settings` | Get org access-control settings (writers, auditors) |
 | PUT | `/b2b_orgs/{uid}/settings` | Update org access-control settings (writers, auditors) |
+| GET | `/b2b_orgs/member-tiers/{username}` | Highest active membership tier per org for a user (machine-to-machine) |
 
 ### Admin
 

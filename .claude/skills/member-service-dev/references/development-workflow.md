@@ -92,6 +92,10 @@ service (authoritative source: `charts/lfx-v2-member-service/templates/ruleset.y
   `writer` on `b2b_org:{uid}`.
 - `POST /b2b_orgs`: `member` on `team:{globalOrgAdminTeamName}` (machine
   callers only; the stable team name is `.Values.app.globalOrgAdminTeamName`).
+- `GET /b2b_orgs/member-tiers/{username}`: `member` on
+  `team:{memberTiersCallerTeamName}` (machine callers only;
+  `.Values.app.memberTiersCallerTeamName` defaults to `member_tiers_caller`,
+  empty falls back to `globalOrgAdminTeamName`).
 - `GET /project_memberships/{uid}`: `auditor` on `project_membership:{uid}`.
 - `GET/POST/PUT/DELETE /project_memberships/{membership_uid}/key_contacts[/{uid}]`:
   reads require `auditor`, mutations `writer`, on

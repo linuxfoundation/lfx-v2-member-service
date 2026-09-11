@@ -78,6 +78,7 @@ type CDCConsumer struct {
 	keyContactsByMembership port.KeyContactsByMembershipReader
 	accountBatch            port.AccountBatchReader
 	cacheInvalidator        port.CacheInvalidator
+	membershipCacheEvictor  port.MembershipCacheEvictor
 	publisher               port.MemberPublisher
 	quotaGauge              port.SalesforceQuotaGauge
 	quotaSkipThreshold      float64
@@ -133,6 +134,12 @@ func WithCDCAccountBatchReader(r port.AccountBatchReader) CDCConsumerOption {
 
 func WithCDCCacheInvalidator(i port.CacheInvalidator) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.cacheInvalidator = i }
+}
+
+// WithCDCMembershipCacheEvictor sets the soft-TTL membership-cache evictor.
+// When nil (e.g. mock mode) soft-TTL eviction is skipped.
+func WithCDCMembershipCacheEvictor(e port.MembershipCacheEvictor) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.membershipCacheEvictor = e }
 }
 
 func WithCDCPublisher(p port.MemberPublisher) CDCConsumerOption {
@@ -880,13 +887,6 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		}
 		return nil
 	}
-	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
-		if isRestore(changeType) {
-			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
-		}
-		return nil
-	}
-
 	// Evict the sObject cache entry for each ID so subsequent re-fetch goes to
 	// Salesforce rather than returning a stale cached record.
 	for _, id := range upsertIDs {
@@ -894,6 +894,21 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 			slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed",
 				"uid", id, "error", err, "publish_failed_for_backfill_repair", true)
 		}
+		// Also evict the soft-TTL membership cache GetMemberTiers serves from, so a
+		// status, end-date, or tier change shows on the next read.
+		if o.membershipCacheEvictor != nil {
+			if err := o.membershipCacheEvictor.DeleteMembership(ctx, id); err != nil {
+				slog.WarnContext(ctx, "cdc: soft-TTL membership cache eviction failed",
+					"uid", id, "error", err)
+			}
+		}
+	}
+
+	if o.quotaExceeded(ctx, "Asset", upsertIDs) {
+		if isRestore(changeType) {
+			return errors.Join(errRestoreIncomplete, errors.New("membership restore skipped by Salesforce quota guard"))
+		}
+		return nil
 	}
 
 	memberships, convErrSFIDs, err := o.membershipBatch.FetchMembershipsBySFIDs(ctx, upsertIDs)
@@ -1168,6 +1183,12 @@ func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
 		slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed on delete",
 			"uid", uid, "error", err)
 	}
+	if o.membershipCacheEvictor != nil {
+		if err := o.membershipCacheEvictor.DeleteMembership(ctx, uid); err != nil {
+			slog.WarnContext(ctx, "cdc: soft-TTL membership cache eviction failed on delete",
+				"uid", uid, "error", err)
+		}
+	}
 
 	stubPM := &model.ProjectMembership{UID: uid}
 	PublishProjectMembershipIndexer(ctx, o.publisher, stubPM, indexerConstants.ActionDeleted)
@@ -1192,15 +1213,23 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 			"record_count", len(upsertIDs), "publish_failed_for_backfill_repair", true)
 		return
 	}
-	if o.quotaExceeded(ctx, "Project_Role__c", upsertIDs) {
-		return
-	}
-
+	// Evict caches before the quota guard so a guard skip cannot leave stale
+	// entries behind (same ordering rationale as handleAssetUpsertBatch).
 	for _, id := range upsertIDs {
 		if err := o.cacheInvalidator.InvalidateKeyContact(ctx, id); err != nil {
 			slog.WarnContext(ctx, "cdc: key_contact cache invalidation failed",
 				"uid", id, "error", err, "publish_failed_for_backfill_repair", true)
 		}
+		// The grant index maps the contact SFID to its membership, so the grouped
+		// key-contacts cache the member-tiers revalidation reads is evicted even
+		// when the quota guard skips the re-fetch below.
+		if grant, indexed := o.lookupKeyContactGrantForEviction(ctx, id); indexed {
+			o.evictKeyContactGroupCache(ctx, grant.MembershipUID)
+		}
+	}
+
+	if o.quotaExceeded(ctx, "Project_Role__c", upsertIDs) {
+		return
 	}
 
 	contacts, convErrSFIDs, err := o.keyContactBatch.FetchKeyContactsBySFIDs(ctx, upsertIDs)
@@ -1218,6 +1247,18 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 	action := indexerConstants.ActionUpdated
 	if changeType == model.CDCChangeCreate {
 		action = indexerConstants.ActionCreated
+	}
+
+	// Evict the grouped key-contacts cache for each affected membership (deduped)
+	// using the fetched records, which cover contacts absent from the grant index
+	// (e.g. a contact that just became Active). The revision-conditional
+	// write-back rejects any in-flight refresh that read before this eviction.
+	evicted := make(map[string]struct{}, len(contacts))
+	for _, kc := range contacts {
+		if _, done := evicted[kc.MembershipUID]; !done {
+			evicted[kc.MembershipUID] = struct{}{}
+			o.evictKeyContactGroupCache(ctx, kc.MembershipUID)
+		}
 	}
 
 	for _, kc := range contacts {
@@ -1285,6 +1326,20 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	}
 }
 
+// evictKeyContactGroupCache evicts the grouped soft-TTL key-contacts cache
+// entry for a membership so the member-tiers eligibility revalidation re-reads
+// Salesforce instead of serving contacts from before this Project_Role__c
+// change. Best-effort: a failure is logged and the entry ages out via soft TTL.
+func (o *CDCConsumer) evictKeyContactGroupCache(ctx context.Context, membershipUID string) {
+	if o.membershipCacheEvictor == nil || membershipUID == "" {
+		return
+	}
+	if err := o.membershipCacheEvictor.DeleteKeyContactsForMembership(ctx, membershipUID); err != nil {
+		slog.WarnContext(ctx, "cdc: key-contacts group cache eviction failed",
+			"membership_uid", membershipUID, "error", err)
+	}
+}
+
 func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) error {
 	if err := o.cacheInvalidator.InvalidateKeyContact(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact cache invalidation failed on delete",
@@ -1300,6 +1355,11 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// record is already gone, so the grant index is the only place the membership
 	// object and granted username can be recovered from.
 	grant, indexed := o.lookupKeyContactGrant(ctx, uid)
+	if indexed {
+		// Evict the grouped key-contacts cache so the member-tiers revalidation
+		// does not keep passing this deleted contact until the soft TTL lapses.
+		o.evictKeyContactGroupCache(ctx, grant.MembershipUID)
+	}
 	removeMsg := BuildKeyContactFGARemoveMessage(grant.MembershipUID, grant.Username)
 	if !indexed {
 		// Pre-index contact, or a grant that was never recorded. Retained for
@@ -1343,6 +1403,27 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		}
 	}
 	return nil
+}
+
+// lookupKeyContactGrantForEviction returns the grant recorded for uid with a
+// single, non-retried read: the upsert path uses it only as a grouped-cache
+// eviction hint, and a failed read costs at most one entry staying stale
+// until its soft TTL. It must not borrow the delete path's retries or its
+// dangling-tuple alert: no revoke is at stake here.
+func (o *CDCConsumer) lookupKeyContactGrantForEviction(ctx context.Context, uid string) (port.KeyContactGrant, bool) {
+	if o.grantIndex == nil {
+		return port.KeyContactGrant{}, false
+	}
+	grant, found, err := o.grantIndex.Get(ctx, uid)
+	if err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index read failed on upsert; skipping grouped-cache eviction hint",
+			"uid", uid, "error", err)
+		return port.KeyContactGrant{}, false
+	}
+	if !found || grant.MembershipUID == "" || grant.Username == "" {
+		return port.KeyContactGrant{}, false
+	}
+	return grant, true
 }
 
 // maxGrantIndexReadAttempts bounds the retry when a grant-index read fails

@@ -45,6 +45,9 @@ var (
 	projectResolver port.ProjectResolver
 	resolverDoOnce  sync.Once
 
+	userMembershipReader port.UserMembershipReader
+	userMembershipDoOnce sync.Once
+
 	// mockSettings is the shared in-memory settings store used in mock mode.
 	// Reader and writer must point at the same instance so writes are visible to reads.
 	mockSettings     *mock.MockB2BOrgSettings
@@ -185,6 +188,46 @@ func ProjectResolverImpl(ctx context.Context) port.ProjectResolver {
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
 		return nil
 	}
+}
+
+// UserMembershipReaderImpl initialises and returns the
+// port.UserMembershipReader implementation selected by the REPOSITORY_SOURCE
+// environment variable:
+//
+//   - "salesforce" (default): reads the user's key-contact tuples from OpenFGA
+//     via the fga-sync NATS RPC (lfx.access_check.read_tuples).
+//   - "mock": in-memory reader seeded to match the mock project membership
+//     reader; for local development.
+func UserMembershipReaderImpl(ctx context.Context) port.UserMembershipReader {
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	switch repoSource {
+	case "mock":
+		slog.InfoContext(ctx, "initialising mock user membership reader")
+		return mock.NewMockUserMembershipReader()
+
+	case "salesforce":
+		userMembershipDoOnce.Do(func() {
+			natsInit(ctx)
+			userMembershipReader = nats.NewAccessCheckRPC(natsClient.Conn(), natsTimeoutFromEnv())
+		})
+		return userMembershipReader
+
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+		return nil
+	}
+}
+
+// MemberTiersUseCase constructs the member-tiers read use-case wired to the
+// selected membership reader (cached Salesforce or mock), the reverse-index
+// reader (fga-sync read_tuples RPC or mock), and the key-contact grant index
+// (nil in mock mode) used to match contacts whose Username is unresolved.
+func MemberTiersUseCase(ctx context.Context) *usecaseSvc.MemberTiers {
+	return usecaseSvc.NewMemberTiers(MemberReaderImpl(ctx), UserMembershipReaderImpl(ctx), KeyContactGrantIndexImpl(ctx))
 }
 
 // KeyContactWriterImpl initialises and returns the port.KeyContactWriter
@@ -1007,6 +1050,9 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// this KV record survived).
 		usecaseSvc.WithCDCB2BOrgSettingsReader(B2BOrgSettingsReaderImpl(ctx)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
+		// Soft-TTL membership-cache evictor: the cache GetMemberTiers reads
+		// from, so a CDC status or tier change is fresh on the next read.
+		usecaseSvc.WithCDCMembershipCacheEvictor(nats.NewStorage(natsClient)),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithCDCB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),

@@ -28,6 +28,7 @@ type Endpoints struct {
 	UpdateB2bOrgSettingsUserRole   goa.Endpoint
 	DeleteB2bOrgSettingsUser       goa.Endpoint
 	GetProjectMembership           goa.Endpoint
+	GetMemberTiers                 goa.Endpoint
 	GetKeyContact                  goa.Endpoint
 	CreateKeyContact               goa.Endpoint
 	UpdateKeyContact               goa.Endpoint
@@ -69,6 +70,7 @@ func NewEndpoints(s Service) *Endpoints {
 		UpdateB2bOrgSettingsUserRole:   NewUpdateB2bOrgSettingsUserRoleEndpoint(s, a.JWTAuth),
 		DeleteB2bOrgSettingsUser:       NewDeleteB2bOrgSettingsUserEndpoint(s, a.JWTAuth),
 		GetProjectMembership:           NewGetProjectMembershipEndpoint(s, a.JWTAuth),
+		GetMemberTiers:                 NewGetMemberTiersEndpoint(s, a.JWTAuth),
 		GetKeyContact:                  NewGetKeyContactEndpoint(s, a.JWTAuth),
 		CreateKeyContact:               NewCreateKeyContactEndpoint(s, a.JWTAuth),
 		UpdateKeyContact:               NewUpdateKeyContactEndpoint(s, a.JWTAuth),
@@ -99,6 +101,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 	e.UpdateB2bOrgSettingsUserRole = m(e.UpdateB2bOrgSettingsUserRole)
 	e.DeleteB2bOrgSettingsUser = m(e.DeleteB2bOrgSettingsUser)
 	e.GetProjectMembership = m(e.GetProjectMembership)
+	e.GetMemberTiers = m(e.GetMemberTiers)
 	e.GetKeyContact = m(e.GetKeyContact)
 	e.CreateKeyContact = m(e.CreateKeyContact)
 	e.UpdateKeyContact = m(e.UpdateKeyContact)
@@ -343,6 +346,29 @@ func NewGetProjectMembershipEndpoint(s Service, authJWTFn security.AuthJWTFunc) 
 			return nil, err
 		}
 		return s.GetProjectMembership(ctx, p)
+	}
+}
+
+// NewGetMemberTiersEndpoint returns an endpoint function that calls the method
+// "get-member-tiers" of service "membership-service".
+func NewGetMemberTiersEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		p := req.(*GetMemberTiersPayload)
+		var err error
+		sc := security.JWTScheme{
+			Name:           "jwt",
+			Scopes:         []string{},
+			RequiredScopes: []string{},
+		}
+		var token string
+		if p.BearerToken != nil {
+			token = *p.BearerToken
+		}
+		ctx, err = authJWTFn(ctx, token, &sc)
+		if err != nil {
+			return nil, err
+		}
+		return s.GetMemberTiers(ctx, p)
 	}
 }
 
