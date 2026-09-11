@@ -846,6 +846,48 @@ func TestCDCConsumer_ProjectRole_Upsert_PreGuardEvictionUsesGrantIndex(t *testin
 	}
 }
 
+// TestCDCConsumer_ProjectRole_Upsert_GrantIndexReadFailure_SingleReadNonFatal
+// verifies the upsert path's grant-index lookup is a single, non-retried read
+// used only as an eviction hint: an index outage must not triple KV reads or
+// borrow the delete path's dangling-tuple alert, and the batch must still
+// converge through the fetched records.
+func TestCDCConsumer_ProjectRole_Upsert_GrantIndexReadFailure_SingleReadNonFatal(t *testing.T) {
+	kcUID := sfid("kc-uid-idx-down")
+	membershipUID := sfid("asset-idx-down")
+	// No Username, so no FGA member_put is published and its own grant-index
+	// supersession read stays out of the call count.
+	kc := &model.KeyContact{UID: kcUID, MembershipUID: membershipUID}
+	calls := 0
+	grants := &mock.MockKeyContactGrantIndex{
+		GetFn: func(_ context.Context, _ string) (port.KeyContactGrant, bool, error) {
+			calls++
+			return port.KeyContactGrant{}, false, assert.AnError
+		},
+	}
+	evictor := &mock.MockMembershipCacheEvictor{}
+	replay := &fakeReplayStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{kcUID}, ReplayID: []byte("r6h")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactBatchReader(&mock.MockKeyContactBatchReader{Contacts: []*model.KeyContact{kc}}),
+		svc.WithCDCKeyContactGrantIndex(grants),
+		svc.WithCDCMembershipCacheEvictor(evictor),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+	assert.Equal(t, 1, calls, "an upsert eviction hint gets one read, never the delete path's retry budget")
+	assert.Equal(t, []byte("r6h"), replay.saved, "an index outage must not block the upsert batch")
+	assert.Equal(t, []string{membershipUID}, evictor.KeyContactDeletedUIDs,
+		"the post-fetch eviction from the fetched record must still happen")
+}
+
 // TestCDCConsumer_ProjectRole_Delete_EvictsGroupedKeyContactCache verifies that
 // a Project_Role__c delete evicts the grouped key-contacts cache for the
 // membership recorded in the grant index, so a deleted contact cannot keep

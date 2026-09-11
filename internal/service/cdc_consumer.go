@@ -1223,7 +1223,7 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 		// The grant index maps the contact SFID to its membership, so the grouped
 		// key-contacts cache the member-tiers revalidation reads is evicted even
 		// when the quota guard skips the re-fetch below.
-		if grant, indexed := o.lookupKeyContactGrant(ctx, id); indexed {
+		if grant, indexed := o.lookupKeyContactGrantForEviction(ctx, id); indexed {
 			o.evictKeyContactGroupCache(ctx, grant.MembershipUID)
 		}
 	}
@@ -1403,6 +1403,27 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 		}
 	}
 	return nil
+}
+
+// lookupKeyContactGrantForEviction returns the grant recorded for uid with a
+// single, non-retried read: the upsert path uses it only as a grouped-cache
+// eviction hint, and a failed read costs at most one entry staying stale
+// until its soft TTL. It must not borrow the delete path's retries or its
+// dangling-tuple alert: no revoke is at stake here.
+func (o *CDCConsumer) lookupKeyContactGrantForEviction(ctx context.Context, uid string) (port.KeyContactGrant, bool) {
+	if o.grantIndex == nil {
+		return port.KeyContactGrant{}, false
+	}
+	grant, found, err := o.grantIndex.Get(ctx, uid)
+	if err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index read failed on upsert; skipping grouped-cache eviction hint",
+			"uid", uid, "error", err)
+		return port.KeyContactGrant{}, false
+	}
+	if !found || grant.MembershipUID == "" || grant.Username == "" {
+		return port.KeyContactGrant{}, false
+	}
+	return grant, true
 }
 
 // maxGrantIndexReadAttempts bounds the retry when a grant-index read fails
