@@ -59,7 +59,7 @@ The service exposes resource-rooted endpoints. The authoritative surface is the 
 | POST | `/b2b_orgs/{uid}/settings/users` | Add a single settings user (per-principal) | `writer` on `b2b_org:{uid}` |
 | PUT | `/b2b_orgs/{uid}/settings/users/{email}` | Change a settings user's role | `writer` on `b2b_org:{uid}` |
 | DELETE | `/b2b_orgs/{uid}/settings/users/{email}` | Remove a settings user | `writer` on `b2b_org:{uid}` |
-| GET | `/b2b_orgs/member-tiers/{username}` | Highest active tier per org for a user (machine callers) | `member` on `team:{memberTiersCallerTeamName}` (defaults to `globalOrgAdminTeamName`) |
+| GET | `/b2b_orgs/member-tiers/{username}` | Highest active tier per org for a user (machine callers) | `member` on `team:{memberTiersCallerTeamName}` (default `member_tiers_caller`; empty falls back to `globalOrgAdminTeamName`) |
 | GET | `/project_memberships/{uid}` | Get a membership | `auditor` on `project_membership:{uid}` |
 | GET | `/project_memberships/{m_uid}/key_contacts/{uid}` | Get a key contact | `auditor` on `project_membership:{m_uid}` |
 | POST | `/project_memberships/{m_uid}/key_contacts` | Create a key contact | `writer` on `project_membership:{m_uid}` |

@@ -32,9 +32,11 @@ ExternalSecret, IRSA role, region, and chart pins live in `lfx-v2-argocd`.
   `team:{{ .Values.app.globalOrgAdminTeamName }}` (defaults to
   `global_org_admin`, consistent across environments), and
   `GET /b2b_orgs/member-tiers/{username}` checks `member` on
-  `team:{{ .Values.app.memberTiersCallerTeamName }}`, which falls back to
-  `globalOrgAdminTeamName` when unset; set it to a dedicated team to scope
-  member-tiers callers (e.g. the Insights Worker) to that endpoint only.
+  `team:{{ .Values.app.memberTiersCallerTeamName }}` (defaults to
+  `member_tiers_caller`), scoping member-tiers callers (the Insights Worker,
+  LFX One) to that endpoint only. The team's member tuples must be written in
+  each environment's OpenFGA store before callers can use the endpoint;
+  setting the value to `""` falls back to `globalOrgAdminTeamName`.
 - **Salesforce secret**: the chart references the pre-existing Kubernetes
   Secret named by `values.yaml` at `salesforce.secrets.name`
   (`lfx-v2-member-service-salesforce` by default). The chart does not create
