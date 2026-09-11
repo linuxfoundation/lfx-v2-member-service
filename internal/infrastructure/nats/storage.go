@@ -82,9 +82,11 @@ func (s *Storage) PutTier(ctx context.Context, tier *model.MembershipTier) error
 // ─── ProjectMembership ───────────────────────────────────────────────────────
 
 // GetMembership retrieves a ProjectMembership by UID. Returns a CacheResult
-// whose Status is CacheStatusMiss when no entry exists for the key.
+// whose Status is CacheStatusMiss when no entry exists for the key. Misses
+// resolve the delete-marker revision because the write-back is conditional
+// (PutMembershipAtRevision).
 func (s *Storage) GetMembership(ctx context.Context, uid string) (CacheResult[*model.ProjectMembership], error) {
-	return getCached[*model.ProjectMembership](ctx, s, keyPrefixMembership+uid)
+	return getCachedForCASWriteBack[*model.ProjectMembership](ctx, s, keyPrefixMembership+uid)
 }
 
 // PutMembershipAtRevision writes a ProjectMembership to the KV bucket, keyed by
@@ -132,8 +134,10 @@ func (s *Storage) DeleteMembership(ctx context.Context, membershipUID string) er
 // membership UID. The contacts are stored as a JSON array under the membership
 // UID key (prefixed with "key-contacts.") in the membership-cache bucket.
 // Returns a CacheResult whose Status is CacheStatusMiss when no entry exists.
+// Misses resolve the delete-marker revision because the write-back is
+// conditional (PutKeyContactsForMembershipAtRevision).
 func (s *Storage) GetKeyContactsForMembership(ctx context.Context, membershipUID string) (CacheResult[[]*model.KeyContact], error) {
-	return getCached[[]*model.KeyContact](ctx, s, keyPrefixKeyContacts+membershipUID)
+	return getCachedForCASWriteBack[[]*model.KeyContact](ctx, s, keyPrefixKeyContacts+membershipUID)
 }
 
 // PutKeyContactsForMembershipAtRevision writes the full slice of key contacts
@@ -348,8 +352,22 @@ func (s *Storage) IsReady(ctx context.Context) error {
 // the membership-cache bucket. On a NATS key-not-found error it returns a
 // CacheResult with CacheStatusMiss (not an error). On any other failure it
 // returns a non-nil error. The CacheResult.Status is derived from the
-// envelope's soft-TTL timestamps.
+// envelope's soft-TTL timestamps. Misses carry Revision 0: this is for key
+// types written back unconditionally (putCached); CAS-written key types read
+// through getCachedForCASWriteBack instead.
 func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[T], error) {
+	return lookupCached[T](ctx, s, key, false)
+}
+
+// getCachedForCASWriteBack is getCached for the key types whose callers
+// write back via putCachedAtRevision (memberships and grouped key contacts):
+// on a miss it also resolves the delete-marker revision, a kv.History call,
+// so the write-back can be conditioned on the tombstone observed here.
+func getCachedForCASWriteBack[T any](ctx context.Context, s *Storage, key string) (CacheResult[T], error) {
+	return lookupCached[T](ctx, s, key, true)
+}
+
+func lookupCached[T any](ctx context.Context, s *Storage, key string, resolveTombstoneRevision bool) (CacheResult[T], error) {
 	var zero CacheResult[T]
 
 	if key == "" {
@@ -364,10 +382,16 @@ func getCached[T any](ctx context.Context, s *Storage, key string) (CacheResult[
 	entry, err := kv.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			// A miss can be a delete tombstone. Carry the marker's revision so
-			// the write-back is conditioned on the state observed here, not on
-			// whatever marker exists at write time (see putCachedAtRevision).
-			return CacheResult[T]{Status: CacheStatusMiss, Revision: deleteMarkerRevision(ctx, kv, key)}, nil
+			// A miss can be a delete tombstone. For CAS-written keys, carry the
+			// marker's revision so the write-back is conditioned on the state
+			// observed here (see putCachedAtRevision). The history lookup is
+			// skipped for unconditionally written keys: it costs a KV watcher
+			// per call and its result would go unused.
+			var revision uint64
+			if resolveTombstoneRevision {
+				revision = deleteMarkerRevision(ctx, kv, key)
+			}
+			return CacheResult[T]{Status: CacheStatusMiss, Revision: revision}, nil
 		}
 		return zero, errs.NewUnexpected(
 			fmt.Sprintf("failed to get key %q from bucket %q", key, constants.KVBucketNameCache), err)

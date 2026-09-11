@@ -18,9 +18,9 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
 )
 
-// MaxMemberTierCandidates caps how many reverse-index UIDs HighestActiveTiers
-// resolves per user. Each can be a Salesforce read, so past the cap it fails
-// closed rather than fan out or truncate to a wrong top tier.
+// MaxMemberTierCandidates caps how many unique reverse-index UIDs
+// HighestActiveTiers resolves per user. Each can be a Salesforce read, so past
+// the cap it fails closed rather than fan out or truncate to a wrong top tier.
 const MaxMemberTierCandidates = 200
 
 // MemberTiers is the read use-case behind GET /b2b_orgs/member-tiers/{username}:
@@ -63,21 +63,26 @@ func (u *MemberTiers) HighestActiveTiers(ctx context.Context, username string) (
 	if err != nil {
 		return nil, err
 	}
-	if len(uids) > MaxMemberTierCandidates {
-		slog.WarnContext(ctx, "member-tiers candidate set exceeds cap; refusing to fan out",
-			"username", redaction.Redact(username), "candidates", len(uids), "cap", MaxMemberTierCandidates)
-		return nil, pkgerrors.NewServiceUnavailable("too many candidate memberships to resolve safely")
-	}
-
-	now := time.Now().UTC()
-	best := make(map[string]*model.ProjectMembership, len(uids))
+	// Deduplicate before applying the cap: only unique memberships fan out to
+	// reads, so duplicate tuple rows must not count against the cap.
+	unique := make([]string, 0, len(uids))
 	seen := make(map[string]bool, len(uids))
 	for _, uid := range uids {
 		if seen[uid] {
 			continue
 		}
 		seen[uid] = true
+		unique = append(unique, uid)
+	}
+	if len(unique) > MaxMemberTierCandidates {
+		slog.WarnContext(ctx, "member-tiers candidate set exceeds cap; refusing to fan out",
+			"username", redaction.Redact(username), "candidates", len(unique), "cap", MaxMemberTierCandidates)
+		return nil, pkgerrors.NewServiceUnavailable("too many candidate memberships to resolve safely")
+	}
 
+	now := time.Now().UTC()
+	best := make(map[string]*model.ProjectMembership, len(unique))
+	for _, uid := range unique {
 		membership, err := u.storage.GetMembership(ctx, uid)
 		if err != nil {
 			var notFound pkgerrors.NotFound
