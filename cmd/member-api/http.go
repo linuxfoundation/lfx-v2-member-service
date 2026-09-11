@@ -69,8 +69,14 @@ func handleHTTPServer(ctx context.Context, host string, membershipServiceEndpoin
 	if dbg {
 		handler = debug.HTTP()(handler)
 	}
+	// Restore the original URL inside the OTel wrapper so routing and the
+	// access log see the real path.
+	handler = middleware.OTelPathRestorer()(handler)
 	// Wrap the handler with OpenTelemetry instrumentation
 	handler = otelhttp.NewHandler(handler, "membership-service")
+	// Redact username-bearing paths before otelhttp records url.path, so raw
+	// LFIDs never reach the tracing backend.
+	handler = middleware.OTelPathRedactor()(handler)
 
 	srv := &http.Server{Addr: host, Handler: handler, ReadHeaderTimeout: time.Second * 60}
 	for _, m := range membershipServiceServer.Mounts {
