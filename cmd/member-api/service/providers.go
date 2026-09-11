@@ -223,10 +223,11 @@ func UserMembershipReaderImpl(ctx context.Context) port.UserMembershipReader {
 }
 
 // MemberTiersUseCase constructs the member-tiers read use-case wired to the
-// selected membership reader (cached Salesforce or mock) and the reverse-index
-// reader (fga-sync read_tuples RPC or mock).
+// selected membership reader (cached Salesforce or mock), the reverse-index
+// reader (fga-sync read_tuples RPC or mock), and the key-contact grant index
+// (nil in mock mode) used to match contacts whose Username is unresolved.
 func MemberTiersUseCase(ctx context.Context) *usecaseSvc.MemberTiers {
-	return usecaseSvc.NewMemberTiers(MemberReaderImpl(ctx), UserMembershipReaderImpl(ctx))
+	return usecaseSvc.NewMemberTiers(MemberReaderImpl(ctx), UserMembershipReaderImpl(ctx), KeyContactGrantIndexImpl(ctx))
 }
 
 // KeyContactWriterImpl initialises and returns the port.KeyContactWriter

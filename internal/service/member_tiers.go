@@ -29,11 +29,14 @@ const MaxMemberTierCandidates = 200
 type MemberTiers struct {
 	storage              port.MemberReader
 	userMembershipReader port.UserMembershipReader
+	grantIndex           port.KeyContactGrantIndex
 }
 
-// NewMemberTiers constructs the member-tiers read use-case.
-func NewMemberTiers(storage port.MemberReader, userMembershipReader port.UserMembershipReader) *MemberTiers {
-	return &MemberTiers{storage: storage, userMembershipReader: userMembershipReader}
+// NewMemberTiers constructs the member-tiers read use-case. grantIndex may be
+// nil (mock mode); contacts without a resolved Username are then unmatchable
+// and their memberships are skipped.
+func NewMemberTiers(storage port.MemberReader, userMembershipReader port.UserMembershipReader, grantIndex port.KeyContactGrantIndex) *MemberTiers {
+	return &MemberTiers{storage: storage, userMembershipReader: userMembershipReader, grantIndex: grantIndex}
 }
 
 // HighestActiveTiers lists each B2B organization's highest active membership
@@ -165,6 +168,13 @@ func (u *MemberTiers) HighestActiveTiers(ctx context.Context, username string) (
 // key contact on the membership's authoritative Project_Role__c records. It
 // reads through the soft-TTL key-contacts cache, so it costs one cached read
 // per candidate and one Salesforce query on a cold membership.
+//
+// Contact records read from Salesforce carry no Username (the SOQL projection
+// resolves emails only; usernames are resolved on the write path), so an
+// active contact with a blank Username is matched through the key-contact
+// grant index: the durable record of the FGA grant that produced the
+// candidate tuple in the first place. An index read failure fails closed; a
+// nil index (mock mode) skips such contacts.
 func (u *MemberTiers) userIsActiveKeyContact(ctx context.Context, membershipUID, username string) (bool, error) {
 	contacts, err := u.storage.ListKeyContactsForMembership(ctx, membershipUID)
 	if err != nil {
@@ -174,9 +184,25 @@ func (u *MemberTiers) userIsActiveKeyContact(ctx context.Context, membershipUID,
 		if kc == nil {
 			continue
 		}
-		// Username match is exact, mirroring the tuple parse in
-		// MembershipUIDsForUser: both compare the LFID verbatim.
-		if kc.Username == username && strings.EqualFold(kc.Status, constants.RoleStatusActive) {
+		if !strings.EqualFold(kc.Status, constants.RoleStatusActive) {
+			continue
+		}
+		if kc.Username != "" {
+			// Username match is exact, mirroring the tuple parse in
+			// MembershipUIDsForUser: both compare the LFID verbatim.
+			if kc.Username == username {
+				return true, nil
+			}
+			continue
+		}
+		if u.grantIndex == nil {
+			continue
+		}
+		grant, found, grantErr := u.grantIndex.Get(ctx, kc.UID)
+		if grantErr != nil {
+			return false, grantErr
+		}
+		if found && grant.MembershipUID == membershipUID && grant.Username == username {
 			return true, nil
 		}
 	}

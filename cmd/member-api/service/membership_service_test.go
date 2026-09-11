@@ -149,6 +149,7 @@ type svcBuilder struct {
 	settingsW       usecaseSvc.OrgSettingsWriter
 	workspaceWriter usecaseSvc.WorkspaceWriter
 	runner          *usecaseSvc.Runner
+	grantIndex      port.KeyContactGrantIndex
 }
 
 type svcOpt func(*svcBuilder)
@@ -188,6 +189,9 @@ func withOrgSettingsStore(store *mock.MockB2BOrgSettings) svcOpt {
 func withBackfillRunner(r *usecaseSvc.Runner) svcOpt {
 	return func(b *svcBuilder) { b.runner = r }
 }
+func withGrantIndex(idx port.KeyContactGrantIndex) svcOpt {
+	return func(b *svcBuilder) { b.grantIndex = idx }
+}
 
 func newTestSvc(opts ...svcOpt) membershipservice.Service {
 	mockRepo := mock.NewMockMembershipRepository()
@@ -208,7 +212,7 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 	}
 	return NewMembershipService(b.auth, b.storage, b.b2bOrgReader,
 		b.pmReader, b.umReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner,
-		usecaseSvc.NewMemberTiers(b.storage, b.umReader))
+		usecaseSvc.NewMemberTiers(b.storage, b.umReader, b.grantIndex))
 }
 
 // ─── B2BOrg handler tests ──────────────────────────────────────────────────────
@@ -758,6 +762,106 @@ func TestGetMemberTiers_KeyContactReadFailureFailsClosed(t *testing.T) {
 		contactsErr: errors.New("dial tcp: i/o timeout"),
 	}
 	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr))
+
+	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.Error(t, err)
+	var serviceErr *goa.ServiceError
+	require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+	assert.Equal(t, "ServiceUnavailable", serviceErr.Name)
+}
+
+// Production contact records carry no Username (the SOQL projection resolves
+// emails only; usernames are resolved on the write path), so revalidation
+// must match them through the key-contact grant index rather than the
+// never-populated Username field.
+func TestGetMemberTiers_ProductionContactMatchesViaGrantIndex(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-1"})
+	mr := &mapMemberReader{
+		memberships: map[string]*model.ProjectMembership{
+			"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+		},
+		keyContacts: map[string][]*model.KeyContact{
+			"m-1": {{UID: "kc-1", MembershipUID: "m-1", Status: "Active", Email: "jdoe@example.org"}},
+		},
+	}
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "m-1", Username: "jdoe"},
+	}}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr), withGrantIndex(idx))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	require.Len(t, res, 1, "a production-shaped contact (blank Username) must match via the grant index")
+	assert.Equal(t, "org-1", res[0].B2bOrgUID)
+}
+
+func TestGetMemberTiers_ProductionContactGrantMismatchSkipped(t *testing.T) {
+	tests := []struct {
+		name string
+		idx  port.KeyContactGrantIndex
+	}{
+		{
+			name: "grant belongs to another user",
+			idx: &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+				"kc-1": {MembershipUID: "m-1", Username: "someoneelse"},
+			}},
+		},
+		{
+			name: "grant reparented to another membership",
+			idx: &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+				"kc-1": {MembershipUID: "m-2", Username: "jdoe"},
+			}},
+		},
+		{
+			name: "no grant entry for the contact",
+			idx:  &mock.MockKeyContactGrantIndex{},
+		},
+		{
+			name: "grant index not wired",
+			idx:  nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			umr := mock.NewMockUserMembershipReader()
+			umr.SetUserMemberships("jdoe", []string{"m-1"})
+			mr := &mapMemberReader{
+				memberships: map[string]*model.ProjectMembership{
+					"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+				},
+				keyContacts: map[string][]*model.KeyContact{
+					"m-1": {{UID: "kc-1", MembershipUID: "m-1", Status: "Active", Email: "jdoe@example.org"}},
+				},
+			}
+			svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr), withGrantIndex(tt.idx))
+
+			res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+			require.NoError(t, err)
+			assert.Empty(t, res, "a blank-Username contact must not count unless the grant index maps it to this user and membership")
+		})
+	}
+}
+
+// An index read failure cannot distinguish a matching grant from a stale one,
+// so the lookup fails closed as ServiceUnavailable, mirroring the key-contact
+// read failure above.
+func TestGetMemberTiers_GrantIndexReadFailureFailsClosed(t *testing.T) {
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", []string{"m-1"})
+	mr := &mapMemberReader{
+		memberships: map[string]*model.ProjectMembership{
+			"m-1": {UID: "m-1", B2BOrgUID: "org-1", TierName: "Gold Membership", Status: "Active"},
+		},
+		keyContacts: map[string][]*model.KeyContact{
+			"m-1": {{UID: "kc-1", MembershipUID: "m-1", Status: "Active", Email: "jdoe@example.org"}},
+		},
+	}
+	idx := &mock.MockKeyContactGrantIndex{GetErr: errors.New("dial tcp: i/o timeout")}
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(mr), withGrantIndex(idx))
 
 	_, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
 
