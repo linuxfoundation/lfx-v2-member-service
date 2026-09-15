@@ -7,6 +7,7 @@ package nats
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -14,6 +15,19 @@ import (
 
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
+
+// projectServiceErrorCode returns the error code from a project-service error
+// envelope ({"error":"not_found",...} or {"error":"internal",...}), or "" if
+// data is a normal success payload.
+func projectServiceErrorCode(data []byte) string {
+	var env struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &env) != nil {
+		return ""
+	}
+	return env.Error
+}
 
 // Project-service NATS RPC subjects.
 const (
@@ -64,10 +78,10 @@ func (r *ProjectRPC) SlugToUID(ctx context.Context, slug string) (string, error)
 }
 
 // request sends a raw UTF-8 payload to the given NATS subject and returns the
-// raw UTF-8 response body. A NATS error, a nil reply, or an empty reply body
-// are all treated as not-found conditions; the caller wraps the returned error
-// appropriately. The context deadline is honoured via RequestMsgWithContext; if
-// the context has no deadline, r.timeout is used instead.
+// raw UTF-8 response body. A NATS transport error or a nil reply is surfaced
+// directly. A JSON error envelope from project-service
+// ({"error":"not_found",...} or {"error":"internal",...}) is returned as a
+// NotFound error; plain UUID/string success replies are returned as-is.
 func (r *ProjectRPC) request(ctx context.Context, subject, payload string) (string, error) {
 	// If the context already carries a deadline, honour it directly; otherwise
 	// apply the configured timeout so the call never hangs indefinitely.
@@ -87,14 +101,18 @@ func (r *ProjectRPC) request(ctx context.Context, subject, payload string) (stri
 		return "", err
 	}
 
-	if reply == nil || len(reply.Data) == 0 {
-		return "", errs.NewNotFound("empty reply from project-service RPC", nil)
+	if reply == nil {
+		return "", errs.NewNotFound("nil reply from project-service RPC", nil)
 	}
 
-	body := strings.TrimSpace(string(reply.Data))
-	if body == "" {
-		return "", errs.NewNotFound("empty reply body from project-service RPC", nil)
+	// Project-service returns {"error":"<code>",...} on errors; any other response
+	// (UUID string, empty body) is a success value.
+	if code := projectServiceErrorCode(reply.Data); code != "" {
+		if code == "not_found" {
+			return "", errs.NewNotFound("project not found", nil)
+		}
+		return "", errs.NewUnexpected("project-service error: "+code, nil)
 	}
 
-	return body, nil
+	return strings.TrimSpace(string(reply.Data)), nil
 }
