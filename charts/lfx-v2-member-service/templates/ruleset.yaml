@@ -214,12 +214,16 @@ spec:
       # document carries the same auditor access check, so tightening this
       # route alone would leave the roster reachable through search.
       #
-      # The gate stays as it is, deliberately. LFXV2-3026 is Org Dash / PCC
-      # parity, and both LF teams already reach this roster in legacy (they
-      # hold the same auditor tuple on the tenant root project), so the grant
-      # migrates an existing disclosure rather than creating one. Narrowing to
-      # writer would also strip roster read from the per-org auditors who have
-      # it today — a product change, not a consequence of the team grant.
+      # The gate stays as it is, deliberately. Two facts stand behind that:
+      # verified — both LF teams hold the same direct auditor tuple on the
+      # tenant root project (FGA read, prod and dev, 2026-09-15), so they
+      # already read every project-plane surface; asserted from the lf-staff
+      # precedent (LFXV2-2937 / LFXV2-3026 Org Dash-PCC parity), not verifiable
+      # from this repo — that legacy tooling already shows this roster to the
+      # same populations, so the grant migrates a disclosure rather than
+      # creating one. Narrowing to writer would also strip roster read from
+      # the per-org auditors who have it today — a product change, not a
+      # consequence of the team grant.
       execute:
         - authenticator: oidc
         - authenticator: anonymous_authenticator
