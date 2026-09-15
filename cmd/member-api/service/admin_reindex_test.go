@@ -250,6 +250,17 @@ func TestB2BOrgAuditorTeamNames(t *testing.T) {
 			want: []string{"contractor-team"},
 		},
 		{
+			// An alias configuration (both variables naming one team) must not
+			// render the same reference twice: teamMemberRefs does not
+			// de-duplicate and OpenFGA rejects a repeated tuple in one write.
+			name: "both variables naming the same team grant it once",
+			env: map[string]string{
+				"LF_STAFF_TEAM_NAME":      "lf-team",
+				"LF_CONTRACTOR_TEAM_NAME": " lf-team ",
+			},
+			want: []string{"lf-team"},
+		},
+		{
 			name: "whitespace-only contractor is dropped while staff is granted",
 			env: map[string]string{
 				"LF_STAFF_TEAM_NAME":      "staff-team",

@@ -532,7 +532,11 @@ func GlobalOrgAdminTeamName() string {
 // Names are trimmed and blank or whitespace-only values are dropped, so no path
 // can produce a "team:#member" subject with an empty name — the trap
 // GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. Each
-// variable is independent: either team may be configured alone.
+// variable is independent: either team may be configured alone. Names are also
+// de-duplicated: two variables resolving to one team (an alias configuration)
+// must yield a single reference, because teamMemberRefs does not de-duplicate
+// and OpenFGA rejects a repeated tuple within one write request — the whole
+// full-sync message would fail on every publish path.
 //
 // Clearing a variable stops new references being emitted but revokes nothing:
 // fga-sync never deletes a tuple whose subject begins with "team:" (that guard
@@ -550,10 +554,17 @@ func GlobalOrgAdminTeamName() string {
 func B2BOrgAuditorTeamNames() []string {
 	envVars := []string{"LF_STAFF_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"}
 	names := make([]string, 0, len(envVars))
+	seen := make(map[string]struct{}, len(envVars))
 	for _, envVar := range envVars {
-		if name := strings.TrimSpace(os.Getenv(envVar)); name != "" {
-			names = append(names, name)
+		name := strings.TrimSpace(os.Getenv(envVar))
+		if name == "" {
+			continue
 		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
 	}
 	return names
 }

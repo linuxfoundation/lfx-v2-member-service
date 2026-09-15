@@ -425,6 +425,8 @@ Consumer-mode environment variables (read only when `RUN_MODE=consumer`):
 | `CDC_QUOTA_SKIP_THRESHOLD` | Fraction of daily Salesforce REST quota (0–1) at which upsert re-fetches are skipped | `0.95` | No |
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the guard issues an active `/limits` refresh (also the refresh-attempt throttle window). `0` disables active refresh (passive header updates only). | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable platform org-admin team name | `global_org_admin` | No |
+| `LF_STAFF_TEAM_NAME` | LF team granted blanket `auditor` on every `b2b_org`; the Account upsert path asserts it on every publish (chart sets `lf-staff`; unset grants nothing) | `""` | No |
+| `LF_CONTRACTOR_TEAM_NAME` | Second LF team with the same blanket `auditor` grant (LFXV2-3071; chart sets `lf-contractor`; unset grants nothing) | `""` | No |
 
 Salesforce credentials (`SF_INSTANCE_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `SF_USERNAME`, `SF_PASSWORD`, `SF_SECURITY_TOKEN`, `SF_CONSUMER_RSA_PEM`) and NATS settings are shared with API mode — see the main [README](../README.md) / [CLAUDE.md](../CLAUDE.md).
 
