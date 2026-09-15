@@ -186,6 +186,9 @@ func (u *MemberTiers) userIsActiveKeyContact(ctx context.Context, membershipUID,
 	}
 	for _, kc := range contacts {
 		if kc == nil {
+			// Should never happen from a well-formed reader result; log it so
+			// an unmarshalling gap surfaces instead of silently under-reporting.
+			slog.WarnContext(ctx, "nil key contact in membership", "membership_uid", membershipUID)
 			continue
 		}
 		if !strings.EqualFold(kc.Status, constants.RoleStatusActive) {

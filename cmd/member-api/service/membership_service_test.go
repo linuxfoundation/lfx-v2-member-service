@@ -686,6 +686,30 @@ func TestGetMemberTiers_CandidateCapBoundaryResolves(t *testing.T) {
 	assert.Len(t, res, usecaseSvc.MaxMemberTierCandidates)
 }
 
+// The cap must apply to the post-dedup candidate count, not the raw tuple
+// count: a pre-dedup count over the cap that collapses to exactly the cap
+// after dedup must still resolve, not fail closed.
+func TestGetMemberTiers_CandidateCapAppliesPostDedup(t *testing.T) {
+	uids := make([]string, usecaseSvc.MaxMemberTierCandidates)
+	memberships := make(map[string]*model.ProjectMembership, len(uids))
+	for i := range uids {
+		id := fmt.Sprintf("m-%d", i)
+		uids[i] = id
+		memberships[id] = &model.ProjectMembership{UID: id, B2BOrgUID: "org-" + id, TierName: "Gold Membership", Status: "Active"}
+	}
+	// Duplicate the first few UIDs so the raw tuple count exceeds the cap
+	// while the unique count stays exactly at it.
+	uids = append(uids, uids[0], uids[1], uids[2])
+	umr := mock.NewMockUserMembershipReader()
+	umr.SetUserMemberships("jdoe", uids)
+	svc := newTestSvc(withUserMembershipReader(umr), withStorage(&mapMemberReader{memberships: memberships}))
+
+	res, err := svc.GetMemberTiers(context.Background(), &membershipservice.GetMemberTiersPayload{Username: "jdoe"})
+
+	require.NoError(t, err)
+	assert.Len(t, res, usecaseSvc.MaxMemberTierCandidates)
+}
+
 // A membership record without a b2b_org_uid cannot be attributed to an
 // organization; it must be skipped rather than fail the lookup or surface as
 // a malformed entry (b2b_org_uid is required in the response contract).
