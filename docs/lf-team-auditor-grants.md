@@ -121,7 +121,7 @@ Deletes only tuples whose subject is exactly one of the configured teams; per-us
 
 ### Rollback order
 
-1. Set both team variables to `""` (or revert the code) and roll out both deployments.
+1. Set the variable for each team you are revoking (`LF_STAFF_TEAM_NAME` and/or `LF_CONTRACTOR_TEAM_NAME`) to `""` (or revert the code) and roll out both deployments. Leave the other team's variable in place — blanking it too means orgs written during the window miss that team's tuple until they are re-written or backfilled.
 2. Confirm no pod is still running the emitting config.
 3. Export the team name to revoke — the service no longer emits it, but the script still needs to know what to look for.
 4. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run.
