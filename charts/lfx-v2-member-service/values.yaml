@@ -59,8 +59,9 @@ app:
   # granted blanket auditor (read-only) access on every b2b_org. They are the
   # same in every environment, so they are real values here rather than
   # per-environment identifiers, and this file is the single authoritative
-  # copy: both deployment templates inject them, and the backfill scripts read
-  # them back from the running deployment rather than carrying a second copy.
+  # copy: both deployment templates inject them, and the backfill scripts
+  # carry no second copy — the operator exports the names read back from the
+  # running deployment (docs/lf-team-auditor-grants.md) before running them.
   #
   # Deploying is the cutover. Every write path asserts the reference, so orgs
   # begin acquiring the tuple as CDC events arrive; the backfill scripts only
