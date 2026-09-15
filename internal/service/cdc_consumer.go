@@ -89,6 +89,9 @@ type CDCConsumer struct {
 	userReader              port.UserReader
 	orgSettings             OrgSettingsPrincipalWriter
 	settingsReader          port.B2BOrgSettingsReader
+	// storage supplies ListKeyContactsForOrg for org-dashboard reconciliation
+	// when an Inactive contact's provisioning is skipped. Nil disables the scan.
+	storage port.MemberReader
 
 	// refreshMu guards lastRefreshAttemptAt so failed/attempted refreshes are
 	// throttled to at most once per staleness window even under concurrent calls.
@@ -188,6 +191,13 @@ func WithCDCOrgSettings(w OrgSettingsPrincipalWriter) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.orgSettings = w }
 }
 
+// WithCDCStorage injects the reader used to scan an org's key contacts for
+// org-dashboard reconciliation when an Inactive contact's provisioning is
+// skipped. Nil disables reconciliation; the gate on Inactive still applies.
+func WithCDCStorage(r port.MemberReader) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.storage = r }
+}
+
 // NewCDCConsumer constructs a CDCConsumer. The quota-skip threshold is read
 // from CDC_QUOTA_SKIP_THRESHOLD (float, 0–1 inclusive; default 0.95) at
 // construction time so it is set once at startup rather than on every event.
@@ -273,8 +283,18 @@ func (o *CDCConsumer) processWithAuthorizationRetry(
 				"error", handleErr,
 			)
 		}
-		if !errors.Is(handleErr, errPurgeUnrecorded) && !errors.Is(handleErr, errRestoreIncomplete) {
+		if !errors.Is(handleErr, errPurgeUnrecorded) && !errors.Is(handleErr, errRestoreIncomplete) &&
+			!errors.Is(handleErr, errKeyContactRevokeIncomplete) {
 			return nil
+		}
+
+		// A retry re-runs the whole event by default. When the handler
+		// attached the subset of IDs that actually still need work, shrink
+		// to that subset so already-settled IDs are not redone.
+		if ids := extractRetryIDs(handleErr); len(ids) > 0 {
+			slog.WarnContext(ctx, "cdc: retrying event with failed subset",
+				"entity", event.Entity, "record_ids", ids)
+			event.RecordIDs = ids
 		}
 
 		slog.ErrorContext(ctx, "cdc: authorization change incomplete — retrying event before advancing",
@@ -364,12 +384,35 @@ func isRestore(ct model.CDCChangeType) bool {
 // been observed (even after an attempted refresh), this returns false
 // (fail-open).
 func (o *CDCConsumer) quotaExceeded(ctx context.Context, entity string, ids []string) bool {
-	if o.quotaGauge == nil {
+	exceeded, snap := o.quotaGuardExceeded(ctx, entity)
+	if !exceeded {
 		return false
+	}
+
+	slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair",
+		"entity", entity,
+		"record_count", len(ids),
+		"api_usage_current", snap.Current,
+		"api_usage_limit", snap.Limit,
+		"threshold", o.quotaSkipThreshold,
+		"publish_failed_for_backfill_repair", true,
+	)
+	o.recordSkippedForRepair(ctx, entity, ids)
+	return true
+}
+
+// quotaGuardExceeded is the core quota-threshold check shared by quotaExceeded
+// (the batched upsert path, which also logs and queues repair markers for the
+// skipped IDs) and quotaGuardedLister (the per-record live recheck path,
+// which has no batch of IDs to queue). entity is used only for the
+// refresh-failure log line.
+func (o *CDCConsumer) quotaGuardExceeded(ctx context.Context, entity string) (bool, port.QuotaSnapshot) {
+	if o.quotaGauge == nil {
+		return false, port.QuotaSnapshot{}
 	}
 	if o.quotaSkipThreshold >= 1 {
 		// Threshold of 1 means "never skip" — guard disabled regardless of usage.
-		return false
+		return false, port.QuotaSnapshot{}
 	}
 
 	snap := o.quotaGauge.Snapshot()
@@ -390,23 +433,50 @@ func (o *CDCConsumer) quotaExceeded(ctx context.Context, entity string, ids []st
 	if !snap.Observed() {
 		// Never observed a valid reading (and refresh, if any, did not produce
 		// one) — fail open.
-		return false
+		return false, snap
 	}
 
-	if snap.Ratio() < o.quotaSkipThreshold {
-		return false
-	}
+	return snap.Ratio() >= o.quotaSkipThreshold, snap
+}
 
-	slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair",
-		"entity", entity,
-		"record_count", len(ids),
-		"api_usage_current", snap.Current,
-		"api_usage_limit", snap.Limit,
-		"threshold", o.quotaSkipThreshold,
-		"publish_failed_for_backfill_repair", true,
-	)
-	o.recordSkippedForRepair(ctx, entity, ids)
-	return true
+// errQuotaGuardSkipped reports that a live key_contact sibling recheck was
+// skipped because the Salesforce quota guard is active. It must read as
+// uncertain, not as an empty sibling list: an empty result would fake
+// certainty that no sibling justifies the pair.
+var errQuotaGuardSkipped = errors.New("live key_contact sibling recheck skipped: Salesforce quota threshold reached")
+
+// quotaGuardedLister wraps a LIVE membershipKeyContactLister so the CDC delete
+// path's per-record recheck consults the quota guard before every Salesforce
+// fetch, instead of the O(N) unguarded calls a multi-ID delete event would
+// otherwise make. These rechecks must stay live (never prefetched), so
+// batching is not an option; consulting the guard per fetch is.
+type quotaGuardedLister struct {
+	inner membershipKeyContactLister
+	o     *CDCConsumer
+}
+
+func (l quotaGuardedLister) ListKeyContactsForMembership(ctx context.Context, membershipUID string) ([]*model.KeyContact, error) {
+	if exceeded, _ := l.o.quotaGuardExceeded(ctx, "Project_Role__c"); exceeded {
+		return nil, errQuotaGuardSkipped
+	}
+	return l.inner.ListKeyContactsForMembership(ctx, membershipUID)
+}
+
+// quotaGuardedLiveSiblingLister builds the quota-aware LIVE recheck lister
+// used throughout the CDC key_contact delete path: the same live reader
+// siblingListerFor wraps, gated so quota pressure surfaces as an error
+// (holding the replay cursor via errKeyContactRevokeIncomplete) instead of
+// hammering Salesforce. The quota gate wraps only the base fetch, with the
+// email resolver layered on afterward exactly as siblingListerFor does: the
+// gate must not sit above withEmailResolver, or the resulting lister no
+// longer exposes usernameByEmailResolver and every sibling reads as
+// unresolvable instead of quota-skipped. Returns nil when no reader is wired.
+func (o *CDCConsumer) quotaGuardedLiveSiblingLister() membershipKeyContactLister {
+	if o.keyContactsByMembership == nil {
+		return nil
+	}
+	gated := quotaGuardedLister{inner: keyContactsByMembershipLister{reader: o.keyContactsByMembership}, o: o}
+	return withEmailResolver(gated, o.userReader)
 }
 
 // shouldAttemptQuotaRefresh reports whether the guard should issue an active
@@ -504,6 +574,69 @@ var errPurgeUnrecorded = errors.New("delete_access purge lost with no recovery m
 // from authoritative state and confirmed delivered. Unlike ordinary upserts,
 // /admin/reindex does not rebuild these per-user relations, so replay must stop.
 var errRestoreIncomplete = errors.New("authorization restore incomplete")
+
+// errKeyContactRevokeIncomplete marks a CDC key_contact delete whose recorded
+// grant was not confirmed revoked. The Salesforce record is gone, so no later
+// upsert or reindex retries it: replay must stop and redeliver the event.
+var errKeyContactRevokeIncomplete = errors.New("key_contact delete revoke incomplete")
+
+// retryIDsError carries the subset of an event's record IDs whose handler
+// failed with a sentinel error, so processWithAuthorizationRetry can retry
+// only those IDs instead of the whole event. A handler that has no per-ID
+// view of a sentinel failure simply does not attach one, and the caller falls
+// back to retrying the full event.
+type retryIDsError struct {
+	ids []string
+}
+
+func (e *retryIDsError) Error() string {
+	return fmt.Sprintf("retry pending for %d record(s)", len(e.ids))
+}
+
+// newRetryIDsError wraps ids as an error for errors.Join, or returns nil when
+// ids is empty so joining it is a no-op.
+func newRetryIDsError(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return &retryIDsError{ids: ids}
+}
+
+// extractRetryIDs walks err's tree, which errors.Join and fmt.Errorf("%w")
+// may nest arbitrarily deep, collecting the IDs from every retryIDsError
+// found into one deduplicated, order-preserving slice. errors.As is not used
+// here because it stops at the first match; a joined tree can carry several.
+func extractRetryIDs(err error) []string {
+	if err == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var ids []string
+	var walk func(error)
+	walk = func(e error) {
+		if e == nil {
+			return
+		}
+		if rid, ok := e.(*retryIDsError); ok {
+			for _, id := range rid.ids {
+				if _, dup := seen[id]; !dup {
+					seen[id] = struct{}{}
+					ids = append(ids, id)
+				}
+			}
+		}
+		switch x := e.(type) {
+		case interface{ Unwrap() []error }:
+			for _, sub := range x.Unwrap() {
+				walk(sub)
+			}
+		case interface{ Unwrap() error }:
+			walk(x.Unwrap())
+		}
+	}
+	walk(err)
+	return ids
+}
 
 // deleteAccessMarkerTimeout bounds the detached recovery-marker write in
 // recordFailedDeleteAccess. It matches the replay-cursor Save timeout in Run
@@ -622,30 +755,35 @@ func partitionRecordIDs(ctx context.Context, entity string, event model.CDCEvent
 	return
 }
 
-// dispatchEntity normalizes and partitions event record IDs, runs each delete
-// ID through deleteHandler (logging failures), and returns the upsert IDs for
-// the caller to batch-process. Shared by all three entity top-level handlers.
+// dispatchEntity runs each ID in deleteIDs through deleteHandler (logging
+// failures). Callers partition the event's record IDs themselves (via
+// partitionRecordIDs) so a caller that needs the delete list before dispatch,
+// batching sibling lookups across it, can build deleteHandler from it first.
+// Shared by all three entity top-level handlers.
 //
 // Every delete failure is logged and the loop continues, so one bad ID never
-// costs the rest of the batch. Only errPurgeUnrecorded is also returned: a
-// purge that reached neither the broker nor the repair bucket has no repair
-// route left except redelivery, which requires the replay cursor to stop. Any
-// other failure stays logged-and-continue as before, so a repairable error
-// cannot stall the stream.
-func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event model.CDCEvent,
-	deleteHandler func(context.Context, string) error) ([]string, error) {
-	deleteIDs, upsertIDs := partitionRecordIDs(ctx, entity, event)
+// costs the rest of the batch. Only errPurgeUnrecorded and
+// errKeyContactRevokeIncomplete are also returned: a purge that reached
+// neither the broker nor the repair bucket, or a key_contact revoke left
+// unconfirmed for a record that is already gone, has no repair route left
+// except redelivery, which requires the replay cursor to stop. Any other
+// failure stays logged-and-continue as before, so a repairable error cannot
+// stall the stream.
+func (o *CDCConsumer) dispatchEntity(ctx context.Context, entity string, event model.CDCEvent, deleteIDs []string,
+	deleteHandler func(context.Context, string) error) error {
 	var unrecorded error
+	var retryIDs []string
 	for _, id := range deleteIDs {
 		if err := deleteHandler(ctx, id); err != nil {
 			slog.ErrorContext(ctx, "cdc: handler failed",
 				"entity", entity, "uid", id, "change_type", event.ChangeType, "error", err)
-			if errors.Is(err, errPurgeUnrecorded) {
+			if errors.Is(err, errPurgeUnrecorded) || errors.Is(err, errKeyContactRevokeIncomplete) {
 				unrecorded = errors.Join(unrecorded, err)
+				retryIDs = append(retryIDs, id)
 			}
 		}
 	}
-	return upsertIDs, unrecorded
+	return errors.Join(unrecorded, newRetryIDsError(retryIDs))
 }
 
 // logBatchFetchError logs a handler failure for each ID in a batch when the
@@ -662,7 +800,8 @@ func logBatchFetchError(ctx context.Context, entity string, ids []string, change
 func (o *CDCConsumer) handleAccount(ctx context.Context, event model.CDCEvent) error {
 	// The upserts run before the error is returned: a lost purge on one ID must
 	// not suppress unrelated work carried in the same event.
-	upsertIDs, err := o.dispatchEntity(ctx, "Account", event, o.handleAccountDelete)
+	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Account", event)
+	err := o.dispatchEntity(ctx, "Account", event, deleteIDs, o.handleAccountDelete)
 	if len(upsertIDs) > 0 {
 		err = errors.Join(err, o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType))
 	}
@@ -718,7 +857,9 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	// The second case is a live org, so this path withdraws no authorization.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
-	o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
+	// handleAccountAbsent always returns nil, so this can never produce a
+	// sentinel; captured anyway since the caller already has a return path.
+	absentErr := o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
 	// Include each org's ParentUID so we also have the parent's full child list for the
@@ -751,6 +892,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	if isRestore(changeType) && childMapErr != nil {
 		restoreErr = fmt.Errorf("read org hierarchy for restore: %w", childMapErr)
 	}
+	restoreErr = errors.Join(restoreErr, absentErr)
 	restorePublished := false
 	for _, org := range orgs {
 		if isRestore(changeType) {
@@ -802,7 +944,14 @@ func makeReturnedSet[T any](items []T, uid func(T) string, seenButFailed []strin
 // provided handler for index convergence. Callers pass the *Absent entry point
 // rather than the *Delete one: absence does not prove deletion, so this path
 // must not withdraw FGA tuples.
-func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, upsertIDs []string, returned map[string]struct{}, deleteHandler func(context.Context, string) error) {
+//
+// Every failure is logged and the loop continues, mirroring dispatchEntity's
+// policy. Only errors matching errPurgeUnrecorded, errRestoreIncomplete, or
+// errKeyContactRevokeIncomplete are also returned: those have no repair route
+// left except redelivery, which requires the replay cursor to stop.
+func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, upsertIDs []string, returned map[string]struct{}, deleteHandler func(context.Context, string) error) error {
+	var unrecorded error
+	var retryIDs []string
 	for _, id := range upsertIDs {
 		if _, found := returned[id]; !found {
 			slog.DebugContext(ctx, "cdc: absent from SOQL result, routing to delete for convergence",
@@ -810,9 +959,15 @@ func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, u
 			if delErr := deleteHandler(ctx, id); delErr != nil {
 				slog.ErrorContext(ctx, "cdc: handler failed",
 					"entity", entity, "uid", id, "change_type", "absent→delete", "error", delErr)
+				if errors.Is(delErr, errPurgeUnrecorded) || errors.Is(delErr, errRestoreIncomplete) ||
+					errors.Is(delErr, errKeyContactRevokeIncomplete) {
+					unrecorded = errors.Join(unrecorded, delErr)
+					retryIDs = append(retryIDs, id)
+				}
 			}
 		}
 	}
+	return errors.Join(unrecorded, newRetryIDsError(retryIDs))
 }
 
 // handleAccountDelete handles an Account genuinely deleted in Salesforce.
@@ -864,7 +1019,8 @@ func (o *CDCConsumer) publishAccountDeleteIndex(ctx context.Context, uid string)
 
 func (o *CDCConsumer) handleAsset(ctx context.Context, event model.CDCEvent) error {
 	// See handleAccount: upserts run before the error is returned.
-	upsertIDs, err := o.dispatchEntity(ctx, "Asset", event, o.handleAssetDelete)
+	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Asset", event)
+	err := o.dispatchEntity(ctx, "Asset", event, deleteIDs, o.handleAssetDelete)
 	if len(upsertIDs) > 0 {
 		err = errors.Join(err, o.handleAssetUpsertBatch(ctx, upsertIDs, event.ChangeType))
 	}
@@ -910,7 +1066,9 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	// which converges the index only, since the latter case is a live record.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(memberships, func(pm *model.ProjectMembership) string { return pm.UID }, convErrSFIDs)
-	o.handleAbsentAsDelete(ctx, "Asset", upsertIDs, returned, o.handleAssetAbsent)
+	// handleAssetAbsent always returns nil, so this can never produce a
+	// sentinel; captured anyway since the caller already has a return path.
+	absentErr := o.handleAbsentAsDelete(ctx, "Asset", upsertIDs, returned, o.handleAssetAbsent)
 
 	action := indexerConstants.ActionUpdated
 	if changeType == model.CDCChangeCreate {
@@ -939,7 +1097,7 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		}
 	}
 
-	var restoreErr error
+	restoreErr := absentErr
 	restorePublished := false
 	for _, pm := range memberships {
 		if isRestore(changeType) {
@@ -1101,6 +1259,11 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 	restored := 0
 	published := false
 	var restoreErr error
+	// contacts is already every key contact on this membership, so the
+	// sibling-check lister costs no extra Salesforce/cache read here. Another
+	// membership (a superseded pair) is uncovered and falls back to a live read.
+	lister := sliceSiblingLister(contacts, o.keyContactsByMembership, o.userReader)
+	live := siblingListerFor(o.keyContactsByMembership, o.userReader)
 	for _, contact := range contacts {
 		if contact.Username == "" && contact.Email != "" {
 			if o.userReader == nil {
@@ -1120,10 +1283,12 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 				contact.Username = username
 			}
 		}
-		if contact.Username == "" {
+		if contact.Username == "" && !strings.EqualFold(contact.Status, constants.RoleStatusInactive) {
+			// No put can be published without an LFID. An Inactive contact
+			// still goes through: its revoke addresses the recorded pair.
 			continue
 		}
-		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact)
+		contactPublished, contactErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, contact, lister, live)
 		published = published || contactPublished
 		if contactErr != nil {
 			restoreErr = errors.Join(restoreErr, contactErr)
@@ -1177,23 +1342,35 @@ func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
 
 func (o *CDCConsumer) handleProjectRole(ctx context.Context, event model.CDCEvent) error {
 	// See handleAccount: upserts run before the error is returned. This entity
-	// publishes no delete_access, so the error is always nil today; returning it
-	// keeps the three handlers uniform rather than silently diverging.
-	upsertIDs, err := o.dispatchEntity(ctx, "Project_Role__c", event, o.handleProjectRoleDelete)
+	// publishes no delete_access; the returned error is non-nil only for an
+	// unconfirmed key_contact revoke (errKeyContactRevokeIncomplete).
+	//
+	// The delete IDs are batched into one deleteHandler up front so a
+	// multi-record delete event shares a single sibling fetch across every
+	// referenced membership, instead of one Salesforce read per deleted
+	// record (projectRoleDeleteBatcher).
+	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Project_Role__c", event)
+	deleteHandler := o.projectRoleDeleteBatcher(ctx, deleteIDs)
+	dispatchErr := o.dispatchEntity(ctx, "Project_Role__c", event, deleteIDs, deleteHandler)
+	var upsertBatchErr error
 	if len(upsertIDs) > 0 {
-		o.handleProjectRoleUpsertBatch(ctx, upsertIDs, event.ChangeType)
+		upsertBatchErr = o.handleProjectRoleUpsertBatch(ctx, upsertIDs, event.ChangeType)
 	}
-	return err
+	return errors.Join(dispatchErr, upsertBatchErr)
 }
 
-func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) {
+// handleProjectRoleUpsertBatch returns a non-nil error when a key_contact
+// revoke could not be confirmed, on either the absent-from-SOQL path (via
+// handleAbsentAsDelete) or an Inactive contact's revoke/drain/transfer/flush
+// in processKeyContact, so the replay cursor holds for redelivery.
+func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) error {
 	if o.keyContactBatch == nil {
 		slog.WarnContext(ctx, "cdc: keyContactBatch reader not wired — skipping Project_Role__c upsert; use /admin/reindex to repair",
 			"record_count", len(upsertIDs), "publish_failed_for_backfill_repair", true)
-		return
+		return nil
 	}
 	if o.quotaExceeded(ctx, "Project_Role__c", upsertIDs) {
-		return
+		return nil
 	}
 
 	for _, id := range upsertIDs {
@@ -1206,41 +1383,82 @@ func (o *CDCConsumer) handleProjectRoleUpsertBatch(ctx context.Context, upsertID
 	contacts, convErrSFIDs, err := o.keyContactBatch.FetchKeyContactsBySFIDs(ctx, upsertIDs)
 	if err != nil {
 		logBatchFetchError(ctx, "Project_Role__c", upsertIDs, changeType, err)
-		return
+		return nil
 	}
 
 	// Build a set of returned UIDs to detect absent records. SFIDs that were
 	// IDs absent from the SOQL result are soft-deleted — route to delete.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(contacts, func(kc *model.KeyContact) string { return kc.UID }, convErrSFIDs)
-	o.handleAbsentAsDelete(ctx, "Project_Role__c", upsertIDs, returned, o.handleProjectRoleDelete)
+	absentIDs := make([]string, 0, len(upsertIDs)-len(returned))
+	for _, id := range upsertIDs {
+		if _, found := returned[id]; !found {
+			absentIDs = append(absentIDs, id)
+		}
+	}
+	// Same batching as the genuine-delete path: one sibling fetch shared
+	// across every membership referenced by the absent IDs' grant entries.
+	absentDeleteHandler := o.projectRoleDeleteBatcher(ctx, absentIDs)
+	absentErr := o.handleAbsentAsDelete(ctx, "Project_Role__c", upsertIDs, returned, absentDeleteHandler)
 
 	action := indexerConstants.ActionUpdated
 	if changeType == model.CDCChangeCreate {
 		action = indexerConstants.ActionCreated
 	}
 
+	// One prefetch serves every Inactive contact's sibling check on this page,
+	// instead of a per-contact Salesforce query.
+	lister := batchedSiblingLister(ctx, o.keyContactsByMembership, o.userReader, contacts)
+	var contactErr error
+	var retryIDs []string
 	for _, kc := range contacts {
-		o.processKeyContact(ctx, kc, action)
+		// Keep processing the rest of the batch: one contact's revoke failure
+		// must not block the others from publishing.
+		if err := o.processKeyContact(ctx, kc, action, lister); err != nil {
+			slog.ErrorContext(ctx, "cdc: handler failed",
+				"entity", "Project_Role__c", "uid", kc.UID, "change_type", changeType, "error", err)
+			contactErr = errors.Join(contactErr, err)
+			if errors.Is(err, errKeyContactRevokeIncomplete) {
+				retryIDs = append(retryIDs, kc.UID)
+			}
+		}
 	}
+	contactErr = errors.Join(contactErr, newRetryIDsError(retryIDs))
 
 	slog.InfoContext(ctx, "cdc: project_role batch published",
 		"upsert_count", len(contacts),
 		"absent_delete_count", len(upsertIDs)-len(returned))
+	return errors.Join(absentErr, contactErr)
 }
 
 // processKeyContact handles LFID resolution, publish, and silent org-dashboard
 // provisioning for a single key contact within a CDC upsert batch.
-func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContact, action indexerConstants.MessageAction) {
+//
+// It returns a non-nil error, wrapped to match errKeyContactRevokeIncomplete,
+// only when kc.Status is Inactive and its revoke, drain, durable-ownership
+// transfer, or flush failed: the Salesforce record is still live and none of
+// those failures self-heal on a later touch, unlike an active-path grant
+// recording failure, which stays best-effort logged as before.
+func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContact, action indexerConstants.MessageAction, lister membershipKeyContactLister) error {
+	// A live lister, not the batched one: an un-prefetched membership would
+	// read as empty siblings and fake certainty. Also passed as the post-remove
+	// recheck below, so a different-UID regrant racing the batched scan is caught.
+	live := siblingListerFor(o.keyContactsByMembership, o.userReader)
+
 	// Attempt LFID resolution when the contact has no stored username. CDC is a
 	// passive sync and must never send emails — provisioning is always silent.
+	var revokeErr error
 	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
 		if username, usernameErr := o.userReader.UsernameByEmail(ctx, kc.Email); usernameErr != nil {
 			if pkgerrors.IsNotFound(usernameErr) {
 				// A definitive miss: the email no longer resolves to any registered
 				// account (e.g. a rename or deregistration since the last time this
 				// contact was granted). Revoke any grant still recorded for it.
-				revokeKeyContactGrantIfUnregistered(ctx, o.publisher, o.grantIndex, kc.UID)
+				// Wrapped so a failure holds the cursor and the ID is retried.
+				if err := revokeKeyContactGrantIfNoLongerLive(ctx, o.publisher, o.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered); err != nil {
+					revokeErr = fmt.Errorf("revoke key_contact grant for unregistered email %s: %w",
+						kc.UID, errors.Join(err, errKeyContactRevokeIncomplete))
+				}
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
 				// leave Username empty and any existing grant untouched.
@@ -1265,13 +1483,31 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 			"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 	}
 
-	// PublishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
-	PublishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc)
+	// publishKeyContactFGA only needs Username + MembershipUID, not ProjectUID.
+	// The error-returning form is used, not the discarding PublishKeyContactFGA
+	// wrapper, so an Inactive contact's revoke failure can hold the cursor.
+	_, pubErr := publishKeyContactFGA(ctx, o.publisher, o.grantIndex, kc, lister, live)
+	if pubErr != nil {
+		if strings.EqualFold(kc.Status, constants.RoleStatusInactive) {
+			pubErr = fmt.Errorf("publish key_contact FGA for inactive contact %s: %w",
+				kc.UID, errors.Join(pubErr, errKeyContactRevokeIncomplete))
+		} else {
+			// Active-path failure (e.g. grant recording after a successful
+			// put): repairable by the next CDC event or /admin/reindex, so it
+			// stays best-effort logged rather than holding the cursor.
+			slog.WarnContext(ctx, "cdc: key_contact FGA publish failed (best-effort)",
+				"uid", kc.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
+			pubErr = nil
+		}
+	}
 
-	// Provision org-dashboard access silently for registered contacts when the
-	// indexer path ran (project_uid resolved). kc.Username is non-empty only when
-	// UsernameByEmail resolved a trusted LFID — unregistered contacts remain pending.
-	if projectUIDResolved && kc.Username != "" && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
+	inactive := strings.EqualFold(kc.Status, constants.RoleStatusInactive)
+
+	// Provision org-dashboard access silently for registered, non-Inactive
+	// contacts when the indexer path ran (project_uid resolved). kc.Username is
+	// non-empty only when UsernameByEmail resolved a trusted LFID, unregistered
+	// contacts remain pending.
+	if projectUIDResolved && kc.Username != "" && !inactive && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
 		if _, provErr := o.orgSettings.AddPrincipal(ctx, B2BOrgSettingsAddPrincipal{
 			OrgUID:               kc.B2BOrgUID,
 			Email:                kc.Email,
@@ -1282,10 +1518,77 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 			slog.WarnContext(ctx, "cdc: key contact org-dashboard provision failed (best-effort)",
 				"uid", kc.UID, "error", provErr)
 		}
+	} else if inactive && o.orgSettings != nil && kc.B2BOrgUID != "" && kc.Email != "" {
+		// Reconcile using remaining active siblings instead of re-asserting
+		// access for a contact whose key_contact tuple was just revoked.
+		// Best-effort: derived access, repairable, never holds the cursor.
+		reconcileOrgDashboardAccess(ctx, o.orgSettings, o.storage, kc)
+	}
+
+	return errors.Join(pubErr, revokeErr)
+}
+
+// keyContactGrantLookup carries one grant-index read's result, captured once
+// per deleted UID by projectRoleDeleteBatcher's pre-pass so the per-record
+// delete handler below never re-reads the same entry.
+type keyContactGrantLookup struct {
+	grant port.KeyContactGrant
+	found bool
+	err   error
+}
+
+// projectRoleDeleteBatcher builds one deleteHandler for the whole batch of
+// key_contact UIDs in ids: it reads each UID's grant-index entry once (a
+// local KV read, not the Salesforce query this exists to batch), collects
+// every membership referenced by those entries (a live pair's own membership
+// and any PendingRevoke marker's) and fetches all of their siblings in a
+// single Salesforce call, instead of the one-fetch-per-record
+// cost siblingListerFor would otherwise pay for each deleted contact. A
+// single-ID delete event runs the same path with a batch of one.
+//
+// The returned lister is for the sibling SCAN only; recheck stays a live,
+// per-record lister built inside handleProjectRoleDelete, since recheck only
+// runs after a remove actually publishes and that per-remove live read is
+// the accepted budget.
+//
+// The prefetch consults the quota guard before fetching: under quota pressure
+// every scan reads as quota-skipped (uncertain), so unsettled deletes hold
+// the replay cursor for redelivery instead of consuming Salesforce quota.
+func (o *CDCConsumer) projectRoleDeleteBatcher(ctx context.Context, ids []string) func(context.Context, string) error {
+	lookups := make(map[string]keyContactGrantLookup, len(ids))
+	memberships := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		grant, found, err := o.lookupKeyContactGrant(ctx, id)
+		lookups[id] = keyContactGrantLookup{grant: grant, found: found, err: err}
+		if err != nil || !found {
+			continue
+		}
+		if grant.MembershipUID != "" {
+			memberships[grant.MembershipUID] = struct{}{}
+		}
+		if grant.PendingRevoke != nil && grant.PendingRevoke.MembershipUID != "" {
+			memberships[grant.PendingRevoke.MembershipUID] = struct{}{}
+		}
+	}
+	var lister membershipKeyContactLister
+	if exceeded, snap := o.quotaGuardExceeded(ctx, "Project_Role__c"); exceeded && len(memberships) > 0 {
+		// Scans read as quota-skipped: uncertain, never falsely sibling-free,
+		// so unsettled deletes hold the replay cursor instead of spending quota.
+		slog.WarnContext(ctx, "cdc: Salesforce API quota threshold reached: skipping delete sibling prefetch",
+			"membership_count", len(memberships),
+			"api_usage_current", snap.Current,
+			"api_usage_limit", snap.Limit,
+			"threshold", o.quotaSkipThreshold)
+		lister = failedKeyContactLister{err: errQuotaGuardSkipped}
+	} else {
+		lister = batchedSiblingListerForMemberships(ctx, o.keyContactsByMembership, o.userReader, memberships)
+	}
+	return func(ctx context.Context, id string) error {
+		return o.handleProjectRoleDelete(ctx, id, lookups[id], lister)
 	}
 }
 
-func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) error {
+func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string, lookup keyContactGrantLookup, lister membershipKeyContactLister) error {
 	if err := o.cacheInvalidator.InvalidateKeyContact(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: key_contact cache invalidation failed on delete",
 			"uid", uid, "error", err)
@@ -1299,48 +1602,212 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 	// The CDC event carries only the key contact's own SFID and the Salesforce
 	// record is already gone, so the grant index is the only place the membership
 	// object and granted username can be recovered from.
-	grant, indexed := o.lookupKeyContactGrant(ctx, uid)
-	removeMsg := BuildKeyContactFGARemoveMessage(grant.MembershipUID, grant.Username)
-	if !indexed {
+	grant, found, lookupErr := lookup.grant, lookup.found, lookup.err
+	if lookupErr != nil {
+		// Retries exhausted: the index may still hold the exact address
+		// needed to revoke this grant, but the read itself failed. Hold the
+		// replay cursor so redelivery retries the lookup.
+		return fmt.Errorf("read key_contact grant index for %s: %w",
+			uid, errors.Join(lookupErr, errKeyContactRevokeIncomplete))
+	}
+	if !found || ((grant.MembershipUID == "" || grant.Username == "") && grant.PendingRevoke == nil) {
 		// Pre-index contact, or a grant that was never recorded. Retained for
 		// parity with the behaviour that predates the index, though fga-sync
 		// rejects a remove with an empty username without cleaning anything up:
 		// this contact's grant, if any, is already dangling either way.
-		removeMsg = BuildKeyContactFGARemoveMessage(uid, "")
+		removeMsg := BuildKeyContactFGARemoveMessage(uid, "")
 		slog.WarnContext(ctx, "cdc: key_contact delete has no recorded grant — revoke cannot be addressed",
 			"uid", uid, "fga_revoke_failed_dangling_tuple", true)
-	}
-
-	if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, removeMsg); err != nil {
-		// fga_revoke_failed_dangling_tuple=true signals a dangling FGA tuple:
-		// the key_contact was deleted in Salesforce but the FGA relation was not
-		// revoked. Unlike publish_failed_for_backfill_repair, this cannot be
-		// recovered by /admin/reindex — requires a targeted FGA sync or
-		// re-sending the remove message manually.
-		slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke failed — dangling tuple requires manual cleanup",
-			"uid", uid, "error", err, "fga_revoke_failed_dangling_tuple", true)
-		// Keep the index entry: it is the only record of what still needs
-		// revoking, and the contact is gone so nothing will rebuild it.
+		if err := o.publisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, removeMsg); err != nil {
+			// fga_revoke_failed_dangling_tuple=true signals a dangling FGA tuple:
+			// the key_contact was deleted in Salesforce but the FGA relation was not
+			// revoked. Unlike publish_failed_for_backfill_repair, this cannot be
+			// recovered by /admin/reindex — requires a targeted FGA sync or
+			// re-sending the remove message manually.
+			slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke failed — dangling tuple requires manual cleanup",
+				"uid", uid, "error", err, "fga_revoke_failed_dangling_tuple", true)
+		}
 		return nil
 	}
 
-	// Access only hands the revoke to the local NATS connection; it does not
-	// confirm the broker received it. Flush before clearing the index entry
-	// below, the same as the API delete path: without it, a crash or
-	// disconnect in the window between Access and actual broker delivery
-	// loses the member_remove while this call has already erased the only
-	// {membership_uid, username} record needed to retry it — and unlike a
-	// live contact, a deleted one gets no other chance to.
-	if indexed {
-		if flushErr := o.publisher.Flush(ctx); flushErr != nil {
-			slog.ErrorContext(ctx, "cdc: key_contact delete FGA revoke flush failed — delivery indeterminate, keeping index entry",
-				"uid", uid, "error", flushErr, "fga_revoke_failed_dangling_tuple", true)
+	// recheck must be LIVE, never the batched scan lister: it only runs after
+	// a remove actually publishes, so one live read per remove stays within
+	// the accepted per-record budget even though the scan above is batched.
+	// Quota-guarded so a multi-ID delete event cannot bypass the same
+	// Salesforce budget the upsert path already respects.
+	live := o.quotaGuardedLiveSiblingLister()
+
+	// Marker-only entry: the live pair was already revoked and cleared, and
+	// only the PendingRevoke marker for a superseded pair remains.
+	if grant.MembershipUID == "" || grant.Username == "" {
+		return o.revokeKeyContactMarkerOnDelete(ctx, uid, grant, lister, live)
+	}
+
+	// The record is already gone in Salesforce, so the stored pair's email
+	// cannot be recovered: justification runs by resolution alone. The choke
+	// point flushes before the entry is cleared, the same as the API delete.
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
+		membershipUID: grant.MembershipUID,
+		username:      grant.Username,
+		excludeUID:    uid,
+		reason:        "key contact deleted in Salesforce",
+		flush:         true,
+		recheck:       live,
+	})
+	if outcome == revokeUncertain || outcome == revokeFailed {
+		// Keep the index entry: it is the only record of what still needs
+		// revoking, and the contact is gone so nothing will rebuild it. The
+		// sentinel holds the replay cursor so redelivery retries this revoke.
+		return fmt.Errorf("revoke key_contact grant for %s: %w",
+			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
+	}
+	// A live sibling justified the pair per the BATCHED snapshot scan above,
+	// but that snapshot can be stale (the sibling may have gone Inactive and
+	// completed its own revoke since the scan ran): revalidate against the
+	// LIVE lister before trusting it, and revoke instead if the snapshot no
+	// longer holds.
+	if outcome == revokeUnneeded && justifiedBy != nil {
+		if err := o.revalidateJustifiedKeyContactPair(ctx, uid, grant.MembershipUID, grant.Username, live,
+			"key contact deleted in Salesforce"); err != nil {
+			// A failed transfer leaves the entry keyed by the just-deleted UID,
+			// which nothing else will ever revisit: hold the replay cursor.
+			return fmt.Errorf("revalidate key_contact justified pair for %s: %w",
+				uid, errors.Join(err, errKeyContactRevokeIncomplete))
+		}
+	}
+
+	// The live pair is settled. A PendingRevoke marker for a superseded pair
+	// must be drained too before the entry can be deleted outright.
+	if grant.PendingRevoke != nil {
+		return o.drainKeyContactMarkerAndDelete(ctx, uid, grant, lister, live)
+	}
+	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
+			"uid", uid, "error", err)
+	}
+	return nil
+}
+
+// revalidateJustifiedKeyContactPair re-confirms, against the LIVE lister,
+// that {membershipUID, username} is still justified before it is reasserted
+// and its durable address transferred. The caller's own scan lister for this
+// pair was the batched CDC snapshot, which can be stale: the sibling may have
+// gone Inactive and completed its own revoke since the scan ran. When the
+// live lister confirms a sibling, this reasserts and transfers ownership to
+// it exactly as the caller would have. When it does not, the snapshot was
+// stale: this runs the revoke path instead (live lister as both scan and
+// recheck, flushed), retaining the original entry's pair as the outcome.
+//
+// A nil error means the pair was settled, either way, and the caller's own
+// entry may be cleared. A non-nil error means it must be retained and the
+// replay cursor held.
+func (o *CDCConsumer) revalidateJustifiedKeyContactPair(ctx context.Context, uid, membershipUID, username string, live membershipKeyContactLister, reason string) error {
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, live, keyContactPairRevoke{
+		membershipUID: membershipUID,
+		username:      username,
+		excludeUID:    uid,
+		reason:        reason,
+		flush:         true,
+		recheck:       live,
+	})
+	switch outcome {
+	case revokeUncertain, revokeFailed:
+		return revokeErr
+	case revokeUnneeded:
+		if justifiedBy == nil {
 			return nil
 		}
-		if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
-			slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
-				"uid", uid, "error", err)
+		return o.settleJustifiedKeyContactPair(ctx, uid, membershipUID, username, justifiedBy)
+	default:
+		// revokePublished: the pair proved unjustified live and was revoked.
+		return nil
+	}
+}
+
+// settleJustifiedKeyContactPair reasserts a live-confirmed pair before its
+// durable address transfers to sib, so a prior unconfirmed remove is
+// repaired first. A non-nil error means the caller's entry must be retained.
+func (o *CDCConsumer) settleJustifiedKeyContactPair(ctx context.Context, uid, membershipUID, username string, sib *model.KeyContact) error {
+	if err := reassertKeyContactPendingRevokePair(ctx, o.publisher, uid, membershipUID, username); err != nil {
+		return err
+	}
+	if !pairDurablyOwned(ctx, o.grantIndex, sib, membershipUID, username) {
+		return fmt.Errorf("transfer durable revoke address for key_contact %s", uid)
+	}
+	return nil
+}
+
+// revokeKeyContactMarkerOnDelete handles a CDC delete for an index entry
+// whose live pair was already revoked and cleared, leaving only a
+// PendingRevoke marker for a superseded pair. It revokes that pending pair
+// using the marker's own membership and username, then clears the entry.
+// lister serves the sibling scan (the batch-wide prefetch); recheck must be a
+// LIVE lister, mirroring handleProjectRoleDelete's own recheck.
+func (o *CDCConsumer) revokeKeyContactMarkerOnDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister, recheck membershipKeyContactLister) error {
+	marker := grant.PendingRevoke
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
+		membershipUID: marker.MembershipUID,
+		username:      marker.Username,
+		excludeUID:    uid,
+		reason:        "key contact deleted in Salesforce (pending revoke marker)",
+		flush:         true,
+		recheck:       recheck,
+	})
+	if outcome == revokeUncertain || outcome == revokeFailed {
+		return fmt.Errorf("revoke key_contact pending marker for %s: %w",
+			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
+	}
+	// justifiedBy came from the batched snapshot scan above: revalidate live
+	// before trusting it, same reasoning as handleProjectRoleDelete.
+	if outcome == revokeUnneeded && justifiedBy != nil {
+		if err := o.revalidateJustifiedKeyContactPair(ctx, uid, marker.MembershipUID, marker.Username, recheck,
+			"key contact deleted in Salesforce (pending revoke marker)"); err != nil {
+			return fmt.Errorf("revalidate key_contact pending marker for %s: %w",
+				uid, errors.Join(err, errKeyContactRevokeIncomplete))
 		}
+	}
+	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after marker revoke",
+			"uid", uid, "error", err)
+	}
+	return nil
+}
+
+// drainKeyContactMarkerAndDelete drains a PendingRevoke marker after the
+// entry's live pair was already revoked, then deletes the entry. If the
+// drain fails or is uncertain, the entry is rewritten with the live pair
+// cleared but the marker intact (mirroring clearRevokedGrant), preserving the
+// marker as a retry address rather than deleting the entry outright.
+// lister serves the sibling scan (the batch-wide prefetch); recheck must be a
+// LIVE lister, mirroring handleProjectRoleDelete's own recheck.
+func (o *CDCConsumer) drainKeyContactMarkerAndDelete(ctx context.Context, uid string, grant port.KeyContactGrant, lister, recheck membershipKeyContactLister) error {
+	marker := grant.PendingRevoke
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.publisher, lister, keyContactPairRevoke{
+		membershipUID: marker.MembershipUID,
+		username:      marker.Username,
+		excludeUID:    uid,
+		reason:        "key contact deleted in Salesforce (draining superseded marker)",
+		flush:         true,
+		recheck:       recheck,
+	})
+	drainFailed := outcome == revokeUncertain || outcome == revokeFailed
+	// justifiedBy came from the batched snapshot scan above: revalidate live
+	// before trusting it, same reasoning as handleProjectRoleDelete.
+	if !drainFailed && outcome == revokeUnneeded && justifiedBy != nil {
+		if err := o.revalidateJustifiedKeyContactPair(ctx, uid, marker.MembershipUID, marker.Username, recheck,
+			"key contact deleted in Salesforce (draining superseded marker)"); err != nil {
+			revokeErr = err
+			drainFailed = true
+		}
+	}
+	if drainFailed {
+		clearRevokedGrant(ctx, o.grantIndex, uid, grant)
+		return fmt.Errorf("drain key_contact pending marker for %s: %w",
+			uid, errors.Join(revokeErr, errKeyContactRevokeIncomplete))
+	}
+	if err := o.grantIndex.Delete(ctx, uid, grant.Revision); err != nil {
+		slog.WarnContext(ctx, "cdc: key_contact grant index cleanup failed after revoke",
+			"uid", uid, "error", err)
 	}
 	return nil
 }
@@ -1355,28 +1822,26 @@ func (o *CDCConsumer) handleProjectRoleDelete(ctx context.Context, uid string) e
 // ridden out must not be treated the same as "no grant was ever recorded."
 const maxGrantIndexReadAttempts = 3
 
-// lookupKeyContactGrant returns the grant recorded for uid. It reports false
-// when the index is not wired or holds no entry — both mean, correctly, that
-// the caller has no addressable grant to revoke. A read failure is retried
-// (see maxGrantIndexReadAttempts); only once retries are exhausted does it
-// also report false, logged distinctly from a genuine miss so it is
-// alertable as a fresh dangling tuple rather than the accepted pre-index gap.
-func (o *CDCConsumer) lookupKeyContactGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool) {
+// lookupKeyContactGrant returns the grant recorded for uid. found reports
+// whether an entry exists at all, even a marker-only one with an empty live
+// pair; the grant is returned raw, not blanked. err is non-nil only once
+// maxGrantIndexReadAttempts is exhausted, distinguishing a read failure
+// (the index may still hold the address needed to revoke this grant) from a
+// genuine miss, so the caller can hold the replay cursor instead of silently
+// falling back to an unaddressed revoke.
+func (o *CDCConsumer) lookupKeyContactGrant(ctx context.Context, uid string) (port.KeyContactGrant, bool, error) {
 	if o.grantIndex == nil {
-		return port.KeyContactGrant{}, false
+		return port.KeyContactGrant{}, false, nil
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxGrantIndexReadAttempts; attempt++ {
 		grant, found, err := o.grantIndex.Get(ctx, uid)
 		if err == nil {
-			if !found || grant.MembershipUID == "" || grant.Username == "" {
-				return port.KeyContactGrant{}, false
-			}
-			return grant, true
+			return grant, found, nil
 		}
 		lastErr = err
 	}
-	slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete after retries — falling back to unaddressed revoke",
+	slog.ErrorContext(ctx, "cdc: key_contact grant index read failed on delete after retries",
 		"uid", uid, "error", lastErr, "attempts", maxGrantIndexReadAttempts, "fga_revoke_failed_dangling_tuple", true)
-	return port.KeyContactGrant{}, false
+	return port.KeyContactGrant{}, false, lastErr
 }
