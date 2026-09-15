@@ -30,6 +30,13 @@ const (
 	userTuplePrefix      = "user:"
 )
 
+// maxReadTuplesResults caps the raw tuple count accepted from a fga-sync
+// read_tuples reply, ahead of the caller's post-dedup MaxMemberTierCandidates
+// check. Bounded today only by the 1 MB NATS max_payload; this is
+// defense-in-depth against a misbehaving trusted peer, not a real risk under
+// the current trust boundary.
+const maxReadTuplesResults = 1000
+
 // AccessCheckRPC provides NATS request/reply calls to the fga-sync service's
 // access-check API.
 type AccessCheckRPC struct {
@@ -91,7 +98,7 @@ func (r *AccessCheckRPC) MembershipUIDsForUser(ctx context.Context, username str
 // parseReadTuplesResponse parses the fga-sync read_tuples reply body. The
 // reverse index gates whose membership records get assembled, so every
 // inconclusive reply (absent/empty body, malformed JSON, or an error reported
-// by fga-sync, even one accompanied by partial results) is ServiceUnavailable
+// by fga-sync, even one accompanied by partial results) is ServiceUnavailable.
 func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, errs.NewServiceUnavailable("empty reply from fga-sync read_tuples RPC")
@@ -110,6 +117,9 @@ func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
 	// or null field is a malformed reply, not "no memberships".
 	if resp.Results == nil {
 		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reply omitted results")
+	}
+	if len(resp.Results) > maxReadTuplesResults {
+		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reply exceeded result cap")
 	}
 
 	uids := make([]string, 0, len(resp.Results))
