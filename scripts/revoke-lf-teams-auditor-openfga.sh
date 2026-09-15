@@ -22,10 +22,9 @@
 # place, export only that team's name.
 #
 # Prerequisites:
-#   Stop the service emitting the grants FIRST — set LF_STAFF_TEAM_NAME to ""
-#   (or revert the code) and roll out, on the API and the CDC consumer both.
-#   This does not apply to a team the service never emits, such as a contractor
-#   team left over from earlier testing. Revoking while the service is emitting
+#   Stop the service emitting the grants FIRST — set LF_STAFF_TEAM_NAME and
+#   LF_CONTRACTOR_TEAM_NAME to "" (or revert the code) and roll out, on the API
+#   and the CDC consumer both. Revoking while the service is emitting
 #   leaves a race this script cannot win: any org written during or after the
 #   run re-acquires the tuple, and fga-sync will not reap it afterwards because
 #   the subject begins with `team:`. Order matters more here than usual because
@@ -152,6 +151,6 @@ if [[ "$DRY_RUN" == true ]]; then
 else
 	echo "Deleted $TOTAL_TARGETS tuples. Re-run with --dry-run to confirm zero remaining."
 	echo ""
-	echo "Reminder: revert or reconfigure the service too (LF_STAFF_TEAM_NAME"
+	echo "Reminder: revert or reconfigure the service too (both team variables"
 	echo "set to \"\"), or the next write re-grants them."
 fi
