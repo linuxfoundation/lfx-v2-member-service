@@ -541,8 +541,12 @@ func GlobalOrgAdminTeamName() string {
 //
 // Both LF teams are read because LFXV2-3071 ratified parity: lf-contractor
 // holds the same auditor tuple on the tenant root project as lf-staff, so the
-// per-org grant is the same for both populations. A third team is one more
-// entry in this list plus its chart value; message construction is untouched.
+// per-org grant is the same for both populations. Message construction is
+// list-driven and untouched by the team count, but the *name* is enumerated at
+// every boundary, so a third team touches all of: the values.yaml key, both
+// Deployment templates (LF_*_TEAM_NAME env), the envVars list below, both
+// scripts' fga_team_names arguments (grant and revoke), the runbook's kubectl
+// exports, and the CLAUDE.md env tables.
 func B2BOrgAuditorTeamNames() []string {
 	envVars := []string{"LF_STAFF_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"}
 	names := make([]string, 0, len(envVars))

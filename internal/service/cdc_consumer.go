@@ -982,9 +982,10 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 	o.publishAccountDeleteIndex(ctx, uid)
 
 	// A surviving "team:" subject is expected rather than a failure. fga-sync
-	// declines to delete team-subject tuples, so a deleted org keeps the staff
-	// reader grant from LFXV2-2937. It confers access to an object that no
-	// longer resolves, so it is inert.
+	// declines to delete team-subject tuples, so a deleted org keeps the
+	// configured LF-team reader grants (staff, LFXV2-2937; contractor,
+	// LFXV2-3071). They confer access to an object that no longer resolves,
+	// so they are inert.
 	// Propagated rather than swallowed: MemberPublisher's delete policy (see
 	// port.MemberPublisher) requires this, and /admin/reindex cannot repair a
 	// dropped purge anyway — a genuinely deleted record reindexes as

@@ -19,7 +19,7 @@ Rollout order:
 
 Plan step 1 deliberately. Reverting the deploy or clearing the team variables afterwards stops further writes but removes nothing already written — that needs the revoke script.
 
-**Staff/contractor parity.** [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) ratified parity: contractors are a population, not a role — `lf-contractor` already holds `auditor` on the tenant root project, the same root tuple `lf-staff` holds, so contractors read every project surface today. Both teams are granted here by default; a future third team is one more chart value plus one more entry in `B2BOrgAuditorTeamNames`.
+**Staff/contractor parity.** [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) ratified parity: contractors are a population, not a role — `lf-contractor` already holds `auditor` on the tenant root project, the same root tuple `lf-staff` holds, so contractors read every project surface today. Both teams are granted here by default. A future third team is not a one-line change: it needs the `values.yaml` key, an `LF_*_TEAM_NAME` env entry in **both** Deployment templates, the env list in `B2BOrgAuditorTeamNames`, the `fga_team_names` arguments of **both** the grant and revoke scripts, the `kubectl` exports in this runbook, and the CLAUDE.md env tables — message construction alone is team-count-agnostic.
 
 See [fga-contract.md](./fga-contract.md) for the message-level contract and [LFXV2-2937](https://linuxfoundation.atlassian.net/browse/LFXV2-2937) for the change itself.
 
@@ -36,7 +36,7 @@ Workspaces and workspace-projects have no `auditor` REST route at all (every wor
 
 Note that `GET /b2b_orgs/{uid}/settings` exposes **pending-invite email addresses**. That route was gated on `auditor` rather than `writer` on the premise that auditors are per-org trusted principals; the blanket grant changes that premise. The `b2b_org_settings` index document carries the same `auditor` access check, so the roster is reachable through search as well as through the route — any narrowing would have to cover both.
 
-This was reviewed and accepted rather than narrowed. [LFXV2-3026](https://linuxfoundation.atlassian.net/browse/LFXV2-3026) is Org Dash / PCC parity, and staff already reach this roster in legacy, so the grant migrates an existing disclosure rather than creating one. Narrowing the route to `writer` would also strip roster read from the per-org auditors who hold it today.
+This was reviewed and accepted rather than narrowed. [LFXV2-3026](https://linuxfoundation.atlassian.net/browse/LFXV2-3026) is Org Dash / PCC parity, and both LF teams already reach this roster in legacy (they hold the same `auditor` tuple on the tenant root project), so the grant migrates an existing disclosure rather than creating one. Narrowing the route to `writer` would also strip roster read from the per-org auditors who hold it today.
 
 No write access anywhere. The `[user, team#member]` branch of `b2b_org.auditor` feeds nothing upward, unlike `global_org_admin`, which flows into `writer`.
 
@@ -130,7 +130,7 @@ Deletes only tuples whose subject is exactly one of the configured teams; per-us
 ## Rollout order
 
 1. Deploy to dev, confirm new orgs get the grants.
-2. Deploy to prod. From this point CDC upserts assert the grants for any org that changes.
+2. Deploy to prod — API and CDC consumer together. During a staggered rollout the two emitters assert different team sets, which converges: references for `team:` subjects are additive under the deployed fga-sync guard, and the older emitter revokes nothing. From this point CDC upserts assert the grants for any org that changes.
 3. Run the export, then the grant script's dry-run (with both team names exported from the deployment), then the live run.
 4. Re-run the dry-run; expect zero.
 5. Spot-check the cascade: pick an org with no per-user auditor, confirm a member of either LF team can `GET` it and the `project_membership` beneath it.
