@@ -115,8 +115,13 @@ func (r *ProjectRPC) request(ctx context.Context, subject, payload string) (stri
 }
 
 // parseProjectRPCReply decodes a raw project-service RPC reply body.
-// A JSON error envelope ({"error":"<code>",...}) is mapped to a typed error.
-// A plain success payload (UUID string, slug, etc.) is returned as-is.
+//
+// Classification:
+//   - JSON error envelope {"error":"not_found",...}   → errs.NotFound
+//   - JSON error envelope {"error":"<other>",...}     → errs.Unexpected
+//   - Empty or nil body                               → errs.Unexpected
+//     (transport/dispatch failure; confirmed absences arrive as {"error":"not_found"})
+//   - Plain non-empty string                          → success
 func parseProjectRPCReply(data []byte) (string, error) {
 	if code := projectServiceErrorCode(data); code != "" {
 		if code == "not_found" {
@@ -124,5 +129,12 @@ func parseProjectRPCReply(data []byte) (string, error) {
 		}
 		return "", errs.NewUnexpected("project-service error: "+code, nil)
 	}
-	return strings.TrimSpace(string(data)), nil
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		// An empty body is a transport/dispatch failure — project-service always
+		// returns {"error":"not_found"} for missing resources. An empty body
+		// cannot be treated as a confirmed absence.
+		return "", errs.NewUnexpected("project-service returned empty reply", nil)
+	}
+	return value, nil
 }

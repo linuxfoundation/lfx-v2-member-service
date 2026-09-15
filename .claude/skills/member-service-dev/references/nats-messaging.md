@@ -103,6 +103,19 @@ projectSlugToUIDSubject = "lfx.projects-api.slug_to_uid"
 Both are owned by `lfx-v2-project-service`. The member service consumes
 them only inside `ProjectResolver` to translate UID, slug, and SFID.
 
+### Project-service RPC reply contract
+
+Project-service replies use **two disjoint wire shapes**:
+
+| Shape | Meaning |
+| --- | --- |
+| Plain UTF-8 string (non-empty) | Success; value is the requested UID, slug, or name |
+| `{"error":"not_found",...}` JSON envelope | Resource does not exist → `errs.NotFound` |
+| `{"error":"<other code>",...}` JSON envelope | Service-side error → `errs.Unexpected` |
+| Empty body | Transport/dispatch failure → `errs.Unexpected` (project-service never returns empty for confirmed absences; it always sends the `not_found` envelope) |
+
+`parseProjectRPCReply` in `internal/infrastructure/nats/project_rpc.go` implements this classification. Callers **must not** map an empty reply value to `NotFound` — an empty body means the RPC round-trip failed, not that the resource is absent.
+
 The per-principal settings flows also resolve an email to an OIDC sub via
 the auth-service request/reply subject
 (`AuthEmailToSubLookupSubject = "lfx.auth-service.email_to_sub"` in

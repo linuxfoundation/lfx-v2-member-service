@@ -83,10 +83,27 @@ func TestParseProjectRPCReply(t *testing.T) {
 			},
 		},
 		{
-			name:      "empty body is an empty success (caller may handle)",
-			body:      []byte{},
-			wantValue: "",
-			wantErr:   func(t *testing.T, err error) { require.NoError(t, err) },
+			name: "empty body is Unexpected (transport failure, not NotFound)",
+			body: []byte{},
+			wantErr: func(t *testing.T, err error) {
+				require.Error(t, err,
+					"empty body must be an error — project-service always sends the not_found envelope for absent resources")
+				assert.False(t, pkgerrors.IsNotFound(err),
+					"empty body must NOT map to NotFound — it is an ambiguous transport failure")
+				var unexpected pkgerrors.Unexpected
+				assert.ErrorAs(t, err, &unexpected,
+					"empty body must map to Unexpected, got %v", err)
+			},
+		},
+		{
+			name: "nil body is Unexpected (transport failure, not NotFound)",
+			body: nil,
+			wantErr: func(t *testing.T, err error) {
+				require.Error(t, err)
+				assert.False(t, pkgerrors.IsNotFound(err))
+				var unexpected pkgerrors.Unexpected
+				assert.ErrorAs(t, err, &unexpected)
+			},
 		},
 	}
 
