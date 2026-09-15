@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -108,6 +109,38 @@ func TestBackfillRunner_TargetedKeyContact_BatchPath_Publishes(t *testing.T) {
 
 	assert.Equal(t, 1, batch.calls, "targeted KC reindex must issue exactly one batch fetch")
 	assert.Len(t, pub.indexerMessages, 1, "returned key_contact must be published")
+}
+
+func TestBackfillRunner_TargetedKeyContact_QuotaHigh_LiveRecheckStillRuns(t *testing.T) {
+	// Targeted mode is the bounded incident-repair tool and stays quota-exempt.
+	// An Inactive contact's revoke rechecks live siblings after the remove; a
+	// quota-guarded recheck would abort the revoke and strand the grant entry.
+	kc := &model.KeyContact{
+		UID: "a0J000000000009AAA", ProjectSlug: "proj", MembershipUID: "pm-9",
+		B2BOrgUID: "org-1", Username: "alice", Email: "alice@example.com", Status: "Inactive",
+	}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "proj"})
+
+	batch := &countingKeyContactBatchReader{contacts: []*model.KeyContact{kc}}
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		kc.UID: {MembershipUID: "pm-9", Username: "alice", Revision: 1},
+	}}
+	pub := &subjectCapturingPublisher{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithKeyContactBatchReader(batch),
+		svc.WithKeyContactGrantIndex(grants),
+		svc.WithRunnerKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
+		svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 99, Limit: 100}))
+
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
+		RunID: "r", Type: "key_contact", Items: []string{kc.UID},
+	}))
+
+	assert.True(t, pub.hasAccess(fgaconstants.GenericMemberRemoveSubject),
+		"the inactive contact's stale grant must publish member_remove despite high quota")
+	assert.Contains(t, grants.Deletes, kc.UID,
+		"the post-remove live recheck must run and clear the grant entry; a quota-guarded recheck leaves it stranded")
 }
 
 // ── Part B: backfill quota guard ─────────────────────────────────────────────

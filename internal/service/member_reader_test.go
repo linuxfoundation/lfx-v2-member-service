@@ -23,7 +23,7 @@ func TestMemberReaderOrchestrator_ListTiersForProject(t *testing.T) {
 	}{
 		{
 			name:      "list tiers for project with sample data",
-			projectID: "project-uid-1",
+			projectID: "22222222-2222-2222-2222-222222222222",
 			wantErr:   false,
 			wantCount: 1,
 		},
@@ -97,7 +97,7 @@ func TestMemberReaderOrchestrator_ListMembershipsForProject(t *testing.T) {
 	}{
 		{
 			name:      "list memberships for project with sample data",
-			projectID: "project-uid-1",
+			projectID: "22222222-2222-2222-2222-222222222222",
 			wantErr:   false,
 			wantCount: 1,
 		},

@@ -5,10 +5,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
-	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	indexerConstants "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
@@ -83,6 +83,10 @@ type keyContactWriterOrchestrator struct {
 	userReader              port.UserReader
 	orgSettings             OrgSettingsPrincipalWriter
 	grantIndex              port.KeyContactGrantIndex
+	// keyContactsByMembership lists sibling key contacts for the
+	// Inactive-revoke check via a fresh fetch, not the stale
+	// membership-group cache. Nil disables the sibling check.
+	keyContactsByMembership port.KeyContactsByMembershipReader
 }
 
 // KeyContactWriterOption configures a keyContactWriterOrchestrator.
@@ -90,6 +94,10 @@ type KeyContactWriterOption func(*keyContactWriterOrchestrator)
 
 func WithKCStorage(r port.MemberReader) KeyContactWriterOption {
 	return func(o *keyContactWriterOrchestrator) { o.storage = r }
+}
+
+func WithKCSiblingReader(r port.KeyContactsByMembershipReader) KeyContactWriterOption {
+	return func(o *keyContactWriterOrchestrator) { o.keyContactsByMembership = r }
 }
 
 func WithKCWriter(w port.KeyContactWriter) KeyContactWriterOption {
@@ -205,18 +213,51 @@ func (o *keyContactWriterOrchestrator) revokeOrDowngradeOrgDashboardRole(ctx con
 	if !o.orgDashboardReady(kc) || o.storage == nil {
 		return
 	}
-	contacts, err := o.storage.ListKeyContactsForOrg(ctx, kc.B2BOrgUID)
+	reconcileOrgDashboardAccess(ctx, o.orgSettings, o.storage, kc)
+}
+
+// orgKeyContactLister lists an org's key contacts for org-dashboard
+// reconciliation. Satisfied by port.MemberReader (API path) and any narrower
+// reader wired for the same purpose on the CDC path.
+type orgKeyContactLister interface {
+	ListKeyContactsForOrg(ctx context.Context, orgSFID string) ([]*model.KeyContact, error)
+}
+
+// reconcileOrgDashboardAccess reconciles org-dashboard access for a key
+// contact that no longer warrants its own provisioning (removed, email
+// changed, or turned Inactive). It scans all OTHER live key contacts for
+// kc.Email in the org (live: any status other than case-insensitive Inactive,
+// matching the key-contact status gate) and takes one of three actions:
+//
+//   - No remaining live contacts → RemovePrincipal (full revoke).
+//   - Remaining max role < departing role → ChangePrincipalRole to max remaining
+//     (downgrade; e.g. Voting Contact deleted while Billing Contact stays active).
+//   - Remaining max role ≥ departing role → no-op (access level unchanged).
+//
+// Fails safe: nil inputs or a scan error → skip rather than revoke prematurely.
+// ChangePrincipalRole NotFound → swallowed (contact never provisioned).
+// ChangePrincipalRole Conflict → swallowed (assertNotRemovingLastAdmin guard; access stays elevated).
+// Shared by the API writer orchestrator and the CDC consumer so both paths
+// reconcile identically; callers own any cursor/error-propagation semantics,
+// since this function itself only logs (best-effort).
+func reconcileOrgDashboardAccess(ctx context.Context, orgSettings OrgSettingsPrincipalWriter, lister orgKeyContactLister, kc *model.KeyContact) {
+	if orgSettings == nil || lister == nil || kc.B2BOrgUID == "" || kc.Email == "" {
+		return
+	}
+	contacts, err := lister.ListKeyContactsForOrg(ctx, kc.B2BOrgUID)
 	if err != nil {
 		slog.WarnContext(ctx, "key contact org scan failed; skipping dashboard action (best-effort)",
 			"org_uid", kc.B2BOrgUID, "error", err)
 		return
 	}
 
-	// Compute the highest org-dashboard role held by any OTHER active contact
-	// with the same email. Empty string means no remaining active contacts.
+	// Compute the highest org-dashboard role held by any OTHER live contact
+	// with the same email; live means not case-insensitively Inactive, the
+	// same semantics as the key-contact status gate. Empty string means no
+	// remaining live contacts.
 	maxRemainingRole := ""
 	for _, c := range contacts {
-		if c.UID == kc.UID || c.Status != constants.RoleStatusActive || !strings.EqualFold(c.Email, kc.Email) {
+		if c.UID == kc.UID || strings.EqualFold(c.Status, constants.RoleStatusInactive) || !strings.EqualFold(c.Email, kc.Email) {
 			continue
 		}
 		r := kcRoleToOrgRole(c.Role)
@@ -230,7 +271,7 @@ func (o *keyContactWriterOrchestrator) revokeOrDowngradeOrgDashboardRole(ctx con
 	switch {
 	case maxRemainingRole == "":
 		// No other active contacts — full revoke.
-		if _, err := o.orgSettings.RemovePrincipal(ctx, B2BOrgSettingsRemovePrincipal{
+		if _, err := orgSettings.RemovePrincipal(ctx, B2BOrgSettingsRemovePrincipal{
 			OrgUID: kc.B2BOrgUID, Email: kc.Email,
 		}); err != nil && !pkgerrors.IsNotFound(err) && !pkgerrors.IsConflict(err) {
 			slog.WarnContext(ctx, "key contact org-dashboard revoke failed (best-effort)",
@@ -242,7 +283,7 @@ func (o *keyContactWriterOrchestrator) revokeOrDowngradeOrgDashboardRole(ctx con
 		// NotFound: contact was never provisioned → no-op.
 		// Conflict: last-writer guard fired (org must keep ≥1 admin) → swallow,
 		// access stays elevated rather than stranding the org without an admin.
-		if _, err := o.orgSettings.ChangePrincipalRole(ctx, B2BOrgSettingsChangeRole{
+		if _, err := orgSettings.ChangePrincipalRole(ctx, B2BOrgSettingsChangeRole{
 			OrgUID: kc.B2BOrgUID, Email: kc.Email, InvitedAs: maxRemainingRole,
 		}); err != nil && !pkgerrors.IsNotFound(err) && !pkgerrors.IsConflict(err) {
 			slog.WarnContext(ctx, "key contact org-dashboard role downgrade failed (best-effort)",
@@ -309,15 +350,27 @@ func (o *keyContactWriterOrchestrator) Create(ctx context.Context, in KeyContact
 	var definitiveMiss bool
 	kc.Username, definitiveMiss = o.resolveUsernameForContact(ctx, "", kc.Email)
 	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionCreated)
-	PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, kc)
+	lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
+	PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, kc, lister, lister)
 	if definitiveMiss {
 		// The email never resolved to a registered account. There is nothing
 		// to revoke on a brand-new contact — no grant was ever published for
 		// it — but the index may still hold a stale entry from a prior,
-		// now-superseded contact at this membership+email pair.
-		revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, kc.UID)
+		// now-superseded contact at this membership+email pair. Best-effort:
+		// this new contact was created successfully regardless of this cleanup.
+		// Deliberate: a failed revoke self-heals on the record's next CDC
+		// touch, where processKeyContact holds the replay cursor until done.
+		_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, lister, kc.UID, kc.Username, "", reasonEmailUnregistered)
 	}
-	o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
+	// Status: coalesce to the input value since the mock echoes "" for a
+	// status it does not persist. An Inactive create must never provision.
+	status := kc.Status
+	if status == "" {
+		status = derefPtrStr(in.Status)
+	}
+	if !strings.EqualFold(status, constants.RoleStatusInactive) {
+		o.provisionOrgDashboardAccess(ctx, kc, in.SendInvite)
+	}
 
 	return kc, nil
 }
@@ -372,10 +425,15 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 	}
 
 	if emailChanging {
+		lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
+		// Role/Status: nil means no change; coalesce before the FGA publish so
+		// an unchanged Inactive contact cannot emit a member_put.
+		newKC.Role = derefOrStr(in.Role, current.Role)
+		newKC.Status = derefOrStr(in.Status, current.Status)
 		// Paired FGA: put new username first (avoid no-access window), then remove old.
 		newKC.Username, _ = o.resolveUsernameForContact(ctx, "", newKC.Email)
-		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
-		// This revoke is intentionally unconditional, even though
+		PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister, lister)
+		// This revoke is intentionally unconditional on the index, even though
 		// PublishKeyContactFGA's recordKeyContactGrant also revokes a superseded
 		// grant when the index already holds one — a duplicate member_remove is
 		// idempotent, but skipping this one is not safe. The index-driven revoke
@@ -387,29 +445,44 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 		// grant from live data (current.Username/current.Email) rather than from
 		// the index, so it is also the only one that reproduces the legacy
 		// auth0|-prefix fallback in resolveUsernameForContact — it must run
-		// regardless of whether the index-driven path also ran.
-		oldUsername, _ := o.resolveUsernameForContact(ctx, current.Username, current.Email)
+		// regardless of whether the index-driven path also ran. It is still
+		// skipped below when a live sibling on the same membership still
+		// holds the old email, since that pair remains justified.
+		oldUsername, oldMiss := o.resolveUsernameForContact(ctx, current.Username, current.Email)
 		if oldUsername != newKC.Username {
-			if pubErr := o.publishFGARemove(ctx, newKC.MembershipUID, oldUsername); pubErr != nil {
-				// Log at error severity (dangling permission), but do not propagate — the
-				// SF update already succeeded and returning an error would mislead callers.
-				// Not flushed either: this path accepts the loss it already accepts on a
-				// publish failure.
-				slog.ErrorContext(ctx, "key contact FGA remove publish failed on email change — dangling permission",
-					"uid", in.UID, "error", pubErr)
+			// On a definitive miss current.Email belongs to no account, so it
+			// cannot serve as direct proof that a sibling justifies oldUsername.
+			directEmail := current.Email
+			if oldMiss {
+				directEmail = ""
 			}
+			// Failures are logged by the choke point but not propagated: the SF
+			// update already succeeded, and this path accepts unflushed loss.
+			revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+				membershipUID: newKC.MembershipUID,
+				username:      oldUsername,
+				excludeUID:    newKC.UID,
+				email:         directEmail,
+				reason:        "email changed",
+				flush:         false,
+				recheck:       lister,
+			})
 		}
-		// Role: nil means no change — coalesce to the current value since the
-		// mock can't re-fetch from SF and returns "" for unchanged fields.
-		newKC.Role = derefOrStr(in.Role, current.Role)
-		o.provisionOrgDashboardAccess(ctx, newKC, in.SendInvite)
+		if strings.EqualFold(newKC.Status, constants.RoleStatusInactive) {
+			// The new email never had a principal provisioned for it, nothing
+			// more to do there. The old email is reconciled below regardless.
+		} else {
+			o.provisionOrgDashboardAccess(ctx, newKC, in.SendInvite)
+		}
 		o.revokeOrDowngradeOrgDashboardRole(ctx, current)
 	} else {
-		// Email/Role: nil input means unchanged — mock returns "" for nil fields; coalesce.
+		// Email/Role/Status: nil input means unchanged, mock returns "" for nil fields; coalesce.
 		if newKC.Email == "" {
 			newKC.Email = current.Email
 		}
 		newKC.Role = derefOrStr(in.Role, current.Role)
+		newKC.Status = derefOrStr(in.Status, current.Status)
+		lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
 		var definitiveMiss bool
 		newKC.Username, definitiveMiss = o.resolveUsernameForContact(ctx, current.Username, newKC.Email)
 		if definitiveMiss {
@@ -419,11 +492,32 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			// (see resolveUsernameForContact) — publishing it would reassert FGA
 			// access for an account just confirmed unregistered. Skip the put
 			// and revoke any grant still recorded for this contact instead.
-			revokeKeyContactGrantIfUnregistered(ctx, o.memberPublisher, o.grantIndex, newKC.UID)
+			// Not propagated, matching the paired-FGA revoke above: the SF
+			// update already succeeded, and this path accepts unflushed loss.
+			// Deliberate: a failed revoke self-heals on the record's next CDC
+			// touch, where processKeyContact holds the replay cursor until done.
+			_ = revokeKeyContactGrantIfNoLongerLive(ctx, o.memberPublisher, o.grantIndex, lister, lister, newKC.UID, newKC.Username, "", reasonEmailUnregistered)
 		} else {
-			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC)
+			PublishKeyContactFGA(ctx, o.memberPublisher, o.grantIndex, newKC, lister, lister)
 		}
-		if in.Role != nil && *in.Role != current.Role {
+
+		becomingInactive := strings.EqualFold(newKC.Status, constants.RoleStatusInactive) &&
+			!strings.EqualFold(current.Status, constants.RoleStatusInactive)
+		becomingActive := !strings.EqualFold(newKC.Status, constants.RoleStatusInactive) &&
+			strings.EqualFold(current.Status, constants.RoleStatusInactive)
+		switch {
+		case becomingInactive:
+			// The tuple was just withdrawn; reconcile using remaining active siblings.
+			o.revokeOrDowngradeOrgDashboardRole(ctx, newKC)
+		case strings.EqualFold(newKC.Status, constants.RoleStatusInactive):
+			// Already Inactive: no principal exists to remap.
+		case becomingActive:
+			// Reactivation: restore the principal removed at deactivation. On
+			// Conflict (principal survived, maybe downgraded) the remap below
+			// raises it back; a remap alone would swallow NotFound.
+			o.provisionOrgDashboardAccess(ctx, newKC, in.SendInvite)
+			o.remapOrgDashboardRole(ctx, newKC)
+		case in.Role != nil && *in.Role != current.Role:
 			o.remapOrgDashboardRole(ctx, newKC)
 		}
 	}
@@ -462,17 +556,16 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 		}
 	}
 
-	if err := o.keyContactWriter.DeleteKeyContact(ctx, in.UID, kc.MembershipUID); err != nil {
-		return err
-	}
-
-	// Indexer delete: swallow (reindexable via /admin/reindex).
-	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionDeleted)
-
-	// FGA remove: propagate a publication failure — dangling permissions are not
-	// auto-repairable. Publication succeeding is not revocation succeeding; it
-	// only means fga-sync has been told, and it converges asynchronously.
-	username, _ := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
+	// Grant-index settlement for a pair OTHER than this record's own must run
+	// before the Salesforce delete below: it can fail into a state (a failed
+	// durable-address transfer) that must not be reported as done, and once
+	// the Salesforce delete has run the record is gone, so a client retry of
+	// this same call could never re-attempt it. Resolving the settlement here,
+	// pre-delete, keeps the whole operation retriable as one idempotent unit:
+	// revokes are sibling-checked and durable-address transfers/reasserts are
+	// themselves idempotent, so re-running this block on retry is safe.
+	resolved, _ := o.resolveUsernameForContact(ctx, kc.Username, kc.Email)
+	username := resolved
 
 	// Read the recorded grant once: it supplies a username fallback when live
 	// lookup comes up empty, and its revision (when the read succeeds) is what
@@ -496,54 +589,166 @@ func (o *keyContactWriterOrchestrator) Delete(ctx context.Context, in KeyContact
 	// is what kc.MembershipUID/username now describe, but the swallowed Put
 	// failure left the index still pointing at the old pair, whose own
 	// member_put was never revoked. Revoke that indexed pair too before the
-	// index entry is cleared below. indexedPairRevokeFailed gates that clear:
-	// if this publish fails, clearing the entry anyway would erase the only
-	// remaining record that the old pair's grant was ever made, right as the
-	// Salesforce record backing it is gone too — leaving it live with no way
-	// to ever revisit it.
-	indexedPairRevokeFailed := false
+	// index entry is cleared below; a failed publish returns early instead,
+	// so the entry, the only remaining record that the old pair's grant was
+	// ever made, survives for the client retry. The record still exists in
+	// Salesforce at this point, but the sibling scan excludes it by UID either
+	// way, so the answer is identical to running this after the delete.
+	lister := siblingListerFor(o.keyContactsByMembership, o.userReader)
 	if grantErr == nil && grantFound && (grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
-		if revokeErr := o.publishFGARemove(ctx, grant.MembershipUID, grant.Username); revokeErr != nil {
-			indexedPairRevokeFailed = true
-			slog.ErrorContext(ctx, "key contact indexed grant remove publish failed on delete — preserving index entry for retry",
-				"uid", in.UID, "membership_uid", grant.MembershipUID, "error", revokeErr,
-				"fga_revoke_failed_dangling_tuple", true)
+		// The stored pair's email is unknown here: justification runs by
+		// resolution alone. A failed or uncertain revoke preserves the entry.
+		// flush:true so delivery is confirmed independently of the main pair's
+		// own flush below, which can now exit via revokeUnneeded without ever
+		// flushing this one.
+		staleOutcome, staleJustifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+			membershipUID: grant.MembershipUID,
+			username:      grant.Username,
+			excludeUID:    in.UID,
+			reason:        "key contact deleted (stale indexed pair)",
+			flush:         true,
+			recheck:       lister,
+		})
+		if revokeErr != nil {
+			// The stale pair is unsettled and its only address is the entry
+			// keyed by this UID. Fail before the Salesforce delete so the
+			// client retry re-attempts this settlement.
+			return pkgerrors.NewUnexpected("failed to revoke stale indexed pair for key contact: retry the delete", revokeErr)
+		} else if staleOutcome == revokeUnneeded && staleJustifiedBy != nil && o.grantIndex != nil &&
+			!pairDurablyOwned(ctx, o.grantIndex, staleJustifiedBy, grant.MembershipUID, grant.Username) {
+			// A live sibling justifies the stale pair, but a failed transfer
+			// leaves the stale entry, keyed by this UID, as the pair's only
+			// durable address: nothing will ever revisit it once the record is
+			// deleted below. Fail before the Salesforce delete runs, so a
+			// client retry re-attempts this same settlement rather than
+			// finding the record already gone.
+			slog.ErrorContext(ctx, "key contact deleted but stale indexed pair durable revoke address transfer failed",
+				"uid", in.UID, "membership_uid", grant.MembershipUID, "manual_recovery_required", true)
+			return pkgerrors.NewUnexpected("key contact durable revoke address transfer failed for stale indexed pair: retry the delete", nil)
 		}
 	}
+
+	if err := o.keyContactWriter.DeleteKeyContact(ctx, in.UID, kc.MembershipUID); err != nil {
+		return err
+	}
+
+	// Indexer delete: swallow (reindexable via /admin/reindex).
+	PublishKeyContactIndexer(ctx, o.memberPublisher, kc, indexerConstants.ActionDeleted)
+
+	// FGA remove: propagate a publication failure, since dangling permissions are not
+	// auto-repairable. Publication succeeding is not revocation succeeding; it
+	// only means fga-sync has been told, and it converges asynchronously.
+	//
+	// This revoke, for the record's OWN pair, must stay after the Salesforce
+	// delete above: revoking it first and then failing the delete would strip
+	// access the record still legitimately holds.
 
 	// Org-dashboard revoke is best-effort; run it regardless of FGA outcome so a
 	// failed FGA publish does not leave a stale writer/auditor entry.
 	o.revokeOrDowngradeOrgDashboardRole(ctx, kc)
 
-	if pubErr := o.publishFGARemove(ctx, kc.MembershipUID, username); pubErr != nil {
-		slog.ErrorContext(ctx, "key contact FGA remove publish failed on delete — dangling permission",
-			"uid", in.UID, "error", pubErr)
-		return pkgerrors.NewUnexpected("failed to publish FGA revocation for deleted key contact", pubErr)
+	// The choke point flushes here so a crash cannot discard a revocation this
+	// call has already reported as done: that confirms the server received the
+	// message, not that OpenFGA converged.
+	// email only justifies a sibling directly when username came from live
+	// resolution, i.e. it is the live identity's own pair. A username copied
+	// from grant.Username after live resolution came up empty must not let a
+	// same-email sibling with a different, now-unregistered LFID justify it.
+	pairEmail := ""
+	if resolved != "" {
+		pairEmail = kc.Email
+	}
+	outcome, justifiedBy, revokeErr := revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+		membershipUID: kc.MembershipUID,
+		username:      username,
+		excludeUID:    in.UID,
+		email:         pairEmail,
+		reason:        "key contact deleted",
+		flush:         true,
+		recheck:       lister,
+	})
+	switch outcome {
+	case revokeFailed, revokeUncertain:
+		// The Salesforce record is already gone, so the index entry recorded
+		// here is the only future retry address for this pair. Record it
+		// before returning the error so a later CDC delete event can still
+		// address the revoke.
+		if o.grantIndex != nil && username != "" {
+			skipRecord := false
+			if grantErr == nil && grantFound && grant.PendingRevoke != nil &&
+				(grant.MembershipUID != kc.MembershipUID || grant.Username != username) {
+				// recordKeyContactGrant would supersede the stale live pair into
+				// the single marker slot, dropping this existing marker's pair
+				// unaddressed. Drain it first so its revoke address survives.
+				marker := *grant.PendingRevoke
+				if drainErr := drainKeyContactPendingRevoke(ctx, o.memberPublisher, o.grantIndex, lister, lister, in.UID,
+					marker, "key contact deleted (pending revoke marker before recovery record)"); drainErr != nil {
+					skipRecord = true
+					slog.ErrorContext(ctx, "key contact grant index record skipped: pending revoke marker could not be drained, no durable retry address for this pair",
+						"uid", in.UID, "membership_uid", kc.MembershipUID, "error", drainErr, "manual_recovery_required", true)
+					revokeErr = errors.Join(revokeErr, drainErr)
+				} else if clearErr := clearPendingRevoke(ctx, o.grantIndex, in.UID, marker); clearErr != nil {
+					// The drain was confirmed delivered; this is bookkeeping only.
+					slog.WarnContext(ctx, "key contact grant index pending-revoke marker clear failed after confirmed drain",
+						"uid", in.UID, "error", clearErr)
+				}
+			}
+			if !skipRecord {
+				if recordErr := recordKeyContactGrant(ctx, o.memberPublisher, o.grantIndex, lister, lister, in.UID, kc.MembershipUID, username); recordErr != nil {
+					slog.ErrorContext(ctx, "key contact grant index record failed after revoke error: no durable retry address for this pair",
+						"uid", in.UID, "membership_uid", kc.MembershipUID, "error", recordErr, "manual_recovery_required", true)
+				}
+			}
+		}
+		if outcome == revokeFailed {
+			return pkgerrors.NewUnexpected("failed to publish FGA revocation for deleted key contact", revokeErr)
+		}
+		// The scan could not prove the pair unjustified. The record is already
+		// deleted, so report the revoke failure rather than a false success.
+		return pkgerrors.NewUnexpected("sibling scan inconclusive for deleted key contact: revocation not published", revokeErr)
 	}
 
-	// The publish above only hands the revocation to the local connection. Flush
-	// so a crash cannot discard a revocation this call has already reported as
-	// done. This confirms the server received the message, not that OpenFGA
-	// converged. It lives here rather than in publishFGARemove because the
-	// email-change path shares that helper under a log-only failure policy and
-	// must not pay for, or fail on, a flush.
-	if flushErr := o.memberPublisher.Flush(ctx); flushErr != nil {
-		slog.ErrorContext(ctx, "key contact FGA remove flush failed on delete — delivery indeterminate",
-			"uid", in.UID, "error", flushErr)
-		return pkgerrors.NewUnexpected("failed to confirm delivery of FGA revocation for deleted key contact", flushErr)
+	// A live sibling justified the pair: this entry may be the pair's only
+	// durable address. A failed transfer here means the retained entry is
+	// keyed by the just-deleted UID, which nothing will ever revisit: that
+	// must fail the delete, not just skip the index clear.
+	if outcome == revokeUnneeded && justifiedBy != nil && o.grantIndex != nil &&
+		!pairDurablyOwned(ctx, o.grantIndex, justifiedBy, kc.MembershipUID, username) {
+		slog.ErrorContext(ctx, "key contact deleted but durable revoke address transfer failed",
+			"uid", in.UID, "membership_uid", kc.MembershipUID, "manual_recovery_required", true)
+		return pkgerrors.NewUnexpected("key contact deleted but durable revoke address transfer failed: retry the delete", nil)
 	}
 
-	// Clear the recorded grant now that the revoke is confirmed delivered. This
-	// runs whether or not a member_remove was published: when no username could
-	// be resolved from either source there is nothing to revoke, and leaving the
-	// entry behind would orphan it permanently — the contact is gone, so nothing
-	// will ever revisit it. Conditioned on the revision read above, so a grant
-	// written concurrently is preserved rather than deleted out from under its
-	// writer. The three error paths above (publish, flush, grant read) all
-	// deliberately return or skip before this point, and indexedPairRevokeFailed
-	// above skips this clear specifically, all keeping the entry as the only
-	// record of a grant still needing manual follow-up.
-	if grantErr == nil && !indexedPairRevokeFailed && o.grantIndex != nil {
+	// A PendingRevoke marker for a superseded pair, unrelated to the live pair
+	// just settled above, must be drained before the entry is erased outright:
+	// the CDC delete path drains markers the same way, but once this Delete
+	// clears the whole entry there is no longer an address for the marker's
+	// pair, and the later CDC delete would see a genuine miss.
+	if grantErr == nil && grantFound && grant.PendingRevoke != nil {
+		if drainErr := drainKeyContactPendingRevoke(ctx, o.memberPublisher, o.grantIndex, lister, lister, in.UID,
+			*grant.PendingRevoke, "key contact deleted (pending revoke marker)"); drainErr != nil {
+			// Preserve the entry: clear the live pair but keep the marker as
+			// the only remaining address for its still-unconfirmed revoke.
+			clearRevokedGrant(ctx, o.grantIndex, in.UID, grant)
+			return pkgerrors.NewUnexpected("failed to drain pending revoke marker for deleted key contact", drainErr)
+		}
+	}
+
+	// Clear the recorded grant now that the revoke is confirmed delivered or
+	// proven unnecessary. This runs whether or not a member_remove was
+	// published: when no username could be resolved from either source there is
+	// nothing to revoke, and leaving the entry behind would orphan it
+	// permanently — the contact is gone, so nothing will ever revisit it. It
+	// also runs when a live sibling still justifies the pair, so a later delete
+	// of that sibling cannot be blocked by this record's stale entry.
+	// Conditioned on the revision read above, so a grant written concurrently
+	// is preserved rather than deleted out from under its writer. The error
+	// paths above (grant read, uncertain scan, failed live or stale revoke)
+	// all deliberately return or skip before this point, keeping the entry as
+	// the only record of a grant still needing follow-up. Any PendingRevoke
+	// marker was already drained above, so clearing the whole entry here is
+	// safe.
+	if grantErr == nil && o.grantIndex != nil {
 		if err := o.grantIndex.Delete(ctx, in.UID, grant.Revision); err != nil {
 			slog.WarnContext(ctx, "key contact grant index cleanup failed after delete",
 				"uid", in.UID, "error", err)
@@ -593,18 +798,6 @@ func (o *keyContactWriterOrchestrator) getGrant(ctx context.Context, uid string)
 		return port.KeyContactGrant{}, false, nil
 	}
 	return o.grantIndex.Get(ctx, uid)
-}
-
-// publishFGARemove publishes a membership revocation and returns only immediate
-// publication failures; it carries no failure policy of its own because its two
-// callers disagree. Delete propagates and then flushes, update-on-email-change
-// logs and continues. Adding either here would silently change the other.
-func (o *keyContactWriterOrchestrator) publishFGARemove(ctx context.Context, membershipUID, username string) error {
-	if username == "" {
-		return nil
-	}
-	msg := BuildKeyContactFGARemoveMessage(membershipUID, username)
-	return o.memberPublisher.Access(ctx, fgaconstants.GenericMemberRemoveSubject, msg)
 }
 
 func hasAnyKCChange(in KeyContactUpdateInput) bool {
