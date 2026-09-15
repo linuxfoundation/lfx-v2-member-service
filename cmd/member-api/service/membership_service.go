@@ -32,7 +32,6 @@ type membershipServicesrvc struct {
 	auth                    domain.Authenticator
 	b2bOrgReader            port.B2BOrgReader
 	projectMembershipReader port.ProjectMembershipReader
-	userMembershipReader    port.UserMembershipReader
 	b2bOrgSettingsReader    port.B2BOrgSettingsReader
 	b2bOrgWriter            usecaseSvc.B2BOrgWriter
 	logoUploader            usecaseSvc.LogoUploader
@@ -1251,7 +1250,6 @@ func NewMembershipService(
 	storage port.MemberReader,
 	b2bOrgReader port.B2BOrgReader,
 	projectMshipR port.ProjectMembershipReader,
-	userMembershipR port.UserMembershipReader,
 	b2bOrgSettingsReader port.B2BOrgSettingsReader,
 	b2bOrgWriter usecaseSvc.B2BOrgWriter,
 	logoUploader usecaseSvc.LogoUploader,
@@ -1266,7 +1264,6 @@ func NewMembershipService(
 		auth:                    auth,
 		b2bOrgReader:            b2bOrgReader,
 		projectMembershipReader: projectMshipR,
-		userMembershipReader:    userMembershipR,
 		b2bOrgSettingsReader:    b2bOrgSettingsReader,
 		b2bOrgWriter:            b2bOrgWriter,
 		logoUploader:            logoUploader,

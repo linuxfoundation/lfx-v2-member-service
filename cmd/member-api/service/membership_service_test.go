@@ -211,7 +211,7 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 		o(b)
 	}
 	return NewMembershipService(b.auth, b.storage, b.b2bOrgReader,
-		b.pmReader, b.umReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner,
+		b.pmReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner,
 		usecaseSvc.NewMemberTiers(b.storage, b.umReader, b.grantIndex))
 }
 
