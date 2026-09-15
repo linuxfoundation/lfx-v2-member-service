@@ -11,17 +11,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 )
 
+// funcUsernameResolver implements usernameByEmailResolver with a function, so
+// a stubSiblingLister can gain the resolver capability revokeSupersededKeyContactGrant's
+// justification check type-asserts for.
+type funcUsernameResolver func(ctx context.Context, email string) (string, error)
+
+func (f funcUsernameResolver) UsernameByEmail(ctx context.Context, email string) (string, error) {
+	return f(ctx, email)
+}
+
 const internalTestMembershipUID = "00000000-0000-0000-0000-000000000010"
 
-// White-box tests for revokeKeyContactGrantIfUnregistered / clearRevokedGrant
-// (unexported — the definitive-miss revoke path added for LFXV2-2999). Kept
-// in a package-internal test file since these helpers are wired directly
-// into the writer/CDC/backfill call sites and are not part of the package's
-// exported surface (unlike PublishKeyContactFGA).
+// White-box tests for revokeKeyContactGrantIfNoLongerLive and
+// clearRevokedGrant. Both are unexported, so these tests live in-package.
 
 // internalRemoveMessages returns the member_remove payloads captured by a
 // mock.MockMemberPublisher, in publication order.
@@ -40,17 +47,17 @@ func internalRemoveMessages(t *testing.T, msgs []any) []fgatypes.GenericMemberDa
 	return out
 }
 
-func TestRevokeKeyContactGrantIfUnregistered_NoRecordedGrant_NoPublish(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_NoRecordedGrant_NoPublish(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	assert.Nil(t, pub.LastAccessData, "no grant was ever recorded, so there is nothing to revoke")
 	assert.Empty(t, grants.Deletes, "and no index entry to clear")
 }
 
-func TestRevokeKeyContactGrantIfUnregistered_RecordedGrant_RevokesAndClears(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_RecordedGrant_RevokesAndClears(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -58,7 +65,7 @@ func TestRevokeKeyContactGrantIfUnregistered_RecordedGrant_RevokesAndClears(t *t
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.Len(t, removes, 1, "the recorded grant must be revoked")
@@ -68,10 +75,10 @@ func TestRevokeKeyContactGrantIfUnregistered_RecordedGrant_RevokesAndClears(t *t
 	assert.Equal(t, []string{"kc-1"}, grants.Deletes, "the confirmed-revoked entry must be cleared")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_PublishFailure_RetainsEntry covers
+// TestRevokeKeyContactGrantIfNoLongerLive_PublishFailure_RetainsEntry covers
 // an unconfirmed revoke: it must not be treated as done — the entry must
 // survive so a later reactive trigger (or backfill) can retry it.
-func TestRevokeKeyContactGrantIfUnregistered_PublishFailure_RetainsEntry(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_PublishFailure_RetainsEntry(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	pub.SetAccessError(assert.AnError)
 	grants := &mock.MockKeyContactGrantIndex{
@@ -80,16 +87,16 @@ func TestRevokeKeyContactGrantIfUnregistered_PublishFailure_RetainsEntry(t *test
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	assert.Empty(t, grants.Deletes, "an unconfirmed publish must leave the entry in place for retry")
 	assert.Equal(t, internalTestMembershipUID, grants.Entries["kc-1"].MembershipUID, "the grant must still be addressable")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_FlushFailure_RetainsEntry covers the
+// TestRevokeKeyContactGrantIfNoLongerLive_FlushFailure_RetainsEntry covers the
 // other half: Access succeeding only means the message reached the local NATS
 // connection, not the broker — an unconfirmed Flush must not clear the entry.
-func TestRevokeKeyContactGrantIfUnregistered_FlushFailure_RetainsEntry(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_FlushFailure_RetainsEntry(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	pub.SetFlushError(assert.AnError)
 	grants := &mock.MockKeyContactGrantIndex{
@@ -98,19 +105,19 @@ func TestRevokeKeyContactGrantIfUnregistered_FlushFailure_RetainsEntry(t *testin
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.NotEmpty(t, removes, "the revoke was handed to NATS even though delivery was never confirmed")
 	assert.Empty(t, grants.Deletes, "an unconfirmed flush must leave the entry in place for retry")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke
+// TestRevokeKeyContactGrantIfNoLongerLive_PreservesUnrelatedPendingRevoke
 // covers an unrelated, still-outstanding PendingRevoke marker on the entry
 // (from a concurrent supersede): it must survive — it addresses a different
 // tuple than the one this call just confirmed revoked, and is only ever
 // cleared by its own confirmed revoke.
-func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_PreservesUnrelatedPendingRevoke(t *testing.T) {
 	pending := port.KeyContactGrantRef{MembershipUID: "asset-superseded", Username: "carol"}
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
@@ -119,7 +126,7 @@ func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.Len(t, removes, 1, "only the live pair is revoked by this call")
@@ -133,14 +140,14 @@ func TestRevokeKeyContactGrantIfUnregistered_PreservesUnrelatedPendingRevoke(t *
 	assert.Equal(t, pending, *entry.PendingRevoke)
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_AbortsBeforePublish
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReplacement_AbortsBeforePublish
 // covers a concurrent writer that already replaced this pair (e.g. the email
 // was corrected and a new grant published) between this call's read and its
 // claim: the claim's revision-conditional rewrite must fail as a conflict, so
 // the function aborts before ever publishing a revoke for the pair it read —
 // the replacement must not be discarded, and no stale member_remove must be
 // sent for a pair that no longer describes what is live.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_AbortsBeforePublish(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReplacement_AbortsBeforePublish(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	original := port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1}
 	grants := &mock.MockKeyContactGrantIndex{
@@ -155,21 +162,21 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReplacement_AbortsBeforeP
 		return original, true, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	assert.Nil(t, pub.LastAccessData, "the claim must fail before any revoke is published for the stale read")
 	assert.Equal(t, "asset-new", grants.Entries["kc-1"].MembershipUID, "the newer pair must not be discarded")
 	assert.Empty(t, grants.Deletes, "the claim conflict must abort before reaching the clear step")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentReconfirmation_AbortsBeforePublish
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReconfirmation_AbortsBeforePublish
 // covers the exact race this claim step closes: a concurrent writer
 // reconfirms the *same* pair (recordKeyContactGrant's unchanged-pair branch,
 // which now always touches the revision) between this call's read and its
 // claim. Without the touch, the claim would see the same stale revision and
 // could not distinguish this from no concurrent activity at all, letting a
 // stale revoke through for a pair another writer just reasserted as live.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReconfirmation_AbortsBeforePublish(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentReconfirmation_AbortsBeforePublish(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	original := port.KeyContactGrant{MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1}
 	grants := &mock.MockKeyContactGrantIndex{
@@ -183,19 +190,19 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentReconfirmation_AbortsBefo
 		return original, true, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	assert.Nil(t, pub.LastAccessData, "a concurrent reconfirmation of the same pair must abort the revoke, not just the later clear")
 	assert.Equal(t, uint64(2), grants.Entries["kc-1"].Revision, "the reconfirmed entry must be left exactly as the concurrent writer left it")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevision
+// TestRevokeKeyContactGrantIfNoLongerLive_ClaimSucceeds_ClearUsesAdvancedRevision
 // covers the happy path once the claim is in place: the claim's own Put
 // advances the revision, so the final clear must use that advanced revision
 // (re-read after Flush, since Put does not return it) rather than the
 // revision originally observed by Get — using the stale revision there would
 // make every clear fail as a spurious conflict against its own claim.
-func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevision(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ClaimSucceeds_ClearUsesAdvancedRevision(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -203,7 +210,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 		},
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
 	require.Len(t, removes, 1, "the claim must not block the legitimate revoke it protects")
@@ -214,7 +221,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 	assert.False(t, found, "the entry must be fully cleared once the clear's CAS uses the claim's advanced revision")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut
 // covers the race the claim step does NOT close: a concurrent writer's own
 // CAS (recordKeyContactGrant reconfirming the same pair) can still land
 // after this call's claim commits — the claim only protects the window up
@@ -224,7 +231,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ClaimSucceeds_ClearUsesAdvancedRevi
 // assumption doesn't hold against a bucket-wide revision counter) and, since
 // the pair is unchanged, repair the possibly-just-removed tuple with a
 // compensating member_put rather than only skipping the index clear.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentSamePairRegrant_AfterClaim_RepairsWithPut(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -245,7 +252,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClai
 		return entry, found, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	require.Equal(t, []string{"access", "flush", "access", "flush"}, pub.CallOrder,
 		"the revoke's remove must still be published, followed by a repair put once the race is detected")
@@ -256,13 +263,13 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentSamePairRegrant_AfterClai
 	assert.Equal(t, uint64(99), grants.Entries["kc-1"].Revision, "the concurrent writer's generation must be left untouched")
 }
 
-// TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair
+// TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair
 // covers the sibling case: a *different* pair supersedes this entry after
 // the claim (not a same-pair reconfirmation). That writer's own
 // supersede-revoke already addresses the pair this call read, so no repair
 // or clear is needed here — touching either would race that writer's own
 // generation.
-func TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair(t *testing.T) {
+func TestRevokeKeyContactGrantIfNoLongerLive_ConcurrentDifferentPairSupersede_AfterClaim_NoRepair(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
 	grants := &mock.MockKeyContactGrantIndex{
 		Entries: map[string]port.KeyContactGrant{
@@ -279,7 +286,7 @@ func TestRevokeKeyContactGrantIfUnregistered_ConcurrentDifferentPairSupersede_Af
 		return entry, found, nil
 	}
 
-	revokeKeyContactGrantIfUnregistered(context.Background(), pub, grants, "kc-1")
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, nil, nil, "kc-1", "", "", reasonEmailUnregistered)
 
 	require.Equal(t, []string{"access", "flush"}, pub.CallOrder, "only the original remove must publish — no repair for a pair this call never revoked")
 	assert.Empty(t, grants.Deletes, "the entry must not be cleared — it belongs to the superseding writer's generation now")
@@ -325,7 +332,7 @@ func TestRecordKeyContactGrant_MarkerOnlyEntry_CarriesPendingRevokeForward(t *te
 		},
 	}
 
-	err := recordKeyContactGrant(context.Background(), pub, grants, "kc-1", "asset-new", "bob")
+	err := recordKeyContactGrant(context.Background(), pub, grants, nil, nil, "kc-1", "asset-new", "bob")
 
 	require.NoError(t, err)
 	assert.Nil(t, pub.LastAccessData, "nothing live existed to supersede, so no revoke must fire")
@@ -335,4 +342,266 @@ func TestRecordKeyContactGrant_MarkerOnlyEntry_CarriesPendingRevokeForward(t *te
 	assert.Equal(t, "bob", entry.Username)
 	require.NotNil(t, entry.PendingRevoke, "the real marker must survive, not be overwritten by an empty superseded ref")
 	assert.Equal(t, pending, *entry.PendingRevoke)
+}
+
+// ── V3: liveEmail direct-match gate requires a positive username match ──────
+
+// TestRevokeKeyContactGrantIfNoLongerLive_EmptyLiveUsername_SiblingSameEmailDoesNotFalselyJustify
+// covers V3: an empty liveUsername means resolution failed, not that the
+// stored username owns liveEmail. A sibling sharing liveEmail must not
+// falsely justify the stored pair by direct email match; only resolution can
+// justify it, and here resolution proves the sibling is a different person,
+// so the revoke must proceed.
+func TestRevokeKeyContactGrantIfNoLongerLive_EmptyLiveUsername_SiblingSameEmailDoesNotFalselyJustify(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "old-alice", Revision: 1},
+		},
+	}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: internalTestMembershipUID, Email: "carol@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "carol@example.com" {
+			return "carol", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, lister, lister, "kc-1", "", "carol@example.com", reasonEmailUnregistered)
+
+	removes := internalRemoveMessages(t, []any{pub.LastAccessData})
+	require.Len(t, removes, 1, "an empty liveUsername must not let a same-email sibling justify the stored pair by direct match")
+	assert.Equal(t, "old-alice", removes[0].Username)
+	assert.Equal(t, []string{"kc-1"}, grants.Deletes)
+}
+
+// TestRevokeKeyContactGrantIfNoLongerLive_PositiveUsernameMatch_LiveEmailJustifiesBySibling
+// covers V3's positive case: when liveUsername positively matches the stored
+// username, liveEmail may still justify the pair by direct match against a
+// sibling carrying that email, with no resolver needed.
+func TestRevokeKeyContactGrantIfNoLongerLive_PositiveUsernameMatch_LiveEmailJustifiesBySibling(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			"kc-1": {MembershipUID: internalTestMembershipUID, Username: "alice", Revision: 1},
+		},
+	}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: internalTestMembershipUID, Email: "alice@example.com", Status: "Active"}
+	lister := stubSiblingLister{siblings: []*model.KeyContact{sib}}
+
+	revokeKeyContactGrantIfNoLongerLive(context.Background(), pub, grants, lister, lister, "kc-1", "alice", "alice@example.com", reasonEmailUnregistered)
+
+	assert.Nil(t, pub.LastAccessData, "a positive username match must still let liveEmail justify the pair by direct match")
+}
+
+// ── U3: revokeSupersededKeyContactGrant durable-address transfer ─────────────
+
+// TestRevokeSupersededKeyContactGrant_UnindexedSiblingJustifies_TransfersBeforeClearing
+// covers U3: a superseded pair justified by a sibling that does not yet
+// durably own the index must transfer ownership to that sibling before the
+// PendingRevoke marker clears.
+func TestRevokeSupersededKeyContactGrant_UnindexedSiblingJustifies_TransfersBeforeClearing(t *testing.T) {
+	superseded := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := mock.NewMockMemberPublisher()
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {MembershipUID: "asset-new", Username: "bob", PendingRevoke: &superseded, Revision: 1},
+	}}
+
+	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, lister, lister, "kc-1", superseded)
+
+	require.NoError(t, err)
+	require.Len(t, idx.Puts, 2, "the sibling must be given a durable entry before the marker clears")
+	assert.Equal(t, "sib-1", idx.Puts[0].UID)
+	assert.Equal(t, "asset-1", idx.Puts[0].MembershipUID)
+	assert.Equal(t, "alice", idx.Puts[0].Username)
+	entry, found := idx.Entries["kc-1"]
+	require.True(t, found)
+	assert.Nil(t, entry.PendingRevoke, "the marker must clear once the sibling durably owns the pair")
+}
+
+// TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors
+// covers the other side of U3: when the justifying sibling's own entry
+// already carries an unrelated PendingRevoke marker (a slot cannot hold two),
+// the transfer fails and the marker must be retained with an error returned,
+// not silently cleared. A sibling entry that merely names a different pair,
+// with no marker of its own, is reconciled instead (see pairDurablyOwned).
+func TestRevokeSupersededKeyContactGrant_TransferFails_RetainsMarkerAndErrors(t *testing.T) {
+	superseded := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: "asset-1", Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := mock.NewMockMemberPublisher()
+	otherMarker := port.KeyContactGrantRef{MembershipUID: "other-asset", Username: "someone-else"}
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1":  {MembershipUID: "asset-new", Username: "bob", PendingRevoke: &superseded, Revision: 1},
+		"sib-1": {MembershipUID: "other-asset", Username: "someone-else", PendingRevoke: &otherMarker, Revision: 9},
+	}}
+
+	err := revokeSupersededKeyContactGrant(context.Background(), pub, idx, lister, lister, "kc-1", superseded)
+
+	require.Error(t, err, "a failed durable-address transfer must not be reported as a successful clear")
+	entry, found := idx.Entries["kc-1"]
+	require.True(t, found)
+	require.NotNil(t, entry.PendingRevoke, "the marker must be retained as the retry address until the transfer succeeds")
+	assert.Equal(t, superseded, *entry.PendingRevoke)
+}
+
+// ── Z0: drainKeyContactPendingRevoke reassert on the justified branch ───────────
+
+// internalPutMessages returns the member_put payloads captured by a
+// mock.MockMemberPublisher, in publication order.
+func internalPutMessages(t *testing.T, msgs []any) []fgatypes.GenericMemberData {
+	t.Helper()
+	var out []fgatypes.GenericMemberData
+	for _, msg := range msgs {
+		fgaMsg, ok := msg.(fgatypes.GenericFGAMessage)
+		if !ok || fgaMsg.Operation != "member_put" {
+			continue
+		}
+		data, ok := fgaMsg.Data.(fgatypes.GenericMemberData)
+		require.True(t, ok)
+		out = append(out, data)
+	}
+	return out
+}
+
+// TestDrainKeyContactPendingRevoke_Justified_ReassertsPutBeforeTransfer covers
+// finding B's rejected-rebuttal gap: when a live sibling justifies the
+// marker's pair, drainKeyContactPendingRevoke must publish a confirmed
+// member_put reasserting that pair before transferring durable ownership, so
+// redelivery actually executes the repair instead of only skipping cleanup.
+func TestDrainKeyContactPendingRevoke_Justified_ReassertsPutBeforeTransfer(t *testing.T) {
+	marker := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: marker.MembershipUID, Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := newCapturingPublisher()
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{}}
+
+	err := drainKeyContactPendingRevoke(context.Background(), pub, idx, lister, lister, "kc-1", marker, "test")
+
+	require.NoError(t, err)
+	puts := internalPutMessages(t, pub.accessMsgs)
+	require.Len(t, puts, 1, "the marker's pair must be reasserted with a member_put")
+	assert.Equal(t, marker.MembershipUID, puts[0].UID)
+	assert.Equal(t, marker.Username, puts[0].Username)
+	assert.Equal(t, 1, pub.FlushCount, "the reassert put must be confirmed with a flush")
+	entry, found := idx.Entries["sib-1"]
+	require.True(t, found, "ownership must transfer to the justifying sibling after the reassert")
+	assert.Equal(t, marker.MembershipUID, entry.MembershipUID)
+	assert.Equal(t, marker.Username, entry.Username)
+}
+
+// TestDrainKeyContactPendingRevoke_Justified_ReassertFails_ReturnsError covers
+// the other side: when the reassert put fails, the drain must return an
+// error so the marker is preserved as the retry address, and ownership must
+// not be transferred on top of an unconfirmed reassert.
+func TestDrainKeyContactPendingRevoke_Justified_ReassertFails_ReturnsError(t *testing.T) {
+	marker := port.KeyContactGrantRef{MembershipUID: "asset-1", Username: "alice"}
+	sib := &model.KeyContact{UID: "sib-1", MembershipUID: marker.MembershipUID, Email: "alice@example.com", Status: "Active"}
+	users := funcUsernameResolver(func(_ context.Context, email string) (string, error) {
+		if email == "alice@example.com" {
+			return "alice", nil
+		}
+		return "", assert.AnError
+	})
+	lister := withEmailResolver(stubSiblingLister{siblings: []*model.KeyContact{sib}}, users)
+
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	idx := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{}}
+
+	err := drainKeyContactPendingRevoke(context.Background(), pub, idx, lister, lister, "kc-1", marker, "test")
+
+	require.Error(t, err, "a failed reassert put must be reported so the marker is preserved")
+	assert.Empty(t, idx.Puts, "ownership must not transfer when the reassert put was not confirmed")
+}
+
+// ── Z1: a second supersede must not overwrite an undrained marker ──────────────
+
+func TestRecordKeyContactGrant_SecondSupersede_DrainsExistingMarkerFirst(t *testing.T) {
+	pub := newCapturingPublisher()
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "p1",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-0", Username: "p0"},
+			Revision:      2,
+		},
+	}}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, stubSiblingLister{}, stubSiblingLister{}, "kc-1", "asset-2", "p2")
+
+	require.NoError(t, err)
+	removes := internalRemoveMessages(t, pub.accessMsgs)
+	require.Len(t, removes, 2, "both the old marker's pair and the newly superseded pair must be revoked")
+	assert.Equal(t, "asset-0", removes[0].UID, "the old marker must drain before its slot is reused")
+	assert.Equal(t, "asset-1", removes[1].UID)
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-2", entry.MembershipUID)
+	assert.Equal(t, "p2", entry.Username)
+}
+
+func TestRecordKeyContactGrant_SecondSupersede_DrainFails_PreservesMarker(t *testing.T) {
+	pub := mock.NewMockMemberPublisher()
+	pub.SetAccessError(assert.AnError)
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "p1",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-0", Username: "p0"},
+			Revision:      2,
+		},
+	}}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, stubSiblingLister{}, stubSiblingLister{}, "kc-1", "asset-2", "p2")
+
+	require.Error(t, err, "a failed drain must be reported, not silently overwritten")
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-1", entry.MembershipUID, "the entry must be left exactly as read")
+	require.NotNil(t, entry.PendingRevoke)
+	assert.Equal(t, "asset-0", entry.PendingRevoke.MembershipUID,
+		"the undrained marker is the old pair's only address and must survive")
+}
+
+func TestRecordKeyContactGrant_MarkerNamesIncomingPair_DroppedWithoutRevoke(t *testing.T) {
+	pub := newCapturingPublisher()
+	grants := &mock.MockKeyContactGrantIndex{Entries: map[string]port.KeyContactGrant{
+		"kc-1": {
+			MembershipUID: "asset-1", Username: "p1",
+			PendingRevoke: &port.KeyContactGrantRef{MembershipUID: "asset-2", Username: "p2"},
+			Revision:      2,
+		},
+	}}
+
+	err := recordKeyContactGrant(context.Background(), pub, grants, stubSiblingLister{}, stubSiblingLister{}, "kc-1", "asset-2", "p2")
+
+	require.NoError(t, err)
+	for _, r := range internalRemoveMessages(t, pub.accessMsgs) {
+		assert.NotEqual(t, "asset-2", r.UID,
+			"a marker re-justified by the incoming grant must be dropped, never revoked")
+	}
+	entry := grants.Entries["kc-1"]
+	assert.Equal(t, "asset-2", entry.MembershipUID)
+	assert.Equal(t, "p2", entry.Username)
 }
