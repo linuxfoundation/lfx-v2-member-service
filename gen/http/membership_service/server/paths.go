@@ -62,6 +62,11 @@ func GetProjectMembershipMembershipServicePath(uid string) string {
 	return fmt.Sprintf("/project_memberships/%v", uid)
 }
 
+// GetMemberTiersMembershipServicePath returns the URL path to the membership-service service get-member-tiers HTTP endpoint.
+func GetMemberTiersMembershipServicePath(username string) string {
+	return fmt.Sprintf("/b2b_orgs/member-tiers/%v", username)
+}
+
 // GetKeyContactMembershipServicePath returns the URL path to the membership-service service get-key-contact HTTP endpoint.
 func GetKeyContactMembershipServicePath(membershipUID string, uid string) string {
 	return fmt.Sprintf("/project_memberships/%v/key_contacts/%v", membershipUID, uid)

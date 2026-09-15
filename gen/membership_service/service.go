@@ -56,6 +56,11 @@ type Service interface {
 	DeleteB2bOrgSettingsUser(context.Context, *DeleteB2bOrgSettingsUserPayload) (res *DeleteB2bOrgSettingsUserResult, err error)
 	// Get a specific project membership by UID
 	GetProjectMembership(context.Context, *GetProjectMembershipPayload) (res *GetProjectMembershipResult, err error)
+	// List the highest active membership tier per B2B organization for the
+	// organizations the given user is a key contact of, ordered highest tier first
+	// so the leading entry is the user's top tier. Unknown users yield an empty
+	// list, not 404.
+	GetMemberTiers(context.Context, *GetMemberTiersPayload) (res []*MemberOrgTierResponse, err error)
 	// Get a specific key contact by UID
 	GetKeyContact(context.Context, *GetKeyContactPayload) (res *GetKeyContactResult, err error)
 	// Create a new key contact
@@ -117,7 +122,7 @@ const ServiceName = "membership-service"
 // MethodNames lists the service method names as defined in the design. These
 // are the same values that are set in the endpoint request contexts under the
 // MethodKey key.
-var MethodNames = [24]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
+var MethodNames = [25]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-member-tiers", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
 
 // AddB2bOrgSettingsUserPayload is the payload type of the membership-service
 // service add-b2b-org-settings-user method.
@@ -535,6 +540,17 @@ type GetKeyContactResult struct {
 	LastModified *string
 }
 
+// GetMemberTiersPayload is the payload type of the membership-service service
+// get-member-tiers method.
+type GetMemberTiersPayload struct {
+	// JWT token issued by Heimdall
+	BearerToken *string
+	// Version of the API
+	Version *string
+	// LFID username to look up
+	Username string
+}
+
 // GetProjectMembershipPayload is the payload type of the membership-service
 // service get-project-membership method.
 type GetProjectMembershipPayload struct {
@@ -559,6 +575,37 @@ type GetProjectMembershipResult struct {
 	Etag *string
 	// Last-Modified header value (HTTP date format)
 	LastModified *string
+}
+
+// Highest active membership tier held by one B2B organization the user is a
+// key contact of
+type MemberOrgTierResponse struct {
+	// UID of the B2B organization (Account) holding the membership
+	B2bOrgUID string
+	// Member company name (denormalized from Account)
+	CompanyName *string
+	// UID of the winning membership (Asset)
+	MembershipUID string
+	// V2 project UUID the membership is scoped to
+	ProjectUID *string
+	// URL slug of the project the membership is scoped to
+	ProjectSlug *string
+	// UID of the membership tier (Product2)
+	TierUID *string
+	// Raw product name of the tier (denormalized from Product2)
+	TierName *string
+	// Normalized tier class derived from the tier name. One of: platinum, premier,
+	// founding, strategic, gold, steering, silver, general, associate, end_user,
+	// academic, contributor, other (highest first, matching the LFX One Org Lens
+	// taxonomy). Deliberately not a closed enum so the taxonomy can grow without
+	// breaking clients; unrecognized names fall back to other.
+	Tier string
+	// Membership status
+	Status *string
+	// Membership start date
+	StartDate *string
+	// Membership end date
+	EndDate *string
 }
 
 // A writer or auditor principal on a b2b_org settings list

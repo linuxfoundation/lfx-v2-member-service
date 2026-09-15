@@ -185,6 +185,12 @@ Key contacts are nested under their membership. GET/PUT/DELETE return 404 (not 4
 
 FGA is published before the indexer so access tuples land before the doc is searchable. Errors on either publish are swallowed with `publish_failed_for_backfill_repair=true`; recovery is a re-PUT of the settings. The `lfx.index.b2b_org_settings` doc is **not** published from the backfill runner — it is created on demand by the first PUT that adds a writer or auditor.
 
+### B2B org read endpoints
+
+| Method | Path                                 | Description                                                          | OpenFGA Check                                                                                                                |
+|--------|---------------------------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| GET    | `/b2b_orgs/member-tiers/{username}`  | Highest active membership tier per org for a user (machine callers) | `member` on `team:{memberTiersCallerTeamName}` (default `member_tiers_caller`; empty falls back to `globalOrgAdminTeamName`) |
+
 ### Admin
 
 | Method | Path             | Description                                                              | OpenFGA Check                              |
@@ -522,6 +528,7 @@ Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/template
 - **GET `/b2b_orgs/:uid/settings`** — `auditor` on `b2b_org:{uid}` (auditor, not writer, so trusted principals can see the pending-invite list)
 - **PUT `/b2b_orgs/:uid/settings`** — `writer` on `b2b_org:{uid}`
 - **POST `/b2b_orgs/:uid/settings/users` and PUT/DELETE `/b2b_orgs/:uid/settings/users/:email`** — `writer` on `b2b_org:{uid}`
+- **GET `/b2b_orgs/member-tiers/:username`**: `member` on `team:{memberTiersCallerTeamName}` (machine callers; default `member_tiers_caller`, empty falls back to `globalOrgAdminTeamName`)
 - **GET `/project_memberships/:uid`** — `auditor` on `project_membership:{uid}`
 - **GET `/project_memberships/:membership_uid/key_contacts/:uid`** — `auditor` on `project_membership:{membership_uid}`
 - **POST/PUT/DELETE `/project_memberships/:membership_uid/key_contacts...`** — `writer` on `project_membership:{membership_uid}` (POST also runs `json_content_type`)

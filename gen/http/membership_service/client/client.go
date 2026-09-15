@@ -58,6 +58,10 @@ type Client struct {
 	// get-project-membership endpoint.
 	GetProjectMembershipDoer goahttp.Doer
 
+	// GetMemberTiers Doer is the HTTP client used to make requests to the
+	// get-member-tiers endpoint.
+	GetMemberTiersDoer goahttp.Doer
+
 	// GetKeyContact Doer is the HTTP client used to make requests to the
 	// get-key-contact endpoint.
 	GetKeyContactDoer goahttp.Doer
@@ -143,6 +147,7 @@ func NewClient(
 		UpdateB2bOrgSettingsUserRoleDoer:   doer,
 		DeleteB2bOrgSettingsUserDoer:       doer,
 		GetProjectMembershipDoer:           doer,
+		GetMemberTiersDoer:                 doer,
 		GetKeyContactDoer:                  doer,
 		CreateKeyContactDoer:               doer,
 		UpdateKeyContactDoer:               doer,
@@ -400,6 +405,30 @@ func (c *Client) GetProjectMembership() goa.Endpoint {
 		resp, err := c.GetProjectMembershipDoer.Do(req)
 		if err != nil {
 			return nil, goahttp.ErrRequestError("membership-service", "get-project-membership", err)
+		}
+		return decodeResponse(resp)
+	}
+}
+
+// GetMemberTiers returns an endpoint that makes HTTP requests to the
+// membership-service service get-member-tiers server.
+func (c *Client) GetMemberTiers() goa.Endpoint {
+	var (
+		encodeRequest  = EncodeGetMemberTiersRequest(c.encoder)
+		decodeResponse = DecodeGetMemberTiersResponse(c.decoder, c.RestoreResponseBody)
+	)
+	return func(ctx context.Context, v any) (any, error) {
+		req, err := c.BuildGetMemberTiersRequest(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		err = encodeRequest(req, v)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.GetMemberTiersDoer.Do(req)
+		if err != nil {
+			return nil, goahttp.ErrRequestError("membership-service", "get-member-tiers", err)
 		}
 		return decodeResponse(resp)
 	}
