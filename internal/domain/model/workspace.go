@@ -4,7 +4,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -254,11 +253,4 @@ func (p *WorkspaceProjects) RemoveProject(projectUID string) bool {
 		}
 	}
 	return false
-}
-
-// WorkspaceTagKey returns a formatted tag; exposed as a package-level helper
-// so tests and callers outside the model can construct expected tag values
-// without importing format strings.
-func WorkspaceTagKey(prefix, value string) string {
-	return fmt.Sprintf("%s%s", prefix, value)
 }
