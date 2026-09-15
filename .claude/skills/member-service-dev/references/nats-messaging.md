@@ -129,10 +129,17 @@ Request body (JSON, `fgatypes.ReadTuplesRequest`):
 {"user": "user:<username>", "object_type": "project_membership"}
 ```
 
-Reply body (JSON, `fgatypes.ReadTuplesResponse`):
+Reply body (JSON, `fgatypes.ReadTuplesResponse`). `Error` has `json:"error,omitempty"`,
+so it is omitted entirely on success rather than sent as an empty string:
 
 ```json
-{"results": ["project_membership:<uid>#key_contact@user:<username>", "..."], "error": ""}
+{"results": ["project_membership:<uid>#key_contact@user:<username>", "..."]}
+```
+
+On failure:
+
+```json
+{"results": null, "error": "<msg>"}
 ```
 
 `results` are canonical `object#relation@user` tuple strings; an empty array
