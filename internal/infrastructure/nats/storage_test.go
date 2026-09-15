@@ -226,3 +226,46 @@ func TestPutKeyContactsForMembershipAtRevision_MissThenEviction_Conflicts(t *tes
 	require.NoError(t, err)
 	assert.Equal(t, CacheStatusMiss, result.Status, "the eviction must stand; stale contacts must not be resurrected")
 }
+
+// TestGetMembership_CorruptEntry_RetainsRevisionForWriteBack covers
+// lookupCached's corrupt-entry branch: a value that fails to unmarshal must
+// still surface as a miss carrying the entry's real revision, not 0, so a
+// repair write-back is a strict Update over the corrupt entry rather than a
+// kv.Create that fails forever against it (the "poisoned cache entry can
+// never be overwritten" bug this guards against).
+func TestGetMembership_CorruptEntry_RetainsRevisionForWriteBack(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeKV()
+	s := newFakeStorage(kv)
+	uid := "pm-corrupt-1"
+	key := keyPrefixMembership + uid
+
+	rev, err := kv.Update(ctx, key, []byte("not-json"), 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rev)
+
+	result, err := s.GetMembership(ctx, uid)
+	require.NoError(t, err)
+	assert.Equal(t, CacheStatusMiss, result.Status)
+	assert.Equal(t, rev, result.Revision, "a corrupt entry must carry its real revision, not 0")
+
+	// The repair write-back at that revision must succeed as a strict Update,
+	// not fail as a Create against the still-present corrupt entry.
+	require.NoError(t, s.PutMembershipAtRevision(ctx, &model.ProjectMembership{UID: uid, ProjectUID: "p-repaired"}, result.Revision))
+	result, err = s.GetMembership(ctx, uid)
+	require.NoError(t, err)
+	assert.Equal(t, CacheStatusFresh, result.Status)
+	assert.Equal(t, "p-repaired", result.Value.ProjectUID)
+}
+
+// TestDeleteMembership_MissingKey_NoOp verifies the documented no-op
+// contract: deleting a UID with no cache entry at all returns nil rather than
+// propagating a not-found error, previously only exercised via keys that
+// existed and were then deleted.
+func TestDeleteMembership_MissingKey_NoOp(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeKV()
+	s := newFakeStorage(kv)
+
+	require.NoError(t, s.DeleteMembership(ctx, "pm-never-existed"))
+}
