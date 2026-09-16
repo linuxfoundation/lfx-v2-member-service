@@ -39,6 +39,7 @@ type membershipServicesrvc struct {
 	orgSettingsWriter       usecaseSvc.OrgSettingsWriter
 	workspaceWriter         usecaseSvc.WorkspaceWriter
 	backfillRunner          *usecaseSvc.Runner
+	memberTiers             *usecaseSvc.MemberTiers
 }
 
 // JWTAuth implements the authorization logic for service "membership-service".
@@ -236,6 +237,58 @@ func (s *membershipServicesrvc) GetProjectMembership(ctx context.Context, p *mem
 		result.Etag = &etagVal
 	}
 	return result, nil
+}
+
+// GetMemberTiers lists the highest active membership tier per B2B organization
+// for the organizations the given user is a key contact of, ordered highest
+// tier first. The ranking, eligibility revalidation, and candidate-cap logic
+// live in the usecaseSvc.MemberTiers use-case; this handler only delegates and
+// maps the result to the transport payload.
+func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershipservice.GetMemberTiersPayload) ([]*membershipservice.MemberOrgTierResponse, error) {
+	ordered, err := s.memberTiers.HighestActiveTiers(ctx, p.Username)
+	if err != nil {
+		return nil, wrapError(ctx, err)
+	}
+	res := make([]*membershipservice.MemberOrgTierResponse, 0, len(ordered))
+	for _, m := range ordered {
+		res = append(res, memberOrgTierToResponse(m))
+	}
+	return res, nil
+}
+
+// memberOrgTierToResponse maps an organization's winning membership to one
+// member-tiers response entry.
+func memberOrgTierToResponse(m *model.ProjectMembership) *membershipservice.MemberOrgTierResponse {
+	resp := &membershipservice.MemberOrgTierResponse{
+		B2bOrgUID:     m.B2BOrgUID,
+		MembershipUID: m.UID,
+		Tier:          model.TierClass(m.TierName),
+	}
+	if m.CompanyName != "" {
+		resp.CompanyName = &m.CompanyName
+	}
+	if m.ProjectUID != "" {
+		resp.ProjectUID = &m.ProjectUID
+	}
+	if m.ProjectSlug != "" {
+		resp.ProjectSlug = &m.ProjectSlug
+	}
+	if m.TierUID != "" {
+		resp.TierUID = &m.TierUID
+	}
+	if m.TierName != "" {
+		resp.TierName = &m.TierName
+	}
+	if m.Status != "" {
+		resp.Status = &m.Status
+	}
+	if m.StartDate != "" {
+		resp.StartDate = &m.StartDate
+	}
+	if m.EndDate != "" {
+		resp.EndDate = &m.EndDate
+	}
+	return resp
 }
 
 // ── Key Contacts ─────────────────────────────────────────────────────────────
@@ -1204,6 +1257,7 @@ func NewMembershipService(
 	orgSettingsWriter usecaseSvc.OrgSettingsWriter,
 	workspaceWriter usecaseSvc.WorkspaceWriter,
 	backfillRunner *usecaseSvc.Runner,
+	memberTiers *usecaseSvc.MemberTiers,
 ) membershipservice.Service {
 	return &membershipServicesrvc{
 		storage:                 storage,
@@ -1217,5 +1271,6 @@ func NewMembershipService(
 		orgSettingsWriter:       orgSettingsWriter,
 		workspaceWriter:         workspaceWriter,
 		backfillRunner:          backfillRunner,
+		memberTiers:             memberTiers,
 	}
 }

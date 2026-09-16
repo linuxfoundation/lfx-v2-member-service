@@ -32,7 +32,7 @@ paths:
                         schema:
                             $ref: '#/components/schemas/AdminReindexPayload'
                         example:
-                            cdc_repair: true
+                            cdc_repair: false
                             dry_run: false
                             items:
                                 - uid: 001B000000IqhSLIAZ
@@ -651,15 +651,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -815,15 +815,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -957,15 +957,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1099,15 +1099,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1248,15 +1248,15 @@ paths:
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
-                                created_at: "2025-01-01T00:00:00Z"
-                                updated_at: "2025-06-01T12:00:00Z"
-                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
                                       invited_as: writer
                                       name: Alice Smith
                                       username: alice
+                                created_at: "2025-01-01T00:00:00Z"
+                                updated_at: "2025-06-01T12:00:00Z"
+                                writers:
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -2042,10 +2042,6 @@ paths:
                             projects:
                                 - project_name: Kubernetes
                                   project_slug: kubernetes
-                                - project_name: Kubernetes
-                                  project_slug: kubernetes
-                                - project_name: Kubernetes
-                                  project_slug: kubernetes
             responses:
                 "200":
                     description: OK response.
@@ -2070,6 +2066,10 @@ paths:
                                 $ref: '#/components/schemas/WorkspaceBulkResponse2'
                             example:
                                 failed:
+                                    - error: project_slug is required
+                                      project_slug: ""
+                                    - error: project_slug is required
+                                      project_slug: ""
                                     - error: project_slug is required
                                       project_slug: ""
                                     - error: project_slug is required
@@ -2132,6 +2132,156 @@ paths:
                                 $ref: '#/components/schemas/Error'
                 "412":
                     description: 'PreconditionFailed: Precondition failed'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "500":
+                    description: 'InternalServerError: Internal server error'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "503":
+                    description: 'ServiceUnavailable: Service unavailable'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+            security:
+                - jwt_header_Authorization: []
+    /b2b_orgs/member-tiers/{username}:
+        get:
+            tags:
+                - membership-service
+            summary: get-member-tiers membership-service
+            description: List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.
+            operationId: membership-service#get-member-tiers
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: Version of the API
+                    example: "1"
+                    enum:
+                        - "1"
+                  example: "1"
+                - name: username
+                  in: path
+                  description: LFID username to look up
+                  required: true
+                  schema:
+                    type: string
+                    description: LFID username to look up
+                    example: jdoe
+                    minLength: 1
+                    maxLength: 255
+                  example: jdoe
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    $ref: '#/components/schemas/MemberOrgTierResponse'
+                                description: One entry per B2B organization, carrying its highest active tier, ordered highest tier first
+                                example:
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
+                            example:
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
+                "400":
+                    description: 'BadRequest: Bad request'
                     content:
                         application/vnd.goa.error:
                             schema:
@@ -2806,7 +2956,7 @@ components:
                     type: boolean
                     description: When true, walk SOQL/live-path but skip publishing. Final log includes would_publish_count.
                     default: false
-                    example: true
+                    example: false
                 items:
                     type: array
                     items:
@@ -2833,7 +2983,7 @@ components:
                     format: date-time
             description: Request payload for triggering a reindex operation
             example:
-                cdc_repair: false
+                cdc_repair: true
                 dry_run: true
                 items:
                     - uid: 001B000000IqhSLIAZ
@@ -2897,7 +3047,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Rerum sed commodi nesciunt magnam consectetur.
+                        example: Suscipit rerum blanditiis consectetur eaque natus.
                     description: Additional domains; each item is a bare host with the same normalization as primary_domain
                     example:
                         - example.org
@@ -3010,12 +3160,6 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
                 created_at:
                     type: string
                     description: Settings record creation timestamp
@@ -3032,6 +3176,12 @@ components:
                         $ref: '#/components/schemas/OrgUser'
                     description: Org administrators (writer relation in FGA). Full-replace on PUT.
                     example:
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
@@ -3080,6 +3230,18 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
+                    - avatar: https://avatars.githubusercontent.com/u/12345
+                      email: alice@example.com
+                      invite_status: accepted
+                      invited_as: writer
+                      name: Alice Smith
+                      username: alice
+                    - avatar: https://avatars.githubusercontent.com/u/12345
+                      email: alice@example.com
+                      invite_status: accepted
+                      invited_as: writer
+                      name: Alice Smith
+                      username: alice
         B2bOrgSettingsUpdateBody:
             type: object
             properties:
@@ -3089,12 +3251,6 @@ components:
                         $ref: '#/components/schemas/OrgUser'
                     description: Complete replacement list for org auditors. Nil = leave unchanged; [] = remove all.
                     example:
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
@@ -3140,19 +3296,7 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                 writers:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -3253,14 +3397,14 @@ components:
                 timeout:
                     type: boolean
                     description: Is the error a timeout?
-                    example: false
+                    example: true
             description: Endpoint not implemented
             example:
-                fault: true
+                fault: false
                 id: 123abc
                 message: parameter 'p' must be an integer
                 name: bad_request
-                temporary: true
+                temporary: false
                 timeout: true
             required:
                 - name
@@ -3311,7 +3455,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user). Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: false
+                    example: true
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -3331,7 +3475,7 @@ components:
                 last_name: Doe
                 primary_contact: false
                 role: Technical Contact
-                send_invite: false
+                send_invite: true
                 status: Active
                 title: CTO
             required:
@@ -3391,7 +3535,7 @@ components:
                 email: john.doe@example.com
                 primary_contact: false
                 role: Technical Contact
-                send_invite: false
+                send_invite: true
                 status: Active
                 title: CTO
         ListMetadata:
@@ -3410,6 +3554,71 @@ components:
             example:
                 next_page_token: ""
                 total_size: 100
+        MemberOrgTierResponse:
+            type: object
+            properties:
+                b2b_org_uid:
+                    type: string
+                    description: UID of the B2B organization (Account) holding the membership
+                    example: 001B000000IqhSLIAZ
+                company_name:
+                    type: string
+                    description: Member company name (denormalized from Account)
+                    example: Example Corp
+                end_date:
+                    type: string
+                    description: Membership end date
+                    example: "2025-12-31"
+                membership_uid:
+                    type: string
+                    description: UID of the winning membership (Asset)
+                    example: 02i2M000009ABCdIAM
+                project_slug:
+                    type: string
+                    description: URL slug of the project the membership is scoped to
+                    example: lf-main
+                project_uid:
+                    type: string
+                    description: V2 project UUID the membership is scoped to
+                    example: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                    format: uuid
+                start_date:
+                    type: string
+                    description: Membership start date
+                    example: "2025-02-01"
+                status:
+                    type: string
+                    description: Membership status
+                    example: Active
+                tier:
+                    type: string
+                    description: 'Normalized tier class derived from the tier name. One of: platinum, premier, founding, strategic, gold, steering, silver, general, associate, end_user, academic, contributor, other (highest first, matching the LFX One Org Lens taxonomy). Deliberately not a closed enum so the taxonomy can grow without breaking clients; unrecognized names fall back to other.'
+                    example: gold
+                tier_name:
+                    type: string
+                    description: Raw product name of the tier (denormalized from Product2)
+                    example: Gold Corporate Membership
+                tier_uid:
+                    type: string
+                    description: UID of the membership tier (Product2)
+                    example: 01t2M000009ABCdIAM
+            description: Highest active membership tier held by one B2B organization the user is a key contact of
+            example:
+                b2b_org_uid: 001B000000IqhSLIAZ
+                company_name: Example Corp
+                end_date: "2025-12-31"
+                membership_uid: 02i2M000009ABCdIAM
+                project_slug: lf-main
+                project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                start_date: "2025-02-01"
+                status: Active
+                tier: gold
+                tier_name: Gold Corporate Membership
+                tier_uid: 01t2M000009ABCdIAM
+            required:
+                - b2b_org_uid
+                - membership_uid
+                - tier
         MembershipTierResponse:
             type: object
             properties:
@@ -3872,12 +4081,6 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
                 writers:
                     type: array
                     items:
@@ -3947,12 +4150,6 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
         UpdateKeyContactRequestBody:
             type: object
             properties:
@@ -3987,7 +4184,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: false
+                    example: true
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -4042,10 +4239,6 @@ components:
                           project_slug: ""
                         - error: project_slug is required
                           project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
                 last_modified:
                     type: string
                     description: Last-Modified header value (HTTP date format)
@@ -4054,7 +4247,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Id ea itaque unde suscipit.
+                        example: Velit aut.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -4078,20 +4271,6 @@ components:
                     created_by: alice
                     name: My Workspace
                     projects:
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes
@@ -4134,7 +4313,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Aut sed ipsa.
+                        example: Consectetur excepturi non inventore veritatis qui.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -4301,13 +4480,13 @@ components:
                           project_slug: kubernetes
                         - project_name: Kubernetes
                           project_slug: kubernetes
+                        - project_name: Kubernetes
+                          project_slug: kubernetes
                     minItems: 1
                     maxItems: 100
             description: Request body for adding multiple projects to a workspace in one operation
             example:
                 projects:
-                    - project_name: Kubernetes
-                      project_slug: kubernetes
                     - project_name: Kubernetes
                       project_slug: kubernetes
             required:
@@ -4368,20 +4547,6 @@ components:
                 created_by: alice
                 name: My Workspace
                 projects:
-                    - created_at: "2026-01-01T00:00:00Z"
-                      created_by: alice
-                      project_name: Kubernetes
-                      project_slug: kubernetes
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                      updated_at: "2026-01-01T00:00:00Z"
-                      updated_by: alice
-                    - created_at: "2026-01-01T00:00:00Z"
-                      created_by: alice
-                      project_name: Kubernetes
-                      project_slug: kubernetes
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                      updated_at: "2026-01-01T00:00:00Z"
-                      updated_by: alice
                     - created_at: "2026-01-01T00:00:00Z"
                       created_by: alice
                       project_name: Kubernetes

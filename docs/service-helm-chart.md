@@ -26,10 +26,17 @@ ExternalSecret, IRSA role, region, and chart pins live in `lfx-v2-argocd`.
   `consumer.pubsubEndpoint`; `SF_ORG_ID` must be set or the consumer
   fails fast at startup.
 - **Heimdall auth** (`templates/ruleset.yaml`): per-object `auditor`/`writer`
-  checks on `b2b_org:{uid}` and `project_membership:{membership_uid}`;
-  `POST /b2b_orgs` and `POST /admin/reindex` check `member` on
-  `team:{{ .Values.app.globalOrgAdminTeamName }}`. The team name defaults to
-  `global_org_admin` and is consistent across environments.
+  checks on `b2b_org:{uid}` and `project_membership:{membership_uid}`. Three
+  machine-caller routes are team-gated instead: `POST /b2b_orgs` and
+  `POST /admin/reindex` check `member` on
+  `team:{{ .Values.app.globalOrgAdminTeamName }}` (defaults to
+  `global_org_admin`, consistent across environments), and
+  `GET /b2b_orgs/member-tiers/{username}` checks `member` on
+  `team:{{ .Values.app.memberTiersCallerTeamName }}` (defaults to
+  `member_tiers_caller`), scoping member-tiers callers (the Insights Worker,
+  LFX One) to that endpoint only. The team's member tuples must be written in
+  each environment's OpenFGA store before callers can use the endpoint;
+  setting the value to `""` falls back to `globalOrgAdminTeamName`.
 - **Salesforce secret**: the chart references the pre-existing Kubernetes
   Secret named by `values.yaml` at `salesforce.secrets.name`
   (`lfx-v2-member-service-salesforce` by default). The chart does not create

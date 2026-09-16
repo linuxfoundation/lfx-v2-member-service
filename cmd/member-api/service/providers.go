@@ -21,7 +21,6 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
-	infrab2borg "github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/b2borg"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/objectstore"
@@ -44,6 +43,9 @@ var (
 
 	projectResolver port.ProjectResolver
 	resolverDoOnce  sync.Once
+
+	userMembershipReader port.UserMembershipReader
+	userMembershipDoOnce sync.Once
 
 	// mockSettings is the shared in-memory settings store used in mock mode.
 	// Reader and writer must point at the same instance so writes are visible to reads.
@@ -148,14 +150,6 @@ func CloseNATSClient() {
 	}
 }
 
-// NATSClientImpl returns the shared NATSClient singleton, initialising it if
-// necessary. This is intended for use by main.go to register NATS RPC
-// subscriptions after MemberReaderImpl has been called.
-func NATSClientImpl(ctx context.Context) *nats.NATSClient {
-	natsInit(ctx)
-	return natsClient
-}
-
 // ProjectResolverImpl returns the shared ProjectResolver singleton, initialising
 // all dependencies (NATS, Salesforce) as needed. Returns nil when
 // REPOSITORY_SOURCE=mock — callers must guard on nil before use.
@@ -185,6 +179,46 @@ func ProjectResolverImpl(ctx context.Context) port.ProjectResolver {
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
 		return nil
 	}
+}
+
+// UserMembershipReaderImpl initialises and returns the
+// port.UserMembershipReader implementation selected by the REPOSITORY_SOURCE
+// environment variable:
+//
+//   - "salesforce" (default): reads the user's key-contact tuples from OpenFGA
+//     via the fga-sync NATS RPC (lfx.access_check.read_tuples).
+//   - "mock": in-memory reader seeded to match the mock project membership
+//     reader; for local development.
+func UserMembershipReaderImpl(ctx context.Context) port.UserMembershipReader {
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	switch repoSource {
+	case "mock":
+		slog.InfoContext(ctx, "initialising mock user membership reader")
+		return mock.NewMockUserMembershipReader()
+
+	case "salesforce":
+		userMembershipDoOnce.Do(func() {
+			natsInit(ctx)
+			userMembershipReader = nats.NewAccessCheckRPC(natsClient.Conn(), natsTimeoutFromEnv())
+		})
+		return userMembershipReader
+
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+		return nil
+	}
+}
+
+// MemberTiersUseCase constructs the member-tiers read use-case wired to the
+// selected membership reader (cached Salesforce or mock), the reverse-index
+// reader (fga-sync read_tuples RPC or mock), and the key-contact grant index
+// (nil in mock mode) used to match contacts whose Username is unresolved.
+func MemberTiersUseCase(ctx context.Context) *usecaseSvc.MemberTiers {
+	return usecaseSvc.NewMemberTiers(MemberReaderImpl(ctx), UserMembershipReaderImpl(ctx), KeyContactGrantIndexImpl(ctx))
 }
 
 // KeyContactWriterImpl initialises and returns the port.KeyContactWriter
@@ -478,7 +512,7 @@ func GlobalOrgAdminTeamName() string {
 }
 
 // B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
-// on every b2b_org, from LF_STAFF_TEAM_NAME.
+// on every b2b_org, from LF_STAFF_TEAM_NAME and LF_CONTRACTOR_TEAM_NAME.
 //
 // No team name is hardcoded here. The authoritative copy lives in
 // charts/lfx-v2-member-service/values.yaml, which both deployments inject
@@ -488,25 +522,40 @@ func GlobalOrgAdminTeamName() string {
 //
 // Names are trimmed and blank or whitespace-only values are dropped, so no path
 // can produce a "team:#member" subject with an empty name — the trap
-// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics.
+// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. Each
+// variable is independent: either team may be configured alone. Names are also
+// de-duplicated: two variables resolving to one team (an alias configuration)
+// must yield a single reference, because teamMemberRefs does not de-duplicate
+// and OpenFGA rejects a repeated tuple within one write request — the whole
+// full-sync message would fail on every publish path.
 //
-// Clearing the variable stops new references being emitted but revokes nothing:
+// Clearing a variable stops new references being emitted but revokes nothing:
 // fga-sync never deletes a tuple whose subject begins with "team:" (that guard
 // lives in the deployed service, v0.3.1 or later), so no service code path can
 // remove them — only scripts/revoke-lf-teams-auditor-openfga.sh.
 //
-// The slice return is not over-engineering for a single team. Adding one
-// (LFXV2-3071 for contractor access) stays a config-and-provider change with no
-// reach into message construction. The contractor variable is deliberately not
-// read here, so a pod deployed from stale values cannot reintroduce it.
+// Both LF teams are read because LFXV2-3071 ratified parity: lf-contractor
+// holds the same auditor tuple on the tenant root project as lf-staff, so the
+// per-org grant is the same for both populations. Message construction is
+// list-driven and untouched by the team count, but the *name* is enumerated at
+// every boundary, so a third team touches all of: the values.yaml key, both
+// Deployment templates (LF_*_TEAM_NAME env), the envVars list below, both
+// scripts' fga_team_names arguments (grant and revoke), the runbook's kubectl
+// exports, and the CLAUDE.md env tables.
 func B2BOrgAuditorTeamNames() []string {
-	names := make([]string, 0, 1)
-	for _, name := range []string{
-		strings.TrimSpace(os.Getenv("LF_STAFF_TEAM_NAME")),
-	} {
-		if name != "" {
-			names = append(names, name)
+	envVars := []string{"LF_STAFF_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"}
+	names := make([]string, 0, len(envVars))
+	seen := make(map[string]struct{}, len(envVars))
+	for _, envVar := range envVars {
+		name := strings.TrimSpace(os.Getenv(envVar))
+		if name == "" {
+			continue
 		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
 	}
 	return names
 }
@@ -637,6 +686,9 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
 			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
+			// Fresh-fetch sibling reader for the Inactive-revoke check (never
+			// served from the stale membership-group cache).
+			usecaseSvc.WithRunnerKeyContactsByMembershipReader(salesforce.NewKeyContactRepo(sfClient)),
 			// A key_contact reindex populates the grant index for contacts whose
 			// grant predates it.
 			usecaseSvc.WithKeyContactGrantIndex(nats.NewKeyContactGrantIndex(nc)),
@@ -693,14 +745,6 @@ func JWTAuthImpl(ctx context.Context) domain.Authenticator {
 	return a
 }
 
-// MemberReaderUseCase constructs the MemberReaderOrchestrator use-case wired
-// with the production (or mock) MemberReader adapter.
-func MemberReaderUseCase(ctx context.Context) usecaseSvc.MemberReader {
-	return usecaseSvc.NewMemberReaderOrchestrator(
-		usecaseSvc.WithMemberReader(MemberReaderImpl(ctx)),
-	)
-}
-
 // B2BOrgWriterUseCase constructs the B2BOrgWriter use-case orchestrator wired
 // with all production (or mock) dependencies.
 func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
@@ -715,7 +759,12 @@ func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
 
 // KeyContactWriterUseCase constructs the KeyContactWriter use-case orchestrator.
 func KeyContactWriterUseCase(ctx context.Context) usecaseSvc.KeyContactWriter {
-	return usecaseSvc.NewKeyContactWriter(
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	opts := []usecaseSvc.KeyContactWriterOption{
 		usecaseSvc.WithKCStorage(MemberReaderImpl(ctx)),
 		usecaseSvc.WithKCWriter(KeyContactWriterImpl(ctx)),
 		usecaseSvc.WithKCProjectMembershipReader(ProjectMembershipReaderImpl(ctx)),
@@ -723,7 +772,21 @@ func KeyContactWriterUseCase(ctx context.Context) usecaseSvc.KeyContactWriter {
 		usecaseSvc.WithKCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithKCOrgSettings(OrgSettingsWriterUseCase(ctx)),
 		usecaseSvc.WithKCGrantIndex(KeyContactGrantIndexImpl(ctx)),
-	)
+	}
+
+	switch repoSource {
+	case "mock":
+		// No fresh-fetch reader in mock mode: the sibling check stays disabled.
+	case "salesforce":
+		// Fresh-fetch sibling reader for the Inactive-revoke check (never
+		// served from the stale membership-group cache).
+		sObjectClientInit(ctx)
+		opts = append(opts, usecaseSvc.WithKCSiblingReader(salesforce.NewKeyContactRepo(sfClient)))
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+	}
+
+	return usecaseSvc.NewKeyContactWriter(opts...)
 }
 
 // InviteSenderImpl returns the port.InviteSender implementation selected by the
@@ -916,14 +979,6 @@ func DrainAPISubscriptions(ctx context.Context) {
 	}
 }
 
-// B2BOrgResolverImpl returns a B2BOrgResolver that translates Salesforce Account
-// SFIDs to v2 b2b_org UUIDs via a deterministic base-62 transform (no I/O).
-// Unlike other providers, there is no mock/salesforce distinction — the resolver
-// is pure CPU and works identically in every mode.
-func B2BOrgResolverImpl(_ context.Context) port.B2BOrgResolver {
-	return infrab2borg.NewResolver()
-}
-
 // CDCConsumerImpl constructs a CDCConsumer wired with all production
 // dependencies for consumer mode. It also initialises the pubsub-state KV
 // bucket (replay cursor storage) in the shared NATSClient.
@@ -1007,11 +1062,17 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// this KV record survived).
 		usecaseSvc.WithCDCB2BOrgSettingsReader(B2BOrgSettingsReaderImpl(ctx)),
 		usecaseSvc.WithCDCCacheInvalidator(sObjectClient),
+		// Soft-TTL membership-cache evictor: the cache GetMemberTiers reads
+		// from, so a CDC status or tier change is fresh on the next read.
+		usecaseSvc.WithCDCMembershipCacheEvictor(nats.NewStorage(natsClient)),
 		usecaseSvc.WithCDCPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithCDCGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithCDCB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 		usecaseSvc.WithCDCUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithCDCOrgSettings(OrgSettingsWriterUseCase(ctx)),
+		// Org-dashboard reconciliation scan for Inactive contacts, same reader
+		// the API writer orchestrator uses for ListKeyContactsForOrg.
+		usecaseSvc.WithCDCStorage(MemberReaderImpl(ctx)),
 	)
 
 	return consumer, replayStore, pubsubClient

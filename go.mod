@@ -17,14 +17,14 @@ require (
 	github.com/k-capehart/go-salesforce/v3 v3.1.2
 	github.com/linkedin/goavro/v2 v2.15.0
 	github.com/linuxfoundation/lfx-v2-email-service v0.1.6
-	github.com/linuxfoundation/lfx-v2-fga-sync v0.2.17
+	github.com/linuxfoundation/lfx-v2-fga-sync v0.3.9
 	github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16
 	github.com/linuxfoundation/lfx-v2-invite-service v0.1.4
-	github.com/nats-io/nats.go v1.49.0
+	github.com/nats-io/nats.go v1.51.0
 	github.com/remychantenay/slog-otel v1.3.5
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/exporters/autoexport v0.69.0
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/contrib/propagators/autoprop v0.69.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/log v0.20.0

@@ -7,10 +7,14 @@ import (
 	"context"
 	"testing"
 
+	fgaconstants "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	inviteapi "github.com/linuxfoundation/lfx-v2-invite-service/pkg/api"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -314,6 +318,278 @@ func TestInviteAcceptedService_Handle_NoKeyContactMatch_NoFGAGrant(t *testing.T)
 		}
 	}
 	assert.Equal(t, 0, accessCount, "no FGA grant when email does not match any key contact")
+}
+
+// TestInviteAcceptedService_Handle_SupersededSiblingSameEmail_NoRemove covers a
+// contact that moved from membership A to B: the grant index still points at
+// A, and another same-email contact remains on A in the org's contact slice.
+// The accepted-email resolver must let the supersede-revoke recognize A as
+// still justified, so no member_remove is published for it.
+func TestInviteAcceptedService_Handle_SupersededSiblingSameEmail_NoRemove(t *testing.T) {
+	const orgUID = "001000000000000AAA"
+	const movedUID = "kc-moved"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A", Username: "alice", Revision: 1},
+		},
+	}
+
+	kcs := []*model.KeyContact{
+		// The moved contact: same UID the index has recorded, now on m-B.
+		{UID: movedUID, MembershipUID: "m-B", Email: "alice@example.com", Status: "Active"},
+		// A sibling still on the old membership, same email, live.
+		{UID: "kc-sibling", MembershipUID: "m-A", Email: "alice@example.com", Status: "Active"},
+	}
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(&stubKCOrgReader{contacts: kcs}),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	for _, msg := range pub.accessMessages {
+		removeData, ok := msg.(fgatypes.GenericMemberData)
+		if !ok {
+			continue
+		}
+		assert.NotEqual(t, "m-A", removeData.UID,
+			"the old membership is still justified by the same-email sibling; it must not be revoked")
+	}
+}
+
+// TestInviteAcceptedService_Handle_SupersededSiblingDifferentEmail_Inconclusive
+// covers the fail-safe side: a sibling on the old membership with a different
+// email is not known to the accepted-email resolver, so the scan must read
+// as inconclusive and skip the revoke rather than strip a possibly-justified
+// tuple.
+func TestInviteAcceptedService_Handle_SupersededSiblingDifferentEmail_Inconclusive(t *testing.T) {
+	const orgUID = "001000000000000AAA"
+	const movedUID = "kc-moved-2"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A2", Username: "alice", Revision: 1},
+		},
+	}
+
+	kcs := []*model.KeyContact{
+		{UID: movedUID, MembershipUID: "m-B2", Email: "alice@example.com", Status: "Active"},
+		// A different person entirely, still on the old membership.
+		{UID: "kc-other", MembershipUID: "m-A2", Email: "carol@example.com", Status: "Active"},
+	}
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(&stubKCOrgReader{contacts: kcs}),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	for _, msg := range pub.accessMessages {
+		removeData, ok := msg.(fgatypes.GenericMemberData)
+		if !ok {
+			continue
+		}
+		assert.NotEqual(t, "m-A2", removeData.UID,
+			"an unresolvable sibling must make the scan inconclusive, not certain the pair is unjustified")
+	}
+	stored, found, err := grants.Get(context.Background(), movedUID)
+	require.NoError(t, err)
+	require.True(t, found, "the marker/entry must be retained so a later pass can retry the revoke")
+	assert.NotNil(t, stored.PendingRevoke, "the superseded pair's address must survive an inconclusive scan")
+}
+
+// sequencedKCOrgReader returns first on the initial read (the handler's
+// prefetch) and rest on every later one (the live post-remove recheck), so a
+// grant racing the prefetched slice can be simulated.
+type sequencedKCOrgReader struct {
+	first []*model.KeyContact
+	rest  []*model.KeyContact
+	calls int
+}
+
+func (r *sequencedKCOrgReader) ListKeyContactsForOrg(_ context.Context, _ string) ([]*model.KeyContact, error) {
+	r.calls++
+	if r.calls == 1 {
+		return r.first, nil
+	}
+	return r.rest, nil
+}
+
+// TestInviteAcceptedService_Handle_SupersededRacingRegrant_LiveRecheckRepairs
+// covers PRRT_kwDORegyoM6g_35f: the superseded-pair revoke must recheck
+// against a fresh org read, not the prefetched slice, so a same-email sibling
+// granted between the prefetch and the remove gets its tuple repaired.
+func TestInviteAcceptedService_Handle_SupersededRacingRegrant_LiveRecheckRepairs(t *testing.T) {
+	const orgUID = "001000000000000AAA"
+	const movedUID = "kc-moved-3"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A3", Username: "alice", Revision: 1},
+		},
+	}
+
+	moved := &model.KeyContact{UID: movedUID, MembershipUID: "m-B3", Email: "alice@example.com", Status: "Active"}
+	// Inactive: covers m-A3 in the prefetched slice without justifying the
+	// pair, so the scan says unjustified and the remove publishes.
+	dead := &model.KeyContact{UID: "kc-dead", MembershipUID: "m-A3", Email: "dead@example.com", Status: constants.RoleStatusInactive}
+	// A same-email grant racing the remove: visible only to the fresh read.
+	racing := &model.KeyContact{UID: "kc-race", MembershipUID: "m-A3", Email: "alice@example.com", Status: "Active"}
+	reader := &sequencedKCOrgReader{
+		first: []*model.KeyContact{moved, dead},
+		rest:  []*model.KeyContact{moved, dead, racing},
+	}
+
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(reader),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, reader.calls, 2, "the post-remove recheck must re-read the org live, not reuse the prefetched slice")
+	removeIdx, repairIdx := -1, -1
+	for i, subj := range pub.access {
+		switch {
+		case subj == fgaconstants.GenericMemberRemoveSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGARemoveMessage("m-A3", "alice")):
+			removeIdx = i
+		case subj == fgaconstants.GenericMemberPutSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGAPutMessage("m-A3", "alice")) && removeIdx >= 0:
+			repairIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, removeIdx, 0, "the superseded pair must be revoked based on the prefetched scan; access calls: %v", pub.access)
+	assert.Greater(t, repairIdx, removeIdx, "the racing same-email grant must be repaired with a compensating member_put after the remove")
+}
+
+// scriptedKCOrgReader returns pages[0] on the first read, pages[1] on the
+// second, and the last page on every later read, so multi-stage races
+// (prefetch, recheck, post-repair verification) can each see different state.
+type scriptedKCOrgReader struct {
+	pages [][]*model.KeyContact
+	calls int
+}
+
+func (r *scriptedKCOrgReader) ListKeyContactsForOrg(_ context.Context, _ string) ([]*model.KeyContact, error) {
+	r.calls++
+	i := r.calls - 1
+	if i >= len(r.pages) {
+		i = len(r.pages) - 1
+	}
+	return r.pages[i], nil
+}
+
+// TestInviteAcceptedService_Handle_RepairRacedByDeactivation_TakedownAndRetry
+// covers PRRT_kwDORegyoM6hA42L: when the sibling that justified the
+// compensating put deactivates before the put lands, the post-put
+// verification must remove the tuple again and keep retry state.
+func TestInviteAcceptedService_Handle_RepairRacedByDeactivation_TakedownAndRetry(t *testing.T) {
+	const orgUID = "001000000000000AAB"
+	const movedUID = "kc-moved-4"
+	store := mock.NewMockB2BOrgSettings()
+	store.Seed(orgUID, &model.B2BOrgSettings{UID: orgUID}, 1)
+
+	inner := &countingWriter{inner: newOrgSettingsWriter(store, mock.NewMockB2BOrgReader(), mock.NewMockMemberPublisher())}
+	pub := &subjectCapturingPublisher{}
+	grants := &mock.MockKeyContactGrantIndex{
+		Entries: map[string]port.KeyContactGrant{
+			movedUID: {MembershipUID: "m-A4", Username: "alice", Revision: 1},
+		},
+	}
+
+	moved := &model.KeyContact{UID: movedUID, MembershipUID: "m-B4", Email: "alice@example.com", Status: "Active"}
+	dead := &model.KeyContact{UID: "kc-dead-4", MembershipUID: "m-A4", Email: "dead@example.com", Status: constants.RoleStatusInactive}
+	racing := &model.KeyContact{UID: "kc-race-4", MembershipUID: "m-A4", Email: "alice@example.com", Status: "Active"}
+	racingGone := &model.KeyContact{UID: "kc-race-4", MembershipUID: "m-A4", Email: "alice@example.com", Status: constants.RoleStatusInactive}
+	reader := &scriptedKCOrgReader{pages: [][]*model.KeyContact{
+		{moved, dead},             // prefetch: m-A4 covered but unjustified, remove publishes
+		{moved, dead, racing},     // post-remove recheck: racing grant found, repair put publishes
+		{moved, dead, racingGone}, // post-repair verification: justification gone, takedown must run
+	}}
+
+	invSvc := svc.NewInviteAcceptedService(
+		svc.WithInviteAcceptedSettingsReader(store),
+		svc.WithInviteAcceptedOrgSettingsWriter(inner),
+		svc.WithInviteAcceptedKeyContactReader(reader),
+		svc.WithInviteAcceptedPublisher(pub),
+		svc.WithInviteAcceptedKeyContactGrantIndex(grants),
+	)
+
+	ev := inviteapi.InviteServiceAcceptedEvent{
+		Invite: inviteapi.Invite{
+			AcceptedBy: "auth0|alice",
+			Recipient:  inviteapi.Recipient{Email: "alice@example.com"},
+			Resource:   inviteapi.Resource{Type: "b2b_org", UID: orgUID},
+		},
+	}
+	err := invSvc.Handle(context.Background(), ev)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, reader.calls, 3, "the repair must be verified against a fresh org read after the put")
+	removeIdx, repairIdx, takedownIdx := -1, -1, -1
+	for i, subj := range pub.access {
+		switch {
+		case subj == fgaconstants.GenericMemberRemoveSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGARemoveMessage("m-A4", "alice")) && repairIdx < 0:
+			removeIdx = i
+		case subj == fgaconstants.GenericMemberPutSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGAPutMessage("m-A4", "alice")) && removeIdx >= 0:
+			repairIdx = i
+		case subj == fgaconstants.GenericMemberRemoveSubject && assert.ObjectsAreEqual(pub.accessMessages[i], svc.BuildKeyContactFGARemoveMessage("m-A4", "alice")) && repairIdx >= 0:
+			takedownIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, removeIdx, 0, "the superseded pair must be revoked first; access calls: %v", pub.access)
+	require.Greater(t, repairIdx, removeIdx, "the racing grant must be repaired with a compensating member_put")
+	assert.Greater(t, takedownIdx, repairIdx, "the verification must take the repaired tuple back down once its justification is gone")
+
+	stored, found, err := grants.Get(context.Background(), movedUID)
+	require.NoError(t, err)
+	require.True(t, found, "the entry must be retained so a later pass can settle the race")
+	assert.NotNil(t, stored.PendingRevoke, "the superseded pair's address must survive an uncertain repair")
 }
 
 func TestInviteAcceptedService_Handle_NilKeyContactDeps_NoPanic(t *testing.T) {
