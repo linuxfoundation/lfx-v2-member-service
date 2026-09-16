@@ -4,12 +4,13 @@
 //
 // Command:
 // $ goa gen
-// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design -o .
+// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
 
 package membershipservice
 
 import (
 	"context"
+	"io"
 
 	goa "goa.design/goa/v3/pkg"
 	"goa.design/goa/v3/security"
@@ -24,6 +25,18 @@ type Service interface {
 	CreateB2bOrg(context.Context, *CreateB2bOrgPayload) (res *CreateB2bOrgResult, err error)
 	// Update a B2B organization
 	UpdateB2bOrg(context.Context, *UpdateB2bOrgPayload) (res *UpdateB2bOrgResult, err error)
+	// Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and
+	// set it as the org's logo URL. The request body is the raw logo image bytes
+	// -- not a JSON envelope -- sent with Content-Type set to one of image/png,
+	// image/jpeg, or image/svg+xml (echoed in the content_type header attribute
+	// below). Content-Length is not modeled as a payload attribute: net/http moves
+	// it off the header map onto Request.ContentLength, which the generated
+	// decoder cannot read, and the size limit is enforced while reading the body
+	// regardless. The body isn't reflected as a structured OpenAPI request body
+	// because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming
+	// access, which Goa's generator does not support combining with a Body(...)
+	// declaration.
+	UploadB2bOrgLogo(context.Context, *UploadB2bOrgLogoPayload, io.ReadCloser) (res *UploadB2bOrgLogoResult, err error)
 	// Get the access-control settings (writers and auditors) for a B2B organization
 	GetB2bOrgSettings(context.Context, *GetB2bOrgSettingsPayload) (res *GetB2bOrgSettingsResult, err error)
 	// Replace the writers and/or auditors list on a B2B organization (full-replace
@@ -43,6 +56,11 @@ type Service interface {
 	DeleteB2bOrgSettingsUser(context.Context, *DeleteB2bOrgSettingsUserPayload) (res *DeleteB2bOrgSettingsUserResult, err error)
 	// Get a specific project membership by UID
 	GetProjectMembership(context.Context, *GetProjectMembershipPayload) (res *GetProjectMembershipResult, err error)
+	// List the highest active membership tier per B2B organization for the
+	// organizations the given user is a key contact of, ordered highest tier first
+	// so the leading entry is the user's top tier. Unknown users yield an empty
+	// list, not 404.
+	GetMemberTiers(context.Context, *GetMemberTiersPayload) (res []*MemberOrgTierResponse, err error)
 	// Get a specific key contact by UID
 	GetKeyContact(context.Context, *GetKeyContactPayload) (res *GetKeyContactResult, err error)
 	// Create a new key contact
@@ -104,7 +122,7 @@ const ServiceName = "membership-service"
 // MethodNames lists the service method names as defined in the design. These
 // are the same values that are set in the endpoint request contexts under the
 // MethodKey key.
-var MethodNames = [23]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
+var MethodNames = [25]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-member-tiers", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
 
 // AddB2bOrgSettingsUserPayload is the payload type of the membership-service
 // service add-b2b-org-settings-user method.
@@ -522,6 +540,17 @@ type GetKeyContactResult struct {
 	LastModified *string
 }
 
+// GetMemberTiersPayload is the payload type of the membership-service service
+// get-member-tiers method.
+type GetMemberTiersPayload struct {
+	// JWT token issued by Heimdall
+	BearerToken *string
+	// Version of the API
+	Version *string
+	// LFID username to look up
+	Username string
+}
+
 // GetProjectMembershipPayload is the payload type of the membership-service
 // service get-project-membership method.
 type GetProjectMembershipPayload struct {
@@ -546,6 +575,37 @@ type GetProjectMembershipResult struct {
 	Etag *string
 	// Last-Modified header value (HTTP date format)
 	LastModified *string
+}
+
+// Highest active membership tier held by one B2B organization the user is a
+// key contact of
+type MemberOrgTierResponse struct {
+	// UID of the B2B organization (Account) holding the membership
+	B2bOrgUID string
+	// Member company name (denormalized from Account)
+	CompanyName *string
+	// UID of the winning membership (Asset)
+	MembershipUID string
+	// V2 project UUID the membership is scoped to
+	ProjectUID *string
+	// URL slug of the project the membership is scoped to
+	ProjectSlug *string
+	// UID of the membership tier (Product2)
+	TierUID *string
+	// Raw product name of the tier (denormalized from Product2)
+	TierName *string
+	// Normalized tier class derived from the tier name. One of: platinum, premier,
+	// founding, strategic, gold, steering, silver, general, associate, end_user,
+	// academic, contributor, other (highest first, matching the LFX One Org Lens
+	// taxonomy). Deliberately not a closed enum so the taxonomy can grow without
+	// breaking clients; unrecognized names fall back to other.
+	Tier string
+	// Membership status
+	Status *string
+	// Membership start date
+	StartDate *string
+	// Membership end date
+	EndDate *string
 }
 
 // A writer or auditor principal on a b2b_org settings list
@@ -865,6 +925,32 @@ type UpdateKeyContactPayload struct {
 type UpdateKeyContactResult struct {
 	// Updated key contact
 	KeyContact *ProjectKeyContactResponse
+	// ETag header value
+	Etag *string
+	// Last-Modified header value (HTTP date format)
+	LastModified *string
+}
+
+// UploadB2bOrgLogoPayload is the payload type of the membership-service
+// service upload-b2b-org-logo method.
+type UploadB2bOrgLogoPayload struct {
+	// JWT token issued by Heimdall
+	BearerToken *string
+	// Version of the API
+	Version *string
+	// B2B organization UID
+	UID string
+	// If-Match header value for conditional requests
+	IfMatch string
+	// MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
+	ContentType string
+}
+
+// UploadB2bOrgLogoResult is the result type of the membership-service service
+// upload-b2b-org-logo method.
+type UploadB2bOrgLogoResult struct {
+	// Updated B2B organization
+	B2bOrg *B2bOrgResponse
 	// ETag header value
 	Etag *string
 	// Last-Modified header value (HTTP date format)

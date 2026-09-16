@@ -132,7 +132,7 @@ func (w *B2BOrgWriter) UpdateB2BOrg(ctx context.Context, uid string, input model
 
 // buildAccountPatch constructs the JSON-serialisable PATCH body for a Salesforce
 // Account update. Only non-zero fields from input are included; nil pointer fields
-// skip unless explicitly set (CrunchBaseURL nil = no-op, "" = explicit null).
+// skip unless explicitly set (LogoURL/CrunchBaseURL nil = no-op, "" = explicit null).
 func buildAccountPatch(input model.B2BOrgInput) (map[string]any, error) {
 	patch := make(map[string]any)
 	if input.Name != "" {
@@ -150,8 +150,12 @@ func buildAccountPatch(input model.B2BOrgInput) (map[string]any, error) {
 	if input.PrimaryDomain != "" {
 		patch["Account_Domain__c"] = input.PrimaryDomain
 	}
-	if input.LogoURL != "" {
-		patch["Logo_URL__c"] = input.LogoURL
+	if input.LogoURL != nil {
+		if *input.LogoURL == "" {
+			patch["Logo_URL__c"] = nil // explicit JSON null = clear the field
+		} else {
+			patch["Logo_URL__c"] = *input.LogoURL
+		}
 	}
 	if input.Industry != "" {
 		patch["Industry"] = input.Industry

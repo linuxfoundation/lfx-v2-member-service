@@ -85,6 +85,8 @@ func TestBuildAccountPatch(t *testing.T) {
 
 	crunchURL := "https://www.crunchbase.com/organization/acme"
 	emptyCrunch := ""
+	logoURL := "https://acme.com/logo.png"
+	emptyLogo := ""
 	var empCount int64 = 500
 
 	tests := []struct {
@@ -111,7 +113,7 @@ func TestBuildAccountPatch(t *testing.T) {
 				Phone:         "+1-555-0100",
 				Website:       "https://acme.com",
 				PrimaryDomain: "acme.com",
-				LogoURL:       "https://acme.com/logo.png",
+				LogoURL:       &logoURL,
 				Industry:      "Technology",
 				Sector:        "Private",
 			},
@@ -125,6 +127,16 @@ func TestBuildAccountPatch(t *testing.T) {
 				"Industry":          "Technology",
 				"Sector__c":         "Private",
 			},
+		},
+		{
+			name:  "LogoURL empty string means explicit null",
+			input: model.B2BOrgInput{LogoURL: &emptyLogo},
+			want:  map[string]any{"Logo_URL__c": nil},
+		},
+		{
+			name:  "LogoURL nil means no-op",
+			input: model.B2BOrgInput{LogoURL: nil},
+			want:  map[string]any{},
 		},
 		{
 			name:  "CrunchBaseURL set to value",

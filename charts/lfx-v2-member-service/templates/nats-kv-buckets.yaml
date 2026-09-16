@@ -84,7 +84,7 @@ spec:
 apiVersion: jetstream.nats.io/v1beta2
 kind: KeyValue
 metadata:
-  name: {{ .Values.nats.kv_bucket_org_workspace_projects.name }}
+  name: {{ .Values.nats.kv_bucket_org_workspace_projects.name | replace "_" "-" }}
   namespace: lfx
   {{- if .Values.nats.kv_bucket_org_workspace_projects.keep }}
   annotations:
@@ -93,6 +93,7 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
 spec:
+  preventDelete: true
   bucket: {{ .Values.nats.kv_bucket_org_workspace_projects.name }}
   replicas: {{ .Values.nats.kv_bucket_org_workspace_projects.replicas }}
   history: {{ .Values.nats.kv_bucket_org_workspace_projects.history }}

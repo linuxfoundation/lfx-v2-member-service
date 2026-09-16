@@ -172,6 +172,30 @@ func TestB2BOrgWriter_Update_NoOp_SkipsWriteAndPublish(t *testing.T) {
 	assert.Empty(t, pub.calls(), "no-op update must not publish")
 }
 
+func TestB2BOrgWriter_UpdateWithoutPublish_PersistsWithoutEvents(t *testing.T) {
+	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
+	updated := &model.B2BOrg{UID: testB2BOrgUID, LogoURL: "https://cdn.example.com/scratch", UpdatedAt: time.Now()}
+	pub := &trackingPublisher{}
+	w := newB2BOrgWriter(
+		&seededOrgReader{org: current},
+		&seededOrgWriter{updateOrg: updated},
+		pub,
+		"",
+	)
+	logoURL := updated.LogoURL
+
+	result, err := w.UpdateWithoutPublish(
+		context.Background(),
+		testB2BOrgUID,
+		model.B2BOrgInput{LogoURL: &logoURL},
+		"",
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, updated, result)
+	assert.Empty(t, pub.calls(), "transient update must not publish indexer or FGA events")
+}
+
 func TestB2BOrgWriter_Update_HasChanges_IndexerBeforeAccess(t *testing.T) {
 	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
 	updated := &model.B2BOrg{UID: testB2BOrgUID, Name: "Updated Name", UpdatedAt: time.Now()}
@@ -307,6 +331,36 @@ func TestB2BOrgWriter_Update_Reparenting_EmitsMoreAccessCalls(t *testing.T) {
 		countCalls(reparentPub.calls(), "access:"),
 		countCalls(sameParentPub.calls(), "access:"),
 		"reparenting must emit more FGA access calls than a non-reparenting update")
+}
+
+// ── ValidatePrecondition tests ───────────────────────────────────────────────
+
+func TestB2BOrgWriter_ValidatePrecondition_Success(t *testing.T) {
+	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
+	w := newB2BOrgWriter(&seededOrgReader{org: current}, &seededOrgWriter{}, &trackingPublisher{}, "")
+
+	_, err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, mustEtag(t, current))
+
+	assert.NoError(t, err)
+}
+
+func TestB2BOrgWriter_ValidatePrecondition_NotFound(t *testing.T) {
+	w := newB2BOrgWriter(&seededOrgReader{}, &seededOrgWriter{}, &trackingPublisher{}, "")
+
+	_, err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, "")
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsNotFound(err))
+}
+
+func TestB2BOrgWriter_ValidatePrecondition_IfMatchMismatch(t *testing.T) {
+	current := &model.B2BOrg{UID: testB2BOrgUID, UpdatedAt: time.Now()}
+	w := newB2BOrgWriter(&seededOrgReader{org: current}, &seededOrgWriter{}, &trackingPublisher{}, "")
+
+	_, err := w.ValidatePrecondition(context.Background(), testB2BOrgUID, "\"stale-etag\"")
+
+	require.Error(t, err)
+	assert.True(t, pkgerrors.IsPreconditionFailed(err))
 }
 
 // ── Children field tests ───────────────────────────────────────────────────

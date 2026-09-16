@@ -41,7 +41,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 	// Sample tier (Product2).
 	sampleTier := &model.MembershipTier{
 		UID:         "tier-1",
-		ProjectUID:  "project-uid-1",
+		ProjectUID:  "22222222-2222-2222-2222-222222222222",
 		ProjectSlug: "linux-foundation",
 		Name:        "Gold Membership",
 		Family:      "Membership",
@@ -51,12 +51,17 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 	}
 	mock.tiers[sampleTier.UID] = sampleTier
 
-	// Sample membership (Asset).
+	// Sample membership (Asset). B2BOrgUID and a far-future EndDate are
+	// required by the member-tiers flow, which reads this record through
+	// GetMembership and filters out memberships that are org-less or past
+	// their end date; a dated end (originally 2025-12-31) silently expired
+	// the seed once the calendar passed it.
 	sampleMembership := &model.ProjectMembership{
 		UID:              "11111111-1111-1111-1111-111111111111",
 		TierUID:          "tier-1",
-		ProjectUID:       "project-uid-1",
+		ProjectUID:       "22222222-2222-2222-2222-222222222222",
 		ProjectSlug:      "linux-foundation",
+		B2BOrgUID:        "org-1",
 		Status:           "Active",
 		Year:             "2025",
 		Tier:             "Gold",
@@ -66,7 +71,7 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 		AnnualFullPrice:  50000,
 		PaymentFrequency: "Annual",
 		StartDate:        "2025-01-01T00:00:00Z",
-		EndDate:          "2025-12-31T23:59:59Z",
+		EndDate:          "2099-12-31T23:59:59Z",
 		CompanyName:      "Example Corp",
 		CompanyLogoURL:   "https://example.com/logo.png",
 		CompanyDomain:    "https://example.com",
@@ -83,10 +88,11 @@ func NewMockMembershipRepository() *MockMembershipRepository {
 		UID:            "contact-role-1",
 		MembershipUID:  "11111111-1111-1111-1111-111111111111",
 		TierUID:        "tier-1",
-		ProjectUID:     "project-uid-1",
+		ProjectUID:     "22222222-2222-2222-2222-222222222222",
 		ProjectSlug:    "linux-foundation",
 		Role:           "Primary Contact",
 		Status:         "Active",
+		Username:       "keycontact1",
 		BoardMember:    false,
 		PrimaryContact: true,
 		FirstName:      "John",
@@ -390,6 +396,40 @@ func (m *MockB2BOrgWriter) UpdateB2BOrg(_ context.Context, _ string, _ model.B2B
 	return nil, errors.NewNotImplemented("update-b2b-org not implemented in mock")
 }
 
+// MockObjectStoreWriter is a stub implementation of port.ObjectStoreWriter for
+// local development when REPOSITORY_SOURCE=mock.
+type MockObjectStoreWriter struct{}
+
+// NewMockObjectStoreWriter creates a new MockObjectStoreWriter.
+func NewMockObjectStoreWriter() *MockObjectStoreWriter {
+	return &MockObjectStoreWriter{}
+}
+
+// Put always returns not-implemented.
+func (m *MockObjectStoreWriter) Put(_ context.Context, _ string, _ string, _ []byte) (string, error) {
+	return "", errors.NewNotImplemented("upload-b2b-org-logo not implemented in mock")
+}
+
+// mockObjectStoreVersion keeps mock URLs deterministic across calls.
+const mockObjectStoreVersion = 1
+
+// VersionedURL returns a syntactically valid deterministic URL. Callers derive
+// other keys from it before ever calling Put, so an empty string would fail
+// them earlier and hide the typed NotImplemented error Put exists to return.
+func (m *MockObjectStoreWriter) VersionedURL(key string) string {
+	return fmt.Sprintf("https://mock-object-store.invalid/%s?v=%d", key, mockObjectStoreVersion)
+}
+
+// Delete always returns not-implemented.
+func (m *MockObjectStoreWriter) Delete(_ context.Context, _ string) error {
+	return errors.NewNotImplemented("delete-b2b-org-logo not implemented in mock")
+}
+
+// CopyIfNewer always returns not-implemented.
+func (m *MockObjectStoreWriter) CopyIfNewer(_ context.Context, _, _ string, _ int64) error {
+	return errors.NewNotImplemented("copy-b2b-org-logo not implemented in mock")
+}
+
 // MockMemberPublisher is a no-op implementation of port.MemberPublisher for
 // local development when MESSAGING_SOURCE=mock. All messages are logged but
 // not published to NATS.
@@ -519,11 +559,16 @@ func (m *MockKeyContactWriterWithOK) CreateKeyContact(_ context.Context, input m
 	if input.Role != nil {
 		role = *input.Role
 	}
+	status := ""
+	if input.Status != nil {
+		status = *input.Status
+	}
 	return &model.KeyContact{
 		UID:           "00000000-0000-0000-0000-000000000099",
 		MembershipUID: input.MembershipUID,
 		Email:         email,
 		Role:          role,
+		Status:        status,
 		B2BOrgUID:     input.AccountSFID,
 		UpdatedAt:     time.Now(),
 	}, nil
@@ -538,11 +583,16 @@ func (m *MockKeyContactWriterWithOK) UpdateKeyContact(_ context.Context, uid str
 	if input.Role != nil {
 		role = *input.Role
 	}
+	status := ""
+	if input.Status != nil {
+		status = *input.Status
+	}
 	return &model.KeyContact{
 		UID:           uid,
 		MembershipUID: input.MembershipUID,
 		Email:         email,
 		Role:          role,
+		Status:        status,
 		B2BOrgUID:     input.AccountSFID,
 		UpdatedAt:     time.Now(),
 	}, nil
@@ -565,9 +615,16 @@ func NewMockProjectMembershipReader() *MockProjectMembershipReader {
 func (m *MockProjectMembershipReader) AssembleProjectMembership(_ context.Context, uid string) (*model.ProjectMembership, time.Time, error) {
 	if uid == "11111111-1111-1111-1111-111111111111" {
 		return &model.ProjectMembership{
-			UID:        "11111111-1111-1111-1111-111111111111",
-			ProjectUID: "project-1",
-			B2BOrgUID:  "org-1",
+			UID:         "11111111-1111-1111-1111-111111111111",
+			ProjectUID:  "project-1",
+			ProjectSlug: "linux-foundation",
+			B2BOrgUID:   "org-1",
+			CompanyName: "Mock Corp",
+			TierUID:     "tier-1",
+			TierName:    "Gold Corporate Membership",
+			Status:      "Active",
+			StartDate:   "2025-01-01",
+			EndDate:     "2099-12-31",
 		}, time.Now(), nil
 	}
 	return nil, time.Time{}, errors.NewNotFound("project membership not found in mock")

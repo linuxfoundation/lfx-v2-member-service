@@ -38,6 +38,10 @@ replica dependency from the v1 platform has been fully removed. The service now:
    invalidates the sObject cache and re-publishes indexer + FGA-sync messages on
    `Account`/`Asset`/`Project_Role__c` change events, persisting its replay cursor in the
    `pubsub-state` KV bucket.
+9. Serves `GET /b2b_orgs/member-tiers/{username}` by resolving the user's memberships through
+   a blocking NATS RPC to fga-sync (`lfx.access_check.read_tuples`), a hard runtime dependency
+   for that endpoint: if fga-sync is unavailable the endpoint returns 503, while the rest of
+   the API is unaffected.
 
 ### Current API layout
 
@@ -55,6 +59,7 @@ The service exposes resource-rooted endpoints. The authoritative surface is the 
 | POST | `/b2b_orgs/{uid}/settings/users` | Add a single settings user (per-principal) | `writer` on `b2b_org:{uid}` |
 | PUT | `/b2b_orgs/{uid}/settings/users/{email}` | Change a settings user's role | `writer` on `b2b_org:{uid}` |
 | DELETE | `/b2b_orgs/{uid}/settings/users/{email}` | Remove a settings user | `writer` on `b2b_org:{uid}` |
+| GET | `/b2b_orgs/member-tiers/{username}` | Highest active tier per org for a user (machine callers) | `member` on `team:{memberTiersCallerTeamName}` (default `member_tiers_caller`; empty falls back to `globalOrgAdminTeamName`) |
 | GET | `/project_memberships/{uid}` | Get a membership | `auditor` on `project_membership:{uid}` |
 | GET | `/project_memberships/{m_uid}/key_contacts/{uid}` | Get a key contact | `auditor` on `project_membership:{m_uid}` |
 | POST | `/project_memberships/{m_uid}/key_contacts` | Create a key contact | `writer` on `project_membership:{m_uid}` |
@@ -1158,10 +1163,10 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
   tombstoned document is rebuilt by `POST /admin/reindex`, whereas a revoked grant is recovered
   only by an operator re-applying the org's settings.
 - A `delete_access` on a deleted object does **not** leave it with zero tuples. fga-sync
-  declines to delete any tuple whose subject begins with `team:`, so the staff-team reader grant
-  from LFXV2-2937 survives. It confers access to an object that no longer resolves, so it is
-  inert — but an audit asserting zero remaining tuples will report a correct implementation as
-  broken.
+  declines to delete any tuple whose subject begins with `team:`, so the configured LF-team reader
+  grants (staff, LFXV2-2937; contractor, LFXV2-3071) survive. They confer access to an object
+  that no longer resolves, so they are inert — but an audit asserting zero remaining tuples will
+  report a correct implementation as broken.
 
 ### Step 6: Indexer integration — *Done*
 

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"expvar"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -33,10 +34,12 @@ type membershipServicesrvc struct {
 	projectMembershipReader port.ProjectMembershipReader
 	b2bOrgSettingsReader    port.B2BOrgSettingsReader
 	b2bOrgWriter            usecaseSvc.B2BOrgWriter
+	logoUploader            usecaseSvc.LogoUploader
 	keyContactWriter        usecaseSvc.KeyContactWriter
 	orgSettingsWriter       usecaseSvc.OrgSettingsWriter
 	workspaceWriter         usecaseSvc.WorkspaceWriter
 	backfillRunner          *usecaseSvc.Runner
+	memberTiers             *usecaseSvc.MemberTiers
 }
 
 // JWTAuth implements the authorization logic for service "membership-service".
@@ -56,6 +59,15 @@ func (s *membershipServicesrvc) Readyz(ctx context.Context) ([]byte, error) {
 		slog.ErrorContext(ctx, "service not ready", "error", err)
 		return nil, err
 	}
+	// The logo bucket is deliberately NOT probed here. Its error was already
+	// discarded (logged, not returned) rather than failing the whole pod's
+	// readiness — but a synchronous HeadBucket still sat in the request path,
+	// so a DNS/network stall against S3 could itself time out this handler
+	// (chart leaves the probe's timeoutSeconds at Kubernetes' 1s default),
+	// taking every unrelated route out of rotation over a check whose result
+	// was going to be ignored anyway. Startup connectivity is still checked
+	// once, out-of-band, by the background goroutine in main.go
+	// (LFXV2-2016 lfx-reviewer finding on PR #87).
 	return []byte("OK\n"), nil
 }
 
@@ -163,6 +175,43 @@ func (s *membershipServicesrvc) UpdateB2bOrg(ctx context.Context, p *memberships
 	return result, nil
 }
 
+// UploadB2bOrgLogo uploads a B2B org logo (PNG/JPEG/SVG, max 2MB) to object
+// storage and sets it as the org's Logo_URL__c under the same If-Match/etag
+// semantics as UpdateB2bOrg.
+func (s *membershipServicesrvc) UploadB2bOrgLogo(ctx context.Context, p *membershipservice.UploadB2bOrgLogoPayload, body io.ReadCloser) (*membershipservice.UploadB2bOrgLogoResult, error) {
+	defer body.Close() //nolint:errcheck
+
+	p.UID = normalizeSFID(p.UID)
+
+	org, err := s.logoUploader.UploadB2BOrgLogo(ctx, p.UID, p.ContentType, body, p.IfMatch)
+	if err != nil {
+		return nil, wrapError(ctx, err)
+	}
+
+	// org.IsParent was populated in place by Update's publishEvents call
+	// (b2b_org_writer.go), which the plain reader behind GetB2bOrg and every
+	// future If-Match check never sets. Hashing it as-is here would return an
+	// etag a parent org's own next request can never satisfy. Clear it first
+	// so this response's etag matches the same shape GetB2bOrg computes
+	// (LFXV2-2016 lfx-reviewer finding on PR #87).
+	orgForEtag := *org
+	orgForEtag.IsParent = false
+	etagVal, etagErr := etag.LFXEtag(&orgForEtag)
+	if etagErr != nil {
+		slog.WarnContext(ctx, "failed to compute etag for b2b org", "uid", p.UID, "error", etagErr)
+	}
+
+	lastMod := org.UpdatedAt.UTC().Format(constants.HTTPDateFormat)
+	result := &membershipservice.UploadB2bOrgLogoResult{
+		B2bOrg:       b2bOrgToResponse(org),
+		LastModified: &lastMod,
+	}
+	if etagVal != "" {
+		result.Etag = &etagVal
+	}
+	return result, nil
+}
+
 // ── Project Memberships ──────────────────────────────────────────────────────
 
 // GetProjectMembership retrieves a single membership by UID and assembles the
@@ -188,6 +237,58 @@ func (s *membershipServicesrvc) GetProjectMembership(ctx context.Context, p *mem
 		result.Etag = &etagVal
 	}
 	return result, nil
+}
+
+// GetMemberTiers lists the highest active membership tier per B2B organization
+// for the organizations the given user is a key contact of, ordered highest
+// tier first. The ranking, eligibility revalidation, and candidate-cap logic
+// live in the usecaseSvc.MemberTiers use-case; this handler only delegates and
+// maps the result to the transport payload.
+func (s *membershipServicesrvc) GetMemberTiers(ctx context.Context, p *membershipservice.GetMemberTiersPayload) ([]*membershipservice.MemberOrgTierResponse, error) {
+	ordered, err := s.memberTiers.HighestActiveTiers(ctx, p.Username)
+	if err != nil {
+		return nil, wrapError(ctx, err)
+	}
+	res := make([]*membershipservice.MemberOrgTierResponse, 0, len(ordered))
+	for _, m := range ordered {
+		res = append(res, memberOrgTierToResponse(m))
+	}
+	return res, nil
+}
+
+// memberOrgTierToResponse maps an organization's winning membership to one
+// member-tiers response entry.
+func memberOrgTierToResponse(m *model.ProjectMembership) *membershipservice.MemberOrgTierResponse {
+	resp := &membershipservice.MemberOrgTierResponse{
+		B2bOrgUID:     m.B2BOrgUID,
+		MembershipUID: m.UID,
+		Tier:          model.TierClass(m.TierName),
+	}
+	if m.CompanyName != "" {
+		resp.CompanyName = &m.CompanyName
+	}
+	if m.ProjectUID != "" {
+		resp.ProjectUID = &m.ProjectUID
+	}
+	if m.ProjectSlug != "" {
+		resp.ProjectSlug = &m.ProjectSlug
+	}
+	if m.TierUID != "" {
+		resp.TierUID = &m.TierUID
+	}
+	if m.TierName != "" {
+		resp.TierName = &m.TierName
+	}
+	if m.Status != "" {
+		resp.Status = &m.Status
+	}
+	if m.StartDate != "" {
+		resp.StartDate = &m.StartDate
+	}
+	if m.EndDate != "" {
+		resp.EndDate = &m.EndDate
+	}
+	return resp
 }
 
 // ── Key Contacts ─────────────────────────────────────────────────────────────
@@ -628,8 +729,8 @@ func payloadToB2BOrgInput(p *membershipservice.UpdateB2bOrgPayload) model.B2BOrg
 	if p.PrimaryDomain != nil {
 		input.PrimaryDomain = *p.PrimaryDomain
 	}
-	if p.LogoURL != nil {
-		input.LogoURL = *p.LogoURL
+	if p.LogoURL != nil && *p.LogoURL != "" {
+		input.LogoURL = p.LogoURL
 	}
 	if p.Industry != nil {
 		input.Industry = *p.Industry
@@ -1151,10 +1252,12 @@ func NewMembershipService(
 	projectMshipR port.ProjectMembershipReader,
 	b2bOrgSettingsReader port.B2BOrgSettingsReader,
 	b2bOrgWriter usecaseSvc.B2BOrgWriter,
+	logoUploader usecaseSvc.LogoUploader,
 	keyContactWriter usecaseSvc.KeyContactWriter,
 	orgSettingsWriter usecaseSvc.OrgSettingsWriter,
 	workspaceWriter usecaseSvc.WorkspaceWriter,
 	backfillRunner *usecaseSvc.Runner,
+	memberTiers *usecaseSvc.MemberTiers,
 ) membershipservice.Service {
 	return &membershipServicesrvc{
 		storage:                 storage,
@@ -1163,9 +1266,11 @@ func NewMembershipService(
 		projectMembershipReader: projectMshipR,
 		b2bOrgSettingsReader:    b2bOrgSettingsReader,
 		b2bOrgWriter:            b2bOrgWriter,
+		logoUploader:            logoUploader,
 		keyContactWriter:        keyContactWriter,
 		orgSettingsWriter:       orgSettingsWriter,
 		workspaceWriter:         workspaceWriter,
 		backfillRunner:          backfillRunner,
+		memberTiers:             memberTiers,
 	}
 }

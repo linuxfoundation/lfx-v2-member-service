@@ -458,6 +458,133 @@ paths:
                                 $ref: '#/components/schemas/Error'
             security:
                 - jwt_header_Authorization: []
+    /b2b_orgs/{uid}/logo:
+        post:
+            tags:
+                - membership-service
+            summary: upload-b2b-org-logo membership-service
+            description: 'Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org''s logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn''t reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa''s generator does not support combining with a Body(...) declaration.'
+            operationId: membership-service#upload-b2b-org-logo
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: Version of the API
+                    example: "1"
+                    enum:
+                        - "1"
+                  example: "1"
+                - name: uid
+                  in: path
+                  description: B2B organization UID
+                  required: true
+                  schema:
+                    type: string
+                    description: B2B organization UID
+                    example: 001B000000IqhSLIAZ
+                  example: 001B000000IqhSLIAZ
+                - name: If-Match
+                  in: header
+                  description: If-Match header value for conditional requests
+                  required: true
+                  schema:
+                    type: string
+                    description: If-Match header value for conditional requests
+                    example: "123"
+                  example: "123"
+                - name: Content-Type
+                  in: header
+                  description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
+                  required: true
+                  schema:
+                    type: string
+                    description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
+                    example: image/png
+                  example: image/png
+            responses:
+                "200":
+                    description: OK response.
+                    headers:
+                        ETag:
+                            description: ETag header value
+                            schema:
+                                type: string
+                                description: ETag header value
+                                example: "123"
+                            example: "123"
+                        Last-Modified:
+                            description: Last-Modified header value (HTTP date format)
+                            schema:
+                                type: string
+                                description: Last-Modified header value (HTTP date format)
+                                example: Wed, 21 Oct 2025 07:28:00 GMT
+                            example: Wed, 21 Oct 2025 07:28:00 GMT
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
+                            example:
+                                created_at: "2025-01-01T00:00:00Z"
+                                crunch_base_url: https://www.crunchbase.com/organization/example-corp
+                                description: A leading technology company
+                                domain_aliases:
+                                    - example.org
+                                    - example.net
+                                industry: Technology
+                                is_member: true
+                                logo_url: https://example.com/logo.png
+                                name: Example Corp
+                                number_of_employees: 500
+                                parent_uid: 001B000000IqhSLIAZ
+                                phone: +1-555-000-0000
+                                primary_domain: example.com
+                                sector: Software
+                                slug: example-corp
+                                status: Active
+                                uid: 001B000000IqhSLIAZ
+                                updated_at: "2025-06-01T12:00:00Z"
+                                website: https://example.com
+                "400":
+                    description: 'BadRequest: Bad request (unsupported content type or file too large)'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "404":
+                    description: 'NotFound: Resource not found'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "412":
+                    description: 'PreconditionFailed: Precondition failed'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "500":
+                    description: 'InternalServerError: Internal server error'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "501":
+                    description: 'NotImplemented: Endpoint not implemented'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "503":
+                    description: 'ServiceUnavailable: Service unavailable'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+            security:
+                - jwt_header_Authorization: []
     /b2b_orgs/{uid}/settings:
         get:
             tags:
@@ -1968,6 +2095,112 @@ paths:
                                 $ref: '#/components/schemas/Error'
             security:
                 - jwt_header_Authorization: []
+    /b2b_orgs/member-tiers/{username}:
+        get:
+            tags:
+                - membership-service
+            summary: get-member-tiers membership-service
+            description: List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.
+            operationId: membership-service#get-member-tiers
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: Version of the API
+                    example: "1"
+                    enum:
+                        - "1"
+                  example: "1"
+                - name: username
+                  in: path
+                  description: LFID username to look up
+                  required: true
+                  schema:
+                    type: string
+                    description: LFID username to look up
+                    example: jdoe
+                    minLength: 1
+                    maxLength: 255
+                  example: jdoe
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    $ref: '#/components/schemas/MemberOrgTierResponse'
+                                description: One entry per B2B organization, carrying its highest active tier, ordered highest tier first
+                                example:
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
+                            example:
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
+                "400":
+                    description: 'BadRequest: Bad request'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "500":
+                    description: 'InternalServerError: Internal server error'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "503":
+                    description: 'ServiceUnavailable: Service unavailable'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+            security:
+                - jwt_header_Authorization: []
     /project_memberships/{membership_uid}/key_contacts:
         post:
             tags:
@@ -3096,6 +3329,71 @@ components:
                 - temporary
                 - timeout
                 - fault
+        MemberOrgTierResponse:
+            type: object
+            properties:
+                b2b_org_uid:
+                    type: string
+                    description: UID of the B2B organization (Account) holding the membership
+                    example: 001B000000IqhSLIAZ
+                company_name:
+                    type: string
+                    description: Member company name (denormalized from Account)
+                    example: Example Corp
+                end_date:
+                    type: string
+                    description: Membership end date
+                    example: "2025-12-31"
+                membership_uid:
+                    type: string
+                    description: UID of the winning membership (Asset)
+                    example: 02i2M000009ABCdIAM
+                project_slug:
+                    type: string
+                    description: URL slug of the project the membership is scoped to
+                    example: lf-main
+                project_uid:
+                    type: string
+                    description: V2 project UUID the membership is scoped to
+                    example: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                    format: uuid
+                start_date:
+                    type: string
+                    description: Membership start date
+                    example: "2025-02-01"
+                status:
+                    type: string
+                    description: Membership status
+                    example: Active
+                tier:
+                    type: string
+                    description: 'Normalized tier class derived from the tier name. One of: platinum, premier, founding, strategic, gold, steering, silver, general, associate, end_user, academic, contributor, other (highest first, matching the LFX One Org Lens taxonomy). Deliberately not a closed enum so the taxonomy can grow without breaking clients; unrecognized names fall back to other.'
+                    example: gold
+                tier_name:
+                    type: string
+                    description: Raw product name of the tier (denormalized from Product2)
+                    example: Gold Corporate Membership
+                tier_uid:
+                    type: string
+                    description: UID of the membership tier (Product2)
+                    example: 01t2M000009ABCdIAM
+            description: Highest active membership tier held by one B2B organization the user is a key contact of
+            example:
+                b2b_org_uid: 001B000000IqhSLIAZ
+                company_name: Example Corp
+                end_date: "2025-12-31"
+                membership_uid: 02i2M000009ABCdIAM
+                project_slug: lf-main
+                project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                start_date: "2025-02-01"
+                status: Active
+                tier: gold
+                tier_name: Gold Corporate Membership
+                tier_uid: 01t2M000009ABCdIAM
+            required:
+                - b2b_org_uid
+                - membership_uid
+                - tier
         MembershipServicecreateB2bOrgWorkspaceResponseBody:
             description: The created workspace
             $ref: '#/components/schemas/WorkspaceResponse'

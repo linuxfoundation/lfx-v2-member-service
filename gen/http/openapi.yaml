@@ -270,6 +270,76 @@ paths:
                 - http
             security:
                 - jwt_header_Authorization: []
+    /b2b_orgs/{uid}/logo:
+        post:
+            tags:
+                - membership-service
+            summary: upload-b2b-org-logo membership-service
+            description: 'Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org''s logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn''t reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa''s generator does not support combining with a Body(...) declaration.'
+            operationId: membership-service#upload-b2b-org-logo
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  required: false
+                  type: string
+                  enum:
+                    - "1"
+                - name: uid
+                  in: path
+                  description: B2B organization UID
+                  required: true
+                  type: string
+                - name: If-Match
+                  in: header
+                  description: If-Match header value for conditional requests
+                  required: true
+                  type: string
+                - name: Content-Type
+                  in: header
+                  description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
+                  required: true
+                  type: string
+            responses:
+                "200":
+                    description: OK response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoResponseBody'
+                    headers:
+                        ETag:
+                            description: ETag header value
+                            type: string
+                        Last-Modified:
+                            description: Last-Modified header value (HTTP date format)
+                            type: string
+                "400":
+                    description: Bad Request response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoBadRequestResponseBody'
+                "404":
+                    description: Not Found response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoNotFoundResponseBody'
+                "412":
+                    description: Precondition Failed response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoPreconditionFailedResponseBody'
+                "500":
+                    description: Internal Server Error response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoInternalServerErrorResponseBody'
+                "501":
+                    description: Not Implemented response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoNotImplementedResponseBody'
+                "503":
+                    description: Service Unavailable response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceUploadB2bOrgLogoServiceUnavailableResponseBody'
+            schemes:
+                - http
+            security:
+                - jwt_header_Authorization: []
     /b2b_orgs/{uid}/settings:
         get:
             tags:
@@ -1068,6 +1138,51 @@ paths:
                 - http
             security:
                 - jwt_header_Authorization: []
+    /b2b_orgs/member-tiers/{username}:
+        get:
+            tags:
+                - membership-service
+            summary: get-member-tiers membership-service
+            description: List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.
+            operationId: membership-service#get-member-tiers
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  required: false
+                  type: string
+                  enum:
+                    - "1"
+                - name: username
+                  in: path
+                  description: LFID username to look up
+                  required: true
+                  type: string
+                  maxLength: 255
+                  minLength: 1
+            responses:
+                "200":
+                    description: OK response.
+                    schema:
+                        type: array
+                        items:
+                            $ref: '#/definitions/MemberOrgTierResponse'
+                "400":
+                    description: Bad Request response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceGetMemberTiersBadRequestResponseBody'
+                "500":
+                    description: Internal Server Error response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceGetMemberTiersInternalServerErrorResponseBody'
+                "503":
+                    description: Service Unavailable response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceGetMemberTiersServiceUnavailableResponseBody'
+            schemes:
+                - http
+            security:
+                - jwt_header_Authorization: []
     /project_memberships/{membership_uid}/key_contacts:
         post:
             tags:
@@ -1650,6 +1765,72 @@ definitions:
                   invited_as: writer
                   name: Alice Smith
                   username: alice
+    MemberOrgTierResponse:
+        title: MemberOrgTierResponse
+        type: object
+        properties:
+            b2b_org_uid:
+                type: string
+                description: UID of the B2B organization (Account) holding the membership
+                example: 001B000000IqhSLIAZ
+            company_name:
+                type: string
+                description: Member company name (denormalized from Account)
+                example: Example Corp
+            end_date:
+                type: string
+                description: Membership end date
+                example: "2025-12-31"
+            membership_uid:
+                type: string
+                description: UID of the winning membership (Asset)
+                example: 02i2M000009ABCdIAM
+            project_slug:
+                type: string
+                description: URL slug of the project the membership is scoped to
+                example: lf-main
+            project_uid:
+                type: string
+                description: V2 project UUID the membership is scoped to
+                example: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                format: uuid
+            start_date:
+                type: string
+                description: Membership start date
+                example: "2025-02-01"
+            status:
+                type: string
+                description: Membership status
+                example: Active
+            tier:
+                type: string
+                description: 'Normalized tier class derived from the tier name. One of: platinum, premier, founding, strategic, gold, steering, silver, general, associate, end_user, academic, contributor, other (highest first, matching the LFX One Org Lens taxonomy). Deliberately not a closed enum so the taxonomy can grow without breaking clients; unrecognized names fall back to other.'
+                example: gold
+            tier_name:
+                type: string
+                description: Raw product name of the tier (denormalized from Product2)
+                example: Gold Corporate Membership
+            tier_uid:
+                type: string
+                description: UID of the membership tier (Product2)
+                example: 01t2M000009ABCdIAM
+        description: Highest active membership tier held by one B2B organization the user is a key contact of
+        example:
+            b2b_org_uid: 001B000000IqhSLIAZ
+            company_name: Example Corp
+            end_date: "2025-12-31"
+            membership_uid: 02i2M000009ABCdIAM
+            project_slug: lf-main
+            project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+            start_date: "2025-02-01"
+            status: Active
+            tier: gold
+            tier_name: Gold Corporate Membership
+            tier_uid: 01t2M000009ABCdIAM
+        required:
+            - b2b_org_uid
+            - membership_uid
+            - tier
     MembershipServiceAddB2bOrgSettingsUserBadRequestResponseBody:
         title: 'Mediatype identifier: application/vnd.goa.error; view=default'
         type: object
@@ -5183,6 +5364,135 @@ definitions:
             - temporary
             - timeout
             - fault
+    MembershipServiceGetMemberTiersBadRequestResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Bad request (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceGetMemberTiersInternalServerErrorResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Internal server error (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceGetMemberTiersServiceUnavailableResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Service unavailable (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
     MembershipServiceGetProjectMembershipBadRequestResponseBody:
         title: 'Mediatype identifier: application/vnd.goa.error; view=default'
         type: object
@@ -7218,6 +7528,267 @@ definitions:
         title: MembershipServiceUpdateKeyContactResponseBody
         $ref: '#/definitions/ProjectKeyContactResponse'
     MembershipServiceUpdateKeyContactServiceUnavailableResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Service unavailable (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceUploadB2bOrgLogoBadRequestResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Bad request (unsupported content type or file too large) (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceUploadB2bOrgLogoInternalServerErrorResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Internal server error (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceUploadB2bOrgLogoNotFoundResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Resource not found (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceUploadB2bOrgLogoNotImplementedResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Endpoint not implemented (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceUploadB2bOrgLogoPreconditionFailedResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Precondition failed (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceUploadB2bOrgLogoResponseBody:
+        title: MembershipServiceUploadB2bOrgLogoResponseBody
+        $ref: '#/definitions/B2bOrgResponse'
+    MembershipServiceUploadB2bOrgLogoServiceUnavailableResponseBody:
         title: 'Mediatype identifier: application/vnd.goa.error; view=default'
         type: object
         properties:

@@ -4,7 +4,7 @@
 //
 // Command:
 // $ goa gen
-// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design -o .
+// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
 
 package server
 
@@ -209,6 +209,10 @@ type CreateB2bOrgResponseBody B2bOrgResponseResponseBody
 // "update-b2b-org" endpoint HTTP response body.
 type UpdateB2bOrgResponseBody B2bOrgResponseResponseBody
 
+// UploadB2bOrgLogoResponseBody is the type of the "membership-service" service
+// "upload-b2b-org-logo" endpoint HTTP response body.
+type UploadB2bOrgLogoResponseBody B2bOrgResponseResponseBody
+
 // GetB2bOrgSettingsResponseBody is the type of the "membership-service"
 // service "get-b2b-org-settings" endpoint HTTP response body.
 type GetB2bOrgSettingsResponseBody B2bOrgSettingsResponseResponseBody
@@ -233,6 +237,10 @@ type DeleteB2bOrgSettingsUserResponseBody B2bOrgSettingsResponseResponseBody
 // GetProjectMembershipResponseBody is the type of the "membership-service"
 // service "get-project-membership" endpoint HTTP response body.
 type GetProjectMembershipResponseBody ProjectMembershipResponseResponseBody
+
+// GetMemberTiersResponseBody is the type of the "membership-service" service
+// "get-member-tiers" endpoint HTTP response body.
+type GetMemberTiersResponseBody []*MemberOrgTierResponseResponse
 
 // GetKeyContactResponseBody is the type of the "membership-service" service
 // "get-key-contact" endpoint HTTP response body.
@@ -611,6 +619,120 @@ type UpdateB2bOrgInternalServerErrorResponseBody struct {
 // "membership-service" service "update-b2b-org" endpoint HTTP response body
 // for the "ServiceUnavailable" error.
 type UpdateB2bOrgServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoNotImplementedResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "NotImplemented" error.
+type UploadB2bOrgLogoNotImplementedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoNotFoundResponseBody is the type of the "membership-service"
+// service "upload-b2b-org-logo" endpoint HTTP response body for the "NotFound"
+// error.
+type UploadB2bOrgLogoNotFoundResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoBadRequestResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "BadRequest" error.
+type UploadB2bOrgLogoBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoPreconditionFailedResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "PreconditionFailed" error.
+type UploadB2bOrgLogoPreconditionFailedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoInternalServerErrorResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "InternalServerError" error.
+type UploadB2bOrgLogoInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// UploadB2bOrgLogoServiceUnavailableResponseBody is the type of the
+// "membership-service" service "upload-b2b-org-logo" endpoint HTTP response
+// body for the "ServiceUnavailable" error.
+type UploadB2bOrgLogoServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name string `form:"name" json:"name" xml:"name"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -1257,6 +1379,63 @@ type GetProjectMembershipInternalServerErrorResponseBody struct {
 // "membership-service" service "get-project-membership" endpoint HTTP response
 // body for the "ServiceUnavailable" error.
 type GetProjectMembershipServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// GetMemberTiersBadRequestResponseBody is the type of the "membership-service"
+// service "get-member-tiers" endpoint HTTP response body for the "BadRequest"
+// error.
+type GetMemberTiersBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// GetMemberTiersInternalServerErrorResponseBody is the type of the
+// "membership-service" service "get-member-tiers" endpoint HTTP response body
+// for the "InternalServerError" error.
+type GetMemberTiersInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// GetMemberTiersServiceUnavailableResponseBody is the type of the
+// "membership-service" service "get-member-tiers" endpoint HTTP response body
+// for the "ServiceUnavailable" error.
+type GetMemberTiersServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name string `form:"name" json:"name" xml:"name"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -2695,6 +2874,37 @@ type ProjectMembershipResponseResponseBody struct {
 	UpdatedAt *string `form:"updated_at,omitempty" json:"updated_at,omitempty" xml:"updated_at,omitempty"`
 }
 
+// MemberOrgTierResponseResponse is used to define fields on response body
+// types.
+type MemberOrgTierResponseResponse struct {
+	// UID of the B2B organization (Account) holding the membership
+	B2bOrgUID string `form:"b2b_org_uid" json:"b2b_org_uid" xml:"b2b_org_uid"`
+	// Member company name (denormalized from Account)
+	CompanyName *string `form:"company_name,omitempty" json:"company_name,omitempty" xml:"company_name,omitempty"`
+	// UID of the winning membership (Asset)
+	MembershipUID string `form:"membership_uid" json:"membership_uid" xml:"membership_uid"`
+	// V2 project UUID the membership is scoped to
+	ProjectUID *string `form:"project_uid,omitempty" json:"project_uid,omitempty" xml:"project_uid,omitempty"`
+	// URL slug of the project the membership is scoped to
+	ProjectSlug *string `form:"project_slug,omitempty" json:"project_slug,omitempty" xml:"project_slug,omitempty"`
+	// UID of the membership tier (Product2)
+	TierUID *string `form:"tier_uid,omitempty" json:"tier_uid,omitempty" xml:"tier_uid,omitempty"`
+	// Raw product name of the tier (denormalized from Product2)
+	TierName *string `form:"tier_name,omitempty" json:"tier_name,omitempty" xml:"tier_name,omitempty"`
+	// Normalized tier class derived from the tier name. One of: platinum, premier,
+	// founding, strategic, gold, steering, silver, general, associate, end_user,
+	// academic, contributor, other (highest first, matching the LFX One Org Lens
+	// taxonomy). Deliberately not a closed enum so the taxonomy can grow without
+	// breaking clients; unrecognized names fall back to other.
+	Tier string `form:"tier" json:"tier" xml:"tier"`
+	// Membership status
+	Status *string `form:"status,omitempty" json:"status,omitempty" xml:"status,omitempty"`
+	// Membership start date
+	StartDate *string `form:"start_date,omitempty" json:"start_date,omitempty" xml:"start_date,omitempty"`
+	// Membership end date
+	EndDate *string `form:"end_date,omitempty" json:"end_date,omitempty" xml:"end_date,omitempty"`
+}
+
 // ProjectKeyContactResponseResponseBody is used to define fields on response
 // body types.
 type ProjectKeyContactResponseResponseBody struct {
@@ -2914,6 +3124,38 @@ func NewUpdateB2bOrgResponseBody(res *membershipservice.UpdateB2bOrgResult) *Upd
 	return body
 }
 
+// NewUploadB2bOrgLogoResponseBody builds the HTTP response body from the
+// result of the "upload-b2b-org-logo" endpoint of the "membership-service"
+// service.
+func NewUploadB2bOrgLogoResponseBody(res *membershipservice.UploadB2bOrgLogoResult) *UploadB2bOrgLogoResponseBody {
+	body := &UploadB2bOrgLogoResponseBody{
+		UID:               res.B2bOrg.UID,
+		Name:              res.B2bOrg.Name,
+		Description:       res.B2bOrg.Description,
+		Phone:             res.B2bOrg.Phone,
+		Website:           res.B2bOrg.Website,
+		PrimaryDomain:     res.B2bOrg.PrimaryDomain,
+		LogoURL:           res.B2bOrg.LogoURL,
+		Industry:          res.B2bOrg.Industry,
+		Sector:            res.B2bOrg.Sector,
+		CrunchBaseURL:     res.B2bOrg.CrunchBaseURL,
+		NumberOfEmployees: res.B2bOrg.NumberOfEmployees,
+		Status:            res.B2bOrg.Status,
+		IsMember:          res.B2bOrg.IsMember,
+		Slug:              res.B2bOrg.Slug,
+		ParentUID:         res.B2bOrg.ParentUID,
+		CreatedAt:         res.B2bOrg.CreatedAt,
+		UpdatedAt:         res.B2bOrg.UpdatedAt,
+	}
+	if res.B2bOrg.DomainAliases != nil {
+		body.DomainAliases = make([]string, len(res.B2bOrg.DomainAliases))
+		for i, val := range res.B2bOrg.DomainAliases {
+			body.DomainAliases[i] = val
+		}
+	}
+	return body
+}
+
 // NewGetB2bOrgSettingsResponseBody builds the HTTP response body from the
 // result of the "get-b2b-org-settings" endpoint of the "membership-service"
 // service.
@@ -3101,6 +3343,20 @@ func NewGetProjectMembershipResponseBody(res *membershipservice.GetProjectMember
 		TierProductType:  res.ProjectMembership.TierProductType,
 		CreatedAt:        res.ProjectMembership.CreatedAt,
 		UpdatedAt:        res.ProjectMembership.UpdatedAt,
+	}
+	return body
+}
+
+// NewGetMemberTiersResponseBody builds the HTTP response body from the result
+// of the "get-member-tiers" endpoint of the "membership-service" service.
+func NewGetMemberTiersResponseBody(res []*membershipservice.MemberOrgTierResponse) GetMemberTiersResponseBody {
+	body := make([]*MemberOrgTierResponseResponse, len(res))
+	for i, val := range res {
+		if val == nil {
+			body[i] = nil
+			continue
+		}
+		body[i] = marshalMembershipserviceMemberOrgTierResponseToMemberOrgTierResponseResponse(val)
 	}
 	return body
 }
@@ -3582,6 +3838,96 @@ func NewUpdateB2bOrgInternalServerErrorResponseBody(res *goa.ServiceError) *Upda
 // service.
 func NewUpdateB2bOrgServiceUnavailableResponseBody(res *goa.ServiceError) *UpdateB2bOrgServiceUnavailableResponseBody {
 	body := &UpdateB2bOrgServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoNotImplementedResponseBody builds the HTTP response body
+// from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoNotImplementedResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoNotImplementedResponseBody {
+	body := &UploadB2bOrgLogoNotImplementedResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoNotFoundResponseBody builds the HTTP response body from
+// the result of the "upload-b2b-org-logo" endpoint of the "membership-service"
+// service.
+func NewUploadB2bOrgLogoNotFoundResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoNotFoundResponseBody {
+	body := &UploadB2bOrgLogoNotFoundResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoBadRequestResponseBody builds the HTTP response body from
+// the result of the "upload-b2b-org-logo" endpoint of the "membership-service"
+// service.
+func NewUploadB2bOrgLogoBadRequestResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoBadRequestResponseBody {
+	body := &UploadB2bOrgLogoBadRequestResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoPreconditionFailedResponseBody builds the HTTP response
+// body from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoPreconditionFailedResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoPreconditionFailedResponseBody {
+	body := &UploadB2bOrgLogoPreconditionFailedResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoInternalServerErrorResponseBody builds the HTTP response
+// body from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoInternalServerErrorResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoInternalServerErrorResponseBody {
+	body := &UploadB2bOrgLogoInternalServerErrorResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewUploadB2bOrgLogoServiceUnavailableResponseBody builds the HTTP response
+// body from the result of the "upload-b2b-org-logo" endpoint of the
+// "membership-service" service.
+func NewUploadB2bOrgLogoServiceUnavailableResponseBody(res *goa.ServiceError) *UploadB2bOrgLogoServiceUnavailableResponseBody {
+	body := &UploadB2bOrgLogoServiceUnavailableResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,
@@ -4095,6 +4441,51 @@ func NewGetProjectMembershipInternalServerErrorResponseBody(res *goa.ServiceErro
 // the "membership-service" service.
 func NewGetProjectMembershipServiceUnavailableResponseBody(res *goa.ServiceError) *GetProjectMembershipServiceUnavailableResponseBody {
 	body := &GetProjectMembershipServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewGetMemberTiersBadRequestResponseBody builds the HTTP response body from
+// the result of the "get-member-tiers" endpoint of the "membership-service"
+// service.
+func NewGetMemberTiersBadRequestResponseBody(res *goa.ServiceError) *GetMemberTiersBadRequestResponseBody {
+	body := &GetMemberTiersBadRequestResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewGetMemberTiersInternalServerErrorResponseBody builds the HTTP response
+// body from the result of the "get-member-tiers" endpoint of the
+// "membership-service" service.
+func NewGetMemberTiersInternalServerErrorResponseBody(res *goa.ServiceError) *GetMemberTiersInternalServerErrorResponseBody {
+	body := &GetMemberTiersInternalServerErrorResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewGetMemberTiersServiceUnavailableResponseBody builds the HTTP response
+// body from the result of the "get-member-tiers" endpoint of the
+// "membership-service" service.
+func NewGetMemberTiersServiceUnavailableResponseBody(res *goa.ServiceError) *GetMemberTiersServiceUnavailableResponseBody {
+	body := &GetMemberTiersServiceUnavailableResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,
@@ -5172,6 +5563,19 @@ func NewUpdateB2bOrgPayload(body *UpdateB2bOrgRequestBody, uid string, version *
 	return v
 }
 
+// NewUploadB2bOrgLogoPayload builds a membership-service service
+// upload-b2b-org-logo endpoint payload.
+func NewUploadB2bOrgLogoPayload(uid string, version *string, bearerToken *string, ifMatch string, contentType string) *membershipservice.UploadB2bOrgLogoPayload {
+	v := &membershipservice.UploadB2bOrgLogoPayload{}
+	v.UID = uid
+	v.Version = version
+	v.BearerToken = bearerToken
+	v.IfMatch = ifMatch
+	v.ContentType = contentType
+
+	return v
+}
+
 // NewGetB2bOrgSettingsPayload builds a membership-service service
 // get-b2b-org-settings endpoint payload.
 func NewGetB2bOrgSettingsPayload(uid string, version *string, bearerToken *string) *membershipservice.GetB2bOrgSettingsPayload {
@@ -5268,6 +5672,17 @@ func NewGetProjectMembershipPayload(uid string, version *string, bearerToken *st
 	v.BearerToken = bearerToken
 	v.IfNoneMatch = ifNoneMatch
 	v.IfModifiedSince = ifModifiedSince
+
+	return v
+}
+
+// NewGetMemberTiersPayload builds a membership-service service
+// get-member-tiers endpoint payload.
+func NewGetMemberTiersPayload(username string, version *string, bearerToken *string) *membershipservice.GetMemberTiersPayload {
+	v := &membershipservice.GetMemberTiersPayload{}
+	v.Username = username
+	v.Version = version
+	v.BearerToken = bearerToken
 
 	return v
 }

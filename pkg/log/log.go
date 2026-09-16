@@ -60,54 +60,47 @@ func AppendCtx(parent context.Context, attr slog.Attr) context.Context {
 // InitStructureLogConfig sets the structured log behavior
 func InitStructureLogConfig() {
 
+	// Resolve configuration BEFORE emitting any log record: until
+	// slog.SetDefault is called, slog writes unformatted text to os.Stderr,
+	// which Datadog parses as status:error.
+	logLevel := os.Getenv("LOG_LEVEL")
 	logOptions := &slog.HandlerOptions{}
-	var h slog.Handler
-
-	configurations := map[string]func(){
-		"options-logLevel": func() {
-			logLevel := os.Getenv("LOG_LEVEL")
-			slog.Info("log config",
-				"logLevel", logLevel,
-			)
-			switch logLevel {
-			case debug:
-				logOptions.Level = slog.LevelDebug
-			case warn:
-				logOptions.Level = slog.LevelWarn
-			case info:
-				logOptions.Level = slog.LevelInfo
-			default:
-				logOptions.Level = logLevelDefault
-			}
-		},
-		"options-addSource": func() {
-			addSourceBool := false
-			addSource := os.Getenv("LOG_ADD_SOURCE")
-			if addSource == "true" || addSource == "false" {
-				addSourceBool = addSource == "true"
-			}
-			slog.Info("log config",
-				"LOG_ADD_SOURCE", addSourceBool,
-			)
-			logOptions.AddSource = addSourceBool
-		},
+	switch logLevel {
+	case debug:
+		logOptions.Level = slog.LevelDebug
+	case warn:
+		logOptions.Level = slog.LevelWarn
+	case info:
+		logOptions.Level = slog.LevelInfo
+	default:
+		logOptions.Level = logLevelDefault
 	}
 
-	for name, f := range configurations {
-		slog.Info("setting logging configuration",
-			"name", name,
-		)
-		f()
+	addSourceBool := false
+	if addSource := os.Getenv("LOG_ADD_SOURCE"); addSource == "true" || addSource == "false" {
+		addSourceBool = addSource == "true"
 	}
-	h = slog.NewJSONHandler(os.Stdout, logOptions)
+	logOptions.AddSource = addSourceBool
+
+	var h slog.Handler = slog.NewJSONHandler(os.Stdout, logOptions)
 	log.SetFlags(log.Llongfile)
 
-	// Wrap with slog-otel handler to add trace_id and span_id from context
-	otelHandler := slogotel.OtelHandler{Next: h}
+	// Wrap with slog-otel handler to add trace_id and span_id from context.
+	// NoBaggage is required: the OTEL_PROPAGATORS default includes baggage, so
+	// otelhttp extracts client-supplied baggage into the request context, and
+	// this handler would otherwise copy every member into each record —
+	// letting a caller inject PII or shadow trusted fields such as status.
+	otelHandler := slogotel.OtelHandler{Next: h, NoBaggage: true}
 
 	// Wrap with contextHandler to support context-based attributes
 	logger := contextHandler{otelHandler}
 	slog.SetDefault(slog.New(logger))
+
+	slog.Info("logging configuration",
+		"logLevel", logOptions.Level.Level().String(),
+		"LOG_LEVEL", logLevel,
+		"LOG_ADD_SOURCE", addSourceBool,
+	)
 }
 
 // Priority creates a slog.Attr for error priority classification

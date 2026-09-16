@@ -18,13 +18,15 @@ import (
 func wrapError(ctx context.Context, err error) error {
 	var notFound pkgerrors.NotFound
 	if errors.As(err, &notFound) {
-		slog.ErrorContext(ctx, "request failed", "error", err)
+		// 404 is expected control flow, not a service failure.
+		slog.InfoContext(ctx, "resource not found", "error", err)
 		return membershipservice.MakeNotFound(err)
 	}
 
 	var validation pkgerrors.Validation
 	if errors.As(err, &validation) {
-		slog.ErrorContext(ctx, "request failed", "error", err)
+		// 400 is caller error, not a service failure.
+		slog.InfoContext(ctx, "request validation failed", "error", err)
 		return membershipservice.MakeBadRequest(err)
 	}
 
@@ -36,8 +38,10 @@ func wrapError(ctx context.Context, err error) error {
 
 	var serviceUnavailable pkgerrors.ServiceUnavailable
 	if errors.As(err, &serviceUnavailable) {
+		// The full cause (upstream NATS, fga-sync, or Salesforce error text)
+		// stays in the server log; the 503 body carries only the stable message.
 		slog.ErrorContext(ctx, "request failed", "error", err)
-		return membershipservice.MakeServiceUnavailable(err)
+		return membershipservice.MakeServiceUnavailable(errors.New(serviceUnavailable.Message()))
 	}
 
 	var preconditionFailed pkgerrors.PreconditionFailed

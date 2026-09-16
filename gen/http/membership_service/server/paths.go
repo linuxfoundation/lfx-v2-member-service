@@ -4,7 +4,7 @@
 //
 // Command:
 // $ goa gen
-// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design -o .
+// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
 
 package server
 
@@ -25,6 +25,11 @@ func CreateB2bOrgMembershipServicePath() string {
 // UpdateB2bOrgMembershipServicePath returns the URL path to the membership-service service update-b2b-org HTTP endpoint.
 func UpdateB2bOrgMembershipServicePath(uid string) string {
 	return fmt.Sprintf("/b2b_orgs/%v", uid)
+}
+
+// UploadB2bOrgLogoMembershipServicePath returns the URL path to the membership-service service upload-b2b-org-logo HTTP endpoint.
+func UploadB2bOrgLogoMembershipServicePath(uid string) string {
+	return fmt.Sprintf("/b2b_orgs/%v/logo", uid)
 }
 
 // GetB2bOrgSettingsMembershipServicePath returns the URL path to the membership-service service get-b2b-org-settings HTTP endpoint.
@@ -55,6 +60,11 @@ func DeleteB2bOrgSettingsUserMembershipServicePath(uid string, email string) str
 // GetProjectMembershipMembershipServicePath returns the URL path to the membership-service service get-project-membership HTTP endpoint.
 func GetProjectMembershipMembershipServicePath(uid string) string {
 	return fmt.Sprintf("/project_memberships/%v", uid)
+}
+
+// GetMemberTiersMembershipServicePath returns the URL path to the membership-service service get-member-tiers HTTP endpoint.
+func GetMemberTiersMembershipServicePath(username string) string {
+	return fmt.Sprintf("/b2b_orgs/member-tiers/%v", username)
 }
 
 // GetKeyContactMembershipServicePath returns the URL path to the membership-service service get-key-contact HTTP endpoint.

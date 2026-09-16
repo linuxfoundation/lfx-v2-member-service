@@ -4,7 +4,7 @@
 //
 // Command:
 // $ goa gen
-// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design -o .
+// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
 
 package client
 
@@ -30,6 +30,10 @@ type Client struct {
 	// update-b2b-org endpoint.
 	UpdateB2bOrgDoer goahttp.Doer
 
+	// UploadB2bOrgLogo Doer is the HTTP client used to make requests to the
+	// upload-b2b-org-logo endpoint.
+	UploadB2bOrgLogoDoer goahttp.Doer
+
 	// GetB2bOrgSettings Doer is the HTTP client used to make requests to the
 	// get-b2b-org-settings endpoint.
 	GetB2bOrgSettingsDoer goahttp.Doer
@@ -53,6 +57,10 @@ type Client struct {
 	// GetProjectMembership Doer is the HTTP client used to make requests to the
 	// get-project-membership endpoint.
 	GetProjectMembershipDoer goahttp.Doer
+
+	// GetMemberTiers Doer is the HTTP client used to make requests to the
+	// get-member-tiers endpoint.
+	GetMemberTiersDoer goahttp.Doer
 
 	// GetKeyContact Doer is the HTTP client used to make requests to the
 	// get-key-contact endpoint.
@@ -132,12 +140,14 @@ func NewClient(
 		GetB2bOrgDoer:                      doer,
 		CreateB2bOrgDoer:                   doer,
 		UpdateB2bOrgDoer:                   doer,
+		UploadB2bOrgLogoDoer:               doer,
 		GetB2bOrgSettingsDoer:              doer,
 		UpdateB2bOrgSettingsDoer:           doer,
 		AddB2bOrgSettingsUserDoer:          doer,
 		UpdateB2bOrgSettingsUserRoleDoer:   doer,
 		DeleteB2bOrgSettingsUserDoer:       doer,
 		GetProjectMembershipDoer:           doer,
+		GetMemberTiersDoer:                 doer,
 		GetKeyContactDoer:                  doer,
 		CreateKeyContactDoer:               doer,
 		UpdateKeyContactDoer:               doer,
@@ -227,6 +237,30 @@ func (c *Client) UpdateB2bOrg() goa.Endpoint {
 		resp, err := c.UpdateB2bOrgDoer.Do(req)
 		if err != nil {
 			return nil, goahttp.ErrRequestError("membership-service", "update-b2b-org", err)
+		}
+		return decodeResponse(resp)
+	}
+}
+
+// UploadB2bOrgLogo returns an endpoint that makes HTTP requests to the
+// membership-service service upload-b2b-org-logo server.
+func (c *Client) UploadB2bOrgLogo() goa.Endpoint {
+	var (
+		encodeRequest  = EncodeUploadB2bOrgLogoRequest(c.encoder)
+		decodeResponse = DecodeUploadB2bOrgLogoResponse(c.decoder, c.RestoreResponseBody)
+	)
+	return func(ctx context.Context, v any) (any, error) {
+		req, err := c.BuildUploadB2bOrgLogoRequest(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		err = encodeRequest(req, v)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.UploadB2bOrgLogoDoer.Do(req)
+		if err != nil {
+			return nil, goahttp.ErrRequestError("membership-service", "upload-b2b-org-logo", err)
 		}
 		return decodeResponse(resp)
 	}
@@ -371,6 +405,30 @@ func (c *Client) GetProjectMembership() goa.Endpoint {
 		resp, err := c.GetProjectMembershipDoer.Do(req)
 		if err != nil {
 			return nil, goahttp.ErrRequestError("membership-service", "get-project-membership", err)
+		}
+		return decodeResponse(resp)
+	}
+}
+
+// GetMemberTiers returns an endpoint that makes HTTP requests to the
+// membership-service service get-member-tiers server.
+func (c *Client) GetMemberTiers() goa.Endpoint {
+	var (
+		encodeRequest  = EncodeGetMemberTiersRequest(c.encoder)
+		decodeResponse = DecodeGetMemberTiersResponse(c.decoder, c.RestoreResponseBody)
+	)
+	return func(ctx context.Context, v any) (any, error) {
+		req, err := c.BuildGetMemberTiersRequest(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		err = encodeRequest(req, v)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.GetMemberTiersDoer.Do(req)
+		if err != nil {
+			return nil, goahttp.ErrRequestError("membership-service", "get-member-tiers", err)
 		}
 		return decodeResponse(resp)
 	}

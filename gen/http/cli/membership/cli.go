@@ -4,7 +4,7 @@
 //
 // Command:
 // $ goa gen
-// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design -o .
+// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
 
 package cli
 
@@ -24,7 +24,7 @@ import (
 //	command (subcommand1|subcommand2|...)
 func UsageCommands() []string {
 	return []string{
-		"membership-service (get-b2b-org|create-b2b-org|update-b2b-org|get-b2b-org-settings|update-b2b-org-settings|add-b2b-org-settings-user|update-b2b-org-settings-user-role|delete-b2b-org-settings-user|get-project-membership|get-key-contact|create-key-contact|update-key-contact|delete-key-contact|admin-reindex|readyz|livez|debug-vars|create-b2b-org-workspace|update-b2b-org-workspace|delete-b2b-org-workspace|add-b2b-org-workspace-project|bulk-add-b2b-org-workspace-projects|remove-b2b-org-workspace-project)",
+		"membership-service (get-b2b-org|create-b2b-org|update-b2b-org|upload-b2b-org-logo|get-b2b-org-settings|update-b2b-org-settings|add-b2b-org-settings-user|update-b2b-org-settings-user-role|delete-b2b-org-settings-user|get-project-membership|get-member-tiers|get-key-contact|create-key-contact|update-key-contact|delete-key-contact|admin-reindex|readyz|livez|debug-vars|create-b2b-org-workspace|update-b2b-org-workspace|delete-b2b-org-workspace|add-b2b-org-workspace-project|bulk-add-b2b-org-workspace-projects|remove-b2b-org-workspace-project)",
 	}
 }
 
@@ -64,6 +64,14 @@ func ParseEndpoint(
 		membershipServiceUpdateB2bOrgVersionFlag     = membershipServiceUpdateB2bOrgFlags.String("version", "", "")
 		membershipServiceUpdateB2bOrgBearerTokenFlag = membershipServiceUpdateB2bOrgFlags.String("bearer-token", "", "")
 		membershipServiceUpdateB2bOrgIfMatchFlag     = membershipServiceUpdateB2bOrgFlags.String("if-match", "", "")
+
+		membershipServiceUploadB2bOrgLogoFlags           = flag.NewFlagSet("upload-b2b-org-logo", flag.ExitOnError)
+		membershipServiceUploadB2bOrgLogoUIDFlag         = membershipServiceUploadB2bOrgLogoFlags.String("uid", "REQUIRED", "B2B organization UID")
+		membershipServiceUploadB2bOrgLogoVersionFlag     = membershipServiceUploadB2bOrgLogoFlags.String("version", "", "")
+		membershipServiceUploadB2bOrgLogoBearerTokenFlag = membershipServiceUploadB2bOrgLogoFlags.String("bearer-token", "", "")
+		membershipServiceUploadB2bOrgLogoIfMatchFlag     = membershipServiceUploadB2bOrgLogoFlags.String("if-match", "REQUIRED", "")
+		membershipServiceUploadB2bOrgLogoContentTypeFlag = membershipServiceUploadB2bOrgLogoFlags.String("content-type", "REQUIRED", "")
+		membershipServiceUploadB2bOrgLogoStreamFlag      = membershipServiceUploadB2bOrgLogoFlags.String("stream", "REQUIRED", "path to file containing the streamed request body")
 
 		membershipServiceGetB2bOrgSettingsFlags           = flag.NewFlagSet("get-b2b-org-settings", flag.ExitOnError)
 		membershipServiceGetB2bOrgSettingsUIDFlag         = membershipServiceGetB2bOrgSettingsFlags.String("uid", "REQUIRED", "B2B organization UID")
@@ -105,6 +113,11 @@ func ParseEndpoint(
 		membershipServiceGetProjectMembershipBearerTokenFlag     = membershipServiceGetProjectMembershipFlags.String("bearer-token", "", "")
 		membershipServiceGetProjectMembershipIfNoneMatchFlag     = membershipServiceGetProjectMembershipFlags.String("if-none-match", "", "")
 		membershipServiceGetProjectMembershipIfModifiedSinceFlag = membershipServiceGetProjectMembershipFlags.String("if-modified-since", "", "")
+
+		membershipServiceGetMemberTiersFlags           = flag.NewFlagSet("get-member-tiers", flag.ExitOnError)
+		membershipServiceGetMemberTiersUsernameFlag    = membershipServiceGetMemberTiersFlags.String("username", "REQUIRED", "LFID username to look up")
+		membershipServiceGetMemberTiersVersionFlag     = membershipServiceGetMemberTiersFlags.String("version", "", "")
+		membershipServiceGetMemberTiersBearerTokenFlag = membershipServiceGetMemberTiersFlags.String("bearer-token", "", "")
 
 		membershipServiceGetKeyContactFlags               = flag.NewFlagSet("get-key-contact", flag.ExitOnError)
 		membershipServiceGetKeyContactMembershipUIDFlag   = membershipServiceGetKeyContactFlags.String("membership-uid", "REQUIRED", "Parent membership UID")
@@ -196,12 +209,14 @@ func ParseEndpoint(
 	membershipServiceGetB2bOrgFlags.Usage = membershipServiceGetB2bOrgUsage
 	membershipServiceCreateB2bOrgFlags.Usage = membershipServiceCreateB2bOrgUsage
 	membershipServiceUpdateB2bOrgFlags.Usage = membershipServiceUpdateB2bOrgUsage
+	membershipServiceUploadB2bOrgLogoFlags.Usage = membershipServiceUploadB2bOrgLogoUsage
 	membershipServiceGetB2bOrgSettingsFlags.Usage = membershipServiceGetB2bOrgSettingsUsage
 	membershipServiceUpdateB2bOrgSettingsFlags.Usage = membershipServiceUpdateB2bOrgSettingsUsage
 	membershipServiceAddB2bOrgSettingsUserFlags.Usage = membershipServiceAddB2bOrgSettingsUserUsage
 	membershipServiceUpdateB2bOrgSettingsUserRoleFlags.Usage = membershipServiceUpdateB2bOrgSettingsUserRoleUsage
 	membershipServiceDeleteB2bOrgSettingsUserFlags.Usage = membershipServiceDeleteB2bOrgSettingsUserUsage
 	membershipServiceGetProjectMembershipFlags.Usage = membershipServiceGetProjectMembershipUsage
+	membershipServiceGetMemberTiersFlags.Usage = membershipServiceGetMemberTiersUsage
 	membershipServiceGetKeyContactFlags.Usage = membershipServiceGetKeyContactUsage
 	membershipServiceCreateKeyContactFlags.Usage = membershipServiceCreateKeyContactUsage
 	membershipServiceUpdateKeyContactFlags.Usage = membershipServiceUpdateKeyContactUsage
@@ -260,6 +275,9 @@ func ParseEndpoint(
 			case "update-b2b-org":
 				epf = membershipServiceUpdateB2bOrgFlags
 
+			case "upload-b2b-org-logo":
+				epf = membershipServiceUploadB2bOrgLogoFlags
+
 			case "get-b2b-org-settings":
 				epf = membershipServiceGetB2bOrgSettingsFlags
 
@@ -277,6 +295,9 @@ func ParseEndpoint(
 
 			case "get-project-membership":
 				epf = membershipServiceGetProjectMembershipFlags
+
+			case "get-member-tiers":
+				epf = membershipServiceGetMemberTiersFlags
 
 			case "get-key-contact":
 				epf = membershipServiceGetKeyContactFlags
@@ -354,6 +375,12 @@ func ParseEndpoint(
 			case "update-b2b-org":
 				endpoint = c.UpdateB2bOrg()
 				data, err = membershipservicec.BuildUpdateB2bOrgPayload(*membershipServiceUpdateB2bOrgBodyFlag, *membershipServiceUpdateB2bOrgUIDFlag, *membershipServiceUpdateB2bOrgVersionFlag, *membershipServiceUpdateB2bOrgBearerTokenFlag, *membershipServiceUpdateB2bOrgIfMatchFlag)
+			case "upload-b2b-org-logo":
+				endpoint = c.UploadB2bOrgLogo()
+				data, err = membershipservicec.BuildUploadB2bOrgLogoPayload(*membershipServiceUploadB2bOrgLogoUIDFlag, *membershipServiceUploadB2bOrgLogoVersionFlag, *membershipServiceUploadB2bOrgLogoBearerTokenFlag, *membershipServiceUploadB2bOrgLogoIfMatchFlag, *membershipServiceUploadB2bOrgLogoContentTypeFlag)
+				if err == nil {
+					data, err = membershipservicec.BuildUploadB2bOrgLogoStreamPayload(data, *membershipServiceUploadB2bOrgLogoStreamFlag)
+				}
 			case "get-b2b-org-settings":
 				endpoint = c.GetB2bOrgSettings()
 				data, err = membershipservicec.BuildGetB2bOrgSettingsPayload(*membershipServiceGetB2bOrgSettingsUIDFlag, *membershipServiceGetB2bOrgSettingsVersionFlag, *membershipServiceGetB2bOrgSettingsBearerTokenFlag)
@@ -372,6 +399,9 @@ func ParseEndpoint(
 			case "get-project-membership":
 				endpoint = c.GetProjectMembership()
 				data, err = membershipservicec.BuildGetProjectMembershipPayload(*membershipServiceGetProjectMembershipUIDFlag, *membershipServiceGetProjectMembershipVersionFlag, *membershipServiceGetProjectMembershipBearerTokenFlag, *membershipServiceGetProjectMembershipIfNoneMatchFlag, *membershipServiceGetProjectMembershipIfModifiedSinceFlag)
+			case "get-member-tiers":
+				endpoint = c.GetMemberTiers()
+				data, err = membershipservicec.BuildGetMemberTiersPayload(*membershipServiceGetMemberTiersUsernameFlag, *membershipServiceGetMemberTiersVersionFlag, *membershipServiceGetMemberTiersBearerTokenFlag)
 			case "get-key-contact":
 				endpoint = c.GetKeyContact()
 				data, err = membershipservicec.BuildGetKeyContactPayload(*membershipServiceGetKeyContactMembershipUIDFlag, *membershipServiceGetKeyContactUIDFlag, *membershipServiceGetKeyContactVersionFlag, *membershipServiceGetKeyContactBearerTokenFlag, *membershipServiceGetKeyContactIfNoneMatchFlag, *membershipServiceGetKeyContactIfModifiedSinceFlag)
@@ -430,12 +460,14 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    get-b2b-org: Get a specific B2B organization by UID`)
 	fmt.Fprintln(os.Stderr, `    create-b2b-org: Create a new B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org: Update a B2B organization`)
+	fmt.Fprintln(os.Stderr, `    upload-b2b-org-logo: Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
 	fmt.Fprintln(os.Stderr, `    get-b2b-org-settings: Get the access-control settings (writers and auditors) for a B2B organization`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-settings: Replace the writers and/or auditors list on a B2B organization (full-replace semantics)`)
 	fmt.Fprintln(os.Stderr, `    add-b2b-org-settings-user: Add (invite) a single principal to a B2B organization's writers or auditors. Per-principal merge: existing members are preserved; the new entry lands as a pending invite (no username yet).`)
 	fmt.Fprintln(os.Stderr, `    update-b2b-org-settings-user-role: Change a single principal's role (writer⇄auditor) on a B2B organization. Per-principal merge: the principal's username and invite lifecycle are preserved; all other members are untouched.`)
 	fmt.Fprintln(os.Stderr, `    delete-b2b-org-settings-user: Remove a single principal's access (revoke an accepted grant or cancel a pending invite) from a B2B organization. Per-principal merge: all other members are untouched.`)
 	fmt.Fprintln(os.Stderr, `    get-project-membership: Get a specific project membership by UID`)
+	fmt.Fprintln(os.Stderr, `    get-member-tiers: List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.`)
 	fmt.Fprintln(os.Stderr, `    get-key-contact: Get a specific key contact by UID`)
 	fmt.Fprintln(os.Stderr, `    create-key-contact: Create a new key contact`)
 	fmt.Fprintln(os.Stderr, `    update-key-contact: Update a key contact`)
@@ -526,6 +558,34 @@ func membershipServiceUpdateB2bOrgUsage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
 	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-b2b-org --body '{\n      \"crunch_base_url\": \"https://www.crunchbase.com/organization/example-corp\",\n      \"description\": \"A leading technology company\",\n      \"industry\": \"Technology\",\n      \"logo_url\": \"https://example.com/logo.png\",\n      \"name\": \"Example Corp\",\n      \"number_of_employees\": 500,\n      \"phone\": \"+1-555-000-0000\",\n      \"primary_domain\": \"example.com\",\n      \"sector\": \"Software\",\n      \"website\": \"https://example.com\"\n   }' --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+}
+
+func membershipServiceUploadB2bOrgLogoUsage() {
+	// Header with flags
+	fmt.Fprintf(os.Stderr, "%s [flags] membership-service upload-b2b-org-logo", os.Args[0])
+	fmt.Fprint(os.Stderr, " -uid STRING")
+	fmt.Fprint(os.Stderr, " -version STRING")
+	fmt.Fprint(os.Stderr, " -bearer-token STRING")
+	fmt.Fprint(os.Stderr, " -if-match STRING")
+	fmt.Fprint(os.Stderr, " -content-type STRING")
+	fmt.Fprint(os.Stderr, " -stream STRING")
+	fmt.Fprintln(os.Stderr)
+
+	// Description
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, `Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and set it as the org's logo URL. The request body is the raw logo image bytes -- not a JSON envelope -- sent with Content-Type set to one of image/png, image/jpeg, or image/svg+xml (echoed in the content_type header attribute below). Content-Length is not modeled as a payload attribute: net/http moves it off the header map onto Request.ContentLength, which the generated decoder cannot read, and the size limit is enforced while reading the body regardless. The body isn't reflected as a structured OpenAPI request body because this endpoint uses SkipRequestBodyEncodeDecode for direct streaming access, which Goa's generator does not support combining with a Body(...) declaration.`)
+
+	// Flags list
+	fmt.Fprintln(os.Stderr, `    -uid STRING: B2B organization UID`)
+	fmt.Fprintln(os.Stderr, `    -version STRING: `)
+	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
+	fmt.Fprintln(os.Stderr, `    -if-match STRING: `)
+	fmt.Fprintln(os.Stderr, `    -content-type STRING: `)
+	fmt.Fprintln(os.Stderr, `    -stream STRING: path to file containing the streamed request body`)
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Example:")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service upload-b2b-org-logo --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\" --content-type \"image/png\" --stream \"goa.png\"")
 }
 
 func membershipServiceGetB2bOrgSettingsUsage() {
@@ -680,6 +740,28 @@ func membershipServiceGetProjectMembershipUsage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
 	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service get-project-membership --uid \"02i2M000009ABCdIAM\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-none-match \"123\" --if-modified-since \"Wed, 21 Oct 2025 07:28:00 GMT\"")
+}
+
+func membershipServiceGetMemberTiersUsage() {
+	// Header with flags
+	fmt.Fprintf(os.Stderr, "%s [flags] membership-service get-member-tiers", os.Args[0])
+	fmt.Fprint(os.Stderr, " -username STRING")
+	fmt.Fprint(os.Stderr, " -version STRING")
+	fmt.Fprint(os.Stderr, " -bearer-token STRING")
+	fmt.Fprintln(os.Stderr)
+
+	// Description
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, `List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.`)
+
+	// Flags list
+	fmt.Fprintln(os.Stderr, `    -username STRING: LFID username to look up`)
+	fmt.Fprintln(os.Stderr, `    -version STRING: `)
+	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Example:")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service get-member-tiers --username \"jdoe\" --version \"1\" --bearer-token \"eyJhbGci...\"")
 }
 
 func membershipServiceGetKeyContactUsage() {

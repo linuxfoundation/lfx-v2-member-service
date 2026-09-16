@@ -7,6 +7,7 @@ package nats
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -14,6 +15,19 @@ import (
 
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
+
+// projectServiceErrorCode returns the error code from a project-service error
+// envelope ({"error":"not_found",...} or {"error":"internal",...}), or "" if
+// data is a normal success payload.
+func projectServiceErrorCode(data []byte) string {
+	var env struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &env) != nil {
+		return ""
+	}
+	return env.Error
+}
 
 // Project-service NATS RPC subjects.
 const (
@@ -42,32 +56,36 @@ func NewProjectRPC(conn *nats.Conn, timeout time.Duration) *ProjectRPC {
 }
 
 // GetSlug resolves a v2 project UID to its slug via the project-service NATS
-// RPC (lfx.projects-api.get_slug). Returns NotFound if the project does not
-// exist or the RPC times out.
+// RPC (lfx.projects-api.get_slug). Returns NotFound only when the project
+// definitively does not exist (project-service replied with code "not_found").
+// A transport failure or an internal error from project-service is returned as
+// an Unexpected error so callers can distinguish a confirmed absence from a
+// transient or service-side failure.
 func (r *ProjectRPC) GetSlug(ctx context.Context, projectUID string) (string, error) {
-	reply, err := r.request(ctx, projectGetSlugSubject, projectUID)
-	if err != nil {
-		return "", errs.NewNotFound("project not found", err)
-	}
-	return reply, nil
+	return r.request(ctx, projectGetSlugSubject, projectUID)
 }
 
 // SlugToUID resolves a project slug to its v2 UID via the project-service NATS
-// RPC (lfx.projects-api.slug_to_uid). Returns NotFound if the slug does not
-// exist or the RPC times out.
+// RPC (lfx.projects-api.slug_to_uid). Returns NotFound only when the slug
+// definitively does not exist (project-service replied with code "not_found").
+// A transport failure or an internal error from project-service is returned as
+// an Unexpected error so callers can distinguish a confirmed absence from a
+// transient or service-side failure.
 func (r *ProjectRPC) SlugToUID(ctx context.Context, slug string) (string, error) {
-	reply, err := r.request(ctx, projectSlugToUIDSubject, slug)
-	if err != nil {
-		return "", errs.NewNotFound("project not found", err)
-	}
-	return reply, nil
+	return r.request(ctx, projectSlugToUIDSubject, slug)
 }
 
 // request sends a raw UTF-8 payload to the given NATS subject and returns the
-// raw UTF-8 response body. A NATS error, a nil reply, or an empty reply body
-// are all treated as not-found conditions; the caller wraps the returned error
-// appropriately. The context deadline is honoured via RequestMsgWithContext; if
-// the context has no deadline, r.timeout is used instead.
+// raw UTF-8 response body.
+//
+// Error classification:
+//   - NATS transport error (timeout, no responder, etc.) → Unexpected; the
+//     caller cannot tell whether the resource exists.
+//   - nil reply body → Unexpected; an absent reply is ambiguous, not a
+//     confirmed absence.
+//   - project-service {"error":"not_found",...} → NotFound.
+//   - project-service {"error":"<any other code>",...} → Unexpected.
+//   - plain success payload → (value, nil).
 func (r *ProjectRPC) request(ctx context.Context, subject, payload string) (string, error) {
 	// If the context already carries a deadline, honour it directly; otherwise
 	// apply the configured timeout so the call never hangs indefinitely.
@@ -84,17 +102,39 @@ func (r *ProjectRPC) request(ctx context.Context, subject, payload string) (stri
 
 	reply, err := requestMsgWithSpan(ctx, r.conn, msg)
 	if err != nil {
-		return "", err
+		// Transport failure: cannot confirm whether the resource exists.
+		return "", errs.NewUnexpected("project-service RPC request failed", err)
 	}
 
-	if reply == nil || len(reply.Data) == 0 {
-		return "", errs.NewNotFound("empty reply from project-service RPC", nil)
+	if reply == nil {
+		// Nil reply is ambiguous — not a confirmed absence.
+		return "", errs.NewUnexpected("nil reply from project-service RPC", nil)
 	}
 
-	body := strings.TrimSpace(string(reply.Data))
-	if body == "" {
-		return "", errs.NewNotFound("empty reply body from project-service RPC", nil)
-	}
+	return parseProjectRPCReply(reply.Data)
+}
 
-	return body, nil
+// parseProjectRPCReply decodes a raw project-service RPC reply body.
+//
+// Classification:
+//   - JSON error envelope {"error":"not_found",...}   → errs.NotFound
+//   - JSON error envelope {"error":"<other>",...}     → errs.Unexpected
+//   - Empty or nil body                               → errs.Unexpected
+//     (transport/dispatch failure; confirmed absences arrive as {"error":"not_found"})
+//   - Plain non-empty string                          → success
+func parseProjectRPCReply(data []byte) (string, error) {
+	if code := projectServiceErrorCode(data); code != "" {
+		if code == "not_found" {
+			return "", errs.NewNotFound("project not found", nil)
+		}
+		return "", errs.NewUnexpected("project-service error: "+code, nil)
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		// An empty body is a transport/dispatch failure — project-service always
+		// returns {"error":"not_found"} for missing resources. An empty body
+		// cannot be treated as a confirmed absence.
+		return "", errs.NewUnexpected("project-service returned empty reply", nil)
+	}
+	return value, nil
 }

@@ -4,7 +4,7 @@
 //
 // Command:
 // $ goa gen
-// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design -o .
+// github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
 
 package client
 
@@ -167,6 +167,50 @@ func BuildUpdateB2bOrgPayload(membershipServiceUpdateB2bOrgBody string, membersh
 	v.Version = version
 	v.BearerToken = bearerToken
 	v.IfMatch = ifMatch
+
+	return v, nil
+}
+
+// BuildUploadB2bOrgLogoPayload builds the payload for the membership-service
+// upload-b2b-org-logo endpoint from CLI flags.
+func BuildUploadB2bOrgLogoPayload(membershipServiceUploadB2bOrgLogoUID string, membershipServiceUploadB2bOrgLogoVersion string, membershipServiceUploadB2bOrgLogoBearerToken string, membershipServiceUploadB2bOrgLogoIfMatch string, membershipServiceUploadB2bOrgLogoContentType string) (*membershipservice.UploadB2bOrgLogoPayload, error) {
+	var err error
+	var uid string
+	{
+		uid = membershipServiceUploadB2bOrgLogoUID
+	}
+	var version *string
+	{
+		if membershipServiceUploadB2bOrgLogoVersion != "" {
+			version = &membershipServiceUploadB2bOrgLogoVersion
+			if !(*version == "1") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var bearerToken *string
+	{
+		if membershipServiceUploadB2bOrgLogoBearerToken != "" {
+			bearerToken = &membershipServiceUploadB2bOrgLogoBearerToken
+		}
+	}
+	var ifMatch string
+	{
+		ifMatch = membershipServiceUploadB2bOrgLogoIfMatch
+	}
+	var contentType string
+	{
+		contentType = membershipServiceUploadB2bOrgLogoContentType
+	}
+	v := &membershipservice.UploadB2bOrgLogoPayload{}
+	v.UID = uid
+	v.Version = version
+	v.BearerToken = bearerToken
+	v.IfMatch = ifMatch
+	v.ContentType = contentType
 
 	return v, nil
 }
@@ -508,6 +552,49 @@ func BuildGetProjectMembershipPayload(membershipServiceGetProjectMembershipUID s
 	v.BearerToken = bearerToken
 	v.IfNoneMatch = ifNoneMatch
 	v.IfModifiedSince = ifModifiedSince
+
+	return v, nil
+}
+
+// BuildGetMemberTiersPayload builds the payload for the membership-service
+// get-member-tiers endpoint from CLI flags.
+func BuildGetMemberTiersPayload(membershipServiceGetMemberTiersUsername string, membershipServiceGetMemberTiersVersion string, membershipServiceGetMemberTiersBearerToken string) (*membershipservice.GetMemberTiersPayload, error) {
+	var err error
+	var username string
+	{
+		username = membershipServiceGetMemberTiersUsername
+		if utf8.RuneCountInString(username) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("username", username, utf8.RuneCountInString(username), 1, true))
+		}
+		if utf8.RuneCountInString(username) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("username", username, utf8.RuneCountInString(username), 255, false))
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	var version *string
+	{
+		if membershipServiceGetMemberTiersVersion != "" {
+			version = &membershipServiceGetMemberTiersVersion
+			if !(*version == "1") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var bearerToken *string
+	{
+		if membershipServiceGetMemberTiersBearerToken != "" {
+			bearerToken = &membershipServiceGetMemberTiersBearerToken
+		}
+	}
+	v := &membershipservice.GetMemberTiersPayload{}
+	v.Username = username
+	v.Version = version
+	v.BearerToken = bearerToken
 
 	return v, nil
 }
