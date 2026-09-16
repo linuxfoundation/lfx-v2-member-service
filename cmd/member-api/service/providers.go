@@ -21,7 +21,6 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
-	infrab2borg "github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/b2borg"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/objectstore"
@@ -149,14 +148,6 @@ func CloseNATSClient() {
 	if natsClient != nil {
 		natsClient.Close() //nolint:errcheck // NATS Close does not return a meaningful error in practice.
 	}
-}
-
-// NATSClientImpl returns the shared NATSClient singleton, initialising it if
-// necessary. This is intended for use by main.go to register NATS RPC
-// subscriptions after MemberReaderImpl has been called.
-func NATSClientImpl(ctx context.Context) *nats.NATSClient {
-	natsInit(ctx)
-	return natsClient
 }
 
 // ProjectResolverImpl returns the shared ProjectResolver singleton, initialising
@@ -739,14 +730,6 @@ func JWTAuthImpl(ctx context.Context) domain.Authenticator {
 	return a
 }
 
-// MemberReaderUseCase constructs the MemberReaderOrchestrator use-case wired
-// with the production (or mock) MemberReader adapter.
-func MemberReaderUseCase(ctx context.Context) usecaseSvc.MemberReader {
-	return usecaseSvc.NewMemberReaderOrchestrator(
-		usecaseSvc.WithMemberReader(MemberReaderImpl(ctx)),
-	)
-}
-
 // B2BOrgWriterUseCase constructs the B2BOrgWriter use-case orchestrator wired
 // with all production (or mock) dependencies.
 func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
@@ -979,14 +962,6 @@ func DrainAPISubscriptions(ctx context.Context) {
 			slog.WarnContext(ctx, "error draining NATS subscription", "error", err)
 		}
 	}
-}
-
-// B2BOrgResolverImpl returns a B2BOrgResolver that translates Salesforce Account
-// SFIDs to v2 b2b_org UUIDs via a deterministic base-62 transform (no I/O).
-// Unlike other providers, there is no mock/salesforce distinction — the resolver
-// is pure CPU and works identically in every mode.
-func B2BOrgResolverImpl(_ context.Context) port.B2BOrgResolver {
-	return infrab2borg.NewResolver()
 }
 
 // CDCConsumerImpl constructs a CDCConsumer wired with all production

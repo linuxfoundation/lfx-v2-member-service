@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	sf "github.com/k-capehart/go-salesforce/v3"
@@ -26,8 +25,8 @@ import (
 )
 
 // sObjectCacher is the storage interface required by SObjectClient. It is
-// satisfied by *nats.SObjectCache in production and by an in-memory stub in
-// tests, keeping the client decoupled from the NATS infrastructure layer.
+// satisfied by *nats.SObjectCache, keeping the client decoupled from the
+// NATS infrastructure layer.
 type sObjectCacher interface {
 	Get(ctx context.Context, key string) (*nats.SObjectCacheEntry, error)
 	Put(ctx context.Context, key string, entry *nats.SObjectCacheEntry) error
@@ -472,51 +471,4 @@ func extractModstamp(body []byte) string {
 	// Go's time.RFC1123 formats the timezone name as "UTC" but HTTP requires
 	// "GMT"; use the equivalent fixed-offset format string instead.
 	return t.UTC().Truncate(time.Second).Format("Mon, 02 Jan 2006 15:04:05 GMT")
-}
-
-// ── in-memory cache ───────────────────────────────────────────────────────────
-
-// inMemSObjectCache is a simple in-memory implementation of sObjectCacher
-// intended for diagnostic tools and tests that cannot or do not wish to
-// connect to NATS. It is safe for concurrent use.
-type inMemSObjectCache struct {
-	mu      sync.RWMutex
-	entries map[string]*nats.SObjectCacheEntry
-}
-
-func newInMemSObjectCache() *inMemSObjectCache {
-	return &inMemSObjectCache{entries: make(map[string]*nats.SObjectCacheEntry)}
-}
-
-func (m *inMemSObjectCache) Get(_ context.Context, key string) (*nats.SObjectCacheEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	e, ok := m.entries[key]
-	if !ok {
-		return nil, nil
-	}
-	return e, nil
-}
-
-func (m *inMemSObjectCache) Put(_ context.Context, key string, entry *nats.SObjectCacheEntry) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.entries[key] = entry
-	return nil
-}
-
-func (m *inMemSObjectCache) Delete(_ context.Context, key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.entries, key)
-	return nil
-}
-
-// NewSObjectClientWithMemCache creates an SObjectClient backed by the given
-// authenticated Salesforce client and a simple in-memory cache. This is
-// intended for diagnostic tools and tests that do not have a NATS connection
-// available. Cache entries persist only for the lifetime of the returned
-// client.
-func NewSObjectClientWithMemCache(sfClient *sf.Salesforce) *SObjectClient {
-	return &SObjectClient{sf: sfClient, cache: newInMemSObjectCache()}
 }

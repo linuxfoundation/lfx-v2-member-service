@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"image"
 	"image/png"
 	"regexp"
@@ -84,8 +83,6 @@ type stubObjectStore struct {
 	// test can prove promotion ran on a context detached from the request's.
 	copyCtxErrs      []error
 	versionedURLKeys []string
-	keyedURLs        bool
-	versionCounter   int
 	gotType          string
 	gotDataLen       int
 	deletedKey       string
@@ -107,17 +104,8 @@ func (s *stubObjectStore) Put(_ context.Context, key, contentType string, data [
 	return s.url, nil
 }
 
-func (s *stubObjectStore) enableKeyedURLs() { s.keyedURLs = true }
-
 func (s *stubObjectStore) VersionedURL(key string) string {
 	s.versionedURLKeys = append(s.versionedURLKeys, key)
-	// keyedURLs derives the URL from the key the way the real client does.
-	// The default single fixed url is fine for most tests, but any test that
-	// has to tell the scratch URL apart from the shared key's URL needs this.
-	if s.keyedURLs {
-		s.versionCounter++
-		return fmt.Sprintf("https://cdn.example.com/%s?v=%d", key, s.versionCounter)
-	}
 	return s.url
 }
 
