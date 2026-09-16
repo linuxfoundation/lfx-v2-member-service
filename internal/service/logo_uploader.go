@@ -348,18 +348,3 @@ func (o *logoUploaderOrchestrator) rollback(ctx context.Context, uid string, cur
 	}
 	return true
 }
-
-// sharesSharedLogoKey reports whether rawURL addresses the same object as
-// sharedKeyURL, ignoring the ?v= cache-buster.
-func sharesSharedLogoKey(rawURL, sharedKeyURL string) bool {
-	base := sharedKeyURL
-	if i := strings.IndexByte(base, '?'); i >= 0 {
-		base = base[:i]
-	}
-	if base == "" || !strings.HasPrefix(rawURL, base) {
-		return false
-	}
-	// Guard against a neighbouring key that merely shares this prefix.
-	rest := rawURL[len(base):]
-	return rest == "" || strings.HasPrefix(rest, "?")
-}
