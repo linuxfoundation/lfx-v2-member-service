@@ -180,13 +180,11 @@ fga_require_store_id() {
 # unreapable as granting the wrong store.
 #
 # The caller names the variables instead of this helper reading every team
-# variable it knows about, because the two callers must not have the same
-# reach. Revoke legitimately targets the contractor team — clearing the dev
-# contractor tuples needs exactly that, and it has to work while the service
-# no longer emits the grant. Grant must not: an operator who exported
-# LF_CONTRACTOR_TEAM_NAME for a revoke and then ran the backfill in the same
-# shell would blanket-grant contractors before LFXV2-3071 has decided whether
-# they get access at all, and no service path can take a team tuple back.
+# variable it knows about, so each script declares its reach explicitly. Both
+# callers currently read the same two variables — LFXV2-3071 ratified
+# staff/contractor parity, so grant and revoke have the same reach. Grant
+# backfills every exported team together; revoke targets whichever subset is
+# exported, so export only the team you intend to remove.
 fga_team_names() {
 	if [[ $# -eq 0 ]]; then
 		echo "ERROR: fga_team_names requires the names of the environment" >&2

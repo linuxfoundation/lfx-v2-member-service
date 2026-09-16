@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: MIT
 #
 # grant-lf-teams-auditor-openfga.sh — Grant the configured team subjects
-# (the LF staff team by default) the `auditor` relation on every b2b_org in
-# the exported census. One-off backfill for orgs that existed before the service
-# started asserting these grants on every write. See LFXV2-2937.
+# (both LF teams — staff and contractor) the `auditor` relation on every
+# b2b_org in the exported census. One-off backfill for orgs that existed
+# before the service started asserting these grants on every write. See
+# LFXV2-2937 and LFXV2-3071.
 #
 # Read-diff-write: it reads the tuples each team already holds, diffs against
 # the exported UID list, and writes only what is missing. Re-running is safe
@@ -21,7 +22,7 @@
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
 #   ./scripts/export-b2b-org-uids-from-opensearch.sh has been run
-#   export LF_STAFF_TEAM_NAME=…   (the only team this script can grant)
+#   export LF_STAFF_TEAM_NAME=… LF_CONTRACTOR_TEAM_NAME=…
 #
 # Usage:
 #   ./scripts/grant-lf-teams-auditor-openfga.sh <store-id> [input_dir] [--dry-run]
@@ -76,12 +77,11 @@ fi
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
 #
-# Staff only, named explicitly: LF_CONTRACTOR_TEAM_NAME is deliberately out of
-# reach here. The revoke script needs that variable, so an operator who has just
-# used it can easily still have it exported — and a grant it picked up would
-# blanket-grant contractors before LFXV2-3071 decides whether they get access,
-# with no service path able to take a team tuple back.
-TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME)
+# Both teams, the same reach as revoke: LFXV2-3071 ratified staff/contractor
+# parity, so the backfill grants whichever teams are exported — normally both,
+# read back from the deployment being back-filled. Either variable left unset
+# is left untouched.
+TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME LF_CONTRACTOR_TEAM_NAME)
 TEAMS=()
 while IFS= read -r team_name; do
 	TEAMS+=("$team_name")

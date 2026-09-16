@@ -512,7 +512,7 @@ func GlobalOrgAdminTeamName() string {
 }
 
 // B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
-// on every b2b_org, from LF_STAFF_TEAM_NAME.
+// on every b2b_org, from LF_STAFF_TEAM_NAME and LF_CONTRACTOR_TEAM_NAME.
 //
 // No team name is hardcoded here. The authoritative copy lives in
 // charts/lfx-v2-member-service/values.yaml, which both deployments inject
@@ -522,25 +522,40 @@ func GlobalOrgAdminTeamName() string {
 //
 // Names are trimmed and blank or whitespace-only values are dropped, so no path
 // can produce a "team:#member" subject with an empty name — the trap
-// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics.
+// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. Each
+// variable is independent: either team may be configured alone. Names are also
+// de-duplicated: two variables resolving to one team (an alias configuration)
+// must yield a single reference, because teamMemberRefs does not de-duplicate
+// and OpenFGA rejects a repeated tuple within one write request — the whole
+// full-sync message would fail on every publish path.
 //
-// Clearing the variable stops new references being emitted but revokes nothing:
+// Clearing a variable stops new references being emitted but revokes nothing:
 // fga-sync never deletes a tuple whose subject begins with "team:" (that guard
 // lives in the deployed service, v0.3.1 or later), so no service code path can
 // remove them — only scripts/revoke-lf-teams-auditor-openfga.sh.
 //
-// The slice return is not over-engineering for a single team. Adding one
-// (LFXV2-3071 for contractor access) stays a config-and-provider change with no
-// reach into message construction. The contractor variable is deliberately not
-// read here, so a pod deployed from stale values cannot reintroduce it.
+// Both LF teams are read because LFXV2-3071 ratified parity: lf-contractor
+// holds the same auditor tuple on the tenant root project as lf-staff, so the
+// per-org grant is the same for both populations. Message construction is
+// list-driven and untouched by the team count, but the *name* is enumerated at
+// every boundary, so a third team touches all of: the values.yaml key, both
+// Deployment templates (LF_*_TEAM_NAME env), the envVars list below, both
+// scripts' fga_team_names arguments (grant and revoke), the runbook's kubectl
+// exports, and the CLAUDE.md env tables.
 func B2BOrgAuditorTeamNames() []string {
-	names := make([]string, 0, 1)
-	for _, name := range []string{
-		strings.TrimSpace(os.Getenv("LF_STAFF_TEAM_NAME")),
-	} {
-		if name != "" {
-			names = append(names, name)
+	envVars := []string{"LF_STAFF_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"}
+	names := make([]string, 0, len(envVars))
+	seen := make(map[string]struct{}, len(envVars))
+	for _, envVar := range envVars {
+		name := strings.TrimSpace(os.Getenv(envVar))
+		if name == "" {
+			continue
 		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
 	}
 	return names
 }
