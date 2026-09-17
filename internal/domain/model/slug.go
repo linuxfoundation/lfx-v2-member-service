@@ -74,11 +74,16 @@ func Slugify(name string) string {
 	s = slugNonAlnumRuns.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 
-	// Only [a-z0-9-] remains, so byte indexes are character indexes.
+	// Only [a-z0-9-] remains, so byte indexes are character indexes. Prefer
+	// ending on a whole token: keep the first 50 characters when the next one
+	// is already a separator, otherwise back up to the last separator inside
+	// the window; a single token longer than 50 is cut hard.
 	if len(s) > slugMaxLen {
-		cut := strings.LastIndex(s[:slugMaxLen], "-")
-		if cut <= 0 {
-			cut = slugMaxLen
+		cut := slugMaxLen
+		if s[slugMaxLen] != '-' {
+			if i := strings.LastIndex(s[:slugMaxLen], "-"); i > 0 {
+				cut = i
+			}
 		}
 		s = strings.Trim(s[:cut], "-")
 	}

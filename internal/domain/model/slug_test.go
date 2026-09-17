@@ -50,6 +50,8 @@ func TestSlugify(t *testing.T) {
 		// length
 		{name: "word-boundary cut", in: "Asociación Colombiana de Informática Sistemas y Tecnologías Afines", want: "asociacion-colombiana-de-informatica-sistemas-y"},
 		{name: "hard cut for a single long token", in: strings.Repeat("a", 60), want: strings.Repeat("a", 50)},
+		{name: "window ending exactly on a token boundary keeps the whole token", in: strings.Repeat("a", 50) + " more words", want: strings.Repeat("a", 50)},
+		{name: "window ending mid-token backs up to the previous boundary", in: strings.Repeat("a", 48) + " bcd efg", want: strings.Repeat("a", 48)},
 		{name: "exactly 50 is untouched", in: strings.Repeat("b", 50), want: strings.Repeat("b", 50)},
 	}
 
