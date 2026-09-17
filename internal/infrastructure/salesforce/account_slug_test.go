@@ -94,6 +94,51 @@ func TestAccountSlugFieldToggle(t *testing.T) {
 		}
 	})
 
+	t.Run("toggle flip never replays a body cached under the other projection", func(t *testing.T) {
+		uid, err := sfuuid.Normalize18(canonicalAccountSFID)
+		require.NoError(t, err)
+
+		// Enabled: first fetch populates the slug-projection key.
+		setAccountSlugFieldEnabled(true)
+		cache := newMemCache()
+		calls := 0
+		rt := &countingTransport{
+			callCount:  &calls,
+			firstResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+			retryResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+			limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
+		}
+		client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
+
+		_, _, err = client.FetchB2BOrg(context.Background(), uid)
+		require.NoError(t, err)
+		require.Equal(t, 1, calls)
+		withSlug, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
+		require.NoError(t, err)
+		require.NotNil(t, withSlug, "enabled fetch writes the b2b_org_v3 key")
+
+		// Disabled: must NOT read the slug-projection entry (which would 304 and
+		// refresh forever) — a fresh request goes out and lands under the noslug key.
+		setAccountSlugFieldEnabled(false)
+		_, _, err = client.FetchB2BOrg(context.Background(), uid)
+		require.NoError(t, err)
+		assert.Equal(t, 2, calls, "disabled fetch must not be served from the slug-projection cache entry")
+		noSlug, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgNoSlug, uid))
+		require.NoError(t, err)
+		assert.NotNil(t, noSlug, "disabled fetch writes the b2b_org_v3_noslug key")
+
+		// Re-enabled: the slug-projection entry is its own identity again; the
+		// noslug body is not consulted. (It is served from the v3 entry via the
+		// conditional-GET path, so no assertion on call count here — only on key.)
+		setAccountSlugFieldEnabled(true)
+		_, _, err = client.FetchB2BOrg(context.Background(), uid)
+		require.NoError(t, err)
+		stillWithSlug, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
+		require.NoError(t, err)
+		assert.NotNil(t, stillWithSlug)
+		assert.JSONEq(t, string(withSlug.Body), string(stillWithSlug.Body), "re-enabled fetch keys on the slug projection")
+	})
+
 	t.Run("Config.Init applies the toggle from the config", func(t *testing.T) {
 		// Init needs live credentials to authenticate, so only the toggle side
 		// effect is exercised: it runs before any network call and must survive

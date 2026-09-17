@@ -27,6 +27,7 @@ records and the project-UID-to-Salesforce-ID resolver are documented in
 | `REPOSITORY_SOURCE` | Reader backend (`salesforce` or `mock`) | `salesforce` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable global org-admin team name (FGA `global_org_admin` reference on b2b_org create) | `global_org_admin` | Yes (deploy) |
 | `RUN_MODE` | `server` (HTTP API) or `consumer` (Salesforce Pub/Sub CDC consumer) | `server` | No |
+| `SF_ACCOUNT_SLUG_FIELD_ENABLED` | Select `Account.Slug__c` on both Account read paths (SOQL list/search and sObject single read) so orgs carry a URL slug (lfx-self-serve#2570). `false` drops the field for a Salesforce org that lacks it (LFXV2-1363 sandbox case); non-boolean values fail startup. Must match on API and consumer pods | `true` | No |
 | `SF_PUBSUB_ENDPOINT` | Salesforce Pub/Sub gRPC endpoint (e.g. `api.pubsub.salesforce.com:7443`) | `""` | Consumer mode |
 | `SF_ORG_ID` | Salesforce org ID for the Pub/Sub tenant | `""` | Consumer mode |
 | `SF_CDC_CHANNEL` | CDC channel to subscribe to | `/data/ChangeEvents` | No |

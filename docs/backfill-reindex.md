@@ -370,6 +370,11 @@ environment — via the chart's `app.extraEnv` (API pod) and `consumer.extraEnv`
 read paths agree: both drop the field, every `data.slug` is omitted, and the UI addresses those
 organizations by SFID. Default is enabled; no chart change is needed for the normal case.
 
+Flipping the toggle needs **no** cache purge: the full-org sObject cache key encodes the projection
+(`b2b_org_v3.*` with the slug, `b2b_org_v3_noslug.*` without), so a body fetched under one field list
+is never replayed under the other. A flip does still change what gets published, so follow it with
+a `b2b_org` reindex if the indexed slugs should reflect the new state.
+
 ---
 
 ## Dry Run

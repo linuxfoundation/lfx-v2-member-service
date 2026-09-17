@@ -16,17 +16,36 @@ import (
 func TestB2BOrg_Tags_Slug(t *testing.T) {
 	t.Parallel()
 
-	withSlug := &B2BOrg{UID: "0014100000Te02DAAR", Slug: "google-llc", IsMember: true}
-	assert.Equal(t,
-		[]string{"0014100000Te02DAAR", "b2b_org_uid:0014100000Te02DAAR", "is_member:true", "slug:google-llc"},
-		withSlug.Tags(),
-	)
-
-	noSlug := &B2BOrg{UID: "0014100000Te02DAAR"}
-	for _, tag := range noSlug.Tags() {
-		assert.NotContains(t, tag, "slug:", "no slug tag without a slug")
+	tests := []struct {
+		name string
+		org  *B2BOrg
+		want []string
+	}{
+		{
+			name: "slug present emits slug tag last",
+			org:  &B2BOrg{UID: "0014100000Te02DAAR", Slug: "google-llc", IsMember: true},
+			want: []string{"0014100000Te02DAAR", "b2b_org_uid:0014100000Te02DAAR", "is_member:true", "slug:google-llc"},
+		},
+		{
+			name: "slug absent emits no slug tag",
+			org:  &B2BOrg{UID: "0014100000Te02DAAR"},
+			want: []string{"0014100000Te02DAAR", "b2b_org_uid:0014100000Te02DAAR", "is_member:false"},
+		},
+		{
+			name: "slug and parent both present",
+			org:  &B2BOrg{UID: "child", ParentUID: "parent", Slug: "child-co"},
+			want: []string{"child", "b2b_org_uid:child", "parent_b2b_org_uid:parent", "is_member:false", "slug:child-co"},
+		},
+		{
+			name: "nil receiver yields nil",
+			org:  nil,
+			want: nil,
+		},
 	}
-
-	var nilOrg *B2BOrg
-	assert.Nil(t, nilOrg.Tags())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.org.Tags())
+		})
+	}
 }

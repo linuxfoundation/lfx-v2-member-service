@@ -45,6 +45,17 @@ func withAccountSlugField(fields string) string {
 	return fields + "," + accountSlugField
 }
 
+// b2bOrgCacheKeyPrefix returns the full-org sObject cache prefix for the current
+// Slug__c projection. The projection is part of the cache identity (see the
+// prefix constants in sobject_readers.go), so a toggle flip can never replay a
+// body fetched under the other field list.
+func b2bOrgCacheKeyPrefix() string {
+	if accountSlugFieldEnabled.Load() {
+		return sobjectKeyPrefixB2BOrg
+	}
+	return sobjectKeyPrefixB2BOrgNoSlug
+}
+
 // normalizeOrgSlug canonicalizes a Salesforce Account.Slug__c value for use as
 // URL identity: trimmed and lowercased. Salesforce custom slug fields arrive
 // mixed-case (the project resolver documents `ToIP` vs `toip` for

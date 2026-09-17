@@ -455,7 +455,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 2: full org fetch for the same Account. Must be a cache miss on
-	// "b2b_org_v2.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
+	// "b2b_org_v3.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 	require.NotNil(t, org)
@@ -468,7 +468,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 }
 
 // TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief verifies the
-// reverse order: once a full org fetch has populated "b2b_org_v2.{uid}", a
+// reverse order: once a full org fetch has populated "b2b_org_v3.{uid}", a
 // later narrow parent-detail fetch for the same Account must not overwrite it.
 func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	t.Parallel()
@@ -493,7 +493,7 @@ func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
 	reader := NewB2BOrgReader(client, nil)
 
-	// Step 1: full org fetch populates "b2b_org_v2.{uid}".
+	// Step 1: full org fetch populates "b2b_org_v3.{uid}".
 	org1, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 	require.NotNil(t, org1)
@@ -558,7 +558,7 @@ func TestSObjectClient_CacheKeyIsolation_FlatAccountThenFullOrg(t *testing.T) {
 // TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored verifies
 // that a legacy under-shaped "b2b_org.{uid}" entry written before the cache-key
 // split is ignored after deploy. The current full-org fetch must read from the
-// versioned "b2b_org_v2.{uid}" key instead of trusting the legacy body.
+// versioned "b2b_org_v3.{uid}" key instead of trusting the legacy body.
 func TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored(t *testing.T) {
 	t.Parallel()
 

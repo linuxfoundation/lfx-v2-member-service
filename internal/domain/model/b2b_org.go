@@ -72,9 +72,13 @@ type B2BOrg struct {
 	// Salesforce workflows.
 	IsMember bool `json:"is_member"`
 
-	// Slug is the URL-friendly identifier for the organization.
-	// The Heroku Connect replica column is "slug" (SF API name Slug__c).
-	// TODO: confirm field exists in the Salesforce org schema before exposing.
+	// Slug is the organization's lowercase URL identity, sourced from
+	// Salesforce Account.Slug__c (Heroku Connect replica column "slug") and
+	// normalized (trim + lowercase) at ingest on both Account read paths. Empty
+	// when the Account has no slug or when SF_ACCOUNT_SLUG_FIELD_ENABLED=false
+	// drops the field from the projection; never generated. Org Lens addresses
+	// the organization as /org/{slug}/… and resolves it back through the
+	// access-filtered `slug:` search tag (lfx-self-serve#2570).
 	Slug string `json:"slug,omitempty"`
 
 	// ParentUID is the canonical 18-char Salesforce Account SFID of the parent

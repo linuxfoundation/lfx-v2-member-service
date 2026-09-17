@@ -594,6 +594,7 @@ before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end witho
 | `SF_PUBSUB_ENDPOINT`  | Salesforce Pub/Sub gRPC endpoint                                            | — (fatal if empty)                   | Yes      |
 | `SF_ORG_ID`           | Salesforce 18-char Org ID injected as `tenantid` gRPC metadata header      | — (fatal if empty)                   | Yes      |
 | `SF_CDC_CHANNEL`      | CDC channel to subscribe to                                                 | `/data/ChangeEvents`                 | No       |
+| `SF_ACCOUNT_SLUG_FIELD_ENABLED` | Select `Account.Slug__c` on both Account read paths (lfx-self-serve#2570); `false` for an SF org without the field. Set identically on API + consumer | `true` | No |
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the quota guard issues an active `/limits` refresh. `0` disables active refresh. | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable platform org-admin team name (same as API mode)              | `global_org_admin`                   | No       |
 | `LF_STAFF_TEAM_NAME`  | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `""` (chart sets `lf-staff`) | No       |

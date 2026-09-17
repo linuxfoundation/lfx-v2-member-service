@@ -44,9 +44,11 @@ var b2bOrgNonChildRelations = []string{
 	"global_org_admin", "auditor", "writer", "owner", "membership", "parent",
 }
 
-// orgNameAndAliases builds the name+domain alias slice for an org indexing
-// config. The URL slug rides along so the org selector's typeahead matches
-// what a viewer sees in the address bar (lfx-self-serve#2570).
+// orgNameAndAliases builds the name+domain alias slice shared by the org,
+// org-settings, and org-workspace indexing configs. The URL slug is deliberately
+// NOT added here — it belongs to the b2b_org document alone (see
+// BuildB2BOrgIndexingConfig), and the settings/workspace contracts do not carry
+// it.
 func orgNameAndAliases(org *model.B2BOrg) []string {
 	var out []string
 	if org.Name != "" {
@@ -55,16 +57,17 @@ func orgNameAndAliases(org *model.B2BOrg) []string {
 	if org.PrimaryDomain != "" {
 		out = append(out, org.PrimaryDomain)
 	}
-	out = append(out, org.DomainAliases...)
-	if org.Slug != "" {
-		out = append(out, org.Slug)
-	}
-	return out
+	return append(out, org.DomainAliases...)
 }
 
 // BuildB2BOrgIndexingConfig constructs an IndexingConfig for a B2BOrg document.
 func BuildB2BOrgIndexingConfig(org *model.B2BOrg) *indexerTypes.IndexingConfig {
+	// The URL slug rides along on the org document only, so the selector's
+	// typeahead matches what a viewer sees in the address bar (lfx-self-serve#2570).
 	nameAndAliases := orgNameAndAliases(org)
+	if org.Slug != "" {
+		nameAndAliases = append(nameAndAliases, org.Slug)
+	}
 
 	var fulltext []string
 	for _, s := range []string{org.Name, org.PrimaryDomain, org.Description, org.Industry, org.Sector, org.Slug} {

@@ -25,11 +25,19 @@ const (
 	// sobjectKeyPrefixB2BOrgV2Legacy is the pre-slug full-org key (LFXV2-2654 →
 	// spec 050). Retained only so InvalidateB2BOrg can evict it; never written.
 	sobjectKeyPrefixB2BOrgV2Legacy = "b2b_org_v2"
-	// sobjectKeyPrefixB2BOrg is the current full-org key. Bumped v2 → v3 when
-	// Slug__c joined b2bOrgFields: the sObject cache key carries no field-list
-	// component and a 304 re-writes the entry to reset its TTL, so a hot
-	// pre-slug body would otherwise be served indefinitely (lfx-self-serve#2570).
-	sobjectKeyPrefixB2BOrg            = "b2b_org_v3"
+	// sobjectKeyPrefixB2BOrg is the current full-org key when Slug__c is in the
+	// projection (the default). Bumped v2 → v3 when Slug__c joined the field
+	// list: the sObject cache key carries no field-list component and a 304
+	// re-writes the entry to reset its TTL, so a hot pre-slug body would
+	// otherwise be served indefinitely (lfx-self-serve#2570).
+	sobjectKeyPrefixB2BOrg = "b2b_org_v3"
+	// sobjectKeyPrefixB2BOrgNoSlug is the full-org key when the Slug__c toggle
+	// is off. A separate prefix per projection is what makes the toggle safe to
+	// flip in either direction: with one shared key, a hot body written under the
+	// previous projection would keep answering 304 — and keep having its TTL
+	// refreshed — so disabling could go on publishing a cached slug and
+	// re-enabling could go on serving a slug-less record indefinitely.
+	sobjectKeyPrefixB2BOrgNoSlug      = "b2b_org_v3_noslug"
 	sobjectKeyPrefixB2BOrgFlat        = "b2b_org_flat"
 	sobjectKeyPrefixB2BOrgParentBrief = "b2b_org_parent_brief"
 	sobjectKeyPrefixProjectMembership = "project_membership"
@@ -207,7 +215,7 @@ type AccountRecord struct {
 
 // FetchAccount fetches a single Salesforce Account (B2BOrg) record by its UID.
 // The SFID is derived from the UID; the cache key is "b2b_org_flat.{sfid}",
-// distinct from FetchB2BOrg's "b2b_org_v2.{sfid}" since this fetch requests a
+// distinct from FetchB2BOrg's "b2b_org_v3.{sfid}" since this fetch requests a
 // different, narrower field list (accountFields) for the same Account.
 //
 // Because the Account sObject has no natural project association in the returned
@@ -249,20 +257,21 @@ func sobjectAccountToRecord(raw *sobjectAccount, uid string) *AccountRecord {
 // using the full field list (b2bOrgFieldsBase plus Slug__c when the toggle is
 // on). The returned model.B2BOrg is fully populated including industry, sector,
 // domains, status, and slug fields.
-// The cache key is "b2b_org_v3.{sfid}". The versioned prefix ensures a deploy
-// never trusts an under-shaped entry written by an earlier field list: "b2b_org"
-// (pre-LFXV2-2654 split) or "b2b_org_v2" (pre-slug, spec 050). Bumping the
-// prefix is mandatory on a field-list change because the key carries no field
-// component and handle304 refreshes the TTL of unchanged records — a hot
-// pre-slug body would otherwise never age out. The FetchResult carries ETag and
-// Last-Modified for use by callers that need to set response headers.
+// The cache key is "b2b_org_v3.{sfid}" with Slug__c in the projection (default)
+// or "b2b_org_v3_noslug.{sfid}" with the toggle off. The prefix encodes the
+// field list because the key otherwise carries no field component and handle304
+// refreshes the TTL of unchanged records: an under-shaped body written by an
+// earlier field list — "b2b_org" (pre-LFXV2-2654 split), "b2b_org_v2" (pre-slug,
+// spec 050), or the other toggle state — would otherwise never age out. The
+// FetchResult carries ETag and Last-Modified for use by callers that need to set
+// response headers.
 func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2BOrg, *FetchResult, error) {
 	sfid, err := normalizeUID("Account", uid)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrg, sfid)
+	cacheKey := sobjectCacheKey(b2bOrgCacheKeyPrefix(), sfid)
 	result, err := c.FetchSObject(ctx, "Account", sfid, cacheKey, withAccountSlugField(b2bOrgFieldsBase))
 	if err != nil {
 		return nil, nil, err
@@ -297,7 +306,7 @@ func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2B
 // caller; the parent detail is best-effort.
 //
 // Uses a distinct cache key prefix ("b2b_org_parent_brief") from FetchB2BOrg's
-// "b2b_org_v2.{sfid}" so that this narrow, 3-field lookup can never be read back as
+// "b2b_org_v3.{sfid}" so that this narrow, 3-field lookup can never be read back as
 // satisfying a full B2BOrg fetch for the same Account (see LFXV2-2654).
 func (c *SObjectClient) fetchParentAccountDetail(ctx context.Context, parentSFID string) (*sobjectAccountParent, error) {
 	parentUID, err := sfuuid.Normalize18(parentSFID)
