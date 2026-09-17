@@ -340,17 +340,22 @@ headroom is tight — every window republishes with the slug.
 
 ### 3. Verify against OpenSearch
 
-Port-forward `opensearch-proxy` (`kubectl -n lfx port-forward deployment/opensearch-proxy 9200:9200`)
-and run:
+Port-forward `opensearch-proxy` (`kubectl -n lfx port-forward deployment/opensearch-proxy 9200:9200`).
+
+**Key every check on the `slug:` tag, not on `data.slug`.** In the `resources` index `data` is a
+`flat_object`: its subfields cannot be aggregated (a `terms` agg on `data.slug` errors) and `exists`
+on them is unreliable (verified 2026-09-17 on prod: `exists data.name` counted 8,105 of 9,475
+docs). `tags` is a plain `keyword` field — `prefix`, `terms`, and `terms` aggregations all work on
+it, and the `slug:` tag is emitted iff `data.slug` is non-empty, so it is the authoritative signal.
 
 ```bash
-# coverage: docs with a slug vs total
-curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"exists":{"field":"data.slug"}}]}}}'
+# coverage: docs carrying a slug tag vs total
+curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"prefix":{"tags":"slug:"}}]}}}'
 curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"term":{"object_type":"b2b_org"}}}'
-# duplicates (expected: empty buckets)
-curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":0,"query":{"term":{"object_type":"b2b_org"}},"aggs":{"dups":{"terms":{"field":"data.slug","min_doc_count":2,"size":100}}}}'
-# reserved page names (expected: 0 hits)
-curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":50,"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"terms":{"data.slug":["overview","memberships","projects","easycla","roi","governance","people","contributions","events","training","meetings","groups","profile","not-found"]}}]}}}'
+# duplicates (expected: empty buckets) — aggregate the keyword tags, keep only slug: ones
+curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":0,"query":{"term":{"object_type":"b2b_org"}},"aggs":{"dups":{"terms":{"field":"tags","include":"slug:.*","min_doc_count":2,"size":100}}}}'
+# reserved page names (expected: 0)
+curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"terms":{"tags":["slug:overview","slug:memberships","slug:projects","slug:easycla","slug:roi","slug:governance","slug:people","slug:contributions","slug:events","slug:training","slug:meetings","slug:groups","slug:profile","slug:not-found"]}}]}}}'
 ```
 
 Expected: coverage ≈ total (orgs without a `Slug__c` in Salesforce are legitimately absent and stay
