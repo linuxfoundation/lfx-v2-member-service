@@ -83,14 +83,14 @@ jobs:
       # the wiring exists.
       - name: Configure AWS credentials
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
         with:
           role-to-assume: arn:aws:iam::788942260905:role/github-actions-deploy
           aws-region: us-east-2
 
       - name: Get lfx-reviewer token from AWS Secrets Manager
         continue-on-error: true
-        uses: aws-actions/aws-secretsmanager-get-secrets@3a411b6ec5cace3d626412dd917e7bfeac242cfa # v3
+        uses: aws-actions/aws-secretsmanager-get-secrets@3a411b6ec5cace3d626412dd917e7bfeac242cfa # v3.0.0
         with:
           secret-ids: |
             GH, /cloudops/managed-secrets/cloud/github/linuxfoundation/lfx-reviewer-pat
