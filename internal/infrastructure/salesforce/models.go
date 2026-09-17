@@ -195,13 +195,9 @@ type soqlAccount struct {
 	// Status is the custom SF field Account.LF_Membership_Status__c.
 	Status *string `salesforce:"LF_Membership_Status__c" json:"LF_Membership_Status__c"`
 	// IsMember is the custom SF field Account.IsMember__c.
-	IsMember *bool `salesforce:"IsMember__c"             json:"IsMember__c"`
-	// Slug is the custom SF field Account.Slug__c — the organization's URL slug
-	// (lfx-self-serve#2570). Selected only when the Slug__c toggle is on; nil when
-	// absent from the projection or unset on the record.
-	Slug             *string `salesforce:"Slug__c" json:"Slug__c"`
-	CreatedDate      string  `salesforce:"CreatedDate"             json:"CreatedDate"`
-	LastModifiedDate string  `salesforce:"LastModifiedDate"        json:"LastModifiedDate"`
+	IsMember         *bool  `salesforce:"IsMember__c"             json:"IsMember__c"`
+	CreatedDate      string `salesforce:"CreatedDate"             json:"CreatedDate"`
+	LastModifiedDate string `salesforce:"LastModifiedDate"        json:"LastModifiedDate"`
 	// Parent is the parent Account sub-object from the SOQL relationship sub-select.
 	// Present when the query includes `Parent.Name, Parent.Logo_URL__c` in the SELECT clause.
 	Parent *soqlAccountParent `salesforce:"Parent"                  json:"Parent"`

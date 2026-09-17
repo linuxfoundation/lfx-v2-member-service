@@ -386,9 +386,9 @@ var B2BOrgResponse = dsl.Type("b2b-org-response", func() {
 	dsl.Attribute("is_member", dsl.Boolean, "Whether the organization is currently an LF member (Account.IsMember__c); read-only, managed by Salesforce workflows", func() {
 		dsl.Example(true)
 	})
-	// Populated from Account.Slug__c on both read paths (lowercased at ingest); omitted when the
-	// Account has no slug or SF_ACCOUNT_SLUG_FIELD_ENABLED=false drops the field (lfx-self-serve#2570).
-	dsl.Attribute("slug", dsl.String, "URL-friendly organization identifier; populated when Account.Slug__c is available", func() {
+	// Derived from Account.Name on both read paths (model.Slugify, spec 050 DR-007); omitted when the
+	// name yields no usable slug (lfx-self-serve#2570).
+	dsl.Attribute("slug", dsl.String, "URL-friendly organization identifier derived from the organization name (lowercase, [a-z0-9-], max 50); omitted when the name yields none", func() {
 		dsl.Example("example-corp")
 	})
 	dsl.Attribute("parent_uid", dsl.String, "UID of the parent organization (Account.ParentId); omitted when no parent", func() {

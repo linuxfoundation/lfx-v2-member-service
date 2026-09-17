@@ -68,11 +68,10 @@ re-publishing.
 
 | Key pattern | Contents |
 | --- | --- |
-| `b2b_org_v3.{uid}` | Salesforce Account sObject cache entry — full `FetchB2BOrg` field list **with** `Slug__c` (the default projection) |
-| `b2b_org_v3_noslug.{uid}` | Same fetch with `SF_ACCOUNT_SLUG_FIELD_ENABLED=false`. Separate key per projection so a toggle flip can never replay a body cached under the other field list (a 304 would otherwise refresh it forever) |
+| `b2b_org_v4.{uid}` | Salesforce Account sObject cache entry — full `FetchB2BOrg` field list (current). The org slug is derived from `Name` at conversion (`model.Slugify`), so it is never part of the cached body |
 | `b2b_org_flat.{uid}` | Salesforce Account sObject cache entry (narrow `FetchAccount` field list) |
 | `b2b_org_parent_brief.{uid}` | Salesforce Account sObject cache entry (3-field parent-detail lookup) |
-| `b2b_org_v2.{uid}` | Pre-slug full-org key (LFXV2-2654 → lfx-self-serve#2570); evicted only, never read after the `b2b_org_v3` rollout. Purged per environment at slug deploy (see `backfill-reindex.md` § Org Slug Backfill) |
+| `b2b_org_v2.{uid}`, `b2b_org_v3.{uid}`, `b2b_org_v3_noslug.{uid}` | Retired full-org keys (LFXV2-2654 → lfx-self-serve#2570 → #109's `Slug__c` projection and toggle, field does not exist); evicted only, never read after the `b2b_org_v4` rollout. `b2b_org_v3*` purged per environment at deploy (see `backfill-reindex.md` § Org Slug Backfill) |
 | `b2b_org.{uid}` | Legacy pre-LFXV2-2654 key; evicted only, never read since the versioned-prefix rollout |
 | `project_membership.{uid}` | Salesforce Asset sObject cache entry |
 | `key_contact.{uid}` | Salesforce Project_Role__c sObject cache entry |

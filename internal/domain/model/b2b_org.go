@@ -72,13 +72,13 @@ type B2BOrg struct {
 	// Salesforce workflows.
 	IsMember bool `json:"is_member"`
 
-	// Slug is the organization's lowercase URL identity, sourced from
-	// Salesforce Account.Slug__c (Heroku Connect replica column "slug") and
-	// normalized (trim + lowercase) at ingest on both Account read paths. Empty
-	// when the Account has no slug or when SF_ACCOUNT_SLUG_FIELD_ENABLED=false
-	// drops the field from the projection; never generated. Org Lens addresses
-	// the organization as /org/{slug}/… and resolves it back through the
-	// access-filtered `slug:` search tag (lfx-self-serve#2570).
+	// Slug is the organization's lowercase URL identity, derived from Name by
+	// Slugify on both Account read paths (spec 050, DR-007) — the same rule the
+	// legacy dashboard uses for myorg.lfx.dev/{slug}/…. Never stored or edited;
+	// a rename changes it. Empty when the name yields nothing usable (e.g. a
+	// non-Latin script) — the organization is then addressed by its SFID. Org
+	// Lens addresses the organization as /org/{slug}/… and resolves it back
+	// through the access-filtered `slug:` search tag (lfx-self-serve#2570).
 	Slug string `json:"slug,omitempty"`
 
 	// ParentUID is the canonical 18-char Salesforce Account SFID of the parent

@@ -16,9 +16,9 @@ import (
 
 // TestInvalidateB2BOrg_ClearsAllB2BOrgKeys verifies that InvalidateB2BOrg evicts
 // every B2BOrg-family cache entry for the same UID: the legacy full-org key, the
-// pre-slug v2 key, both v3 projections (slug on / slug off), the flat-account
-// key, and the parent-brief key. Deploys and toggle flips can leave any of them
-// populated until the old entries are evicted.
+// retired v2 / v3 / v3_noslug keys, the current v4 key, the flat-account key,
+// and the parent-brief key. Deploys can leave any of them populated until the
+// old entries are evicted.
 func TestInvalidateB2BOrg_ClearsAllB2BOrgKeys(t *testing.T) {
 	t.Parallel()
 
@@ -29,8 +29,9 @@ func TestInvalidateB2BOrg_ClearsAllB2BOrgKeys(t *testing.T) {
 	allKeys := []string{
 		sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrgV2Legacy, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgV3Legacy, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgV3NoSlugLegacy, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid),
-		sobjectCacheKey(sobjectKeyPrefixB2BOrgNoSlug, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid),
 		sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid),
 	}

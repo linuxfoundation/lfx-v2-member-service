@@ -3091,7 +3091,7 @@ components:
                     example: Software
                 slug:
                     type: string
-                    description: URL-friendly organization identifier; populated when Account.Slug__c is available
+                    description: URL-friendly organization identifier derived from the organization name (lowercase, [a-z0-9-], max 50); omitted when the name yields none
                     example: example-corp
                 status:
                     type: string

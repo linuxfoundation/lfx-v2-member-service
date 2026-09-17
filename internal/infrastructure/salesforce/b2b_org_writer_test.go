@@ -283,7 +283,6 @@ const updatedAccountJSON = `{
 	"CrunchBase_URL__c":null,
 	"NumberOfEmployees":250,
 	"LF_Membership_Status__c":"Active",
-	"Slug__c":"linux-foundation",
 	"CreatedDate":"2020-01-15T10:30:00.000+0000",
 	"LastModifiedDate":"2024-07-01T10:00:00.000+0000",
 	"SystemModstamp":"2024-07-01T10:00:00.000+0000"
