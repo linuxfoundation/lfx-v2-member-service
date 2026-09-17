@@ -217,6 +217,8 @@ Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or 
 
 > **Internal filtering:** SOQL-level membership filtering (`MembershipFilters` in `internal/domain/model/list_params.go`, e.g. tier UID / product) is applied internally on the Salesforce read path. It is not exposed as an HTTP `filter` query parameter on the current resource-rooted surface.
 
+> **Breaking OpenAPI schema rename (Goa v3.30.0, LFXV2-3338):** the Goa generator/runtime upgrade from v3.25.3 to v3.30.0 renames public component IDs in the served `/_memberships/openapi3.yaml` contract even though the underlying Goa design did not change (for example, `AdminReindexPayload` becomes `AdminReindexRequestBody`, and several `MembershipService...`-prefixed response schemas are renamed). This is an intentional, accepted breaking change as part of standardizing on a current Goa version. Downstream consumers that generate client models from these schema names must regenerate against the new names.
+
 ## Development Workflow
 
 ### Common Development Tasks
