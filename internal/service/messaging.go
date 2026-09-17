@@ -44,7 +44,9 @@ var b2bOrgNonChildRelations = []string{
 	"global_org_admin", "auditor", "writer", "owner", "membership", "parent",
 }
 
-// orgNameAndAliases builds the name+domain alias slice for an org indexing config.
+// orgNameAndAliases builds the name+domain alias slice for an org indexing
+// config. The URL slug rides along so the org selector's typeahead matches
+// what a viewer sees in the address bar (lfx-self-serve#2570).
 func orgNameAndAliases(org *model.B2BOrg) []string {
 	var out []string
 	if org.Name != "" {
@@ -53,7 +55,11 @@ func orgNameAndAliases(org *model.B2BOrg) []string {
 	if org.PrimaryDomain != "" {
 		out = append(out, org.PrimaryDomain)
 	}
-	return append(out, org.DomainAliases...)
+	out = append(out, org.DomainAliases...)
+	if org.Slug != "" {
+		out = append(out, org.Slug)
+	}
+	return out
 }
 
 // BuildB2BOrgIndexingConfig constructs an IndexingConfig for a B2BOrg document.
@@ -61,7 +67,7 @@ func BuildB2BOrgIndexingConfig(org *model.B2BOrg) *indexerTypes.IndexingConfig {
 	nameAndAliases := orgNameAndAliases(org)
 
 	var fulltext []string
-	for _, s := range []string{org.Name, org.PrimaryDomain, org.Description, org.Industry, org.Sector} {
+	for _, s := range []string{org.Name, org.PrimaryDomain, org.Description, org.Industry, org.Sector, org.Slug} {
 		if s != "" {
 			fulltext = append(fulltext, s)
 		}

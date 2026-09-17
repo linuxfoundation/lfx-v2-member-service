@@ -32,6 +32,7 @@ For the downstream message payloads the runner produces, see:
 - [Per-Type Handling](#per-type-handling)
 - [`project_uid` Resolution Parity](#project_uid-resolution-parity)
 - [Avatar Enrichment (`avatar-backfill`)](#avatar-enrichment-avatar-backfill)
+- [Org Slug Backfill (lfx-self-serve#2570)](#org-slug-backfill-lfx-self-serve2570)
 - [Dry Run](#dry-run)
 - [Failure Modes & Log Signals](#failure-modes--log-signals)
 - [Configuration](#configuration)
@@ -292,6 +293,77 @@ Per org, `enrichSettingsAvatars` (`backfill_runner.go`) refreshes each accepted 
 - **`AvatarSleep`** waits between lookups to respect Auth0 rate limits; a context cancellation during the sleep aborts the pass cleanly (not counted as a failure).
 - **Failure tolerance:** transient lookup failures are counted and isolated; the type is reported failed only when they exceed `maxToleratedAvatarFailures` (50).
 - Enriched avatars are persisted via `UpdateSettings` (skipped on a revision conflict) **before** the indexer doc is republished, so the doc only reflects persisted values.
+
+---
+
+## Org Slug Backfill (lfx-self-serve#2570)
+
+Org Lens addresses organizations as `/org/{slug}/{page}` (spec 050 in the org-lens workspace). The
+slug is Salesforce `Account.Slug__c`, published on the `b2b_org` indexer doc as `data.slug` and as a
+`slug:{slug}` tag (see [indexer-contract.md](./indexer-contract.md#b2b-org)). Before that change no
+`b2b_org` document carried a slug (prod, 2026-09-17: 0 of 9,475), so the whole population must be
+republished once per environment **before** the UI's address-shape change is enabled there.
+
+Two things have to happen, in order, per environment — dev first, verify, then prod:
+
+### 1. Purge the pre-slug sObject cache
+
+`GET /b2b_orgs/{uid}` reads through the `member-service-cache` KV bucket keyed `b2b_org_v3.{sfid}`.
+The prefix was bumped from `b2b_org_v2` when `Slug__c` joined the field list, because the sObject
+cache key carries **no field-list component** and `handle304` re-writes an unchanged entry to
+reset its TTL — a frequently-read org would otherwise serve its slug-less body **forever**, not for a
+TTL. The bump means new code never reads a `v2` entry; purging is belt-and-braces so the old keys
+do not linger in the bucket:
+
+```bash
+# dev: make -C .tools/nats-forward nats-dev ; prod: nats-prod  (localhost:4222)
+nats kv ls member-service-cache --server=localhost:4222 \
+  | grep '^b2b_org_v2\.' \
+  | xargs -n1 nats kv del member-service-cache --server=localhost:4222 -f
+```
+
+`InvalidateB2BOrg` also evicts the `v2` key on every per-org invalidation, so orgs touched by CDC
+converge on their own; the purge covers the rest.
+
+### 2. Reindex `b2b_org`
+
+```bash
+curl -sS -X POST "$MEMBER_SERVICE_URL/admin/reindex" \
+  -H "Authorization: Bearer $M2M_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type":"b2b_org"}'
+```
+
+This walks the SOQL list path (`accountsSOQLBase`, which now selects `Slug__c`) and republishes every
+member-eligible Account; CDC keeps the population converged afterwards. Check quota headroom first
+(see [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex)); a windowed run is fine if
+headroom is tight — every window republishes with the slug.
+
+### 3. Verify against OpenSearch
+
+Port-forward `opensearch-proxy` (`kubectl -n lfx port-forward deployment/opensearch-proxy 9200:9200`)
+and run:
+
+```bash
+# coverage: docs with a slug vs total
+curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"exists":{"field":"data.slug"}}]}}}'
+curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"term":{"object_type":"b2b_org"}}}'
+# duplicates (expected: empty buckets)
+curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":0,"query":{"term":{"object_type":"b2b_org"}},"aggs":{"dups":{"terms":{"field":"data.slug","min_doc_count":2,"size":100}}}}'
+# reserved page names (expected: 0 hits)
+curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":50,"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"terms":{"data.slug":["overview","memberships","projects","easycla","roi","governance","people","contributions","events","training","meetings","groups","profile","not-found"]}}]}}}'
+```
+
+Expected: coverage ≈ total (orgs without a `Slug__c` in Salesforce are legitimately absent and stay
+addressable by SFID), zero duplicate buckets, zero reserved-name hits. Deviations are reported to the
+slug owner (LF support maintains `Slug__c`) — nothing in this service renames or generates slugs.
+
+### Opting out per environment
+
+A Salesforce org without the `Slug__c` custom field 400s every Account fetch with `INVALID_FIELD`
+(the partial-sandbox failure behind LFXV2-1363). Set `SF_ACCOUNT_SLUG_FIELD_ENABLED=false` for that
+environment — via the chart's `app.extraEnv` (API pod) and `consumer.extraEnv` (CDC consumer) so both
+read paths agree: both drop the field, every `data.slug` is omitted, and the UI addresses those
+organizations by SFID. Default is enabled; no chart change is needed for the normal case.
 
 ---
 

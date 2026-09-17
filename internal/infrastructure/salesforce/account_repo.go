@@ -22,20 +22,22 @@ type soqlAccountID struct {
 	ID string `salesforce:"Id" json:"Id"`
 }
 
-// accountsSOQLBase is the SELECT and fixed WHERE base for Account search/list
-// queries. The caller appends optional LIKE predicates and an ORDER BY clause
-// before executing. Only Accounts that are not deleted and have at least one
-// membership Asset are returned — the SOQL semi-join on Asset ensures we do
-// not expose arbitrary Account records to the API.
-const accountsSOQLBase = `
-SELECT
-    Id, Name, Logo_URL__c, Website,
-    Account_Domain__c, Domain_Alias__c,
-    Description, Phone, ParentId,
-    Parent.Id, Parent.Name, Parent.Logo_URL__c,
-    Industry, Sector__c, CrunchBase_URL__c,
-    NumberOfEmployees, LF_Membership_Status__c, IsMember__c,
-    CreatedDate, LastModifiedDate
+// accountsSOQLSelect is the fixed Account projection shared by every list/search
+// query. Slug__c is appended at query-build time via withAccountSlugField so the
+// per-environment toggle applies here exactly as it does to the sObject path.
+const accountsSOQLSelect = "Id, Name, Logo_URL__c, Website," +
+	" Account_Domain__c, Domain_Alias__c," +
+	" Description, Phone, ParentId," +
+	" Parent.Id, Parent.Name, Parent.Logo_URL__c," +
+	" Industry, Sector__c, CrunchBase_URL__c," +
+	" NumberOfEmployees, LF_Membership_Status__c, IsMember__c," +
+	" CreatedDate, LastModifiedDate"
+
+// accountsSOQLWhere is the fixed WHERE base for Account search/list queries.
+// Only Accounts that are not deleted and have at least one membership Asset are
+// returned — the SOQL semi-join on Asset ensures we do not expose arbitrary
+// Account records to the API.
+const accountsSOQLWhere = `
 FROM Account
 WHERE IsDeleted = false
     AND Id IN (
@@ -43,6 +45,14 @@ WHERE IsDeleted = false
         WHERE Product2.Family = 'Membership'
             AND IsDeleted = false
     )`
+
+// accountsSOQLBase returns the SELECT + fixed WHERE base for Account
+// search/list queries. The caller appends optional predicates and an ORDER BY
+// clause before executing. A function rather than a const because the
+// projection depends on the Slug__c toggle (see account_slug.go).
+func accountsSOQLBase() string {
+	return "\nSELECT\n    " + withAccountSlugField(accountsSOQLSelect) + accountsSOQLWhere
+}
 
 // AccountRepo handles Salesforce SOQL queries for Account (B2BOrg) records.
 type AccountRepo struct {
@@ -92,7 +102,7 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 // Salesforce Id. Returns nil, nil when no matching record is found.
 func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*model.B2BOrg, error) {
 	slog.DebugContext(ctx, "fetching account by SFID from Salesforce", "sfid", sfid)
-	query := accountsSOQLBase + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
+	query := accountsSOQLBase() + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
 	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching account by SFID %s: %w", sfid, err)
@@ -124,7 +134,7 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 		}
 		chunk := sfids[start:end]
 
-		query := accountsSOQLBase + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
+		query := accountsSOQLBase() + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
 		sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
 		if err != nil {
 			return nil, nil, fmt.Errorf("batch fetching accounts (chunk %d-%d): %w", start, end, err)
@@ -294,6 +304,9 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 	if acc.IsMember != nil {
 		org.IsMember = *acc.IsMember
 	}
+	// URL identity for Org Lens (spec 050). Lowercased at ingest so the indexed
+	// `data.slug`, the `slug:` search tag, and the canonical address agree.
+	org.Slug = normalizeOrgSlug(derefString(acc.Slug))
 
 	if parentSFID := derefString(acc.ParentID); parentSFID != "" {
 		parentUID, convErr := sfuuid.Normalize18(parentSFID)
@@ -329,7 +342,7 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 // optional LastModifiedDate filter when since is provided. Calls fn for each
 // page of converted records. Conversion errors are logged and skipped.
 func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
-	query := accountsSOQLBase + lastModifiedWindowClause(since, until)
+	query := accountsSOQLBase() + lastModifiedWindowClause(since, until)
 	return IterPages[soqlAccount, *model.B2BOrg](ctx, r.client, query, func(acc soqlAccount) (*model.B2BOrg, error) {
 		return convertSOQLToB2BOrg(ctx, acc)
 	}, fn)

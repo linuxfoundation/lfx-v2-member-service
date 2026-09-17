@@ -48,9 +48,8 @@ const canonicalAccountJSON = `{
 // TestSobjectAccountToB2BOrg_FixtureEquivalence verifies that
 // sobjectAccountToB2BOrg (sObject REST path) and convertSOQLToB2BOrg (SOQL
 // path) produce identical model.B2BOrg values for every field that both
-// converters handle. The sObject path additionally populates Slug (Slug__c),
-// which accountsSOQLBase does not select — that divergence is expected and
-// asserted explicitly below.
+// converters handle — including Slug, which both paths select since
+// lfx-self-serve#2570 and both lowercase at ingest.
 func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	t.Parallel()
 
@@ -65,8 +64,9 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	require.NotNil(t, sObjOrg)
 
 	// ── SOQL path ─────────────────────────────────────────────────────────────
-	// Populate soqlAccount with the same values (Slug__c excluded — accountsSOQLBase
-	// does not select it).
+	// Populate soqlAccount with the same values. Slug__c arrives mixed-case here
+	// to prove the SOQL path normalizes exactly as the sObject path does.
+	slug := "Linux-Foundation"
 	crunchURL := "https://www.crunchbase.com/organization/linux-foundation"
 	var empCount int64 = 200
 	logoURL := "https://linuxfoundation.org/logo.png"
@@ -93,6 +93,7 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 		CrunchBaseURL:     &crunchURL,
 		NumberOfEmployees: &empCount,
 		Status:            &status,
+		Slug:              &slug,
 		CreatedDate:       "2020-01-15T10:30:00.000+0000",
 		LastModifiedDate:  "2024-06-01T08:00:00.000+0000",
 	}
@@ -118,9 +119,10 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	assert.Equal(t, soqlOrg.CreatedAt.UTC(), sObjOrg.CreatedAt.UTC(), "CreatedAt")
 	assert.Equal(t, soqlOrg.UpdatedAt.UTC(), sObjOrg.UpdatedAt.UTC(), "UpdatedAt")
 
-	// Slug is only populated by the sObject path (Slug__c absent from accountsSOQLBase).
+	// Both paths carry the slug, lowercased, so `data.slug` never depends on which
+	// read path last published the org.
 	assert.Equal(t, "linux-foundation", sObjOrg.Slug, "sObject path must populate Slug")
-	assert.Empty(t, soqlOrg.Slug, "SOQL path must leave Slug empty (not in accountsSOQLBase)")
+	assert.Equal(t, sObjOrg.Slug, soqlOrg.Slug, "SOQL path must populate the same lowercased Slug")
 }
 
 // TestB2BOrgReader_GetB2BOrg_Happy verifies that GetB2BOrg returns a fully-

@@ -108,8 +108,16 @@ type B2BOrgParentDetail struct {
 }
 
 // Tags returns the search tags for this organization. The indexer uses these
-// to make the record discoverable by UID and by parent relationship.
-// Pattern: bare UID + prefixed b2b_org_uid:<uid> + parent ref if set.
+// to make the record discoverable by UID, by parent relationship, and — when
+// the organization has one — by URL slug.
+// Pattern: bare UID + prefixed b2b_org_uid:<uid> + parent ref if set +
+// is_member:<bool> + slug:<slug> if set.
+//
+// The slug tag is what lets Org Lens resolve `/org/{slug}/…` back to an
+// organization through the query-service, which applies the caller's `auditor`
+// grant per row — so a slug the caller may not read resolves to nothing rather
+// than through an unfiltered lookup (lfx-self-serve#2570). Slug is lowercased
+// at ingest; the tag is emitted verbatim.
 func (o *B2BOrg) Tags() []string {
 	if o == nil {
 		return nil
@@ -123,6 +131,9 @@ func (o *B2BOrg) Tags() []string {
 		tags = append(tags, fmt.Sprintf("parent_b2b_org_uid:%s", o.ParentUID))
 	}
 	tags = append(tags, fmt.Sprintf("is_member:%v", o.IsMember))
+	if o.Slug != "" {
+		tags = append(tags, fmt.Sprintf("slug:%s", o.Slug))
+	}
 	return tags
 }
 

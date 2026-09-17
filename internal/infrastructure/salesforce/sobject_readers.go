@@ -21,8 +21,15 @@ import (
 // sObject cache key prefix constants for the member-service-cache bucket.
 // Keys follow the pattern "{prefix}.{uid}" as required by the architecture.
 const (
-	sobjectKeyPrefixB2BOrgLegacy      = "b2b_org"
-	sobjectKeyPrefixB2BOrg            = "b2b_org_v2"
+	sobjectKeyPrefixB2BOrgLegacy = "b2b_org"
+	// sobjectKeyPrefixB2BOrgV2Legacy is the pre-slug full-org key (LFXV2-2654 →
+	// spec 050). Retained only so InvalidateB2BOrg can evict it; never written.
+	sobjectKeyPrefixB2BOrgV2Legacy = "b2b_org_v2"
+	// sobjectKeyPrefixB2BOrg is the current full-org key. Bumped v2 → v3 when
+	// Slug__c joined b2bOrgFields: the sObject cache key carries no field-list
+	// component and a 304 re-writes the entry to reset its TTL, so a hot
+	// pre-slug body would otherwise be served indefinitely (lfx-self-serve#2570).
+	sobjectKeyPrefixB2BOrg            = "b2b_org_v3"
 	sobjectKeyPrefixB2BOrgFlat        = "b2b_org_flat"
 	sobjectKeyPrefixB2BOrgParentBrief = "b2b_org_parent_brief"
 	sobjectKeyPrefixProjectMembership = "project_membership"
@@ -162,11 +169,10 @@ type sobjectContact struct {
 const (
 	accountFields = "Id,Name,Logo_URL__c,Website,CreatedDate,LastModifiedDate,SystemModstamp"
 
-	// b2bOrgFields is the full field list for B2BOrg fetches via FetchB2BOrg. It
-	// includes all fields required to populate model.B2BOrg.
-	// TODO(LFXV2-1363): add Slug__c once the custom field is confirmed to exist in all
-	// target SF orgs (absent from partial sandbox, causing 400 INVALID_FIELD on fetch).
-	b2bOrgFields = "Id,Name,Logo_URL__c,Website,Account_Domain__c,Domain_Alias__c," +
+	// b2bOrgFieldsBase is the full field list for B2BOrg fetches via FetchB2BOrg,
+	// minus Slug__c, which is appended per environment by withAccountSlugField
+	// (see account_slug.go — supersedes the LFXV2-1363 TODO that excluded it).
+	b2bOrgFieldsBase = "Id,Name,Logo_URL__c,Website,Account_Domain__c,Domain_Alias__c," +
 		"Description,Phone,ParentId,Industry,Sector__c,CrunchBase_URL__c," +
 		"NumberOfEmployees,LF_Membership_Status__c,IsMember__c," +
 		"CreatedDate,LastModifiedDate,SystemModstamp"
@@ -240,12 +246,16 @@ func sobjectAccountToRecord(raw *sobjectAccount, uid string) *AccountRecord {
 }
 
 // FetchB2BOrg fetches a single Salesforce Account (B2BOrg) record by its UID
-// using the full b2bOrgFields field list. The returned model.B2BOrg is fully
-// populated including industry, sector, domains, and status fields.
-// The cache key is "b2b_org_v2.{sfid}"; the versioned prefix ensures a deploy
-// never trusts a legacy poisoned "b2b_org.{sfid}" entry written before the
-// field-list split in LFXV2-2654. The FetchResult carries ETag and Last-Modified
-// for use by callers that need to set response headers.
+// using the full field list (b2bOrgFieldsBase plus Slug__c when the toggle is
+// on). The returned model.B2BOrg is fully populated including industry, sector,
+// domains, status, and slug fields.
+// The cache key is "b2b_org_v3.{sfid}". The versioned prefix ensures a deploy
+// never trusts an under-shaped entry written by an earlier field list: "b2b_org"
+// (pre-LFXV2-2654 split) or "b2b_org_v2" (pre-slug, spec 050). Bumping the
+// prefix is mandatory on a field-list change because the key carries no field
+// component and handle304 refreshes the TTL of unchanged records — a hot
+// pre-slug body would otherwise never age out. The FetchResult carries ETag and
+// Last-Modified for use by callers that need to set response headers.
 func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2BOrg, *FetchResult, error) {
 	sfid, err := normalizeUID("Account", uid)
 	if err != nil {
@@ -253,7 +263,7 @@ func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2B
 	}
 
 	cacheKey := sobjectCacheKey(sobjectKeyPrefixB2BOrg, sfid)
-	result, err := c.FetchSObject(ctx, "Account", sfid, cacheKey, b2bOrgFields)
+	result, err := c.FetchSObject(ctx, "Account", sfid, cacheKey, withAccountSlugField(b2bOrgFieldsBase))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -358,7 +368,8 @@ func sobjectAccountToB2BOrg(ctx context.Context, raw *sobjectAccount, uid string
 	if raw.IsMember != nil {
 		org.IsMember = *raw.IsMember
 	}
-	org.Slug = derefString(raw.Slug)
+	// URL identity for Org Lens (spec 050); lowercased at ingest, see normalizeOrgSlug.
+	org.Slug = normalizeOrgSlug(derefString(raw.Slug))
 
 	if parentSFID := derefString(raw.ParentID); parentSFID != "" {
 		parentUID, convErr := sfuuid.Normalize18(parentSFID)
