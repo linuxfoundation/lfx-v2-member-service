@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 
 	sf "github.com/k-capehart/go-salesforce/v3"
 )
@@ -62,6 +63,14 @@ type Config struct {
 	// (e.g. "api.pubsub.salesforce.com:7443"). Empty disables the CDC consumer
 	// entirely (no-op), so existing deployments without the var are unaffected.
 	PubSubEndpoint string
+
+	// AccountSlugFieldDisabled stops Account.Slug__c from being selected on both
+	// Account read paths. The zero value (enabled) is the default so a hand-built
+	// Config keeps slugs on; set SF_ACCOUNT_SLUG_FIELD_ENABLED=false for a
+	// Salesforce org that lacks the custom field (every Account fetch would
+	// otherwise 400 with INVALID_FIELD, as the partial sandbox did under
+	// LFXV2-1363). Applied to the package toggle by Init (lfx-self-serve#2570).
+	AccountSlugFieldDisabled bool
 }
 
 // ConfigFromEnv builds a Config from environment variables. It returns an error
@@ -90,8 +99,9 @@ type Config struct {
 //
 // Optional:
 //
-//	SF_API_VERSION     — API version (default: "v63.0").
-//	SF_PUBSUB_ENDPOINT — Salesforce Pub/Sub gRPC endpoint; empty disables the CDC consumer.
+//	SF_API_VERSION                — API version (default: "v63.0").
+//	SF_PUBSUB_ENDPOINT            — Salesforce Pub/Sub gRPC endpoint; empty disables the CDC consumer.
+//	SF_ACCOUNT_SLUG_FIELD_ENABLED — select Account.Slug__c (default: true); "false" for SF orgs without the field.
 func ConfigFromEnv() (Config, error) {
 	domain := os.Getenv("SF_INSTANCE_URL")
 	if domain == "" {
@@ -116,6 +126,15 @@ func ConfigFromEnv() (Config, error) {
 
 	pubSubEndpoint := os.Getenv("SF_PUBSUB_ENDPOINT")
 
+	accountSlugFieldDisabled := false
+	if raw := os.Getenv("SF_ACCOUNT_SLUG_FIELD_ENABLED"); raw != "" {
+		enabled, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("SF_ACCOUNT_SLUG_FIELD_ENABLED must be a boolean, got %q: %w", raw, parseErr)
+		}
+		accountSlugFieldDisabled = !enabled
+	}
+
 	// Validate that at least one auth flow is satisfiable.
 	hasJWT := username != "" && consumerRSAPem != ""
 	hasUserPass := username != "" && password != ""
@@ -139,6 +158,8 @@ func ConfigFromEnv() (Config, error) {
 		ConsumerRSAPem: consumerRSAPem,
 		APIVersion:     apiVersion,
 		PubSubEndpoint: pubSubEndpoint,
+
+		AccountSlugFieldDisabled: accountSlugFieldDisabled,
 	}, nil
 }
 
@@ -150,6 +171,13 @@ func ConfigFromEnv() (Config, error) {
 //  2. Username/password — when Username and Password are both set.
 //  3. Client-credentials — when ConsumerSecret is set without Username.
 func (c Config) Init() (*sf.Salesforce, error) {
+	// Apply the Slug__c projection toggle before any Account read can run; both
+	// AccountRepo and SObjectClient consult the package-level flag.
+	setAccountSlugFieldEnabled(!c.AccountSlugFieldDisabled)
+	if c.AccountSlugFieldDisabled {
+		slog.Warn("Salesforce Account.Slug__c selection disabled by SF_ACCOUNT_SLUG_FIELD_ENABLED=false; organizations will carry no URL slug")
+	}
+
 	creds := sf.Creds{
 		Domain:         c.Domain,
 		ConsumerKey:    c.ConsumerKey,

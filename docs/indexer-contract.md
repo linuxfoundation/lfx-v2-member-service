@@ -96,6 +96,7 @@ Suppression mutates a **shallow copy** of the record (and of `parent_detail`), n
 | `number_of_employees` | int64 (optional)    | Employee count                                                                                                                                               |
 | `status`              | string (optional)   | LF membership status                                                                                                                                         |
 | `is_member`           | bool                | Whether the org is an active LF member                                                                                                                       |
+| `slug`                | string (optional)   | Lowercase URL slug from Salesforce `Account.Slug__c` — the organization's identity in Org Lens addresses (`/org/{slug}/…`, lfx-self-serve#2570). Omitted when the Account has no slug (the UI then addresses the org by `uid`). Never generated; lowercased at ingest on both read paths. Selection is toggled per environment by `SF_ACCOUNT_SLUG_FIELD_ENABLED` (default on). |
 | `parent_uid`          | string (optional)   | UID of the parent org                                                                                                                                        |
 | `parent_detail`       | object (optional)   | Denormalized parent info: `uid`, `name`, `logo_url`                                                                                                          |
 | `is_parent`           | bool (optional)     | `true` when this org has at least one direct member-eligible child. Omitted when false. To retrieve children, query the index for `parent_uid = <this uid>`. |
@@ -110,8 +111,9 @@ Suppression mutates a **shallow copy** of the record (and of `parent_detail`), n
 | `b2b_org_uid:{uid}`        | `b2b_org_uid:0012M00002qnukOQAQ`  | Find orgs by UID                  |
 | `parent_b2b_org_uid:{uid}` | `parent_b2b_org_uid:0014100000Te2ovAAB` | Find all children of a parent org |
 | `is_member:{true\|false}`  | `is_member:true`                  | Filter by LF member status        |
+| `slug:{slug}`              | `slug:google-llc`                 | Resolve an Org Lens URL slug to its org. Emitted only when `slug` is non-empty; always lowercase. Because the doc carries `access_check_relation: auditor`, a lookup by this tag through the query-service returns nothing for a caller who does not hold the org — the UI relies on that to keep slug resolution access-filtered (no unfiltered slug oracle). |
 
-> `parent_b2b_org_uid` tag is only emitted when `parent_uid` is non-empty.
+> `parent_b2b_org_uid` tag is only emitted when `parent_uid` is non-empty; `slug` tag only when `slug` is non-empty.
 
 ### Access Control (IndexingConfig)
 
@@ -126,8 +128,8 @@ Suppression mutates a **shallow copy** of the record (and of `parent_detail`), n
 
 | Field              | Value                                                         |
 |--------------------|---------------------------------------------------------------|
-| `fulltext`         | `name`, `primary_domain`, `description`, `industry`, `sector` |
-| `name_and_aliases` | `name`, `primary_domain`, all `domain_aliases`                |
+| `fulltext`         | `name`, `primary_domain`, `description`, `industry`, `sector`, `slug` |
+| `name_and_aliases` | `name`, `primary_domain`, all `domain_aliases`, `slug`        |
 | `sort_name`        | `name` (lowercased)                                           |
 | `public`           | `false`                                                       |
 

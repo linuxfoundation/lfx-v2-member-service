@@ -570,6 +570,7 @@ When `openfga.enabled` is false (local dev), every rule falls back to `allow_all
 | `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set from `values.yaml` (`lf-staff`), which is the only copy of the name; unset grants nothing. Clearing it stops new grants but already-written tuples survive (fga-sync never deletes a `team:`-subject tuple) | `""` (chart sets `lf-staff`) | No |
 | `LF_CONTRACTOR_TEAM_NAME`                | OpenFGA team name granted blanket `auditor` on every `b2b_org`, alongside `LF_STAFF_TEAM_NAME`. Set from `values.yaml` (`lf-contractor`); unset grants nothing. Same one-way-door semantics as the staff variable | `""` (chart sets `lf-contractor`) | No |
 | `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which the backfill quota guard refuses/stops a run: the `cdc_repair` drain (refuses to start / stops mid-page) **and** the full/filtered reindex paths (synchronous HTTP `503` + mid-run stop). Targeted (`items`) is exempt. | `0.80` | No |
+| `SF_ACCOUNT_SLUG_FIELD_ENABLED`          | Select `Account.Slug__c` on both Account read paths (SOQL list/search and sObject single read) so organizations carry a URL slug (lfx-self-serve#2570). `false` drops the field for a Salesforce org that lacks it (LFXV2-1363 sandbox case); non-boolean values fail startup. Read by **both** API and consumer mode — set identically on both pods (`app.extraEnv` + `consumer.extraEnv`). | `true` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
 

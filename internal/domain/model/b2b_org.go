@@ -72,9 +72,13 @@ type B2BOrg struct {
 	// Salesforce workflows.
 	IsMember bool `json:"is_member"`
 
-	// Slug is the URL-friendly identifier for the organization.
-	// The Heroku Connect replica column is "slug" (SF API name Slug__c).
-	// TODO: confirm field exists in the Salesforce org schema before exposing.
+	// Slug is the organization's lowercase URL identity, sourced from
+	// Salesforce Account.Slug__c (Heroku Connect replica column "slug") and
+	// normalized (trim + lowercase) at ingest on both Account read paths. Empty
+	// when the Account has no slug or when SF_ACCOUNT_SLUG_FIELD_ENABLED=false
+	// drops the field from the projection; never generated. Org Lens addresses
+	// the organization as /org/{slug}/… and resolves it back through the
+	// access-filtered `slug:` search tag (lfx-self-serve#2570).
 	Slug string `json:"slug,omitempty"`
 
 	// ParentUID is the canonical 18-char Salesforce Account SFID of the parent
@@ -108,8 +112,16 @@ type B2BOrgParentDetail struct {
 }
 
 // Tags returns the search tags for this organization. The indexer uses these
-// to make the record discoverable by UID and by parent relationship.
-// Pattern: bare UID + prefixed b2b_org_uid:<uid> + parent ref if set.
+// to make the record discoverable by UID, by parent relationship, and — when
+// the organization has one — by URL slug.
+// Pattern: bare UID + prefixed b2b_org_uid:<uid> + parent ref if set +
+// is_member:<bool> + slug:<slug> if set.
+//
+// The slug tag is what lets Org Lens resolve `/org/{slug}/…` back to an
+// organization through the query-service, which applies the caller's `auditor`
+// grant per row — so a slug the caller may not read resolves to nothing rather
+// than through an unfiltered lookup (lfx-self-serve#2570). Slug is lowercased
+// at ingest; the tag is emitted verbatim.
 func (o *B2BOrg) Tags() []string {
 	if o == nil {
 		return nil
@@ -123,6 +135,9 @@ func (o *B2BOrg) Tags() []string {
 		tags = append(tags, fmt.Sprintf("parent_b2b_org_uid:%s", o.ParentUID))
 	}
 	tags = append(tags, fmt.Sprintf("is_member:%v", o.IsMember))
+	if o.Slug != "" {
+		tags = append(tags, fmt.Sprintf("slug:%s", o.Slug))
+	}
 	return tags
 }
 

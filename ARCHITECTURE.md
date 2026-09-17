@@ -1235,6 +1235,7 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
 | `SF_CLIENT_ID` | Salesforce connected app client ID | Yes |
 | `SF_CLIENT_SECRET` | Salesforce connected app client secret | Conditional (not required for JWT bearer flow) |
 | `SF_API_VERSION` | Salesforce API version (default: `v63.0`) | No |
+| `SF_ACCOUNT_SLUG_FIELD_ENABLED` | Select `Account.Slug__c` on both Account read paths so orgs carry a URL slug (default `true`; `false` for an SF org without the field — LFXV2-1363). Must match on API and consumer pods | No |
 | `SF_PUBSUB_ENDPOINT` | Salesforce PubSub gRPC endpoint (e.g. `api.pubsub.salesforce.com:7443`) | Consumer mode only |
 | `SF_ORG_ID` | Salesforce org ID for the Pub/Sub tenant | Consumer mode only |
 | `SF_CDC_CHANNEL` | CDC channel to subscribe to (default `/data/ChangeEvents`) | No |

@@ -24,6 +24,7 @@ var testB2BOrg = &model.B2BOrg{
 	UID:           "b2b-org-uid-001",
 	SFID:          "001000000000001AAA",
 	Name:          "Linux Foundation",
+	Slug:          "linux-foundation",
 	PrimaryDomain: "linuxfoundation.org",
 	Description:   "Supporting open source ecosystems.",
 	Industry:      "Technology",
@@ -44,14 +45,17 @@ func TestBuildB2BOrgIndexingConfig(t *testing.T) {
 	assert.Equal(t, fgaconstants.RelationAuditor, cfg.HistoryCheckRelation)
 	assert.Equal(t, "linux foundation", cfg.SortName)
 	assert.Equal(t,
-		[]string{"Linux Foundation", "linuxfoundation.org", "lf.org", "thelinuxfoundation.org"},
+		[]string{"Linux Foundation", "linuxfoundation.org", "lf.org", "thelinuxfoundation.org", "linux-foundation"},
 		cfg.NameAndAliases,
+		"slug rides along so typeahead matches the address bar (lfx-self-serve#2570)",
 	)
 	assert.Contains(t, cfg.Fulltext, "Linux Foundation")
 	assert.Contains(t, cfg.Fulltext, "linuxfoundation.org")
 	assert.Contains(t, cfg.Fulltext, "Supporting open source ecosystems.")
 	assert.Contains(t, cfg.Fulltext, "Technology")
 	assert.Contains(t, cfg.Fulltext, "Non-Profit")
+	assert.Contains(t, cfg.Fulltext, "linux-foundation")
+	assert.Contains(t, cfg.Tags, "slug:linux-foundation")
 	assert.Equal(t, testB2BOrg.Tags(), cfg.Tags)
 }
 

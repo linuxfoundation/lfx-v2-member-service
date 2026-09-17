@@ -48,9 +48,8 @@ const canonicalAccountJSON = `{
 // TestSobjectAccountToB2BOrg_FixtureEquivalence verifies that
 // sobjectAccountToB2BOrg (sObject REST path) and convertSOQLToB2BOrg (SOQL
 // path) produce identical model.B2BOrg values for every field that both
-// converters handle. The sObject path additionally populates Slug (Slug__c),
-// which accountsSOQLBase does not select — that divergence is expected and
-// asserted explicitly below.
+// converters handle — including Slug, which both paths select since
+// lfx-self-serve#2570 and both lowercase at ingest.
 func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	t.Parallel()
 
@@ -65,8 +64,9 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	require.NotNil(t, sObjOrg)
 
 	// ── SOQL path ─────────────────────────────────────────────────────────────
-	// Populate soqlAccount with the same values (Slug__c excluded — accountsSOQLBase
-	// does not select it).
+	// Populate soqlAccount with the same values. Slug__c arrives mixed-case here
+	// to prove the SOQL path normalizes exactly as the sObject path does.
+	slug := "Linux-Foundation"
 	crunchURL := "https://www.crunchbase.com/organization/linux-foundation"
 	var empCount int64 = 200
 	logoURL := "https://linuxfoundation.org/logo.png"
@@ -93,6 +93,7 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 		CrunchBaseURL:     &crunchURL,
 		NumberOfEmployees: &empCount,
 		Status:            &status,
+		Slug:              &slug,
 		CreatedDate:       "2020-01-15T10:30:00.000+0000",
 		LastModifiedDate:  "2024-06-01T08:00:00.000+0000",
 	}
@@ -118,9 +119,10 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	assert.Equal(t, soqlOrg.CreatedAt.UTC(), sObjOrg.CreatedAt.UTC(), "CreatedAt")
 	assert.Equal(t, soqlOrg.UpdatedAt.UTC(), sObjOrg.UpdatedAt.UTC(), "UpdatedAt")
 
-	// Slug is only populated by the sObject path (Slug__c absent from accountsSOQLBase).
+	// Both paths carry the slug, lowercased, so `data.slug` never depends on which
+	// read path last published the org.
 	assert.Equal(t, "linux-foundation", sObjOrg.Slug, "sObject path must populate Slug")
-	assert.Empty(t, soqlOrg.Slug, "SOQL path must leave Slug empty (not in accountsSOQLBase)")
+	assert.Equal(t, sObjOrg.Slug, soqlOrg.Slug, "SOQL path must populate the same lowercased Slug")
 }
 
 // TestB2BOrgReader_GetB2BOrg_Happy verifies that GetB2BOrg returns a fully-
@@ -453,7 +455,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 2: full org fetch for the same Account. Must be a cache miss on
-	// "b2b_org_v2.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
+	// "b2b_org_v3.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 	require.NotNil(t, org)
@@ -466,7 +468,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 }
 
 // TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief verifies the
-// reverse order: once a full org fetch has populated "b2b_org_v2.{uid}", a
+// reverse order: once a full org fetch has populated "b2b_org_v3.{uid}", a
 // later narrow parent-detail fetch for the same Account must not overwrite it.
 func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	t.Parallel()
@@ -491,7 +493,7 @@ func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
 	reader := NewB2BOrgReader(client, nil)
 
-	// Step 1: full org fetch populates "b2b_org_v2.{uid}".
+	// Step 1: full org fetch populates "b2b_org_v3.{uid}".
 	org1, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 	require.NotNil(t, org1)
@@ -556,7 +558,7 @@ func TestSObjectClient_CacheKeyIsolation_FlatAccountThenFullOrg(t *testing.T) {
 // TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored verifies
 // that a legacy under-shaped "b2b_org.{uid}" entry written before the cache-key
 // split is ignored after deploy. The current full-org fetch must read from the
-// versioned "b2b_org_v2.{uid}" key instead of trusting the legacy body.
+// versioned "b2b_org_v3.{uid}" key instead of trusting the legacy body.
 func TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored(t *testing.T) {
 	t.Parallel()
 

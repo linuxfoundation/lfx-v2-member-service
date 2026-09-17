@@ -370,7 +370,7 @@ Every raw record ID is normalised to its canonical 18-char SFID before use, matc
 
 ### Cache invalidation
 
-Each upsert/delete evicts the record's sObject cache entry in the `member-service-cache` bucket (`CacheInvalidator.Invalidate*`, implemented by `salesforce.SObjectClient`). This keeps sObject-cache-backed readers — the HTTP API and the b2b_org reparenting `GetB2BOrg` lookup — from serving a stale copy. The CDC batch re-fetch itself is uncached SOQL, so it does not depend on this eviction. `InvalidateB2BOrg` evicts all four B2BOrg key variants (legacy, full, flat, parent-brief) for the UID.
+Each upsert/delete evicts the record's sObject cache entry in the `member-service-cache` bucket (`CacheInvalidator.Invalidate*`, implemented by `salesforce.SObjectClient`). This keeps sObject-cache-backed readers — the HTTP API and the b2b_org reparenting `GetB2BOrg` lookup — from serving a stale copy. The CDC batch re-fetch itself is uncached SOQL, so it does not depend on this eviction. `InvalidateB2BOrg` evicts every B2BOrg key variant for the UID: `b2b_org` (legacy), `b2b_org_v2` (pre-slug), `b2b_org_v3` and `b2b_org_v3_noslug` (the two current full-org projections, selected by `SF_ACCOUNT_SLUG_FIELD_ENABLED`), `b2b_org_flat`, and `b2b_org_parent_brief` — see `docs/agent-guidance/salesforce-cache.md` for the key inventory.
 
 ---
 
