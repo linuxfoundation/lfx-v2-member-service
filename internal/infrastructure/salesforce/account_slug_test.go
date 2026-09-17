@@ -6,8 +6,10 @@ package salesforce
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
@@ -98,21 +100,32 @@ func TestAccountSlugFieldToggle(t *testing.T) {
 		uid, err := sfuuid.Normalize18(canonicalAccountSFID)
 		require.NoError(t, err)
 
-		// Enabled: first fetch populates the slug-projection key.
-		setAccountSlugFieldEnabled(true)
+		// Distinguishable fixtures per projection, so a read from the wrong cache
+		// entry changes the decoded org rather than passing on identical bytes:
+		// the slug projection answers with Slug__c, the noslug projection without.
+		var noSlugDoc map[string]any
+		require.NoError(t, json.Unmarshal([]byte(canonicalAccountJSON), &noSlugDoc))
+		delete(noSlugDoc, "Slug__c")
+		noSlugJSON, err := json.Marshal(noSlugDoc)
+		require.NoError(t, err)
+
+		// Call 1 (enabled): 200 with slug. Call 2 (disabled): 200 without slug.
+		// Call 3 (re-enabled): 304, so whatever is served comes from the cache
+		// entry the code chose to key on — that choice is what the test proves.
+		rt := &sequenceTransport{responses: []*http.Response{
+			fakeResponse(http.StatusOK, canonicalAccountJSON, map[string]string{"ETag": `"with-slug"`}),
+			fakeResponse(http.StatusOK, string(noSlugJSON), map[string]string{"ETag": `"no-slug"`}),
+			fakeResponse(http.StatusNotModified, "", nil),
+		}}
 		cache := newMemCache()
-		calls := 0
-		rt := &countingTransport{
-			callCount:  &calls,
-			firstResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
-			retryResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
-			limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
-		}
 		client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
 
-		_, _, err = client.FetchB2BOrg(context.Background(), uid)
+		// Enabled: first fetch populates the slug-projection key.
+		setAccountSlugFieldEnabled(true)
+		first, _, err := client.FetchB2BOrg(context.Background(), uid)
 		require.NoError(t, err)
-		require.Equal(t, 1, calls)
+		require.Equal(t, 1, rt.calls())
+		require.Equal(t, "linux-foundation", first.Slug)
 		withSlug, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
 		require.NoError(t, err)
 		require.NotNil(t, withSlug, "enabled fetch writes the b2b_org_v3 key")
@@ -120,23 +133,22 @@ func TestAccountSlugFieldToggle(t *testing.T) {
 		// Disabled: must NOT read the slug-projection entry (which would 304 and
 		// refresh forever) — a fresh request goes out and lands under the noslug key.
 		setAccountSlugFieldEnabled(false)
-		_, _, err = client.FetchB2BOrg(context.Background(), uid)
+		second, _, err := client.FetchB2BOrg(context.Background(), uid)
 		require.NoError(t, err)
-		assert.Equal(t, 2, calls, "disabled fetch must not be served from the slug-projection cache entry")
+		assert.Equal(t, 2, rt.calls(), "disabled fetch must not be served from the slug-projection cache entry")
+		assert.Empty(t, second.Slug, "disabled fetch decodes the slug-less body")
 		noSlug, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgNoSlug, uid))
 		require.NoError(t, err)
-		assert.NotNil(t, noSlug, "disabled fetch writes the b2b_org_v3_noslug key")
+		require.NotNil(t, noSlug, "disabled fetch writes the b2b_org_v3_noslug key")
 
-		// Re-enabled: the slug-projection entry is its own identity again; the
-		// noslug body is not consulted. (It is served from the v3 entry via the
-		// conditional-GET path, so no assertion on call count here — only on key.)
+		// Re-enabled: Salesforce answers 304, so the body is whatever entry the
+		// client keyed on. Only the slug-projection entry carries a slug — reading
+		// the noslug entry by mistake would decode an empty Slug and fail here.
 		setAccountSlugFieldEnabled(true)
-		_, _, err = client.FetchB2BOrg(context.Background(), uid)
+		third, _, err := client.FetchB2BOrg(context.Background(), uid)
 		require.NoError(t, err)
-		stillWithSlug, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
-		require.NoError(t, err)
-		assert.NotNil(t, stillWithSlug)
-		assert.JSONEq(t, string(withSlug.Body), string(stillWithSlug.Body), "re-enabled fetch keys on the slug projection")
+		assert.Equal(t, 3, rt.calls())
+		assert.Equal(t, "linux-foundation", third.Slug, "re-enabled 304 must be served from the slug-projection entry, not the noslug one")
 	})
 
 	t.Run("Config.Init applies the toggle from the config", func(t *testing.T) {
@@ -205,4 +217,33 @@ func TestSObjectClient_CacheKeyIsolation_V2PoisonedFullOrgKeyIgnored(t *testing.
 	gone, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgV2Legacy, uid))
 	require.NoError(t, err)
 	assert.Nil(t, gone, "InvalidateB2BOrg must evict the v2 key too")
+}
+
+// sequenceTransport answers sObject requests with a fixed ordered list of
+// responses (one per call) and /limits with 200, so a test can script a
+// 200 → 200 → 304 conversation and inspect which cached body a 304 resolves to.
+type sequenceTransport struct {
+	mu        sync.Mutex
+	responses []*http.Response
+	n         int
+}
+
+func (st *sequenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if strings.Contains(req.URL.Path, "/limits") {
+		return fakeResponse(http.StatusOK, `{}`, nil), nil
+	}
+	if st.n >= len(st.responses) {
+		return nil, fmt.Errorf("sequenceTransport: unexpected sObject call #%d", st.n+1)
+	}
+	resp := cloneResponse(st.responses[st.n])
+	st.n++
+	return resp, nil
+}
+
+func (st *sequenceTransport) calls() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.n
 }
