@@ -36,6 +36,9 @@ func TestSlugify(t *testing.T) {
 		{name: "grave", in: "Alma Mater Studiorum - Università di Bologna", want: "alma-mater-studiorum-universita-di-bologna"},
 		{name: "sharp s", in: "Straße GmbH", want: "strasse-gmbh"},
 		{name: "capital sharp s", in: "STRAẞE GmbH", want: "strasse-gmbh"},
+		{name: "dotless i", in: "Işık Teknoloji", want: "isik-teknoloji"},
+		{name: "dotless i uppercased", in: "IŞIK TEKNOLOJI", want: "isik-teknoloji"},
+		{name: "h stroke and eng", in: "Ħal Ŋiŋ", want: "hal-nging"},
 		{name: "o slash", in: "Ørsted", want: "orsted"},
 		{name: "l stroke", in: "Łódź", want: "lodz"},
 
@@ -73,7 +76,7 @@ func TestSlugify(t *testing.T) {
 // an address segment never changes what Slugify would have produced.
 func TestSlugify_Idempotent(t *testing.T) {
 	t.Parallel()
-	for _, in := range []string{"Google LLC", "Straße GmbH", "Università di Bologna", "AT&T"} {
+	for _, in := range []string{"Google LLC", "Straße GmbH", "Università di Bologna", "AT&T", "Işık Teknoloji", "Ħal Ŋiŋ"} {
 		once := Slugify(in)
 		assert.Equal(t, once, Slugify(once), in)
 		assert.Equal(t, once, Slugify(strings.ToUpper(in)), in)

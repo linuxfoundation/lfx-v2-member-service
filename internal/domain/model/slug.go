@@ -22,7 +22,11 @@ var (
 	slugSFIDShaped = regexp.MustCompile(`^001[a-z0-9]{15}$`)
 
 	// slugFold maps the Latin letters NFKD leaves undecomposed. Without it
-	// "Straße" would slug to "stra-e".
+	// "Straße" would slug to "stra-e". Both cases are listed for every letter
+	// that has one, because the fold runs before lowercasing and a name's
+	// capitalization must never move its address (TestSlugify_Idempotent):
+	// Go uppercases dotless ı to plain I, so without 'ı' → "i" a case-only
+	// rename of "Işık" would relocate the organization.
 	slugFold = map[rune]string{
 		'ß': "ss", 'ẞ': "ss",
 		'ø': "o", 'Ø': "o",
@@ -32,6 +36,10 @@ var (
 		'đ': "d", 'Đ': "d",
 		'þ': "th", 'Þ': "th",
 		'ð': "d", 'Ð': "d",
+		'ı': "i",
+		'ħ': "h", 'Ħ': "h",
+		'ŋ': "ng", 'Ŋ': "ng",
+		'ĸ': "k",
 	}
 )
 
@@ -49,8 +57,9 @@ var (
 //     does not decompose (ß → ss, ø → o, …).
 //  2. Lowercase; replace every run of characters outside [a-z0-9] with "-";
 //     trim "-" from both ends.
-//  3. If longer than 50, cut at the last "-" within the first 50 characters
-//     (hard cut when a single token exceeds 50) and trim again.
+//  3. If longer than 50: keep the first 50 characters when character 51 is
+//     already "-"; otherwise back up to the last "-" inside those 50; hard-cut
+//     at 50 when there is none (a single token longer than 50). Trim "-" again.
 //  4. An empty result, or one shaped like a Salesforce Account id, yields ""
 //     — the organization is then addressed by its SFID.
 //

@@ -310,7 +310,7 @@ organization with its new slug through CDC, and there is no Salesforce field inv
 down and was removed).
 
 Before the slug-based UI ships in an environment, every existing `b2b_org` document must be
-republished once so it carries `data.slug` + the `slug:` tag. Two steps, dev first, then prod:
+republished once so it carries `data.slug` + the `slug:` tag. Three steps, dev first, then prod — step 3 is the gate:
 
 ### 1. Purge the retired sObject cache keys
 
@@ -359,8 +359,9 @@ Port-forward `opensearch-proxy` (`kubectl -n lfx port-forward deployment/opensea
 
 **Key every check on the `slug:` tag, not on `data.slug`.** In the `resources` index `data` is a
 `flat_object`: its subfields cannot be aggregated (a `terms` agg on `data.slug` errors) and `exists`
-on them is unreliable (verified 2026-09-17 on prod: `exists data.name` counted 8,105 of 9,475
-docs). `tags` is a plain `keyword` field — `prefix`, `terms`, and `terms` aggregations all work on
+on them is unreliable (verified 2026-09-17 on prod: `exists data.name` counted 8,105 of the 9,475
+`b2b_org` docs indexed at the time of that probe; the population is measured again by the second
+count below on every run — the expectations are percentages for that reason). `tags` is a plain `keyword` field — `prefix`, `terms`, and `terms` aggregations all work on
 it, and the `slug:` tag is emitted iff `data.slug` is non-empty, so it is the authoritative signal.
 
 ```bash
@@ -369,16 +370,19 @@ curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '
 curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"term":{"object_type":"b2b_org"}}}'
 # collisions (organizations sharing a slug) — aggregate the keyword tags, keep only slug: ones
 curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":0,"query":{"term":{"object_type":"b2b_org"}},"aggs":{"dups":{"terms":{"field":"tags","include":"slug:.*","min_doc_count":2,"size":100}}}}'
-# reserved page names (expected: 0)
+# reserved page names — informational, NOT a gate. Slugify("People") == "people" is correct output
+# (this service does not know the UI route table); Org Lens addresses such an organization by its
+# SFID instead (spec 050 DR-007 §5, `orgUrlSegment`). A non-zero count needs no action here.
 curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"terms":{"tags":["slug:overview","slug:memberships","slug:projects","slug:easycla","slug:roi","slug:governance","slug:people","slug:contributions","slug:events","slug:training","slug:meetings","slug:groups","slug:profile","slug:not-found"]}}]}}}'
 ```
 
-Expected (prod, measured 2026-09-17 against the 9,498 indexed organizations): coverage ≈ 99.4%
-(names in non-Latin scripts yield no slug and stay SFID-addressed); ≈ 18 collision buckets covering
-≈ 42 docs — duplicate Salesforce accounts of one company and generic names such as "Private" — which
-the Org Lens resolver handles per viewer (a slug that stays ambiguous for a viewer is a not-found);
-0 reserved-name hits. Collision buckets are reported to the SFDC team as duplicate accounts; nothing
-in this service renames or disambiguates slugs.
+Expected (prod, measured 2026-09-17 against the 9,498 indexed organizations of that later probe):
+coverage ≈ 99.4% (names in non-Latin scripts yield no slug and stay SFID-addressed); ≈ 18 collision
+buckets covering ≈ 42 docs — duplicate Salesforce accounts of one company and generic names such as
+"Private" — which the Org Lens resolver handles per viewer (a slug that stays ambiguous for a viewer
+is a not-found); reserved-name hits: 0 today, but any count is acceptable (see the query comment).
+Collision buckets are reported to the SFDC team as duplicate accounts; nothing in this service
+renames or disambiguates slugs.
 
 ---
 
