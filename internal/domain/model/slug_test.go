@@ -35,6 +35,7 @@ func TestSlugify(t *testing.T) {
 		{name: "diaeresis", in: "Amoniac OÜ", want: "amoniac-ou"},
 		{name: "grave", in: "Alma Mater Studiorum - Università di Bologna", want: "alma-mater-studiorum-universita-di-bologna"},
 		{name: "sharp s", in: "Straße GmbH", want: "strasse-gmbh"},
+		{name: "capital sharp s", in: "STRAẞE GmbH", want: "strasse-gmbh"},
 		{name: "o slash", in: "Ørsted", want: "orsted"},
 		{name: "l stroke", in: "Łódź", want: "lodz"},
 

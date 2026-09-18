@@ -24,7 +24,7 @@ var (
 	// slugFold maps the Latin letters NFKD leaves undecomposed. Without it
 	// "Straße" would slug to "stra-e".
 	slugFold = map[rune]string{
-		'ß': "ss",
+		'ß': "ss", 'ẞ': "ss",
 		'ø': "o", 'Ø': "o",
 		'æ': "ae", 'Æ': "ae",
 		'œ': "oe", 'Œ': "oe",

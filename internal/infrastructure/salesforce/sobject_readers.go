@@ -211,7 +211,7 @@ type AccountRecord struct {
 
 // FetchAccount fetches a single Salesforce Account (B2BOrg) record by its UID.
 // The SFID is derived from the UID; the cache key is "b2b_org_flat.{sfid}",
-// distinct from FetchB2BOrg's "b2b_org_v3.{sfid}" since this fetch requests a
+// distinct from FetchB2BOrg's "b2b_org_v4.{sfid}" since this fetch requests a
 // different, narrower field list (accountFields) for the same Account.
 //
 // Because the Account sObject has no natural project association in the returned
@@ -300,7 +300,7 @@ func (c *SObjectClient) FetchB2BOrg(ctx context.Context, uid string) (*model.B2B
 // caller; the parent detail is best-effort.
 //
 // Uses a distinct cache key prefix ("b2b_org_parent_brief") from FetchB2BOrg's
-// "b2b_org_v3.{sfid}" so that this narrow, 3-field lookup can never be read back as
+// "b2b_org_v4.{sfid}" so that this narrow, 3-field lookup can never be read back as
 // satisfying a full B2BOrg fetch for the same Account (see LFXV2-2654).
 func (c *SObjectClient) fetchParentAccountDetail(ctx context.Context, parentSFID string) (*sobjectAccountParent, error) {
 	parentUID, err := sfuuid.Normalize18(parentSFID)

@@ -331,6 +331,12 @@ nats kv ls member-service-cache --server=localhost:4222 \
 converge on their own; the purge covers the rest. The slug itself is not in the cached body, so no
 future slug change needs a purge.
 
+Roll the API and the CDC consumer together (one release, same chart sync). An old consumer binary
+evicts `b2b_org_v3*` only, so during a mixed window a rename could leave a hot `b2b_org_v4` body —
+refreshed forever by `handle304` — serving the old `Name` and slug while the uncached CDC SOQL path
+republishes the new one. If a mixed window did run, purge `b2b_org_v4.*` once the old consumer is
+gone.
+
 ### 2. Reindex `b2b_org`
 
 ```bash
@@ -341,8 +347,11 @@ curl -sS -X POST "$MEMBER_SERVICE_URL/admin/reindex" \
 
 This walks the SOQL list path (`accountsSOQLBase`) and republishes every member-eligible Account
 through `convertSOQLToB2BOrg`, which sets the slug; CDC keeps the population converged afterwards.
-The run is quota-gated (see [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex)); a
-windowed run is fine if headroom is tight — every window republishes with the slug.
+The run is quota-gated (see [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex)). If
+headroom is tight, use **contiguous `since`/`until` windows that together cover the whole Account
+history** (oldest `LastModifiedDate` through now), run sequentially — every window republishes with
+the slug, but a single recent window leaves older organizations without a `slug:` tag. Step 3's
+coverage check must pass before the slug-based UI is enabled in that environment.
 
 ### 3. Verify against OpenSearch
 
