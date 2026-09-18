@@ -82,7 +82,6 @@ func TestAssembleKeyContact_HappyPath(t *testing.T) {
 		"CrunchBase_URL__c":null,
 		"NumberOfEmployees":null,
 		"LF_Membership_Status__c":"Active",
-		"Slug__c":null,
 		"CreatedDate":"2024-01-15T00:00:00.000+0000",
 		"LastModifiedDate":"2024-06-01T00:00:00.000+0000",
 		"SystemModstamp":"2024-06-01T00:00:00.000+0000"
@@ -185,7 +184,6 @@ func TestAssembleKeyContact_NoContact(t *testing.T) {
 		"CrunchBase_URL__c":null,
 		"NumberOfEmployees":null,
 		"LF_Membership_Status__c":null,
-		"Slug__c":null,
 		"CreatedDate":"2024-01-15T00:00:00.000+0000",
 		"LastModifiedDate":"2024-06-01T00:00:00.000+0000",
 		"SystemModstamp":"2024-06-01T00:00:00.000+0000"

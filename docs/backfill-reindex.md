@@ -299,31 +299,43 @@ Per org, `enrichSettingsAvatars` (`backfill_runner.go`) refreshes each accepted 
 ## Org Slug Backfill (lfx-self-serve#2570)
 
 Org Lens addresses organizations as `/org/{slug}/{page}` (spec 050 in the org-lens workspace). The
-slug is Salesforce `Account.Slug__c`, published on the `b2b_org` indexer doc as `data.slug` and as a
-`slug:{slug}` tag (see [indexer-contract.md](./indexer-contract.md#b2b-org)). Before that change no
-`b2b_org` document carried a slug (prod, 2026-09-17: 0 of 9,475), so the whole population must be
-republished once per environment **before** the UI's address-shape change is enabled there.
+slug is **derived from `Account.Name`** by `model.Slugify` when a `B2BOrg` is materialized on either
+Salesforce read path — the same rule the legacy dashboard uses for `myorg.lfx.dev/{slug}/…` (accent
+fold, lowercase, non-alphanumeric runs → `-`, trim, word-boundary cut at 50; an empty or SFID-shaped
+result yields no slug and the organization is addressed by its SFID). It is published on the
+`b2b_org` indexer doc as `data.slug` and as a `slug:{slug}` tag (see
+[indexer-contract.md](./indexer-contract.md#b2b-org)). Nothing is stored: a rename republishes the
+organization with its new slug through CDC, and there is no Salesforce field involved
+(`Account.Slug__c` exists in no LF Salesforce org — the #109 projection that selected it took dev
+down and was removed).
 
-Two things have to happen, in order, per environment — dev first, verify, then prod:
+Before the slug-based UI ships in an environment, every existing `b2b_org` document must be
+republished once so it carries `data.slug` + the `slug:` tag. Three steps, dev first, then prod — step 3 is the gate:
 
-### 1. Purge the pre-slug sObject cache
+### 1. Purge the retired sObject cache keys
 
-`GET /b2b_orgs/{uid}` reads through the `member-service-cache` KV bucket keyed `b2b_org_v3.{sfid}`.
-The prefix was bumped from `b2b_org_v2` when `Slug__c` joined the field list, because the sObject
-cache key carries **no field-list component** and `handle304` re-writes an unchanged entry to
-reset its TTL — a frequently-read org would otherwise serve its slug-less body **forever**, not for a
-TTL. The bump means new code never reads a `v2` entry; purging is belt-and-braces so the old keys
-do not linger in the bucket:
+`GET /b2b_orgs/{uid}` reads through the `member-service-cache` KV bucket keyed `b2b_org_v4.{sfid}`.
+The prefix was bumped from `b2b_org_v3` / `b2b_org_v3_noslug` (#109) when the field list was
+restored, because the sObject cache key carries **no field-list component** and `handle304`
+re-writes an unchanged entry to reset its TTL — a frequently-read org would otherwise serve a body
+of the wrong shape **forever**. New code never reads the retired keys; purging is belt-and-braces:
 
 ```bash
 # dev: make -C .tools/nats-forward nats-dev ; prod: nats-prod  (localhost:4222)
 nats kv ls member-service-cache --server=localhost:4222 \
-  | grep '^b2b_org_v2\.' \
+  | grep -E '^b2b_org_v3(_noslug)?\.' \
   | xargs -n1 nats kv del member-service-cache --server=localhost:4222 -f
 ```
 
-`InvalidateB2BOrg` also evicts the `v2` key on every per-org invalidation, so orgs touched by CDC
-converge on their own; the purge covers the rest.
+`InvalidateB2BOrg` also evicts the retired keys on every per-org invalidation, so orgs touched by CDC
+converge on their own; the purge covers the rest. The slug itself is not in the cached body, so no
+future slug change needs a purge.
+
+Roll the API and the CDC consumer together (one release, same chart sync). An old consumer binary
+evicts `b2b_org_v3*` only, so during a mixed window a rename could leave a hot `b2b_org_v4` body —
+refreshed forever by `handle304` — serving the old `Name` and slug while the uncached CDC SOQL path
+republishes the new one. If a mixed window did run, purge `b2b_org_v4.*` once the old consumer is
+gone.
 
 ### 2. Reindex `b2b_org`
 
@@ -333,10 +345,13 @@ curl -sS -X POST "$MEMBER_SERVICE_URL/admin/reindex" \
   -d '{"type":"b2b_org"}'
 ```
 
-This walks the SOQL list path (`accountsSOQLBase`, which now selects `Slug__c`) and republishes every
-member-eligible Account; CDC keeps the population converged afterwards. Check quota headroom first
-(see [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex)); a windowed run is fine if
-headroom is tight — every window republishes with the slug.
+This walks the SOQL list path (`accountsSOQLBase`) and republishes every member-eligible Account
+through `convertSOQLToB2BOrg`, which sets the slug; CDC keeps the population converged afterwards.
+The run is quota-gated (see [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex)). If
+headroom is tight, use **contiguous `since`/`until` windows that together cover the whole Account
+history** (oldest `LastModifiedDate` through now), run sequentially — every window republishes with
+the slug, but a single recent window leaves older organizations without a `slug:` tag. Step 3's
+coverage check must pass before the slug-based UI is enabled in that environment.
 
 ### 3. Verify against OpenSearch
 
@@ -344,36 +359,30 @@ Port-forward `opensearch-proxy` (`kubectl -n lfx port-forward deployment/opensea
 
 **Key every check on the `slug:` tag, not on `data.slug`.** In the `resources` index `data` is a
 `flat_object`: its subfields cannot be aggregated (a `terms` agg on `data.slug` errors) and `exists`
-on them is unreliable (verified 2026-09-17 on prod: `exists data.name` counted 8,105 of 9,475
-docs). `tags` is a plain `keyword` field — `prefix`, `terms`, and `terms` aggregations all work on
+on them is unreliable (verified 2026-09-17 on prod: `exists data.name` counted 8,105 of the 9,475
+`b2b_org` docs indexed at the time of that probe; the population is measured again by the second
+count below on every run — the expectations are percentages for that reason). `tags` is a plain `keyword` field — `prefix`, `terms`, and `terms` aggregations all work on
 it, and the `slug:` tag is emitted iff `data.slug` is non-empty, so it is the authoritative signal.
 
 ```bash
 # coverage: docs carrying a slug tag vs total
 curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"prefix":{"tags":"slug:"}}]}}}'
 curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"term":{"object_type":"b2b_org"}}}'
-# duplicates (expected: empty buckets) — aggregate the keyword tags, keep only slug: ones
+# collisions (organizations sharing a slug) — aggregate the keyword tags, keep only slug: ones
 curl -s localhost:9200/resources/_search -H 'Content-Type: application/json' -d '{"size":0,"query":{"term":{"object_type":"b2b_org"}},"aggs":{"dups":{"terms":{"field":"tags","include":"slug:.*","min_doc_count":2,"size":100}}}}'
-# reserved page names (expected: 0)
+# reserved page names — informational, NOT a gate. Slugify("People") == "people" is correct output
+# (this service does not know the UI route table); Org Lens addresses such an organization by its
+# SFID instead (spec 050 DR-007 §5, `orgUrlSegment`). A non-zero count needs no action here.
 curl -s localhost:9200/resources/_count -H 'Content-Type: application/json' -d '{"query":{"bool":{"must":[{"term":{"object_type":"b2b_org"}},{"terms":{"tags":["slug:overview","slug:memberships","slug:projects","slug:easycla","slug:roi","slug:governance","slug:people","slug:contributions","slug:events","slug:training","slug:meetings","slug:groups","slug:profile","slug:not-found"]}}]}}}'
 ```
 
-Expected: coverage ≈ total (orgs without a `Slug__c` in Salesforce are legitimately absent and stay
-addressable by SFID), zero duplicate buckets, zero reserved-name hits. Deviations are reported to the
-slug owner (LF support maintains `Slug__c`) — nothing in this service renames or generates slugs.
-
-### Opting out per environment
-
-A Salesforce org without the `Slug__c` custom field 400s every Account fetch with `INVALID_FIELD`
-(the partial-sandbox failure behind LFXV2-1363). Set `SF_ACCOUNT_SLUG_FIELD_ENABLED=false` for that
-environment — via the chart's `app.extraEnv` (API pod) and `consumer.extraEnv` (CDC consumer) so both
-read paths agree: both drop the field, every `data.slug` is omitted, and the UI addresses those
-organizations by SFID. Default is enabled; no chart change is needed for the normal case.
-
-Flipping the toggle needs **no** cache purge: the full-org sObject cache key encodes the projection
-(`b2b_org_v3.*` with the slug, `b2b_org_v3_noslug.*` without), so a body fetched under one field list
-is never replayed under the other. A flip does still change what gets published, so follow it with
-a `b2b_org` reindex if the indexed slugs should reflect the new state.
+Expected (prod, measured 2026-09-17 against the 9,498 indexed organizations of that later probe):
+coverage ≈ 99.4% (names in non-Latin scripts yield no slug and stay SFID-addressed); ≈ 18 collision
+buckets covering ≈ 42 docs — duplicate Salesforce accounts of one company and generic names such as
+"Private" — which the Org Lens resolver handles per viewer (a slug that stays ambiguous for a viewer
+is a not-found); reserved-name hits: 0 today, but any count is acceptable (see the query comment).
+Collision buckets are reported to the SFDC team as duplicate accounts; nothing in this service
+renames or disambiguates slugs.
 
 ---
 
