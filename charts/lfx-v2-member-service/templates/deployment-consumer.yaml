@@ -44,8 +44,6 @@ spec:
               value: {{ .Values.app.globalOrgAdminTeamName | trim | quote }}
             - name: LF_STAFF_TEAM_NAME
               value: {{ .Values.app.lfStaffTeamName | trim | quote }}
-            - name: LF_CONTRACTOR_TEAM_NAME
-              value: {{ .Values.app.lfContractorTeamName | trim | quote }}
             - name: SF_PUBSUB_ENDPOINT
               value: {{ .Values.consumer.pubsubEndpoint | quote }}
             - name: SF_CDC_CHANNEL

@@ -22,7 +22,7 @@
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
 #   ./scripts/export-b2b-org-uids-from-opensearch.sh has been run
-#   export LF_STAFF_TEAM_NAME=… LF_CONTRACTOR_TEAM_NAME=…
+#   export LF_STAFF_TEAM_NAME=…   (staff only; LF_CONTRACTOR_TEAM_NAME is not read)
 #
 # Usage:
 #   ./scripts/grant-lf-teams-auditor-openfga.sh <store-id> [input_dir] [--dry-run]
@@ -77,11 +77,12 @@ fi
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
 #
-# Both teams, the same reach as revoke: LFXV2-3071 ratified staff/contractor
-# parity, so the backfill grants whichever teams are exported — normally both,
-# read back from the deployment being back-filled. Either variable left unset
-# is left untouched.
-TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME LF_CONTRACTOR_TEAM_NAME)
+# Staff only: the contractor grant was withdrawn (LFXV2-3071 rollback;
+# lfx-self-serve#2814 deletes the root tuple it rested on), so the backfill must
+# not be able to re-create it from a shell that still exports the variable. The
+# revoke script still reads LF_CONTRACTOR_TEAM_NAME — rollback has to be able to
+# target a team the service no longer emits.
+TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME)
 TEAMS=()
 while IFS= read -r team_name; do
 	TEAMS+=("$team_name")

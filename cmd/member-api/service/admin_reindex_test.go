@@ -199,9 +199,9 @@ func TestGlobalOrgAdminTeamName(t *testing.T) {
 // changing config or reverting code. Only a name given explicitly may get
 // through: the chart supplies both (values.yaml is the single copy), and an
 // absent, blank or whitespace-only variable must grant nothing rather than fall
-// back to a hardcoded name that could drift from the chart. Both LF teams are
-// read (LFXV2-3071 ratified staff/contractor parity); each variable stands on
-// its own, so a chart that configures one team grants exactly that team.
+// back to a hardcoded name that could drift from the chart. Staff only since
+// the LFXV2-3071 rollback: LF_CONTRACTOR_TEAM_NAME is no longer read, so a
+// chart or shell still setting it must grant nothing.
 func TestB2BOrgAuditorTeamNames(t *testing.T) {
 	tests := []struct {
 		name string
@@ -235,38 +235,20 @@ func TestB2BOrgAuditorTeamNames(t *testing.T) {
 			want: []string{"staff-team"},
 		},
 		{
-			// LFXV2-3071: contractors hold the same root-project auditor tuple
-			// as staff, so the per-org grant is the same for both populations.
-			name: "a configured contractor team is granted",
+			// The rollback's regression case: the variable that granted 8,105
+			// prod tuples under LFXV2-3071 must now be inert. Re-adding it to
+			// envVars fails here.
+			name: "a configured contractor team is NOT granted",
 			env: map[string]string{
 				"LF_STAFF_TEAM_NAME":      "staff-team",
 				"LF_CONTRACTOR_TEAM_NAME": "contractor-team",
 			},
-			want: []string{"staff-team", "contractor-team"},
-		},
-		{
-			name: "contractor alone grants contractor only",
-			env:  map[string]string{"LF_CONTRACTOR_TEAM_NAME": "contractor-team"},
-			want: []string{"contractor-team"},
-		},
-		{
-			// An alias configuration (both variables naming one team) must not
-			// render the same reference twice: teamMemberRefs does not
-			// de-duplicate and OpenFGA rejects a repeated tuple in one write.
-			name: "both variables naming the same team grant it once",
-			env: map[string]string{
-				"LF_STAFF_TEAM_NAME":      "lf-team",
-				"LF_CONTRACTOR_TEAM_NAME": " lf-team ",
-			},
-			want: []string{"lf-team"},
-		},
-		{
-			name: "whitespace-only contractor is dropped while staff is granted",
-			env: map[string]string{
-				"LF_STAFF_TEAM_NAME":      "staff-team",
-				"LF_CONTRACTOR_TEAM_NAME": "   ",
-			},
 			want: []string{"staff-team"},
+		},
+		{
+			name: "contractor alone grants nothing",
+			env:  map[string]string{"LF_CONTRACTOR_TEAM_NAME": "contractor-team"},
+			want: []string{},
 		},
 	}
 
