@@ -163,6 +163,10 @@ if [[ "$DRY_RUN" == true ]]; then
 else
 	echo "Deleted $TOTAL_TARGETS tuples. Re-run with --dry-run to confirm zero remaining."
 	echo ""
-	echo "Reminder: revert or reconfigure the service too (the revoked team's"
-	echo "variable set to \"\"), or the next write re-grants them."
+	echo "Reminder: this only holds if BOTH writers of the grant are stopped."
+	echo "  - member-service (API and CDC consumer): for lf-contractor, confirm both run"
+	echo "    a staff-only build; for lf-staff, lfStaffTeamName must be \"\"."
+	echo "  - sync-global-groups reconciler: its build must exclude the team (logs show"
+	echo "    'org auditor surplus' for it), or ORG_RECONCILE_ENABLED=false."
+	echo "Wait at least two reconciler runs (~20 min), then re-run with --dry-run."
 fi

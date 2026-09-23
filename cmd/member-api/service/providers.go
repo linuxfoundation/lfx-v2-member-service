@@ -522,11 +522,12 @@ func GlobalOrgAdminTeamName() string {
 //
 // Names are trimmed and blank or whitespace-only values are dropped, so no path
 // can produce a "team:#member" subject with an empty name — the trap
-// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. Names are
-// de-duplicated: two variables resolving to one team (an alias configuration)
-// must yield a single reference, because teamMemberRefs does not de-duplicate
-// and OpenFGA rejects a repeated tuple within one write request — the whole
-// full-sync message would fail on every publish path.
+// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. The
+// de-duplication below is forward-looking: with one variable it cannot fire,
+// but it stays so that re-adding a team cannot silently break publishing —
+// teamMemberRefs does not de-duplicate, and OpenFGA rejects a repeated tuple
+// within one write request, so two variables naming one team would fail the
+// whole full-sync message on every publish path.
 //
 // Clearing a variable stops new references being emitted but revokes nothing:
 // fga-sync never deletes a tuple whose subject begins with "team:" (that guard
