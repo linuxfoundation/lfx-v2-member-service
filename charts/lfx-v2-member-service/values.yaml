@@ -80,8 +80,8 @@ app:
   # withdrawn: that parity rested on lf-contractor holding auditor on the tenant
   # root project, and lfx-self-serve#2814 Release 2 deletes that tuple (dropped,
   # not migrated). Contractors keep explicit per-org grants only (Manish Dixit,
-  # LFXV2-3071, 2026-08-10). The contractor tuples already written (≈ the org census — 8,177 prod on
-  # 2026-09-23, and growing until this build ships) are NOT removed by
+  # LFXV2-3071, 2026-08-10). The contractor tuples already written (about one per org; the reconciler's
+  # `org auditor surplus` count is the live figure) are NOT removed by
   # this key — see docs/lf-team-auditor-grants.md for the revoke runbook.
   lfStaffTeamName: "lf-staff"
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
