@@ -22,16 +22,24 @@
 # place, export only that team's name.
 #
 # Prerequisites:
-#   Stop the service emitting the grants FIRST — set the variable for each
-#   team you are revoking (LF_STAFF_TEAM_NAME and/or LF_CONTRACTOR_TEAM_NAME)
-#   to "" (or revert the code) and roll out, on the API and the CDC consumer
-#   both; leave the other team's variable alone or its new orgs go without
-#   the tuple until re-written. Revoking while the service is emitting
-#   leaves a race this script cannot win: any org written during or after the
-#   run re-acquires the tuple, and fga-sync will not reap it afterwards because
-#   the subject begins with `team:`. Order matters more here than usual because
-#   the residue is invisible — a post-run dry-run reports only what it can see
-#   at that instant.
+#   Stop EVERY writer of the grant FIRST. There are two:
+#   1. member-service, on the API and the CDC consumer both. For lf-contractor
+#      this is already done in code — the chart no longer injects
+#      LF_CONTRACTOR_TEAM_NAME, so confirm both deployments run a staff-only
+#      build; there is no variable to blank. For lf-staff, set
+#      lfStaffTeamName to "" and roll out.
+#   2. the sync-global-groups reconciler (lfx-v2-argocd), which writes blanket
+#      auditor for every team in its in-code orgAuditorTeams set every 10
+#      minutes and never deletes. Confirm the running build excludes the team
+#      you are revoking — its logs should show `org auditor surplus` for that
+#      team and no `org auditor reconcile` line naming it — or set
+#      ORG_RECONCILE_ENABLED=false in that environment's overlay.
+#   Revoking while either writer is live is a race this script cannot win:
+#   any org written during or after the run re-acquires the tuple, and fga-sync
+#   will not reap it afterwards because the subject begins with `team:`. The
+#   residue is invisible — a post-run dry-run reports only what it can see at
+#   that instant, so wait at least two reconciler runs (~20 min) before the
+#   confirming dry-run.
 #
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
@@ -84,7 +92,9 @@ done
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
 #
-# Both teams, the same reach as the grant script (LFXV2-3071 parity). Set only
+# Both teams — deliberately wider than the grant script, which is staff-only
+# since the rollback of lfx-self-serve#2157: revoke must be able to target a team
+# the service no longer emits (lf-contractor). Set only
 # the variable for the team you intend to remove — whichever is left unset is
 # left untouched, which is how a single team can be revoked while the other
 # keeps its grants.
@@ -153,6 +163,10 @@ if [[ "$DRY_RUN" == true ]]; then
 else
 	echo "Deleted $TOTAL_TARGETS tuples. Re-run with --dry-run to confirm zero remaining."
 	echo ""
-	echo "Reminder: revert or reconfigure the service too (the revoked team's"
-	echo "variable set to \"\"), or the next write re-grants them."
+	echo "Reminder: this only holds if BOTH writers of the grant are stopped."
+	echo "  - member-service (API and CDC consumer): for lf-contractor, confirm both run"
+	echo "    a staff-only build; for lf-staff, lfStaffTeamName must be \"\"."
+	echo "  - sync-global-groups reconciler: its build must exclude the team (logs show"
+	echo "    'org auditor surplus' for it), or ORG_RECONCILE_ENABLED=false."
+	echo "Wait at least two reconciler runs (~20 min), then re-run with --dry-run."
 fi
