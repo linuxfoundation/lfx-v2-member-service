@@ -197,7 +197,7 @@ func TestGlobalOrgAdminTeamName(t *testing.T) {
 // function holds auditor on every b2b_org, and fga-sync never deletes a tuple
 // whose subject begins with "team:", so the grant cannot be taken back by
 // changing config or reverting code. Only a name given explicitly may get
-// through: the chart supplies both (values.yaml is the single copy), and an
+// through: the chart supplies the staff name (values.yaml is the single copy), and an
 // absent, blank or whitespace-only variable must grant nothing rather than fall
 // back to a hardcoded name that could drift from the chart. Staff only since
 // the LFXV2-3071 rollback: LF_CONTRACTOR_TEAM_NAME is no longer read, so a

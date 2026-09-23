@@ -22,16 +22,24 @@
 # place, export only that team's name.
 #
 # Prerequisites:
-#   Stop the service emitting the grants FIRST — set the variable for each
-#   team you are revoking (LF_STAFF_TEAM_NAME and/or LF_CONTRACTOR_TEAM_NAME)
-#   to "" (or revert the code) and roll out, on the API and the CDC consumer
-#   both; leave the other team's variable alone or its new orgs go without
-#   the tuple until re-written. Revoking while the service is emitting
-#   leaves a race this script cannot win: any org written during or after the
-#   run re-acquires the tuple, and fga-sync will not reap it afterwards because
-#   the subject begins with `team:`. Order matters more here than usual because
-#   the residue is invisible — a post-run dry-run reports only what it can see
-#   at that instant.
+#   Stop EVERY writer of the grant FIRST. There are two:
+#   1. member-service, on the API and the CDC consumer both. For lf-contractor
+#      this is already done in code — the chart no longer injects
+#      LF_CONTRACTOR_TEAM_NAME, so confirm both deployments run a staff-only
+#      build; there is no variable to blank. For lf-staff, set
+#      lfStaffTeamName to "" and roll out.
+#   2. the sync-global-groups reconciler (lfx-v2-argocd), which writes blanket
+#      auditor for every team in its in-code orgAuditorTeams set every 10
+#      minutes and never deletes. Confirm the running build excludes the team
+#      you are revoking — its logs should show `org auditor surplus` for that
+#      team and no `org auditor reconcile` line naming it — or set
+#      ORG_RECONCILE_ENABLED=false in that environment's overlay.
+#   Revoking while either writer is live is a race this script cannot win:
+#   any org written during or after the run re-acquires the tuple, and fga-sync
+#   will not reap it afterwards because the subject begins with `team:`. The
+#   residue is invisible — a post-run dry-run reports only what it can see at
+#   that instant, so wait at least two reconciler runs (~20 min) before the
+#   confirming dry-run.
 #
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
