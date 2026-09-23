@@ -568,7 +568,7 @@ When `openfga.enabled` is false (local dev), every rule falls back to `allow_all
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
 | `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set from `values.yaml` (`lf-staff`), which is the only copy of the name; unset grants nothing. Clearing it stops new grants but already-written tuples survive (fga-sync never deletes a `team:`-subject tuple) | `""` (chart sets `lf-staff`) | No |
-| ~~`LF_CONTRACTOR_TEAM_NAME`~~ | **No longer read.** Granted blanket `auditor` on every `b2b_org` under LFXV2-3071; withdrawn in the lfx-self-serve#2157 rollback. The chart key is gone, so setting this variable grants nothing. Already-written tuples survive until revoked | — | — |
+| ~~`LF_CONTRACTOR_TEAM_NAME`~~ | **No longer read.** Granted blanket `auditor` on every `b2b_org` under LFXV2-3071; withdrawn in the rollback of lfx-self-serve#2157. The chart key is gone, so setting this variable grants nothing. Already-written tuples survive until revoked | — | — |
 | `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which the backfill quota guard refuses/stops a run: the `cdc_repair` drain (refuses to start / stops mid-page) **and** the full/filtered reindex paths (synchronous HTTP `503` + mid-run stop). Targeted (`items`) is exempt. | `0.80` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)

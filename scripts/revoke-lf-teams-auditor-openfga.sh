@@ -93,7 +93,7 @@ done
 # as /bin/bash, which is what an operator running this from a laptop will hit.
 #
 # Both teams — deliberately wider than the grant script, which is staff-only
-# since the lfx-self-serve#2157 rollback: revoke must be able to target a team
+# since the rollback of lfx-self-serve#2157: revoke must be able to target a team
 # the service no longer emits (lf-contractor). Set only
 # the variable for the team you intend to remove — whichever is left unset is
 # left untouched, which is how a single team can be revoked while the other
