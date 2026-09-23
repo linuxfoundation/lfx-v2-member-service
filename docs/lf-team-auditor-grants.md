@@ -11,7 +11,7 @@ The LF staff team — named by `LF_STAFF_TEAM_NAME`, written as `team:<name>#mem
 
 **The deploy is the cutover, not the backfill.** Every write path asserts the reference, so orgs begin acquiring the tuple as soon as the new build is running and CDC events arrive. The scripts below only sweep up orgs that never change on their own.
 
-The team names are the same in every environment, so they live as real values in `charts/lfx-v2-member-service/values.yaml` rather than being overridden per environment in `lfx-v2-argocd`. They are the single authoritative copy: neither the service code nor the scripts hardcode them.
+The team name is the same in every environment, so it lives as a real value (`lfStaffTeamName`) in `charts/lfx-v2-member-service/values.yaml` rather than being overridden per environment in `lfx-v2-argocd`. It is the single authoritative copy: neither the service code nor the scripts hardcode it. The chart carries no contractor setting any more; the contractor tuples written under LFXV2-3071 are historical and removed only by the revoke script.
 
 Rollout order:
 
@@ -38,13 +38,13 @@ Workspaces and workspace-projects have no `auditor` REST route at all (every wor
 
 Note that `GET /b2b_orgs/{uid}/settings` exposes **pending-invite email addresses**. That route was gated on `auditor` rather than `writer` on the premise that auditors are per-org trusted principals; the blanket grant changes that premise. The `b2b_org_settings` index document carries the same `auditor` access check, so the roster is reachable through search as well as through the route — any narrowing would have to cover both.
 
-This was reviewed and accepted rather than narrowed. [LFXV2-3026](https://linuxfoundation.atlassian.net/browse/LFXV2-3026) is Org Dash / PCC parity. What is verified: both LF teams hold the same direct `auditor` tuple on the tenant root project (FGA read, prod and dev, 2026-09-15), so they already read every project-plane surface. What is asserted from the `lf-staff` precedent rather than verifiable here: that legacy tooling already shows this roster to the same populations — on that basis the grant migrates an existing disclosure rather than creating one. Narrowing the route to `writer` would also strip roster read from the per-org auditors who hold it today.
+This was reviewed and accepted rather than narrowed. [LFXV2-3026](https://linuxfoundation.atlassian.net/browse/LFXV2-3026) is Org Dash / PCC parity. What is asserted from the `lf-staff` precedent rather than verifiable here: that legacy tooling already shows this roster to the same population — on that basis the grant migrates an existing disclosure rather than creating one. (The contractor half of this argument — that `lf-contractor` held the same tenant-root `auditor` tuple — is withdrawn: lfx-self-serve#2814 Release 2 deletes that tuple. Until the revoke has run, contractors still reach this roster.) Narrowing the route to `writer` would also strip roster read from the per-org auditors who hold it today.
 
 No write access anywhere. The `[user, team#member]` branch of `b2b_org.auditor` feeds nothing upward, unlike `global_org_admin`, which flows into `writer`.
 
 ## The one-way-door property
 
-**fga-sync never deletes a tuple whose subject begins with `team:`.** Reverting the service code stops *new* grants being written; it does not remove existing ones. Setting either `LF_STAFF_TEAM_NAME` or `LF_CONTRACTOR_TEAM_NAME` to `""` behaves the same way for that team.
+**fga-sync never deletes a tuple whose subject begins with `team:`.** Reverting the service code stops *new* grants being written; it does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` to `""` behaves the same way. `LF_CONTRACTOR_TEAM_NAME` is no longer read at all, so the service already emits no contractor grant; the existing contractor tuples still need the revoke script.
 
 That guard belongs to the **deployed** fga-sync, not to this repository's dependency pin. It was added in fga-sync `v0.3.1` — the delete branch of `SyncObjectTuples` in `fga.go` — and the platform chart deploys `~0.3.5`. This repo pins `v0.2.17` in `go.mod`, which predates the guard, but that pin supplies only the message types in `pkg/types` and `pkg/constants`; nothing here links the sync engine, so the pin has no bearing on what the running service deletes. Everything below assumes a deployed fga-sync at `v0.3.1` or later. On anything older the guard is absent, and a settings write would revoke these grants instead of preserving them.
 
@@ -119,7 +119,7 @@ The live form prompts for the store ID before deleting, because it differs from 
 
 Deletes only tuples whose subject is exactly one of the configured teams; per-user `auditor` grants and `global_org_admin` are never touched. Batches set `"on_missing": "ignore"` inside the `deletes` object — the mirror of the grant script's problem, since the tuple list comes from a paginated read that can go stale mid-run.
 
-**Stop the emission before you revoke, not after.** Set the team name to `""` (or revert) and roll out the API *and* the CDC consumer first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because the subject begins with `team:`. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
+**Stop the emission before you revoke, not after.** For `lf-contractor`, that means the staff-only build is running on the API *and* the CDC consumer — there is no variable to blank. For `lf-staff`, set `lfStaffTeamName: ""` (or revert) and roll out both first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because the subject begins with `team:`. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
 
 ### Rollback order
 

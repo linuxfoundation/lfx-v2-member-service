@@ -2,8 +2,8 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# grant-lf-teams-auditor-openfga.sh — Grant the configured team subjects
-# (both LF teams — staff and contractor) the `auditor` relation on every
+# grant-lf-teams-auditor-openfga.sh — Grant the configured team subject
+# (the LF staff team only) the `auditor` relation on every
 # b2b_org in the exported census. One-off backfill for orgs that existed
 # before the service started asserting these grants on every write. See
 # LFXV2-2937 and LFXV2-3071.
