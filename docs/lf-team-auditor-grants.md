@@ -5,7 +5,7 @@
 
 The LF staff team — named by `LF_STAFF_TEAM_NAME`, written as `team:<name>#member` throughout this document — holds the `auditor` relation on every `b2b_org`. The service asserts the grant on every full-sync publish path; the scripts in this document exist for the orgs that already existed when that behaviour shipped, and for rolling the grant back.
 
-> **Contractor rollback in progress.** `lf-contractor` was granted the same blanket `auditor` under [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) (~8,105 prod tuples, ~1,634 dev, backfilled 2026-09-16). The service no longer emits it and the grant script no longer reads it, but **neither removes what was written** — fga-sync never deletes a `team:`-subject tuple. Until the revoke below has run per environment, those tuples are live and contractors read every org. The `sync-global-groups` reconciler reports them on every run as `org auditor surplus`.
+> **Contractor rollback in progress.** `lf-contractor` was granted the same blanket `auditor` under [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) (8,105 prod backfilled 2026-09-16; every org written since also received one until this build ships, so the count tracks the org census — 8,177 prod / 6,738 dev on 2026-09-23, the numbers the revoke dry-run should report). The service no longer emits it and the grant script no longer reads it, but **neither removes what was written** — fga-sync never deletes a `team:`-subject tuple. Until the revoke below has run per environment, those tuples are live and contractors read every org. The `sync-global-groups` reconciler reports them on every run as `org auditor surplus`.
 
 ## When the grant starts
 
