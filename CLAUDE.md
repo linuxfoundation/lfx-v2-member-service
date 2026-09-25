@@ -5,11 +5,11 @@ This guide provides essential information for Claude instances working with the 
 > **Central LFX skills:**
 > - `lfx-skills:lfx` for cross-repo tasks, "where does X live" questions, owner/peer repo routing, or missing checkouts.
 > - `lfx-skills:lfx-platform-architecture` for platform composition, V2 service classes, write/read/access-check flows, NATS/KV ownership, and handoff points across FGA, indexer, query, Heimdall, OpenFGA, Helm, or ArgoCD.
-> - For the post-commit review lifecycle, launch the central pre-PR reviewers through the Agent tool after every commit: `lfx-skills:lfx-general-code-reviewer` for general code review, `lfx-skills:lfx-member-service-code-reviewer` for repo-specific member-service conventions/contracts, and `lfx-skills:lfx-member-service-learnings-reviewer` for empirical-pattern matching against `docs/reviews/knowledge-base/`.
+> - Local review lifecycle: see [Pre-PR review](#pre-pr-review) below.
 > - **Local skills:**
 >   - `member-service-dev` auto-attaches on Go and service paths (`**/*.go`, `cmd/**`, `internal/**`, `pkg/**`, `gen/**`, `Makefile`) and owns Go conventions, Goa boundaries, NATS/KV cache and RPC rules, tests, formatting, and the Salesforce-integration callout.
 >   - `member-add-endpoint` is the entry point for adding or changing any membership HTTP endpoint (Goa design, regen, handler, tests, Heimdall ruleset update).
->   - Before opening a PR, run the repo-local cycle in order: `/member-service-pr-readiness` for branch/commit shape, then `/member-service-preflight` for mechanical Go validation.
+>   - Repo-local pre-PR check skills: `/member-service-pr-readiness origin/main` (branch/commit shape), then `/member-service-preflight origin/main --dry-run` (mechanical Go validation and PR summary) — the `Preflight` value of [Pre-PR review](#pre-pr-review).
 > - Repo-local docs own concrete subjects, payloads, contracts, chart values, and domain behavior. If the plugin is missing, install with `/plugin marketplace add linuxfoundation/lfx-skills` then `/plugin install lfx-skills@lfx-skills`.
 
 ## Project Overview
@@ -267,37 +267,26 @@ make fmt    # Format code
 make lint   # Run golangci-lint
 ```
 
-## Work cycle — post-commit and pre-PR reviews
+## Pre-PR review
 
-> **CRITICAL — while the branch is pre-PR, post-commit review is mandatory.** After every commit on the local branch, launch `lfx-skills:lfx-general-code-reviewer`, `lfx-skills:lfx-member-service-code-reviewer`, AND `lfx-skills:lfx-member-service-learnings-reviewer` via the Agent tool with `run_in_background: true` — then keep working while they run. If Claude displays plugin agents without the `lfx-skills:` namespace, use the equivalent displayed reviewer names. Before opening a PR, every running review must return clean (or remaining findings explicitly documented as trade-offs), the **full-branch sweep** must run clean if the branch has more than one commit (`branch` arg), AND `/member-service-pr-readiness` must clear every Critical finding before `/member-service-preflight` runs.
+> **IMPORTANT — follow this exactly.** When the implementation is complete
+> and committed and you are about to open a PR:
 >
-> **Once the PR is open, do NOT invoke the central reviewers on iteration commits.** CodeRabbit + Copilot auto-trigger on every push and own the audit surface from that point. The central reviewers are pre-PR insurance only.
+> 1. **Review once.** Load `/lfx-skills:lfx-pre-pr-review` with the Skill
+>    tool and follow it: it tells you how to launch the reviewers. You run
+>    **one** review round of the whole branch and land **all accepted
+>    findings in exactly one fix commit** (none if there is nothing to fix).
+>    Do not work from memory: **load the skill before launching the
+>    reviewers**.
+> 2. **Preflight.** Run the `Preflight` value below and make it pass. It is
+>    deterministic checks, not a review: fix what it reports in its own
+>    commit(s), as many as it takes, and rerun it — never the reviewers.
+> 3. **Open the PR.** From then on there are **no local reviews of any
+>    kind** — iterate only on the PR's bot and human feedback, still running
+>    tests and checks.
 
-### Post-commit (pre-PR phase, after every commit, asynchronous)
-
-1. **Commit your work.** `git commit -s -S`. Do not wait for any prior review to finish.
-2. **Immediately launch all three reviewer subagents in parallel.** Use `subagent_type: lfx-skills:lfx-general-code-reviewer`, `run_in_background: true`; `subagent_type: lfx-skills:lfx-member-service-code-reviewer`, `run_in_background: true`; and `subagent_type: lfx-skills:lfx-member-service-learnings-reviewer`, `run_in_background: true`.
-3. **Post-commit mode prompt for each reviewer (exact):** `target repo: lfx-v2-member-service\n\nReview the latest commit.` Append `extra: <focus>` on a new line only when there is a priority hint to add. Do NOT pass `branch` here. If this work cycle is launched from the LFX workspace parent, the `target repo:` line is required so both reviewers operate in this repo.
-4. **Keep working.** Start the next commit while the reviewers run. Do not block on them.
-5. **When the reviews return:** roll every Critical finding and every reasonable Important finding into the next commit.
-
-### Pre-PR (drain the queue, sweep cumulative state, then open)
-
-When the work is done and no more code commits are planned:
-
-1. **Wait for every running review to complete.**
-2. **If any returned review flags Critical or reasonable Important:** add a fix commit, launch both reviewers again on the new state, wait, and loop until clean or explicitly documented as a trade-off.
-3. **Full-branch sweep — only if the branch has more than one commit.** Launch `lfx-skills:lfx-general-code-reviewer`, `lfx-skills:lfx-member-service-code-reviewer`, and `lfx-skills:lfx-member-service-learnings-reviewer` with prompt **`target repo: lfx-v2-member-service\nbranch\n\nReview the branch's diff against origin/main.`**. Address any new findings, then re-run the sweep until clean.
-4. **Run `/member-service-pr-readiness`** for branch and commit shape only.
-5. **Run `/member-service-preflight`** for mechanical Go validation and PR summary.
-6. **Only then push and open the PR.**
-
-### Post-PR iteration (responding to bot feedback on an open PR)
-
-1. Wait for CodeRabbit + Copilot to comment after each push.
-2. Triage every Critical and reasonable Important finding against current code.
-3. Roll fixes into a `fix(review): ...` commit.
-4. Push. Repeat until clean.
+- KB review skill: `/member-service-learnings-reviewer`
+- Preflight: `/member-service-pr-readiness origin/main`, then `/member-service-preflight origin/main --dry-run`
 
 ## Adding New Endpoints (Goa is design-first)
 

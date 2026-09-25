@@ -3,12 +3,15 @@
 
 # Known false positives — applied LAST in every review pass
 
-Findings that match any pattern below MUST be dropped, regardless of which source (KB
-pattern file, code-reviewer rule, or bot) produced them. This list is the floor — even a
-quotable pattern match does not survive if it matches a known false positive.
+Findings that match any pattern below MUST be dropped, whichever KB pattern file produced
+them. This list is the floor — even a quotable pattern match does not survive if it matches
+a known false positive.
 
-Used by the `lfx-skills:lfx-member-service-learnings-reviewer` subagent (Step 4) and as a
-filter-discipline reference for `lfx-skills:lfx-member-service-code-reviewer`.
+Applied by two reviewers: the pre-PR `/member-service-learnings-reviewer` skill (Step 4) and
+the PR-side `.github/skills/member-service-code-review/SKILL.md` ("The house standards" and
+"What not to flag"), which the Copilot code reviewer loads on every code PR. The
+pre-PR general and security reviewers that `/lfx-skills:lfx-pre-pr-review` launches do not
+read this file; human reviewers are not bound by it.
 
 ---
 
@@ -61,13 +64,56 @@ read/write proxy with NATS KV caches — no Postgres, no sync job. (Reads served
 **Pattern matched:** a finding asserting the service must NOT publish FGA-sync or indexer
 messages, citing CLAUDE.md's "does NOT publish FGA or indexer messages" line.
 
-**Why false (now):** that statement was true for the read-only proxy era only (the
-`lfx-member-service-code-reviewer`'s KFP list has since been refreshed to drop it). As
+**Why false (now):** that statement was true for the read-only proxy era only (the repo's
+former conventions-review agent, since retired, dropped it from its own KFP list). As
 of `origin/main` (PRs #36-#44, plus the CDC consumer) the service DOES publish FGA-sync
 and indexer messages for b2b-org, b2b-org settings, and key-contacts (see
 `internal/service/**`, `pkg/constants/subjects.go`,
 `docs/fga-contract.md`). Findings about FGA/indexer message *construction* are valid (see
 `fga-and-indexer.md`). Only drop a finding that says publishing should not exist at all.
+
+---
+
+## Documented shape, not a defect
+
+Salvaged from the retired conventions-review agent (2026-09-25): the two suppressions it
+carried that are not restated anywhere else in the review surface.
+
+### `REPOSITORY_SOURCE=mock` is not an offline mode
+
+**Pattern matched:** "mock mode still dials NATS at startup; make `REPOSITORY_SOURCE=mock`
+fully offline", or a test/doc faulted for needing NATS under mock mode.
+
+**Why false:** documented behaviour of the API binary. `REPOSITORY_SOURCE=mock` swaps every
+Salesforce-backed reader for an in-memory mock and initialises **no** Salesforce client:
+`ProjectResolverImpl` returns `nil` for `mock` before `sfInit`
+(`cmd/member-api/service/providers.go:163`), and every other `sfInit`/`sObjectClientInit`
+call sits under `case "salesforce"` (`providers.go:242,274,282,316,340,437,582`). What mock
+mode still needs is NATS: `QueueSubscriptions` calls `natsInit` unconditionally and registers
+the `b2b_org_lookup` and `invite_accepted` handlers in mock mode too (`providers.go:942-948`).
+A finding that mock mode "initialises Salesforce" is wrong on the facts; a finding that it
+needs NATS is not a defect unless the change itself claims to make mock mode offline. The
+consumer binary (`runConsumer` → `CDCConsumerImpl`, `providers.go:991-1004`) always
+initialises Salesforce and is not governed by `REPOSITORY_SOURCE`.
+
+**Source:** provider code cited above (verified 2026-09-25); carried over from the retired
+`member-service-code-reviewer` skill, which stated it as "mock repository still starts shared
+dependencies".
+
+### Target Architecture in `ARCHITECTURE.md` is not current behaviour
+
+**Pattern matched:** "does not match `ARCHITECTURE.md`" where the cited text sits under
+"Target Architecture" — root `/key_contacts/{uid}` routes, "ports to remove in the target
+state", target-era type or relation names.
+
+**Why false:** `ARCHITECTURE.md` deliberately holds both "Current State" and "Target
+Architecture"; the target sections describe a migration not yet shipped. Divergence from
+the target is a finding only when the change explicitly implements that part of the
+migration — and then the docs/contracts must move in the same change
+(`docs-and-comments-drift.md`).
+
+**Source:** `ARCHITECTURE.md` §Current State / §Target Architecture;
+`.github/copilot-instructions.md` states the same caveat for PR-side review.
 
 ---
 
