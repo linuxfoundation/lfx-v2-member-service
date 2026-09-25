@@ -151,6 +151,12 @@ service:
   # port is the service port
   port: 8080
 
+# networkPolicy restricts ingress to the service pods. Disabled for local development.
+networkPolicy:
+  enabled: false
+  ingress:
+    from: []
+
 # nats is the configuration for the NATS server
 nats:
   # url is the URL of the NATS server
