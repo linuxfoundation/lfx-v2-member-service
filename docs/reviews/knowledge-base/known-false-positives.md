@@ -71,6 +71,42 @@ and indexer messages for b2b-org, b2b-org settings, and key-contacts (see
 
 ---
 
+## Documented shape, not a defect
+
+Salvaged from the retired conventions-review agent (2026-09-25): the two suppressions it
+carried that are not restated anywhere else in the review surface.
+
+### `REPOSITORY_SOURCE=mock` is not an offline mode
+
+**Pattern matched:** "mock mode still dials NATS / initialises the Salesforce client at startup;
+make `REPOSITORY_SOURCE=mock` fully offline", or a test/doc faulted for needing NATS under
+mock mode.
+
+**Why false:** documented behaviour. `REPOSITORY_SOURCE=mock` swaps the membership and B2B
+readers for in-memory mocks, but `main.go` still initialises NATS/Salesforce for the
+project-id-map RPC handler and key-contact writer wiring. Not a defect unless the change
+itself claims to make mock mode offline.
+
+**Source:** `docs/agent-guidance/salesforce-integration.md` ("Mock repository still starts
+shared dependencies").
+
+### Target Architecture in `ARCHITECTURE.md` is not current behaviour
+
+**Pattern matched:** "does not match `ARCHITECTURE.md`" where the cited text sits under
+"Target Architecture" — root `/key_contacts/{uid}` routes, "ports to remove in the target
+state", target-era type or relation names.
+
+**Why false:** `ARCHITECTURE.md` deliberately holds both "Current State" and "Target
+Architecture"; the target sections describe a migration not yet shipped. Divergence from
+the target is a finding only when the change explicitly implements that part of the
+migration — and then the docs/contracts must move in the same change
+(`docs-and-comments-drift.md`).
+
+**Source:** `ARCHITECTURE.md` §Current State / §Target Architecture;
+`.github/copilot-instructions.md` states the same caveat for PR-side review.
+
+---
+
 ## Intentional, maintainer-endorsed design decisions
 
 ### `/debug/vars` unauthenticated

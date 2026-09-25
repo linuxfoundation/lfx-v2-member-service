@@ -1,7 +1,7 @@
 ---
 name: member-service-learnings-reviewer
 description: >-
-  Empirical-pattern review for lfx-v2-member-service. Audits a pinned diff range against `docs/reviews/knowledge-base/` — patterns extracted from past PR review comments on this repo (Copilot + heavy human maintainer review; CodeRabbit is not active here). Findings are gated by KB matches: every finding must quote a pattern entry; unsourced findings are dropped. Loaded by a background reviewer subagent launched from this repo's pre-PR review block (CLAUDE.md, "Pre-PR review"), in parallel with `/lfx-skills:lfx-general-code-review`. Report-only; renders a markdown review.
+  Empirical-pattern review for lfx-v2-member-service. Audits a pinned diff range against `docs/reviews/knowledge-base/` — patterns extracted from past PR review comments on this repo (Copilot + heavy human maintainer review; CodeRabbit is not active here). Findings are gated by KB matches: every finding must quote a pattern entry; unsourced findings are dropped. Loaded by the knowledge-base reviewer subagent that `/lfx-skills:lfx-pre-pr-review` launches (pointed at from CLAUDE.md, "Pre-PR review"), alongside the general and security reviewers. Report-only; renders a markdown review.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->
@@ -15,10 +15,11 @@ Generic-rubric findings (security / performance / quality / architecture / testi
 
 ## When you run
 
-This skill is loaded by one of the two background reviewer subagents that the
-pre-PR review block in `CLAUDE.md` launches **once**, over the whole branch,
-before the PR is opened. It is not run after individual commits and never once
-the PR exists.
+This skill is loaded by the knowledge-base reviewer subagent that
+`/lfx-skills:lfx-pre-pr-review` (pointed at from `CLAUDE.md`, "Pre-PR review")
+launches **once**, over the whole branch, before the PR is opened, alongside
+the general and security reviewers. It is not run after individual commits and
+never once the PR exists.
 
 ## Repository scope
 

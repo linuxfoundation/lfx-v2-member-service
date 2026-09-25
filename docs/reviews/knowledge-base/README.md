@@ -60,9 +60,9 @@ only findings it can quote (KB-match gate), then drops anything matching
 | [`chart-and-deploy.md`](chart-and-deploy.md) | 5 | `charts/lfx-v2-member-service/**` |
 | [`docs-and-comments-drift.md`](docs-and-comments-drift.md) | 3 | a `.go` doc-comment, `CLAUDE.md`, `README.md`, `ARCHITECTURE.md`, or `docs/**` changed alongside a behavior change |
 | [`observability-and-resilience.md`](observability-and-resilience.md) | 4 | `pkg/errors/**`, `cmd/member-api/service/error.go`, `internal/infrastructure/nats/project_rpc.go`, `.../project_id_map_handler.go`, `.../client.go`, or any error map/log |
-| [`known-false-positives.md`](known-false-positives.md) | 10 entries | always (applied LAST as the floor) |
+| [`known-false-positives.md`](known-false-positives.md) | 12 entries | always (applied LAST as the floor) |
 
-**33 promoted patterns** across 7 category files, plus 10 false-positive entries.
+**33 promoted patterns** across 7 category files, plus 12 false-positive entries.
 
 ## Highest-value patterns
 
