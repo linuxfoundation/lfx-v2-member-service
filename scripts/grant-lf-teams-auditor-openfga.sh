@@ -14,9 +14,9 @@
 # dry-run the reconciliation check rather than a separate tool.
 #
 # ⚠️  These writes are effectively permanent as far as the service is concerned.
-#     fga-sync never deletes a tuple whose subject begins with `team:`, so no
-#     code path can undo them. Reversal means running
-#     scripts/revoke-lf-teams-auditor-openfga.sh.
+#     fga-sync preserves team subjects on relations not prefixed `global_`; this
+#     grant uses `auditor`, so no service code path can undo it. Reversal means
+#     running scripts/revoke-lf-teams-auditor-openfga.sh.
 #
 # Prerequisites:
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080

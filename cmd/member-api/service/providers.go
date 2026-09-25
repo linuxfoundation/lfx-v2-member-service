@@ -530,9 +530,9 @@ func GlobalOrgAdminTeamName() string {
 // whole full-sync message on every publish path.
 //
 // Clearing a variable stops new references being emitted but revokes nothing:
-// fga-sync never deletes a tuple whose subject begins with "team:" (that guard
-// lives in the deployed service, v0.3.1 or later), so no service code path can
-// remove them — only scripts/revoke-lf-teams-auditor-openfga.sh.
+// fga-sync preserves team subjects on relations not prefixed "global_". This
+// grant uses "auditor", so no service code path can remove it — only
+// scripts/revoke-lf-teams-auditor-openfga.sh.
 //
 // Staff only. LF_CONTRACTOR_TEAM_NAME was read here under LFXV2-3071 and has
 // been withdrawn: that parity rested on lf-contractor holding auditor on the
