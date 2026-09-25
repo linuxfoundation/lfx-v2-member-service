@@ -1163,9 +1163,9 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
   tombstoned document is rebuilt by `POST /admin/reindex`, whereas a revoked grant is recovered
   only by an operator re-applying the org's settings.
 - A `delete_access` on a deleted object does **not** leave it with zero tuples. fga-sync
-  declines to delete any tuple whose subject begins with `team:`, so the configured LF-team reader
-  grant (staff, LFXV2-2937 — plus any contractor tuples not yet revoked, lfx-self-serve#2157)
-  survives. It confers access to an object
+  preserves team-subject tuples on relations not prefixed `global_`, so the configured LF-team
+  reader grant on `auditor` (staff, LFXV2-2937 — plus any contractor tuples not yet revoked,
+  lfx-self-serve#2157) survives. It confers access to an object
   that no longer resolves, so it is inert — but an audit asserting zero remaining tuples will
   report a correct implementation as broken.
 

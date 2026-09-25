@@ -5,7 +5,7 @@
 
 The LF staff team — named by `LF_STAFF_TEAM_NAME`, written as `team:<name>#member` throughout this document — holds the `auditor` relation on every `b2b_org`. The service asserts the grant on every full-sync publish path; the scripts in this document exist for the orgs that already existed when that behaviour shipped, and for rolling the grant back.
 
-> **Contractor rollback in progress.** `lf-contractor` was granted the same blanket `auditor` under [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) (8,105 prod backfilled 2026-09-16). Two writers kept adding it after that: member-service on every org write, and the `sync-global-groups` reconciler on every org in its census until its fixed-team build deployed. So the count tracks each environment's org census, which grew: dev's went from 1,634 to 6,738 between 2026-09-16 and 2026-09-23. Don't compare the revoke dry-run against a number written here. Compare it against the reconciler's latest `org auditor surplus` count for `lf-contractor` in that environment, which is the live figure. The service no longer emits it and the grant script no longer reads it, but **neither removes what was written** — fga-sync never deletes a `team:`-subject tuple. Until the revoke below has run per environment, those tuples are live and contractors read every org. The `sync-global-groups` reconciler reports them on every run as `org auditor surplus`.
+> **Contractor rollback in progress.** `lf-contractor` was granted the same blanket `auditor` under [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) (8,105 prod backfilled 2026-09-16). Two writers kept adding it after that: member-service on every org write, and the `sync-global-groups` reconciler on every org in its census until its fixed-team build deployed. So the count tracks each environment's org census, which grew: dev's went from 1,634 to 6,738 between 2026-09-16 and 2026-09-23. Don't compare the revoke dry-run against a number written here. Compare it against the reconciler's latest `org auditor surplus` count for `lf-contractor` in that environment, which is the live figure. The service no longer emits it and the grant script no longer reads it, but **neither removes what was written** — fga-sync preserves team subjects on the non-global `auditor` relation. Until the revoke below has run per environment, those tuples are live and contractors read every org. The `sync-global-groups` reconciler reports them on every run as `org auditor surplus`.
 
 ## When the grant starts
 
@@ -44,9 +44,9 @@ No write access anywhere. The `[user, team#member]` branch of `b2b_org.auditor` 
 
 ## The one-way-door property
 
-**fga-sync never deletes a tuple whose subject begins with `team:`.** Reverting the service code stops *new* grants being written; it does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` to `""` behaves the same way. `LF_CONTRACTOR_TEAM_NAME` is no longer read at all, so the service already emits no contractor grant; the existing contractor tuples still need the revoke script.
+**fga-sync preserves team-subject tuples on relations whose names do not begin with `global_`.** This grant uses `auditor`, so reverting the service code stops *new* grants being written but does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` to `""` behaves the same way. `LF_CONTRACTOR_TEAM_NAME` is no longer read at all, so the service already emits no contractor grant; the existing contractor tuples still need the revoke script.
 
-That guard belongs to the **deployed** fga-sync, not to this repository's dependency pin. It was added in fga-sync `v0.3.1` — the delete branch of `SyncObjectTuples` in `fga.go` — and the platform chart deploys `~0.3.5`. This repo pins `v0.2.17` in `go.mod`, which predates the guard, but that pin supplies only the message types in `pkg/types` and `pkg/constants`; nothing here links the sync engine, so the pin has no bearing on what the running service deletes. Everything below assumes a deployed fga-sync at `v0.3.1` or later. On anything older the guard is absent, and a settings write would revoke these grants instead of preserving them.
+That behavior belongs to the independently deployed fga-sync, not to this repository's dependency pin. This repo's pin supplies only the message types in `pkg/types` and `pkg/constants`; nothing here links the sync engine, so the pin has no bearing on what the running service deletes. The running fga-sync must be `v0.3.1` or later to preserve team subjects; older builds can delete this grant. A release containing relation-name reconciliation reaps `global_*` team relations while continuing to protect this non-global `auditor` grant.
 
 Removing the tuples requires `revoke-lf-teams-auditor-openfga.sh`. That is why it ships alongside the grant script rather than being written later under incident pressure.
 
@@ -119,7 +119,7 @@ The live form prompts for the store ID before deleting, because it differs from 
 
 Deletes only tuples whose subject is exactly one of the configured teams; per-user `auditor` grants and `global_org_admin` are never touched. Batches set `"on_missing": "ignore"` inside the `deletes` object — the mirror of the grant script's problem, since the tuple list comes from a paginated read that can go stale mid-run.
 
-**Stop the emission before you revoke, not after.** For `lf-contractor`, that means the staff-only build is running on the API *and* the CDC consumer — there is no variable to blank. For `lf-staff`, set `lfStaffTeamName: ""` (or revert) and roll out both first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because the subject begins with `team:`. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
+**Stop the emission before you revoke, not after.** For `lf-contractor`, that means the staff-only build is running on the API *and* the CDC consumer — there is no variable to blank. For `lf-staff`, set `lfStaffTeamName: ""` (or revert) and roll out both first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because `auditor` is not a `global_*` relation. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
 
 ### Rollback order
 
@@ -133,7 +133,7 @@ Deletes only tuples whose subject is exactly one of the configured teams; per-us
 ## Rollout order
 
 1. Deploy to dev, confirm new orgs get the grants.
-2. Deploy to prod — API and CDC consumer together. During a staggered rollout the two emitters assert different team sets, which converges: references for `team:` subjects are additive under the deployed fga-sync guard, and the older emitter revokes nothing. From this point CDC upserts assert the grants for any org that changes.
+2. Deploy to prod — API and CDC consumer together. During a staggered rollout the two emitters assert different team sets, which converges: team references on the non-global `auditor` relation are additive under the fga-sync guard, and the older emitter revokes nothing. From this point CDC upserts assert the grants for any org that changes.
 3. Run the export, then the grant script's dry-run (with `LF_STAFF_TEAM_NAME` exported from the deployment), then the live run.
 4. Re-run the dry-run; expect zero.
 5. Spot-check the cascade: pick an org with no per-user auditor, confirm a member of the LF staff team can `GET` it and the `project_membership` beneath it.
