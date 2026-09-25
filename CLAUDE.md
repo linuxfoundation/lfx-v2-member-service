@@ -9,7 +9,7 @@ This guide provides essential information for Claude instances working with the 
 > - **Local skills:**
 >   - `member-service-dev` auto-attaches on Go and service paths (`**/*.go`, `cmd/**`, `internal/**`, `pkg/**`, `gen/**`, `Makefile`) and owns Go conventions, Goa boundaries, NATS/KV cache and RPC rules, tests, formatting, and the Salesforce-integration callout.
 >   - `member-add-endpoint` is the entry point for adding or changing any membership HTTP endpoint (Goa design, regen, handler, tests, Heimdall ruleset update).
->   - `member-service-pr-readiness` (branch/commit shape) and `member-service-preflight` (mechanical Go validation and PR summary) are the repo-local pre-PR check skills; the review lifecycle they sit alongside is in [Pre-PR review](#pre-pr-review).
+>   - `/member-service-pr-readiness` (branch/commit shape) and `/member-service-preflight` (mechanical Go validation and PR summary) are the repo-local pre-PR check skills; together they are the Preflight value of [Pre-PR review](#pre-pr-review), which is where the review lifecycle lives.
 > - Repo-local docs own concrete subjects, payloads, contracts, chart values, and domain behavior. If the plugin is missing, install with `/plugin marketplace add linuxfoundation/lfx-skills` then `/plugin install lfx-skills@lfx-skills`.
 
 ## Project Overview
@@ -282,7 +282,7 @@ make lint   # Run golangci-lint
 > launching the reviewers, before the fix commit, before opening the PR.
 
 - KB review skill: `/member-service-learnings-reviewer`
-- Preflight: `make build && make test`
+- Preflight: `/member-service-pr-readiness origin/main`, then `/member-service-preflight origin/main --report-only`
 
 ## Adding New Endpoints (Goa is design-first)
 
