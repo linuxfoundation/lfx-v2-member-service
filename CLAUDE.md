@@ -5,11 +5,11 @@ This guide provides essential information for Claude instances working with the 
 > **Central LFX skills:**
 > - `lfx-skills:lfx` for cross-repo tasks, "where does X live" questions, owner/peer repo routing, or missing checkouts.
 > - `lfx-skills:lfx-platform-architecture` for platform composition, V2 service classes, write/read/access-check flows, NATS/KV ownership, and handoff points across FGA, indexer, query, Heimdall, OpenFGA, Helm, or ArgoCD.
-> - Local review lifecycle: see [Pre-PR review](#pre-pr-review) below — one full-branch round before the PR opens, nothing after individual commits.
+> - Local review lifecycle: see [Pre-PR review](#pre-pr-review) below.
 > - **Local skills:**
 >   - `member-service-dev` auto-attaches on Go and service paths (`**/*.go`, `cmd/**`, `internal/**`, `pkg/**`, `gen/**`, `Makefile`) and owns Go conventions, Goa boundaries, NATS/KV cache and RPC rules, tests, formatting, and the Salesforce-integration callout.
 >   - `member-add-endpoint` is the entry point for adding or changing any membership HTTP endpoint (Goa design, regen, handler, tests, Heimdall ruleset update).
->   - `/member-service-pr-readiness` (branch/commit shape) and `/member-service-preflight` (mechanical Go validation and PR summary) are the repo-local pre-PR check skills; together they are the Preflight value of [Pre-PR review](#pre-pr-review), which is where the review lifecycle lives.
+>   - Repo-local pre-PR check skills: `/member-service-pr-readiness origin/main` (branch/commit shape), then `/member-service-preflight origin/main --dry-run` (mechanical Go validation and PR summary) — the `Preflight` value of [Pre-PR review](#pre-pr-review).
 > - Repo-local docs own concrete subjects, payloads, contracts, chart values, and domain behavior. If the plugin is missing, install with `/plugin marketplace add linuxfoundation/lfx-skills` then `/plugin install lfx-skills@lfx-skills`.
 
 ## Project Overview
@@ -287,7 +287,7 @@ make lint   # Run golangci-lint
 >    tests and checks.
 
 - KB review skill: `/member-service-learnings-reviewer`
-- Preflight: `/member-service-pr-readiness origin/main`, then `/member-service-preflight origin/main --report-only`
+- Preflight: `/member-service-pr-readiness origin/main`, then `/member-service-preflight origin/main --dry-run`
 
 ## Adding New Endpoints (Goa is design-first)
 

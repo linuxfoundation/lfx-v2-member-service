@@ -4,8 +4,8 @@ description: >
   Mechanical pre-PR pipeline for lfx-v2-member-service. Runs the Go-specific
   working tree, license header, formatting, lint, build, tests, protected
   file, commit verification, and change-summary checks after
-  /member-service-pr-readiness has passed. Supports default validation and a
-  non-mutating --dry-run / --report-only mode.
+  /member-service-pr-readiness has passed. Supports default validation and
+  report-only dry-run mode.
 allowed-tools: Bash, Read, Glob, Grep, Edit, AskUserQuestion
 ---
 
@@ -21,13 +21,11 @@ flows. Every check here is shell-driven or file-list-driven.
 
 ## Modes
 
-Args format: `[base-branch] [--dry-run|--report-only] [extra instructions]`.
-
 - **Default:** run the mechanical checks. `make fmt` may rewrite Go files.
   Ask before editing license headers by hand and before committing anything.
-- **`--dry-run` / `--report-only`** (synonyms): do not run mutating
-  commands. Use read-only equivalents (`gofmt -l`, file scans, build/test/lint
-  commands) and report what would need fixing.
+- **`--dry-run` / `report only`:** do not run mutating commands. Use
+  read-only equivalents (`gofmt -l`, file scans, build/test/lint commands)
+  and report what would need fixing.
 
 Default base branch: `origin/main`. Normalize bare branch names such as
 `main` to `origin/main`.
