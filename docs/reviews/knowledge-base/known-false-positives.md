@@ -7,9 +7,11 @@ Findings that match any pattern below MUST be dropped, whichever KB pattern file
 them. This list is the floor — even a quotable pattern match does not survive if it matches
 a known false positive.
 
-Applied by the `/member-service-learnings-reviewer` skill (Step 4) and by no other
-reviewer: the general and security reviewers, and the PR-side bots and humans, do not read
-this file.
+Applied by two reviewers: the pre-PR `/member-service-learnings-reviewer` skill (Step 4) and
+the PR-side `.github/skills/member-service-code-review/SKILL.md` ("The house standards" and
+"What not to flag"), which the Copilot code reviewer loads on every code PR. The
+pre-PR general and security reviewers that `/lfx-skills:lfx-pre-pr-review` launches do not
+read this file; human reviewers are not bound by it.
 
 ---
 

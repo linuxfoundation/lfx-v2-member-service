@@ -59,7 +59,7 @@ git diff <base_sha> <target_sha>
 
 Use `git diff` with both revisions named — not `git show`. Use the stat block to drive Step 2's pattern-file routing and the Step 6 report header; abort with `INCOMPLETE — empty range` if the diff is empty.
 
-If the diff is too big for context, save it to `/tmp/member-learnings-reviewer-diff.patch` and Read changed files individually.
+If the diff is too big for context, save it to `/tmp/member-learnings-reviewer-diff.patch` and inspect changed files individually at the pinned revisions: `git show <target_sha>:<path>` for added or modified files, `git show <base_sha>:<path>` for deleted files, and `git diff <base_sha> <target_sha> -- <path>` for one file's hunks. Never `Read` the working tree for source inspection — it can differ from `target_sha`.
 
 ## Step 2 — Load pattern files (routed by diff)
 
@@ -99,7 +99,7 @@ If a routed pattern file fails to load, mark the report **INCOMPLETE** in Step 6
 
 For each pattern entry in every loaded pattern file (excluding `known-false-positives.md`):
 
-1. **Check `**Detect:**`** — use grep / file reads as the entry directs. Don't infer the match from the `**Pattern:**` description alone; the `**Detect:**` clause is the operational rule. Read the changed file at the pinned revision (`git show <target_sha>:<path>`) so you check the real code, not only the hunk. Working-tree content is not evidence about the commit.
+1. **Check `**Detect:**`** — inspect as the entry directs, always at the pinned revisions: added or modified files via `git show <target_sha>:<path>` (or `git grep <pattern> <target_sha> -- <paths>`), deleted files via `git show <base_sha>:<path>`. Don't infer the match from the `**Pattern:**` description alone; the `**Detect:**` clause is the operational rule. Check the real file at `target_sha`, not only the hunk. Never `Read` or grep the working tree for source inspection — its content is not evidence about the commit.
 2. **If matched, emit a finding** with:
    - **Confidence** derived from the entry's severity header: `Critical` → 90-100, `Important` → 80-89, `Nit` → below 80 (suppressed by the floor in Step 6).
    - **Rule:** the entry's full ID (e.g., `salesforce-and-uuid/swallowed-sfid-conversion-error`).

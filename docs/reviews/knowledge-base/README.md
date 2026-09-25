@@ -16,7 +16,9 @@ patterns reviewers have actually flagged here.
 Consumed by `/member-service-learnings-reviewer`, which routes by changed-file
 path to the category files below, matches each pattern's `**Detect:**` clause, and emits
 only findings it can quote (KB-match gate), then drops anything matching
-`known-false-positives.md`.
+`known-false-positives.md`. The PR-side `.github/skills/member-service-code-review/SKILL.md`
+also reads the category files as a checklist and `known-false-positives.md` as a floor. The
+pre-PR general and security reviewers do not read this directory.
 
 ## Methodology
 
