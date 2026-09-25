@@ -1,6 +1,7 @@
 ---
 name: member-service-learnings-reviewer
-description: Empirical-pattern review for lfx-v2-member-service. Audits a pinned diff range against `docs/reviews/knowledge-base/` — patterns extracted from past PR review comments on this repo (Copilot + heavy human maintainer review; CodeRabbit is not active here). Findings are gated by KB matches: every finding must quote a pattern entry; unsourced findings are dropped. Loaded by a background reviewer subagent launched from this repo's pre-PR review block (CLAUDE.md, "Pre-PR review"), in parallel with `/lfx-skills:lfx-general-code-review`. Report-only; renders a markdown review.
+description: >-
+  Empirical-pattern review for lfx-v2-member-service. Audits a pinned diff range against `docs/reviews/knowledge-base/` — patterns extracted from past PR review comments on this repo (Copilot + heavy human maintainer review; CodeRabbit is not active here). Findings are gated by KB matches: every finding must quote a pattern entry; unsourced findings are dropped. Loaded by a background reviewer subagent launched from this repo's pre-PR review block (CLAUDE.md, "Pre-PR review"), in parallel with `/lfx-skills:lfx-general-code-review`. Report-only; renders a markdown review.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 <!-- Copyright The Linux Foundation and each contributor to LFX. -->

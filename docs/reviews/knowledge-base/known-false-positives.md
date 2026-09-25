@@ -7,8 +7,8 @@ Findings that match any pattern below MUST be dropped, regardless of which sourc
 pattern file, code-reviewer rule, or bot) produced them. This list is the floor — even a
 quotable pattern match does not survive if it matches a known false positive.
 
-Used by the `lfx-skills:lfx-member-service-learnings-reviewer` subagent (Step 4) and as a
-filter-discipline reference for `lfx-skills:lfx-member-service-code-reviewer`.
+Used by the `/member-service-learnings-reviewer` skill (Step 4) and as a
+filter-discipline reference for `/lfx-skills:lfx-general-code-review`.
 
 ---
 
@@ -61,8 +61,8 @@ read/write proxy with NATS KV caches — no Postgres, no sync job. (Reads served
 **Pattern matched:** a finding asserting the service must NOT publish FGA-sync or indexer
 messages, citing CLAUDE.md's "does NOT publish FGA or indexer messages" line.
 
-**Why false (now):** that statement was true for the read-only proxy era only (the
-`lfx-member-service-code-reviewer`'s KFP list has since been refreshed to drop it). As
+**Why false (now):** that statement was true for the read-only proxy era only (the repo's
+former conventions-review agent, since retired, dropped it from its own KFP list). As
 of `origin/main` (PRs #36-#44, plus the CDC consumer) the service DOES publish FGA-sync
 and indexer messages for b2b-org, b2b-org settings, and key-contacts (see
 `internal/service/**`, `pkg/constants/subjects.go`,
