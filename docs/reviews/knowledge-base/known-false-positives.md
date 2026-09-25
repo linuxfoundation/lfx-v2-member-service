@@ -81,17 +81,24 @@ carried that are not restated anywhere else in the review surface.
 
 ### `REPOSITORY_SOURCE=mock` is not an offline mode
 
-**Pattern matched:** "mock mode still dials NATS / initialises the Salesforce client at startup;
-make `REPOSITORY_SOURCE=mock` fully offline", or a test/doc faulted for needing NATS under
-mock mode.
+**Pattern matched:** "mock mode still dials NATS at startup; make `REPOSITORY_SOURCE=mock`
+fully offline", or a test/doc faulted for needing NATS under mock mode.
 
-**Why false:** documented behaviour. `REPOSITORY_SOURCE=mock` swaps the membership and B2B
-readers for in-memory mocks, but `main.go` still initialises NATS/Salesforce for the
-project-id-map RPC handler and key-contact writer wiring. Not a defect unless the change
-itself claims to make mock mode offline.
+**Why false:** documented behaviour of the API binary. `REPOSITORY_SOURCE=mock` swaps every
+Salesforce-backed reader for an in-memory mock and initialises **no** Salesforce client:
+`ProjectResolverImpl` returns `nil` for `mock` before `sfInit`
+(`cmd/member-api/service/providers.go:163`), and every other `sfInit`/`sObjectClientInit`
+call sits under `case "salesforce"` (`providers.go:242,274,282,316,340,437,582`). What mock
+mode still needs is NATS: `QueueSubscriptions` calls `natsInit` unconditionally and registers
+the `b2b_org_lookup` and `invite_accepted` handlers in mock mode too (`providers.go:942-948`).
+A finding that mock mode "initialises Salesforce" is wrong on the facts; a finding that it
+needs NATS is not a defect unless the change itself claims to make mock mode offline. The
+consumer binary (`runConsumer` → `CDCConsumerImpl`, `providers.go:991-1004`) always
+initialises Salesforce and is not governed by `REPOSITORY_SOURCE`.
 
-**Source:** `docs/agent-guidance/salesforce-integration.md` ("Mock repository still starts
-shared dependencies").
+**Source:** provider code cited above (verified 2026-09-25); carried over from the retired
+`member-service-code-reviewer` skill, which stated it as "mock repository still starts shared
+dependencies".
 
 ### Target Architecture in `ARCHITECTURE.md` is not current behaviour
 
