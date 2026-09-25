@@ -3,12 +3,13 @@
 
 # Known false positives — applied LAST in every review pass
 
-Findings that match any pattern below MUST be dropped, regardless of which source (KB
-pattern file, code-reviewer rule, or bot) produced them. This list is the floor — even a
-quotable pattern match does not survive if it matches a known false positive.
+Findings that match any pattern below MUST be dropped, whichever KB pattern file produced
+them. This list is the floor — even a quotable pattern match does not survive if it matches
+a known false positive.
 
-Used by the `/member-service-learnings-reviewer` skill (Step 4) and as a
-filter-discipline reference for `/lfx-skills:lfx-general-code-review`.
+Applied by the `/member-service-learnings-reviewer` skill (Step 4) and by no other
+reviewer: the general and security reviewers, and the PR-side bots and humans, do not read
+this file.
 
 ---
 

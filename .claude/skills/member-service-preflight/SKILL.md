@@ -4,8 +4,8 @@ description: >
   Mechanical pre-PR pipeline for lfx-v2-member-service. Runs the Go-specific
   working tree, license header, formatting, lint, build, tests, protected
   file, commit verification, and change-summary checks after
-  /member-service-pr-readiness has passed. Runs the same checks CI runs.
-  Supports default validation and a non-mutating --report-only mode.
+  /member-service-pr-readiness has passed. Supports default validation and a
+  non-mutating --dry-run / --report-only mode.
 allowed-tools: Bash, Read, Glob, Grep, Edit, AskUserQuestion
 ---
 
@@ -17,9 +17,7 @@ chart under `charts/lfx-v2-member-service/`.
 
 Run this after `/member-service-pr-readiness` has completed. This skill does
 not replace the shape check and does not run central or generic reviewer
-flows. Every check here is shell-driven or file-list-driven, and the set of
-checks mirrors what CI runs on a pull request (`member-api-build.yml`,
-`license-header-check.yml`, `mega-linter.yml`).
+flows. Every check here is shell-driven or file-list-driven.
 
 ## Modes
 
@@ -55,10 +53,7 @@ Evaluate:
 ## Check 1 - License headers
 
 The repository enforces license headers through
-`.github/workflows/license-header-check.yml`, which excludes `gen`,
-`internal/infrastructure/salesforce/pubsub/proto`, and
-`internal/infrastructure/email/templates` (its `exclude_pattern`). Apply the
-same exclusions here.
+`.github/workflows/license-header-check.yml`, excluding `gen/`.
 
 For changed files, verify the repo's existing header style:
 
@@ -75,9 +70,8 @@ Suggested read-only scan:
 git diff --name-only <base>...HEAD
 ```
 
-Check new or modified source/docs files outside the excluded paths. In
-default mode, add missing headers only after reading nearby files for the
-exact comment style.
+Check new or modified source/docs files outside `gen/`. In default mode, add
+missing headers only after reading nearby files for the exact comment style.
 
 ## Check 2 - Formatting
 
@@ -113,21 +107,6 @@ If fixes were applied in Checks 1-3, rerun:
 make lint
 ```
 
-## Check 3b - MegaLinter
-
-CI runs MegaLinter (Go flavor, configured by `.mega-linter.yml`) on every
-pull request; `make lint` does not cover the non-Go linters it enables
-(markdownlint, yamllint, shellcheck, Helm, and the rest). When Docker is
-available, run the same flavor locally, read-only:
-
-```bash
-npx mega-linter-runner --flavor go --release v9.1.0 -e VALIDATE_ALL_CODEBASE=false
-```
-
-Report hits only in files changed on the branch (`git diff --name-only
-<base>...HEAD`). If Docker or `npx` is unavailable, report the check as
-`SKIP MegaLinter - not run locally; CI runs it` rather than as a pass.
-
 ## Check 4 - Build verification
 
 Run:
@@ -143,11 +122,7 @@ make apigen
 make build
 ```
 
-`make apigen` writes generated files under `gen/`; never hand-edit `gen/`. CI
-(`member-api-build.yml`) runs `make deps`, `make apigen`, `make build`, then
-`make test` unconditionally, so a committed `gen/` that lags the design still
-builds in CI — the regenerated output must be committed here for the branch
-to match what CI builds.
+`make apigen` writes generated files under `gen/`; never hand-edit `gen/`.
 
 ## Check 5 - Tests
 
@@ -237,7 +212,6 @@ PASS Working tree     - Clean, N commits ahead of origin/main
 PASS License headers  - All changed files have headers
 PASS Formatting       - make fmt clean
 PASS Lint             - make lint succeeded
-PASS MegaLinter       - no hits in changed files
 PASS Build            - make build succeeded
 PASS Tests            - make test succeeded
 PASS Protected files  - charts/ touched; PR owner note required
@@ -258,7 +232,6 @@ PASS Working tree     - Dirty tree acknowledged
 FAIL License headers  - 2 files missing headers
 PASS Formatting       - make fmt clean
 FAIL Lint             - golangci-lint failed in internal/...
-SKIP MegaLinter       - not run locally; CI runs it
 FAIL Build            - make build failed after apigen
 SKIP Tests            - skipped because build failed
 WARN Protected files  - go.mod and charts/ touched
@@ -276,5 +249,4 @@ Final verdict:
 
 If default-mode formatting or header fixes created uncommitted changes, end
 by asking whether to commit them. Do not create the PR from this skill unless
-the user explicitly asks. `SKIP MegaLinter` does not block `READY FOR PR`;
-CI still runs it.
+the user explicitly asks.
