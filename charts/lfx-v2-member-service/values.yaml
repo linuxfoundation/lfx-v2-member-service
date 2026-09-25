@@ -68,13 +68,11 @@ app:
   # sweep up orgs that never change on their own. Plan the rollout knowing the
   # grant starts here, not at the backfill.
   #
-  # Setting it to "" stops new grants being emitted. It does
-  # not revoke grants already written: fga-sync never deletes a tuple whose
-  # subject begins with "team:", so removal needs
-  # scripts/revoke-lf-teams-auditor-openfga.sh. That guard is in the deployed
-  # fga-sync (added in v0.3.1; the platform chart deploys ~0.3.5), not in this
-  # repo's go.mod pin, which only supplies message types. Adding a team here is
-  # therefore a one-way door. See docs/lf-team-auditor-grants.md.
+  # Setting it to "" stops new grants being emitted. It does not revoke grants
+  # already written: fga-sync preserves team subjects on relations not prefixed
+  # "global_", and this grant uses "auditor". Removal therefore needs
+  # scripts/revoke-lf-teams-auditor-openfga.sh. Adding a team here remains a
+  # one-way door. See docs/lf-team-auditor-grants.md.
   #
   # Staff only. lfContractorTeamName was added under LFXV2-3071 and has been
   # withdrawn: that parity rested on lf-contractor holding auditor on the tenant

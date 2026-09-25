@@ -6,9 +6,10 @@
 # by the configured team subjects on b2b_org objects. The inverse of
 # grant-lf-teams-auditor-openfga.sh. See LFXV2-2937.
 #
-# This exists because the grant is otherwise irreversible: fga-sync never
-# deletes a tuple whose subject begins with `team:`, so reverting the service
-# code does not remove the tuples — it only stops new ones being written.
+# This exists because the grant is otherwise irreversible: fga-sync preserves
+# team subjects on relations not prefixed `global_`. This grant uses `auditor`,
+# so reverting the service code does not remove the tuples — it only stops new
+# ones being written.
 # Shipping this alongside the grant turns "point of no return" into a
 # one-command rollback rather than a script written under incident pressure.
 #
@@ -36,9 +37,9 @@
 #      ORG_RECONCILE_ENABLED=false in that environment's overlay.
 #   Revoking while either writer is live is a race this script cannot win:
 #   any org written during or after the run re-acquires the tuple, and fga-sync
-#   will not reap it afterwards because the subject begins with `team:`. The
-#   residue is invisible — a post-run dry-run reports only what it can see at
-#   that instant, so wait at least two reconciler runs (~20 min) before the
+#   will not reap it afterwards because `auditor` is not a `global_*` relation.
+#   The residue is invisible — a post-run dry-run reports only what it can see
+#   at that instant, so wait at least two reconciler runs (~20 min) before the
 #   confirming dry-run.
 #
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
