@@ -5,7 +5,7 @@ This guide provides essential information for Claude instances working with the 
 > **Central LFX skills:**
 > - `lfx-skills:lfx` for cross-repo tasks, "where does X live" questions, owner/peer repo routing, or missing checkouts.
 > - `lfx-skills:lfx-platform-architecture` for platform composition, V2 service classes, write/read/access-check flows, NATS/KV ownership, and handoff points across FGA, indexer, query, Heimdall, OpenFGA, Helm, or ArgoCD.
-> - Local review lifecycle: see [Pre-PR review](#pre-pr-review) below.
+> - Local review lifecycle: see [Pre-PR review](#pre-pr-review) below. Every commit is signed and DCO-signed-off (`git commit -s -S`); `/member-service-pr-readiness` fails otherwise.
 > - **Local skills:**
 >   - `member-service-dev` auto-attaches on Go and service paths (`**/*.go`, `cmd/**`, `internal/**`, `pkg/**`, `gen/**`, `Makefile`) and owns Go conventions, Goa boundaries, NATS/KV cache and RPC rules, tests, formatting, and the Salesforce-integration callout.
 >   - `member-add-endpoint` is the entry point for adding or changing any membership HTTP endpoint (Goa design, regen, handler, tests, Heimdall ruleset update).

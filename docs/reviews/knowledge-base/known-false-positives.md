@@ -77,7 +77,7 @@ and indexer messages for b2b-org, b2b-org settings, and key-contacts (see
 ## Documented shape, not a defect
 
 Salvaged from the retired conventions-review agent (2026-09-25): the two suppressions it
-carried that are not restated anywhere else in the review surface.
+carried that this KB did not already hold.
 
 ### `REPOSITORY_SOURCE=mock` is not an offline mode
 
@@ -89,28 +89,37 @@ Salesforce-backed reader for an in-memory mock and initialises **no** Salesforce
 `ProjectResolverImpl` returns `nil` for `mock` before `sfInit`
 (`cmd/member-api/service/providers.go:163`), and every other `sfInit`/`sObjectClientInit`
 call sits under `case "salesforce"` (`providers.go:242,274,282,316,340,437,582`). What mock
-mode still needs is NATS: `QueueSubscriptions` calls `natsInit` unconditionally and registers
-the `b2b_org_lookup` and `invite_accepted` handlers in mock mode too (`providers.go:942-948`).
+mode still needs is NATS: `QueueSubscriptions` calls `natsInit` unconditionally
+(`providers.go:943`) and registers the `b2b_org_lookup` and `invite_accepted` handlers in mock
+mode too (`providers.go:954-968`); only the project-id-map subscription is skipped.
 A finding that mock mode "initialises Salesforce" is wrong on the facts; a finding that it
 needs NATS is not a defect unless the change itself claims to make mock mode offline. The
-consumer binary (`runConsumer` → `CDCConsumerImpl`, `providers.go:991-1004`) always
+consumer mode (`runConsumer` → `CDCConsumerImpl`, `providers.go:991-1004`) always
 initialises Salesforce and is not governed by `REPOSITORY_SOURCE`.
+`docs/agent-guidance/salesforce-integration.md` § "Mock repository still starts shared
+dependencies" is stale on the Salesforce half (it says NATS/Salesforce are still initialised);
+the provider code above is authoritative.
 
 **Source:** provider code cited above (verified 2026-09-25); carried over from the retired
-`member-service-code-reviewer` skill, which stated it as "mock repository still starts shared
-dependencies".
+`lfx-skills:lfx-member-service-code-reviewer` agent, which pointed at
+`docs/agent-guidance/salesforce-integration.md` § "Mock repository still starts shared
+dependencies" for it.
 
 ### Target Architecture in `ARCHITECTURE.md` is not current behaviour
 
-**Pattern matched:** "does not match `ARCHITECTURE.md`" where the cited text sits under
-"Target Architecture" — root `/key_contacts/{uid}` routes, "ports to remove in the target
-state", target-era type or relation names.
+**Pattern matched:** "does not match `ARCHITECTURE.md`" where the cited text describes a
+part of the Target Architecture that its Implementation Plan still marks unshipped — today
+the root `/key_contacts/{uid}` routes (Step 4, *Mostly Done*) and the remaining sObject read
+wiring for membership reads (Step 2, *Partially Done*), plus "ports to remove in the target
+state" that still exist.
 
 **Why false:** `ARCHITECTURE.md` deliberately holds both "Current State" and "Target
-Architecture"; the target sections describe a migration not yet shipped. Divergence from
-the target is a finding only when the change explicitly implements that part of the
-migration — and then the docs/contracts must move in the same change
-(`docs-and-comments-drift.md`).
+Architecture"; only the parts its Implementation Plan marks unshipped describe a migration
+not yet done. Target text for steps marked *Done* (3, 5–9) — including the live `b2b_org` /
+`project_membership` types, FGA sync, indexer and CDC behaviour — **is** current behaviour and
+is not covered by this entry; a drift finding against it stands. Divergence from an unshipped
+part is a finding only when the change explicitly implements that part of the migration — and
+then the docs/contracts must move in the same change (`docs-and-comments-drift.md`).
 
 **Source:** `ARCHITECTURE.md` §Current State / §Target Architecture;
 `.github/copilot-instructions.md` states the same caveat for PR-side review.

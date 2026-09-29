@@ -71,7 +71,7 @@ If the diff is too big for context, save it to `/tmp/member-learnings-reviewer-d
 
 | Pattern file | Read when |
 | --- | --- |
-| `salesforce-and-uuid.md` | any file under `internal/infrastructure/salesforce/**`, `pkg/sfuuid/**`, `internal/infrastructure/project/**`, or any `.go` that calls `sfuuid.ToSFID` / `sfuuid.ToUUID`, builds a SOQL string, or resolves a project UID↔SFID |
+| `salesforce-and-uuid.md` | any file under `internal/infrastructure/salesforce/**`, `pkg/sfuuid/**`, `internal/infrastructure/project/**`, or any `.go` that calls a `pkg/sfuuid` helper (`Normalize18` / `Normalize15` / `Salesforce15To18` / `IsSFID`), builds a SOQL string, or resolves a project UID↔SFID |
 | `cache-and-kv.md` | any file under `internal/infrastructure/nats/**`, `pkg/constants/storage.go`, `pkg/constants/nats.go`, or any handler in `cmd/member-api/service/**` / `internal/service/**` that performs a key-contact / b2b-org / settings write |
 | `endpoint-and-goa.md` | any file under `cmd/member-api/design/**`, `cmd/member-api/service/**`, `internal/service/**`, or `gen/**` |
 | `fga-and-indexer.md` | any file under `internal/service/**` or `internal/domain/model/**` building FGA/indexer messages (`message_builders.go`, `b2b_org_settings.go`, `*_writer.go`, `member_message.go`), `pkg/constants/subjects.go`, or `docs/fga-contract.md` |
