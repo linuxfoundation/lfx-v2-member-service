@@ -450,10 +450,11 @@ test_verify_rejects_unapproved_census_difference() {
 }
 
 test_plan_live_roster_rejects_non_user_subjects() {
-	local dir census subject status
+	local dir census errors subject user status
 	dir=$(mktemp -d)
 	census=$(mktemp)
-	trap 'rm -rf "$dir"; rm -f "$census"' RETURN
+	errors=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$errors"' RETURN
 	write_live_roster_plan_fixture "$dir" "$census"
 	for subject in \
 		'{"user":"user:*","relation":"member","object":"team:global_org_admin"}' \
@@ -463,9 +464,15 @@ test_plan_live_roster_rejects_non_user_subjects() {
 		'{"user":"user:alice bob","relation":"member","object":"team:global_org_admin"}'; do
 		# shellcheck disable=SC2329 # Fixture override invoked through migration_plan.
 		fga_read_all() { printf '%s\n' "$subject"; }
+		user=$(jq -r '.user' <<<"$subject")
 		status=0
-		migration_plan "$dir" "$census" 1 false live >/dev/null 2>&1 || status=$?
+		migration_plan "$dir" "$census" 1 false live >/dev/null 2>"$errors" || status=$?
 		assert_eq "4" "$status" "a live roster with $(jq -c '{user,condition}' <<<"$subject") must not be approved"
+		if grep -qF "$user" "$errors"; then
+			fail "rejected principals must not be printed to stderr: $(cat "$errors")"
+		fi
+		assert_eq "$user" "$(jq -r '.user' "$dir/stable-roster-rejected.jsonl")" \
+			"rejected subjects must be recorded in the owner-only output directory for review"
 	done
 }
 

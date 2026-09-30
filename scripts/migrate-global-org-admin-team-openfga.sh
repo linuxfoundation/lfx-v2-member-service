@@ -280,14 +280,17 @@ migration_plan() {
 			fga_error "stable team roster is empty; refusing to approve it"
 			return 4
 		fi
-		local unsupported
-		unsupported=$(jq -r 'select((.user | test("^user:[^*#\\s]+$") | not) or has("condition")) | .user' \
-			"$directory/stable-roster-plan.jsonl")
-		if [[ -n "$unsupported" ]]; then
+		# Rejected subjects are principals: keep them in the owner-only output
+		# directory (umask 077) rather than on stderr, which ends up in logs.
+		local rejected="$directory/stable-roster-rejected.jsonl"
+		jq -c 'select((.user | test("^user:[^*#\\s]+$") | not) or has("condition"))' \
+			"$directory/stable-roster-plan.jsonl" >"$rejected"
+		if [[ -s "$rejected" ]]; then
 			rm -f "${plan_tmp_files[@]}" "$directory/stable-roster-plan.jsonl"
-			fga_error "stable team has members that are not direct users (wildcard, userset, or conditional); refusing to approve: $(printf '%s' "$unsupported" | paste -sd, -)"
+			fga_error "stable team has $(migration_line_count "$rejected") member(s) that are not direct users (wildcard, userset, or conditional); refusing to approve. Review $rejected"
 			return 4
 		fi
+		rm -f "$rejected"
 	else
 		jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
 			"$directory/legacy-roster.jsonl" >"$directory/stable-roster-plan.jsonl"
