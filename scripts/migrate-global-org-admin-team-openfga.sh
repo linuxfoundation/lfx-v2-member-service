@@ -29,6 +29,7 @@ Options:
   --census-file FILE
   --salesforce-count N
   --approve-census-difference
+  --stable-roster-from-live
   --allowed-user USER --denied-user USER --sample-org UID
   --dry-run
   --confirm
@@ -36,6 +37,8 @@ Options:
 
 cleanup requires the allowed/denied/sample controls and --cutover-complete.
 restore verifies the final precleanup tuple hashes before previewing or writing.
+plan --stable-roster-from-live records the current stable-team roster as the approved
+roster instead of copying the legacy roster; verify and cleanup then require exactly it.
 USAGE
 }
 
@@ -181,6 +184,7 @@ migration_write_plan_summary() {
 	local missing_uids="$4"
 	local salesforce_count="$5"
 	local approve_difference="$6"
+	local roster_source="${7:-legacy}"
 	local census_count orphan_count missing_count difference approved manifest_hash roster_hash grants_hash
 	census_count=$(migration_line_count "$census_uids")
 	orphan_count=$(migration_line_count "$orphan_uids")
@@ -195,11 +199,11 @@ migration_write_plan_summary() {
 		--argjson difference "$difference" --argjson orphan_count "$orphan_count" \
 		--argjson missing_source_count "$missing_count" --argjson census_approved "$approved" \
 		--arg manifest_hash "$manifest_hash" --arg roster_hash "$roster_hash" \
-		--arg grants_hash "$grants_hash" \
+		--arg grants_hash "$grants_hash" --arg roster_source "$roster_source" \
 		'{census_count:$census_count,salesforce_count:$salesforce_count,census_difference:$difference,
 		  census_approved:$census_approved,live_count:$census_count,orphan_count:$orphan_count,
 		  missing_source_count:$missing_source_count,snapshot_manifest_sha256:$manifest_hash,
-		  stable_roster_sha256:$roster_hash,
+		  stable_roster_source:$roster_source,stable_roster_sha256:$roster_hash,
 		  live_grants_sha256:$grants_hash}' >"$directory/summary.json"
 	echo "Plan: $census_count live, $orphan_count orphan, $missing_count missing source"
 	if [[ "$approved" != true ]]; then
@@ -213,6 +217,7 @@ migration_plan() {
 	local census_file="$2"
 	local salesforce_count="$3"
 	local approve_difference="$4"
+	local roster_source="${5:-legacy}"
 	[[ -f "$directory/manifest.json" && -f "$directory/legacy-grants.jsonl" &&
 		-f "$directory/legacy-roster.jsonl" && -f "$census_file" ]] || {
 		fga_error "snapshot or census artifact is missing"
@@ -243,11 +248,28 @@ migration_plan() {
 	migration_write_grant_file "$census_uids" "$FGA_STABLE_TEAM" "$directory/live-grants.jsonl"
 	migration_write_grant_file "$orphan_uids" "$old_team" "$directory/orphan-grants.jsonl"
 	migration_write_grant_file "$missing_uids" "$FGA_STABLE_TEAM" "$directory/missing-source-grants.jsonl"
-	jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
-		"$directory/legacy-roster.jsonl" >"$directory/stable-roster-plan.jsonl"
+	if [[ "$roster_source" == live ]]; then
+		# The stable team is authoritative: approve its current roster as-is.
+		# verify and cleanup then require exactly this hash-bound roster.
+		migration_sorted_read \
+			"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
+			"$directory/stable-roster-plan.jsonl" || {
+			local read_status=$?
+			rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+			return "$read_status"
+		}
+		if [[ ! -s "$directory/stable-roster-plan.jsonl" ]]; then
+			rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+			fga_error "stable team roster is empty; refusing to approve it"
+			return 4
+		fi
+	else
+		jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
+			"$directory/legacy-roster.jsonl" >"$directory/stable-roster-plan.jsonl"
+	fi
 	local status=0
 	migration_write_plan_summary "$directory" "$census_uids" "$orphan_uids" \
-		"$missing_uids" "$salesforce_count" "$approve_difference" || status=$?
+		"$missing_uids" "$salesforce_count" "$approve_difference" "$roster_source" || status=$?
 	rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
 	return "$status"
 }
@@ -653,6 +675,7 @@ migration_parse_args() {
 		--denied-user) MIGRATION_DENIED_USER="${2:-}"; shift 2 ;;
 		--sample-org) MIGRATION_SAMPLE_ORG="${2:-}"; shift 2 ;;
 		--approve-census-difference) MIGRATION_APPROVE_DIFFERENCE=true; shift ;;
+		--stable-roster-from-live) MIGRATION_STABLE_ROSTER_SOURCE=live; shift ;;
 		--dry-run) MIGRATION_DRY_RUN=true; shift ;;
 		--confirm) MIGRATION_CONFIRM=true; shift ;;
 		--cutover-complete) MIGRATION_CUTOVER_COMPLETE=true; shift ;;
@@ -674,7 +697,7 @@ migration_dispatch() {
 			return 2
 		}
 		migration_plan "$MIGRATION_OUTPUT_DIR" "$MIGRATION_CENSUS_FILE" \
-			"$MIGRATION_SALESFORCE_COUNT" "$MIGRATION_APPROVE_DIFFERENCE"
+			"$MIGRATION_SALESFORCE_COUNT" "$MIGRATION_APPROVE_DIFFERENCE" "$MIGRATION_STABLE_ROSTER_SOURCE"
 		;;
 	apply) migration_apply "$MIGRATION_OUTPUT_DIR" "$MIGRATION_DRY_RUN" "$MIGRATION_CONFIRM" ;;
 	verify)
@@ -702,9 +725,13 @@ migration_main() {
 	MIGRATION_CENSUS_FILE="" MIGRATION_SALESFORCE_COUNT=""
 	MIGRATION_BASE_URL="${OPENFGA_URL:-http://localhost:8080}"
 	MIGRATION_APPROVE_DIFFERENCE=false MIGRATION_DRY_RUN=false
-	MIGRATION_CONFIRM=false MIGRATION_CUTOVER_COMPLETE=false
+	MIGRATION_CONFIRM=false MIGRATION_CUTOVER_COMPLETE=false MIGRATION_STABLE_ROSTER_SOURCE=legacy
 	MIGRATION_ALLOWED_USER="" MIGRATION_DENIED_USER="" MIGRATION_SAMPLE_ORG=""
 	migration_parse_args "$@" || return $?
+	if [[ "$MIGRATION_STABLE_ROSTER_SOURCE" == live && "$MIGRATION_PHASE" != plan ]]; then
+		fga_error "--stable-roster-from-live only applies to plan"
+		return 2
+	fi
 	[[ -n "$MIGRATION_STORE_ID" && -n "$MIGRATION_OLD_TEAM" && -n "$MIGRATION_OUTPUT_DIR" ]] || {
 		fga_error "--store-id, --old-team, and --output-dir are required"
 		return 2

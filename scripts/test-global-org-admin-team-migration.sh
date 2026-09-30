@@ -306,6 +306,78 @@ test_plan_rejects_empty_census() {
 	assert_eq "4" "$status" "an empty live-organization census must block planning"
 }
 
+write_live_roster_plan_fixture() {
+	local dir="$1"
+	local census="$2"
+	printf '%s\n' '{"store_id":"store","old_team":"old","source_old_tuple_count":2}' >"$dir/manifest.json"
+	printf '%s\n' \
+		'{"user":"user:alice","relation":"member","object":"team:old"}' \
+		'{"user":"user:dave","relation":"member","object":"team:old"}' \
+		>"$dir/legacy-roster.jsonl"
+	printf '%s\n' \
+		'{"user":"team:old#member","relation":"global_org_admin","object":"b2b_org:live"}' \
+		>"$dir/legacy-grants.jsonl"
+	printf '%s\n' '{"uid":"live"}' >"$census"
+}
+
+test_plan_live_roster_is_approved_and_enforced() {
+	local dir census stable_members status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	printf '%s\n' alice bob >"$stable_members"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_plan and the stable-plan gate.
+	fga_read_all() {
+		local object
+		object=$(printf '%s' "$1" | jq -r '.object // ""')
+		if [[ "$object" == "team:global_org_admin" ]]; then
+			jq -Rc '{user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+				"$stable_members"
+		else
+			printf '%s\n' \
+				'{"user":"team:global_org_admin#member","relation":"global_org_admin","object":"b2b_org:live","condition":null}'
+		fi
+	}
+
+	migration_plan "$dir" "$census" 1 false live >/dev/null
+
+	assert_eq "user:alice,user:bob" "$(jq -r '.user' "$dir/stable-roster-plan.jsonl" | paste -sd, -)" \
+		"a live-roster plan must approve the stable team as it is: bob added there stays, dave removed there is not re-copied"
+	assert_eq "live" "$(jq -r '.stable_roster_source' "$dir/summary.json")" \
+		"the plan summary must record where the approved roster came from"
+	migration_assert_live_stable_plan "$dir" >/dev/null 2>&1 ||
+		fail "the approved live roster must satisfy the stable-plan gate"
+	printf '%s\n' carol >>"$stable_members"
+	migration_assert_live_stable_plan "$dir" >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a stable roster that changes after plan must still block verify and cleanup"
+}
+
+test_plan_live_roster_rejects_empty_stable_team() {
+	local dir census status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_plan.
+	fga_read_all() { :; }
+	migration_plan "$dir" "$census" 1 false live >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "an empty stable team must never be approved as the roster"
+}
+
+test_stable_roster_flag_only_applies_to_plan() {
+	local dir errors status=0
+	dir=$(mktemp -d)
+	errors=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$errors"' RETURN
+	migration_main cleanup --store-id store --old-team old --output-dir "$dir" \
+		--stable-roster-from-live >/dev/null 2>"$errors" || status=$?
+	assert_eq "2" "$status" "--stable-roster-from-live must be rejected outside plan"
+	grep -q "only applies to plan" "$errors" ||
+		fail "the rejection must come from the plan-only guard, not another argument check"
+}
+
 test_changed_snapshot_manifest_invalidates_existing_plan() {
 	local dir status=0
 	dir=$(mktemp -d)
@@ -873,6 +945,9 @@ test_cleanup_requires_checkpoint
 test_cleanup_requires_authorization_controls
 test_plan_classifies_grants
 test_plan_rejects_empty_census
+test_plan_live_roster_is_approved_and_enforced
+test_plan_live_roster_rejects_empty_stable_team
+test_stable_roster_flag_only_applies_to_plan
 test_changed_snapshot_manifest_invalidates_existing_plan
 test_cleanup_blocks_old_write_increase
 test_cleanup_blocks_compensating_tuple_drift

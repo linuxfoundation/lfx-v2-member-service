@@ -17,6 +17,8 @@ approved change window and an explicit store ID.
 - Writes and deletes use batches of at most 100 and ignore duplicates or already-missing tuples.
 - Plan copies grants only for current, non-deleted organizations in the OpenSearch census.
 - Each plan records the snapshot manifest hash; a newer snapshot invalidates the old plan.
+- The approved stable roster is copied from the legacy roster, or with `--stable-roster-from-live`
+  read from the current stable team; either way it is hash-bound in `summary.json`.
 - Any OpenSearch-to-Salesforce count difference blocks writes until explicitly approved.
 - Cleanup requires a matching verification checkpoint, completed API and CDC rollouts, and no
   old-team tuples absent from the pre-cutover snapshot. Immediately before deletion it also
@@ -77,6 +79,24 @@ scripts/migrate-global-org-admin-team-openfga.sh plan \
 
 If the counts differ, investigate first. After recording the explanation in the operator change,
 rerun with `--approve-census-difference`. Record `orphan_count` from `summary.json` on LFXV2-3034.
+
+By default the plan approves a stable roster copied from the legacy roster, and `verify`/`cleanup`
+require the stable team to match it exactly. If the stable team is already the authoritative roster
+(members were added or removed there after cutover), add `--stable-roster-from-live`: the plan
+records the stable team's current roster instead, `summary.json` shows
+`stable_roster_source: "live"`, and `verify`/`cleanup` require exactly that reviewed roster.
+
+With `--stable-roster-from-live`:
+
+- Nothing compares the approved roster with the legacy team any more. The peer reviewer must check
+  `stable-roster-plan.jsonl` against the intended administrator list, alongside the roster and
+  grant counts, before `verify`.
+- `apply` adds no members: the planned roster is the stable team as it already is. If every live
+  organization already holds the stable grant, `snapshot` → `plan` → `verify` → `cleanup` needs no
+  `apply`.
+- The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
+  `verify`/`cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` → `plan` →
+  `verify` after an edit.
 
 ## 3. Preview and duplicate stable-team tuples
 
@@ -149,6 +169,10 @@ that exact roster and grants in `precleanup.checkpoint` before deleting them. Re
 live old-team sets to remain subsets of that immutable binding, then delete from the full binding.
 `--dry-run` does not create it. Re-run `verify` and direct authorization checks after cleanup.
 
+The script writes to OpenFGA directly, so fga-sync's check cache (`fga-sync-cache`) is not
+invalidated by it; only fga-sync's own writes do that. Check results in OpenFGA first. If API
+responses still reflect the old grants, purge `fga-sync-cache` or wait for the next fga-sync write.
+
 ## Rollback
 
 Before cleanup, revert the GitOps value to the old team identifier; both tuple sets still exist.
@@ -168,7 +192,8 @@ replace `--dry-run` with `--confirm`. The command refuses to proceed if either f
 hash binding in `precleanup.checkpoint`; writes ignore tuples that already exist, so a confirmed
 restore can be retried.
 
-After the confirmed restore, directly verify the known allowed and denied principals against a
+After the confirmed restore, purge `fga-sync-cache` so restored access is visible through the API,
+then directly verify the known allowed and denied principals against a
 representative organization. Only then revert the GitOps value to the old team identifier and wait
 for both the API and CDC consumer Deployments to complete. Keep the stable tuples in place until the
 rollback has been verified; normal service reconciliation does not restore team-subject tuples.
