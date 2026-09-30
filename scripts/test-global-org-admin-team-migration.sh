@@ -436,7 +436,9 @@ test_plan_live_roster_rejects_non_user_subjects() {
 	for subject in \
 		'{"user":"user:*","relation":"member","object":"team:global_org_admin"}' \
 		'{"user":"team:other#member","relation":"member","object":"team:global_org_admin"}' \
-		'{"user":"user:alice","relation":"member","object":"team:global_org_admin","condition":{"name":"window"}}'; do
+		'{"user":"user:alice","relation":"member","object":"team:global_org_admin","condition":{"name":"window"}}' \
+		'{"user":"user:alice*bob","relation":"member","object":"team:global_org_admin"}' \
+		'{"user":"user:alice bob","relation":"member","object":"team:global_org_admin"}'; do
 		# shellcheck disable=SC2329 # Fixture override invoked through migration_plan.
 		fga_read_all() { printf '%s\n' "$subject"; }
 		status=0
@@ -632,6 +634,49 @@ test_cleanup_revalidates_stable_plan_and_controls_before_deletes() {
 	first_delete=$(awk -F: '$1 == "delete" { print NR; exit }' "$call_log")
 	[[ "$last_check" -lt "$first_delete" ]] ||
 		fail "authorization controls must complete immediately before legacy deletes"
+}
+
+test_cleanup_rejects_unapproved_census_with_existing_checkpoint() {
+	local dir call_log status=0
+	dir=$(mktemp -d)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$call_log"' RETURN
+	write_cleanup_fixture "$dir"
+	# A checkpoint written by a verify that did not yet enforce census approval
+	# binds an unapproved summary; cleanup must still refuse before any delete.
+	jq '.census_approved = false' "$dir/summary.json" >"$dir/summary.tmp" && mv "$dir/summary.tmp" "$dir/summary.json"
+	fga_write_checkpoint "$dir"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_cleanup.
+	fga_read_all() {
+		local object user
+		object=$(printf '%s' "$1" | jq -r '.object // ""')
+		user=$(printf '%s' "$1" | jq -r '.user // ""')
+		if [[ "$user" == "team:old#member" ]]; then
+			printf '%s\n' '{"user":"team:old#member","relation":"global_org_admin","object":"b2b_org:fixture-org"}'
+		elif [[ "$user" == "team:global_org_admin#member" ]]; then
+			printf '%s\n' \
+				'{"user":"team:global_org_admin#member","relation":"global_org_admin","object":"b2b_org:fixture-org"}'
+		elif [[ "$object" == "team:old" ]]; then
+			printf '%s\n' '{"user":"user:fixture-admin","relation":"member","object":"team:old"}'
+		elif [[ "$object" == "team:global_org_admin" ]]; then
+			printf '%s\n' '{"user":"user:fixture-admin","relation":"member","object":"team:global_org_admin"}'
+		fi
+	}
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_cleanup.
+	fga_check() { [[ "$1" == "user:fixture-admin" ]] && printf '%s\n' true || printf '%s\n' false; }
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_cleanup.
+	fga_apply_tuple_file() { printf 'delete:%s\n' "$2" >>"$call_log"; }
+
+	migration_cleanup "$dir" old false true true fixture-admin fixture-denied fixture-org >/dev/null 2>&1 ||
+		status=$?
+	assert_eq "4" "$status" "cleanup must refuse an unapproved census even with a valid verified checkpoint"
+	[[ ! -s "$call_log" ]] || fail "cleanup must not delete anything on an unapproved census: $(cat "$call_log")"
+
+	jq '.census_approved = true' "$dir/summary.json" >"$dir/summary.tmp" && mv "$dir/summary.tmp" "$dir/summary.json"
+	fga_write_checkpoint "$dir"
+	migration_cleanup "$dir" old false true true fixture-admin fixture-denied fixture-org >/dev/null ||
+		fail "the same cleanup with an approved census must proceed, so the census gate is what refused it"
+	[[ -s "$call_log" ]] || fail "an approved cleanup must delete the bound legacy tuples"
 }
 
 test_cleanup_blocks_stable_plan_drift_before_deletes() {
@@ -1046,6 +1091,7 @@ test_changed_snapshot_manifest_invalidates_existing_plan
 test_cleanup_blocks_old_write_increase
 test_cleanup_blocks_compensating_tuple_drift
 test_cleanup_revalidates_stable_plan_and_controls_before_deletes
+test_cleanup_rejects_unapproved_census_with_existing_checkpoint
 test_cleanup_blocks_stable_plan_drift_before_deletes
 test_cleanup_blocks_concurrent_old_write_before_deletes
 test_restore_uses_hashed_precleanup_subset

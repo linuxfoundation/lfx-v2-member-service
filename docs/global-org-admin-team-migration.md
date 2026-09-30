@@ -20,8 +20,9 @@ approved change window and an explicit store ID.
 - The approved stable roster is copied from the legacy roster, or with `--stable-roster-from-live`
   read from the current stable team (direct `user:` members only); either way it is hash-bound in
   `summary.json`.
-- Any OpenSearch-to-Salesforce count difference blocks `apply` and `verify` (and therefore
-  `cleanup`) until explicitly approved.
+- Any OpenSearch-to-Salesforce count difference blocks `apply`, `verify`, and `cleanup` until
+  explicitly approved. Each phase checks `census_approved` itself, so a checkpoint written by an
+  older script cannot carry an unapproved plan into `cleanup`.
 - Cleanup requires a matching verification checkpoint, completed API and CDC rollouts, and no
   old-team tuples absent from the pre-cutover snapshot. Immediately before deletion it also
   revalidates the stable roster and grants against the approved plan and reruns the baseline
@@ -97,8 +98,9 @@ With `--stable-roster-from-live`:
   grant counts, before `apply` or `verify`.
 - `plan` refuses a stable team that is empty or has members other than direct users (wildcards,
   usersets, or conditional tuples).
-- `apply` never writes members. It first confirms that the stable team still equals the approved
-  roster and exits 4 if it changed, so a removal made after `plan` is never undone. If every live
+- `apply` never writes members. Writing the approved roster back would undo any removal made in
+  sso-tools after `plan`, and `verify` would then pass. So `apply` first confirms that the stable
+  team still equals the approved roster and exits 4 if it changed. If every live
   organization already holds the stable grant, `snapshot` → `plan` → `verify` → `cleanup` needs no
   `apply`; `verify` still requires the census difference to be approved.
 - The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
@@ -178,7 +180,12 @@ live old-team sets to remain subsets of that immutable binding, then delete from
 
 The script writes to OpenFGA directly, so fga-sync's check cache (`fga-sync-cache`) is not
 invalidated by it; only fga-sync's own writes do that. Check results in OpenFGA first. If API
-responses still reflect the old grants, purge `fga-sync-cache` or wait for the next fga-sync write.
+responses still reflect the old grants, invalidate the cache the same way fga-sync does, by
+rewriting its `inv` marker; every cached decision older than the marker is then re-checked:
+
+```bash
+kubectl -n lfx exec deploy/lfx-platform-nats-box -- nats kv put fga-sync-cache inv 1
+```
 
 ## Rollback
 
@@ -199,7 +206,8 @@ replace `--dry-run` with `--confirm`. The command refuses to proceed if either f
 hash binding in `precleanup.checkpoint`; writes ignore tuples that already exist, so a confirmed
 restore can be retried.
 
-After the confirmed restore, purge `fga-sync-cache` so restored access is visible through the API,
+After the confirmed restore, invalidate `fga-sync-cache` with the command in section 6 so restored
+access is visible through the API,
 then directly verify the known allowed and denied principals against a
 representative organization. Only then revert the GitOps value to the old team identifier and wait
 for both the API and CDC consumer Deployments to complete. Keep the stable tuples in place until the

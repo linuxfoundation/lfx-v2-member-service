@@ -247,9 +247,10 @@ migration_plan() {
 	source_uids=$(mktemp)
 	orphan_uids=$(mktemp)
 	missing_uids=$(mktemp)
+	local plan_tmp_files=("$census_uids" "$source_uids" "$orphan_uids" "$missing_uids")
 	jq -r 'select(.uid | type == "string" and length > 0) | .uid' "$census_file" | LC_ALL=C sort -u >"$census_uids"
 	if [[ ! -s "$census_uids" ]]; then
-		rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+		rm -f "${plan_tmp_files[@]}"
 		fga_error "live-organization census is empty"
 		return 4
 	fi
@@ -269,19 +270,19 @@ migration_plan() {
 			"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
 			"$directory/stable-roster-plan.jsonl" || {
 			local read_status=$?
-			rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+			rm -f "${plan_tmp_files[@]}"
 			return "$read_status"
 		}
 		if [[ ! -s "$directory/stable-roster-plan.jsonl" ]]; then
-			rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+			rm -f "${plan_tmp_files[@]}"
 			fga_error "stable team roster is empty; refusing to approve it"
 			return 4
 		fi
 		local unsupported
-		unsupported=$(jq -r 'select((.user | test("^user:[^*#][^#]*$") | not) or has("condition")) | .user' \
+		unsupported=$(jq -r 'select((.user | test("^user:[^*#\\s]+$") | not) or has("condition")) | .user' \
 			"$directory/stable-roster-plan.jsonl")
 		if [[ -n "$unsupported" ]]; then
-			rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids" "$directory/stable-roster-plan.jsonl"
+			rm -f "${plan_tmp_files[@]}" "$directory/stable-roster-plan.jsonl"
 			fga_error "stable team has members that are not direct users (wildcard, userset, or conditional); refusing to approve: $(printf '%s' "$unsupported" | paste -sd, -)"
 			return 4
 		fi
@@ -292,8 +293,16 @@ migration_plan() {
 	local status=0
 	migration_write_plan_summary "$directory" "$census_uids" "$orphan_uids" \
 		"$missing_uids" "$salesforce_count" "$approve_difference" "$roster_source" || status=$?
-	rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+	rm -f "${plan_tmp_files[@]}"
 	return "$status"
+}
+
+migration_require_census_approved() {
+	local directory="$1"
+	[[ "$(jq -r '.census_approved' "$directory/summary.json" 2>/dev/null)" == true ]] || {
+		fga_error "census difference is not approved; re-run plan with --approve-census-difference after review"
+		return 4
+	}
 }
 
 migration_validate_plan_hashes() {
@@ -331,10 +340,7 @@ migration_apply() {
 		fga_error "summary.json is missing; run plan first"
 		return 6
 	}
-	[[ "$(jq -r '.census_approved' "$directory/summary.json")" == true ]] || {
-		fga_error "census difference is not approved"
-		return 4
-	}
+	migration_require_census_approved "$directory" || return $?
 	migration_validate_plan_hashes "$directory" || return $?
 	migration_require_execution_mode apply "$dry_run" "$confirm" || return $?
 	case "$(jq -r '.stable_roster_source // "legacy"' "$directory/summary.json")" in
@@ -461,10 +467,7 @@ migration_verify() {
 		fga_error "baseline-checks.json is missing; rerun snapshot"
 		return 6
 	}
-	[[ "$(jq -r '.census_approved' "$directory/summary.json" 2>/dev/null)" == true ]] || {
-		fga_error "census difference is not approved; re-run plan with --approve-census-difference after review"
-		return 4
-	}
+	migration_require_census_approved "$directory" || return $?
 	local extra_grants status
 	extra_grants=$(mktemp)
 	migration_assert_live_stable_plan "$directory" "$extra_grants" || {
@@ -678,6 +681,9 @@ migration_cleanup() {
 		return 6
 	}
 
+	# A verified.checkpoint written before verify enforced census approval can
+	# bind an unapproved summary; re-check here before any delete.
+	migration_require_census_approved "$directory" || return $?
 	migration_assert_live_stable_plan "$directory" || return $?
 	migration_assert_authorization_baseline "$directory" "$directory/precleanup-checks.json" \
 		"$allowed_user" "$denied_user" "$sample_org" || return $?
