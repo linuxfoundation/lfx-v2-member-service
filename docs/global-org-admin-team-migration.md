@@ -117,7 +117,9 @@ scripts/migrate-global-org-admin-team-openfga.sh apply \
   --dry-run
 ```
 
-After peer review, replace `--dry-run` with `--confirm`. Rerunning is safe.
+After peer review, replace `--dry-run` with `--confirm`. Rerunning is safe. After a confirmed
+`apply`, invalidate fga-sync's check cache (section 6), so new stable-team grants are not denied
+from cached decisions.
 
 ## 4. Change configuration through GitOps
 
@@ -179,13 +181,17 @@ live old-team sets to remain subsets of that immutable binding, then delete from
 `--dry-run` does not create it. Re-run `verify` and direct authorization checks after cleanup.
 
 The script writes to OpenFGA directly, so fga-sync's check cache (`fga-sync-cache`) is not
-invalidated by it; only fga-sync's own writes do that. Check results in OpenFGA first. If API
-responses still reflect the old grants, invalidate the cache the same way fga-sync does, by
-rewriting its `inv` marker; every cached decision older than the marker is then re-checked:
+invalidated by it; only fga-sync's own writes do that. Cached `allowed` decisions for removed
+legacy-team members would otherwise stay in effect until the next fga-sync write or cache expiry.
+Immediately after every confirmed `apply`, `cleanup`, or `restore`, invalidate the cache the same
+way fga-sync does, by rewriting its `inv` marker; every cached decision older than the marker is
+then re-checked against OpenFGA:
 
 ```bash
 kubectl -n lfx exec deploy/lfx-platform-nats-box -- nats kv put fga-sync-cache inv 1
 ```
+
+Then run the direct authorization checks.
 
 ## Rollback
 
