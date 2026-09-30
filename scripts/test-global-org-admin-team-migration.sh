@@ -347,11 +347,102 @@ test_plan_live_roster_is_approved_and_enforced() {
 		"a live-roster plan must approve the stable team as it is: bob added there stays, dave removed there is not re-copied"
 	assert_eq "live" "$(jq -r '.stable_roster_source' "$dir/summary.json")" \
 		"the plan summary must record where the approved roster came from"
+	assert_eq "2 1 1" "$(jq -r '"\(.stable_roster_count) \(.stable_roster_added_vs_legacy) \(.stable_roster_removed_vs_legacy)"' "$dir/summary.json")" \
+		"the plan summary must show the reviewer how the approved roster differs from the legacy roster"
 	migration_assert_live_stable_plan "$dir" >/dev/null 2>&1 ||
 		fail "the approved live roster must satisfy the stable-plan gate"
 	printf '%s\n' carol >>"$stable_members"
 	migration_assert_live_stable_plan "$dir" >/dev/null 2>&1 || status=$?
 	assert_eq "4" "$status" "a stable roster that changes after plan must still block verify and cleanup"
+}
+
+test_apply_live_roster_never_writes_roster_and_refuses_changed_team() {
+	local dir census stable_members call_log status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	printf '%s\n' alice bob >"$stable_members"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_plan and migration_apply.
+	fga_read_all() {
+		jq -Rc '{user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+			"$stable_members"
+	}
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	migration_plan "$dir" "$census" 1 false live >/dev/null
+
+	printf '%s\n' alice >"$stable_members"
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "apply must refuse when a member was removed from the stable team after plan"
+	[[ ! -s "$call_log" ]] || fail "apply must not write anything when the stable team changed: $(cat "$call_log")"
+
+	printf '%s\n' alice bob >"$stable_members"
+	migration_apply "$dir" false true >/dev/null
+	assert_eq "writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
+		"a live-roster apply writes grants only, never the roster"
+
+	jq '.stable_roster_source = "other"' "$dir/summary.json" >"$dir/summary.tmp" && mv "$dir/summary.tmp" "$dir/summary.json"
+	status=0
+	migration_apply "$dir" true false >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "apply must fail closed on an unknown roster source"
+}
+
+test_verify_rejects_unapproved_census_difference() {
+	local dir census status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	printf '%s\n' \
+		'{"allowed_user":"admin","denied_user":"nonadmin","sample_org":"live","allowed_result":true,"denied_result":false}' \
+		>"$dir/baseline-checks.json"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_plan and migration_verify.
+	fga_read_all() {
+		local object user
+		object=$(printf '%s' "$1" | jq -r '.object // ""')
+		user=$(printf '%s' "$1" | jq -r '.user // ""')
+		if [[ "$object" == "team:global_org_admin" ]]; then
+			printf '%s\n' '{"user":"user:alice","relation":"member","object":"team:global_org_admin","condition":null}'
+		elif [[ "$object" == "team:old" ]]; then
+			jq -c '. + {condition:null}' "$dir/legacy-roster.jsonl"
+		elif [[ "$user" == "team:old#member" ]]; then
+			jq -c '. + {condition:null}' "$dir/legacy-grants.jsonl"
+		else
+			printf '%s\n' \
+				'{"user":"team:global_org_admin#member","relation":"global_org_admin","object":"b2b_org:live","condition":null}'
+		fi
+	}
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_verify.
+	fga_check() { [[ "$1" == "user:admin" ]] && printf '%s\n' true || printf '%s\n' false; }
+	migration_plan "$dir" "$census" 2 false live >/dev/null 2>&1 || true
+	migration_verify "$dir" admin nonadmin live >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "verify must refuse a plan whose census difference was not approved"
+	[[ ! -f "$dir/verified.checkpoint" ]] || fail "an unapproved census must never produce a verified checkpoint"
+	migration_plan "$dir" "$census" 1 false live >/dev/null
+	migration_verify "$dir" admin nonadmin live >/dev/null ||
+		fail "the same plan with an approved census must verify, so the census gate is what refused it"
+	[[ -f "$dir/verified.checkpoint" ]] || fail "an approved census must produce a verified checkpoint"
+}
+
+test_plan_live_roster_rejects_non_user_subjects() {
+	local dir census subject status
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	for subject in \
+		'{"user":"user:*","relation":"member","object":"team:global_org_admin"}' \
+		'{"user":"team:other#member","relation":"member","object":"team:global_org_admin"}' \
+		'{"user":"user:alice","relation":"member","object":"team:global_org_admin","condition":{"name":"window"}}'; do
+		# shellcheck disable=SC2329 # Fixture override invoked through migration_plan.
+		fga_read_all() { printf '%s\n' "$subject"; }
+		status=0
+		migration_plan "$dir" "$census" 1 false live >/dev/null 2>&1 || status=$?
+		assert_eq "4" "$status" "a live roster with $(jq -c '{user,condition}' <<<"$subject") must not be approved"
+	done
 }
 
 test_plan_live_roster_rejects_empty_stable_team() {
@@ -946,6 +1037,9 @@ test_cleanup_requires_authorization_controls
 test_plan_classifies_grants
 test_plan_rejects_empty_census
 test_plan_live_roster_is_approved_and_enforced
+test_apply_live_roster_never_writes_roster_and_refuses_changed_team
+test_verify_rejects_unapproved_census_difference
+test_plan_live_roster_rejects_non_user_subjects
 test_plan_live_roster_rejects_empty_stable_team
 test_stable_roster_flag_only_applies_to_plan
 test_changed_snapshot_manifest_invalidates_existing_plan

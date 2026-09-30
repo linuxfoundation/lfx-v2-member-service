@@ -18,8 +18,10 @@ approved change window and an explicit store ID.
 - Plan copies grants only for current, non-deleted organizations in the OpenSearch census.
 - Each plan records the snapshot manifest hash; a newer snapshot invalidates the old plan.
 - The approved stable roster is copied from the legacy roster, or with `--stable-roster-from-live`
-  read from the current stable team; either way it is hash-bound in `summary.json`.
-- Any OpenSearch-to-Salesforce count difference blocks writes until explicitly approved.
+  read from the current stable team (direct `user:` members only); either way it is hash-bound in
+  `summary.json`.
+- Any OpenSearch-to-Salesforce count difference blocks `apply` and `verify` (and therefore
+  `cleanup`) until explicitly approved.
 - Cleanup requires a matching verification checkpoint, completed API and CDC rollouts, and no
   old-team tuples absent from the pre-cutover snapshot. Immediately before deletion it also
   revalidates the stable roster and grants against the approved plan and reruns the baseline
@@ -88,15 +90,20 @@ records the stable team's current roster instead, `summary.json` shows
 
 With `--stable-roster-from-live`:
 
-- Nothing compares the approved roster with the legacy team any more. The peer reviewer must check
-  `stable-roster-plan.jsonl` against the intended administrator list, alongside the roster and
-  grant counts, before `verify`.
-- `apply` adds no members: the planned roster is the stable team as it already is. If every live
+- Nothing compares the approved roster with the legacy team any more. `plan` prints and records
+  `stable_roster_count` and the members added and removed relative to the legacy roster
+  (`stable_roster_added_vs_legacy`, `stable_roster_removed_vs_legacy`). The peer reviewer must check
+  `stable-roster-plan.jsonl` against the intended administrator list, alongside those counts and the
+  grant counts, before `apply` or `verify`.
+- `plan` refuses a stable team that is empty or has members other than direct users (wildcards,
+  usersets, or conditional tuples).
+- `apply` never writes members. It first confirms that the stable team still equals the approved
+  roster and exits 4 if it changed, so a removal made after `plan` is never undone. If every live
   organization already holds the stable grant, `snapshot` → `plan` → `verify` → `cleanup` needs no
-  `apply`.
+  `apply`; `verify` still requires the census difference to be approved.
 - The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
-  `verify`/`cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` → `plan` →
-  `verify` after an edit.
+  `apply`, `verify`, or `cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` →
+  `plan` → review → `verify` after an edit.
 
 ## 3. Preview and duplicate stable-team tuples
 
