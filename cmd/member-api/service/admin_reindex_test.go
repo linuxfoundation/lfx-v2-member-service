@@ -194,8 +194,8 @@ func TestGlobalOrgAdminTeamName(t *testing.T) {
 // could not silently swallow these grants.
 //
 // These cases are load-bearing rather than cosmetic. A team reaching this
-// function holds auditor on every b2b_org, and fga-sync never deletes a tuple
-// whose subject begins with "team:", so the grant cannot be taken back by
+// function holds auditor on every b2b_org, and fga-sync preserves team subjects
+// on the non-global auditor relation, so the grant cannot be taken back by
 // changing config or reverting code. Only a name given explicitly may get
 // through: the chart supplies the staff name (values.yaml is the single copy), and an
 // absent, blank or whitespace-only variable must grant nothing rather than fall

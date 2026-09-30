@@ -496,14 +496,15 @@ func TestCDCConsumer_Account_Upsert_PassesGlobalOrgAdminTeamName(t *testing.T) {
 }
 
 // TestCDCConsumer_Account_Delete_AssertsNoTeamReferences pins the delete-path
-// behaviour change. fga-sync structurally never deletes a tuple whose subject
-// begins with "team:", so any team reference asserted on an org that no longer
-// exists is a permanent orphan on a dead object that nothing can ever reap.
-// Before this change the delete path re-asserted global_org_admin; adding the
-// two auditor teams would have tripled the rate of those orphans.
+// behaviour change. fga-sync preserves team subjects on relations not prefixed
+// "global_", so an auditor-team reference asserted on an org that no longer
+// exists is a permanent orphan on a dead object. Before this change the delete
+// path re-asserted global_org_admin; asserting an auditor team would add a
+// non-reapable orphan.
 // TestCDCConsumer_Account_Delete_AssertsNoTeamReferences guards the original
-// concern — a delete must not write team references that nothing can ever reap
-// — now that the delete path sends delete_access instead of update_access.
+// concern — a delete must not write non-global team references that nothing
+// can reap — now that the delete path sends delete_access instead of
+// update_access.
 // Asserting the absence of any update_access is the stronger form of the old
 // per-field checks: a message that is never sent can carry no orphan reference.
 func TestCDCConsumer_Account_Delete_AssertsNoTeamReferences(t *testing.T) {
