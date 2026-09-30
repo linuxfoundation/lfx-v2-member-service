@@ -186,7 +186,7 @@ migration_write_plan_summary() {
 	local approve_difference="$6"
 	local roster_source="${7:-legacy}"
 	local census_count orphan_count missing_count difference approved manifest_hash roster_hash grants_hash
-	local roster_count legacy_users stable_users roster_added roster_removed
+	local roster_count roster_delta roster_added roster_removed
 	census_count=$(migration_line_count "$census_uids")
 	orphan_count=$(migration_line_count "$orphan_uids")
 	missing_count=$(migration_line_count "$missing_uids")
@@ -197,13 +197,15 @@ migration_write_plan_summary() {
 	roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
 	grants_hash=$(fga_hash_file "$directory/live-grants.jsonl")
 	roster_count=$(migration_line_count "$directory/stable-roster-plan.jsonl")
-	legacy_users=$(mktemp)
-	stable_users=$(mktemp)
-	jq -r '.user' "$directory/legacy-roster.jsonl" | LC_ALL=C sort -u >"$legacy_users"
-	jq -r '.user' "$directory/stable-roster-plan.jsonl" | LC_ALL=C sort -u >"$stable_users"
-	roster_added=$(comm -13 "$legacy_users" "$stable_users" | awk 'NF { n++ } END { print n + 0 }')
-	roster_removed=$(comm -23 "$legacy_users" "$stable_users" | awk 'NF { n++ } END { print n + 0 }')
-	rm -f "$legacy_users" "$stable_users"
+	# Members added and removed relative to the legacy roster, computed in one
+	# jq pass so no principal-bearing temp file is left behind on an error.
+	roster_delta=$(jq -rn \
+		--slurpfile legacy "$directory/legacy-roster.jsonl" \
+		--slurpfile stable "$directory/stable-roster-plan.jsonl" \
+		'([$legacy[].user] | unique) as $l | ([$stable[].user] | unique) as $s
+		 | "\(($s - $l) | length) \(($l - $s) | length)"')
+	roster_added=${roster_delta% *}
+	roster_removed=${roster_delta#* }
 	jq -n --argjson census_count "$census_count" --argjson salesforce_count "$salesforce_count" \
 		--argjson difference "$difference" --argjson orphan_count "$orphan_count" \
 		--argjson missing_source_count "$missing_count" --argjson census_approved "$approved" \

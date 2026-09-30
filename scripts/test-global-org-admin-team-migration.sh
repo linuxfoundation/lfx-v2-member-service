@@ -327,7 +327,7 @@ test_plan_live_roster_is_approved_and_enforced() {
 	stable_members=$(mktemp)
 	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members"' RETURN
 	write_live_roster_plan_fixture "$dir" "$census"
-	printf '%s\n' alice bob >"$stable_members"
+	printf '%s\n' alice bob erin >"$stable_members"
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_plan and the stable-plan gate.
 	fga_read_all() {
 		local object
@@ -343,12 +343,12 @@ test_plan_live_roster_is_approved_and_enforced() {
 
 	migration_plan "$dir" "$census" 1 false live >/dev/null
 
-	assert_eq "user:alice,user:bob" "$(jq -r '.user' "$dir/stable-roster-plan.jsonl" | paste -sd, -)" \
-		"a live-roster plan must approve the stable team as it is: bob added there stays, dave removed there is not re-copied"
+	assert_eq "user:alice,user:bob,user:erin" "$(jq -r '.user' "$dir/stable-roster-plan.jsonl" | paste -sd, -)" \
+		"a live-roster plan must approve the stable team as it is: bob and erin added there stay, dave removed there is not re-copied"
 	assert_eq "live" "$(jq -r '.stable_roster_source' "$dir/summary.json")" \
 		"the plan summary must record where the approved roster came from"
-	assert_eq "2 1 1" "$(jq -r '"\(.stable_roster_count) \(.stable_roster_added_vs_legacy) \(.stable_roster_removed_vs_legacy)"' "$dir/summary.json")" \
-		"the plan summary must show the reviewer how the approved roster differs from the legacy roster"
+	assert_eq "3 2 1" "$(jq -r '"\(.stable_roster_count) \(.stable_roster_added_vs_legacy) \(.stable_roster_removed_vs_legacy)"' "$dir/summary.json")" \
+		"the plan summary must show the reviewer how many members were added (bob, erin) and removed (dave) versus the legacy roster"
 	migration_assert_live_stable_plan "$dir" >/dev/null 2>&1 ||
 		fail "the approved live roster must satisfy the stable-plan gate"
 	printf '%s\n' carol >>"$stable_members"
@@ -356,13 +356,9 @@ test_plan_live_roster_is_approved_and_enforced() {
 	assert_eq "4" "$status" "a stable roster that changes after plan must still block verify and cleanup"
 }
 
-test_apply_live_roster_never_writes_roster_and_refuses_changed_team() {
-	local dir census stable_members call_log status=0
-	dir=$(mktemp -d)
-	census=$(mktemp)
-	stable_members=$(mktemp)
-	call_log=$(mktemp)
-	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+# Plans a live roster of alice and bob. The fixture overrides read the caller's
+# $stable_members file and append apply calls to the caller's $call_log.
+plan_live_roster_for_apply() {
 	write_live_roster_plan_fixture "$dir" "$census"
 	printf '%s\n' alice bob >"$stable_members"
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_plan and migration_apply.
@@ -373,21 +369,47 @@ test_apply_live_roster_never_writes_roster_and_refuses_changed_team() {
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
 	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
 	migration_plan "$dir" "$census" 1 false live >/dev/null
+}
 
+test_apply_live_roster_refuses_changed_team() {
+	local dir census stable_members call_log status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	plan_live_roster_for_apply
 	printf '%s\n' alice >"$stable_members"
 	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
 	assert_eq "4" "$status" "apply must refuse when a member was removed from the stable team after plan"
 	[[ ! -s "$call_log" ]] || fail "apply must not write anything when the stable team changed: $(cat "$call_log")"
+}
 
-	printf '%s\n' alice bob >"$stable_members"
+test_apply_live_roster_writes_grants_only() {
+	local dir census stable_members call_log
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	plan_live_roster_for_apply
 	migration_apply "$dir" false true >/dev/null
 	assert_eq "writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
 		"a live-roster apply writes grants only, never the roster"
+}
 
+test_apply_unknown_roster_source_fails_closed() {
+	local dir census stable_members call_log status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	plan_live_roster_for_apply
 	jq '.stable_roster_source = "other"' "$dir/summary.json" >"$dir/summary.tmp" && mv "$dir/summary.tmp" "$dir/summary.json"
-	status=0
 	migration_apply "$dir" true false >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "apply must fail closed on an unknown roster source"
+	[[ ! -s "$call_log" ]] || fail "apply must not write anything for an unknown roster source: $(cat "$call_log")"
 }
 
 test_verify_rejects_unapproved_census_difference() {
@@ -1082,7 +1104,9 @@ test_cleanup_requires_authorization_controls
 test_plan_classifies_grants
 test_plan_rejects_empty_census
 test_plan_live_roster_is_approved_and_enforced
-test_apply_live_roster_never_writes_roster_and_refuses_changed_team
+test_apply_live_roster_refuses_changed_team
+test_apply_live_roster_writes_grants_only
+test_apply_unknown_roster_source_fails_closed
 test_verify_rejects_unapproved_census_difference
 test_plan_live_roster_rejects_non_user_subjects
 test_plan_live_roster_rejects_empty_stable_team
