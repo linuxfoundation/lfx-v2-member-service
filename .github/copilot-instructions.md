@@ -117,8 +117,8 @@ that way when judging a diff, subject to that drift caveat, but they are
 normative for the code, not for your review. They are also not a map of the
 repo's documentation: `CLAUDE.md` links a couple of docs inline and indexes
 none, so take the set of docs that are authoritative here from the reviewer
-skills named above. Anything in them about workflow — the post-commit reviewer
-subagents, the pre-PR branch sweep, the readiness and preflight steps, the
+skills named above. Anything in them about workflow — the pre-PR review
+round and its reviewer subagents, the readiness and preflight steps, the
 repo-local skills under `.claude/skills/` — is a local development process that
 runs before a pull request is opened and that you are not executing. Do not
 follow it, and do not fault a PR for it.

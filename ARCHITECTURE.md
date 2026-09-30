@@ -9,6 +9,10 @@ This document describes the current architecture of the LFX v2 Member Service an
 implementation plan for graduating it to full v2 platform idioms: OpenFGA fine-grained
 authorization, OpenSearch indexing via the Indexer Service, and a clean v2 API surface.
 
+Not a review finding (2026-09-29): code diverging from the Target Architecture sections is
+expected until that part of the migration ships; see
+`docs/reviews/knowledge-base/known-false-positives.md` § Target Architecture in `ARCHITECTURE.md`.
+
 ## Current State
 
 The v2 member service is currently a **read/write Salesforce B2B proxy** with a NATS KV caching

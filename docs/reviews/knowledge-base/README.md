@@ -8,15 +8,17 @@ pattern was flagged by a real reviewer (human maintainer or Copilot) on a real
 member-service PR and cleared the promotion gate in the service review-KB research
 playbook.
 
-This KB is the **empirical** surface. It does NOT duplicate `lfx-skills:lfx-general-code-reviewer`
-(generic correctness/security/test intuition) or `lfx-skills:lfx-member-service-code-reviewer`
-(the documented rule/contract surface). It encodes the repo-specific patterns reviewers
-have actually flagged here.
+This KB is the **empirical** surface. It does NOT duplicate `/lfx-skills:lfx-general-code-review`
+(generic correctness/security/test intuition plus this repo's documented rule/contract
+surface, which it reads from `CLAUDE.md` and the repo's docs). It encodes the repo-specific
+patterns reviewers have actually flagged here.
 
-Consumed by `lfx-skills:lfx-member-service-learnings-reviewer`, which routes by changed-file
+Consumed by `/member-service-learnings-reviewer`, which routes by changed-file
 path to the category files below, matches each pattern's `**Detect:**` clause, and emits
 only findings it can quote (KB-match gate), then drops anything matching
-`known-false-positives.md`.
+`known-false-positives.md`. The PR-side `.github/skills/member-service-code-review/SKILL.md`
+also reads the category files as a checklist and `known-false-positives.md` as a floor. The
+pre-PR general and security reviewers do not read this directory.
 
 ## Methodology
 
@@ -60,9 +62,9 @@ only findings it can quote (KB-match gate), then drops anything matching
 | [`chart-and-deploy.md`](chart-and-deploy.md) | 5 | `charts/lfx-v2-member-service/**` |
 | [`docs-and-comments-drift.md`](docs-and-comments-drift.md) | 3 | a `.go` doc-comment, `CLAUDE.md`, `README.md`, `ARCHITECTURE.md`, or `docs/**` changed alongside a behavior change |
 | [`observability-and-resilience.md`](observability-and-resilience.md) | 4 | `pkg/errors/**`, `cmd/member-api/service/error.go`, `internal/infrastructure/nats/project_rpc.go`, `.../project_id_map_handler.go`, `.../client.go`, or any error map/log |
-| [`known-false-positives.md`](known-false-positives.md) | 10 entries | always (applied LAST as the floor) |
+| [`known-false-positives.md`](known-false-positives.md) | 12 entries | always (applied LAST as the floor) |
 
-**33 promoted patterns** across 7 category files, plus 10 false-positive entries.
+**33 promoted patterns** across 7 category files, plus 12 false-positive entries.
 
 ## Highest-value patterns
 
@@ -84,10 +86,9 @@ only findings it can quote (KB-match gate), then drops anything matching
 - `observability-and-resilience/4xx-logged-at-error` is only *partially* live: `origin/main`
   already routes NotImplemented→Debug and Conflict/Precondition→Warn, but Validation/NotFound
   still log at Error. Kept as a Nit; a maintainer should decide whether to lower them.
-- The `lfx-skills:lfx-member-service-code-reviewer` agent's "Known False Positives"
-  previously stated the service does NOT publish FGA/indexer and that key-contact mutations
-  do not accept `If-Match`. Both became stale on `origin/main` (publishing exists; `If-Match`
-  guards exist) and the agent's KFP list has been refreshed against `origin/main` to remove
-  them. This KB treats the current code as authoritative.
+- The repo's former conventions-review agent (since retired) once stated in its "Known
+  False Positives" that the service does NOT publish FGA/indexer and that key-contact
+  mutations do not accept `If-Match`. Both became stale on `origin/main` (publishing exists;
+  `If-Match` guards exist). This KB treats the current code as authoritative.
 
 _Built 2026-05-29 against `origin/main` @ `7f6ca55` (PR #44 merged)._
