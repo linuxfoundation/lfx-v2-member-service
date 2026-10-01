@@ -204,6 +204,7 @@ test_apply_records_migrated_count() {
 	local dir
 	dir=$(mktemp -d)
 	trap 'rm -rf "$dir"' RETURN
+	printf '%s\n' '{"user":"user:alice","relation":"member","object":"team:old"}' >"$dir/legacy-roster.jsonl"
 	printf '%s\n' '{"user":"user:alice","relation":"member","object":"team:global_org_admin"}' \
 		>"$dir/stable-roster-plan.jsonl"
 	printf '%s\n' \
@@ -410,6 +411,23 @@ test_apply_unknown_roster_source_fails_closed() {
 	migration_apply "$dir" true false >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "apply must fail closed on an unknown roster source"
 	[[ ! -s "$call_log" ]] || fail "apply must not write anything for an unknown roster source: $(cat "$call_log")"
+}
+
+test_apply_refuses_live_plan_relabelled_legacy() {
+	local dir census stable_members call_log status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	plan_live_roster_for_apply
+	# The summary field is not hash-bound: relabel the live plan as legacy,
+	# then remove bob from the stable team as an operator would in sso-tools.
+	jq '.stable_roster_source = "legacy"' "$dir/summary.json" >"$dir/summary.tmp" && mv "$dir/summary.tmp" "$dir/summary.json"
+	printf '%s\n' alice >"$stable_members"
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "apply must refuse a live-roster plan relabelled as legacy"
+	[[ ! -s "$call_log" ]] || fail "a relabelled live plan must not write members back: $(cat "$call_log")"
 }
 
 test_verify_rejects_unapproved_census_difference() {
@@ -1114,6 +1132,7 @@ test_plan_live_roster_is_approved_and_enforced
 test_apply_live_roster_refuses_changed_team
 test_apply_live_roster_writes_grants_only
 test_apply_unknown_roster_source_fails_closed
+test_apply_refuses_live_plan_relabelled_legacy
 test_verify_rejects_unapproved_census_difference
 test_plan_live_roster_rejects_non_user_subjects
 test_plan_live_roster_rejects_empty_stable_team

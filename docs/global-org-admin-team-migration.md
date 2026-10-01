@@ -103,6 +103,8 @@ With `--stable-roster-from-live`:
   team still equals the approved roster and exits 4 if it changed. If every live
   organization already holds the stable grant, `snapshot` → `plan` → `verify` → `cleanup` needs no
   `apply`; `verify` still requires the census difference to be approved.
+- `apply` writes members only for a plan whose roster is exactly the legacy roster. A live plan
+  whose `stable_roster_source` was changed to `legacy` in `summary.json` exits 6 without writing.
 - The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
   `apply`, `verify`, or `cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` →
   `plan` → review → `verify` after an edit.

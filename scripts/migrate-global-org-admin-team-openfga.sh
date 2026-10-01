@@ -350,6 +350,11 @@ migration_apply() {
 	migration_require_execution_mode apply "$dry_run" "$confirm" || return $?
 	case "$(jq -r '.stable_roster_source // "legacy"' "$directory/summary.json")" in
 	legacy)
+		# stable_roster_source is a plain summary field. Writing members is
+		# only safe for a plan that copied the legacy roster, so check the
+		# hash-bound roster itself: a live plan relabelled "legacy" must not
+		# write its roster back over removals made since plan.
+		migration_assert_plan_roster_is_legacy "$directory" || return $?
 		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run"
 		;;
 	live)
@@ -379,6 +384,28 @@ migration_normalize_file() {
 	local output="$2"
 	jq -cS 'if .condition == null then del(.condition) else . end' "$input" |
 		LC_ALL=C sort -u >"$output"
+}
+
+migration_assert_plan_roster_is_legacy() {
+	local directory="$1"
+	local temp_dir status
+	temp_dir=$(mktemp -d)
+	if jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
+		"$directory/legacy-roster.jsonl" >"$temp_dir/legacy-as-stable" &&
+		migration_normalize_file "$temp_dir/legacy-as-stable" "$temp_dir/expected-roster" &&
+		migration_normalize_file "$directory/stable-roster-plan.jsonl" "$temp_dir/planned-roster"; then
+		:
+	else
+		status=$?
+		rm -rf "$temp_dir"
+		return "$status"
+	fi
+	if ! cmp -s "$temp_dir/planned-roster" "$temp_dir/expected-roster"; then
+		rm -rf "$temp_dir"
+		fga_error "stable_roster_source is legacy but the planned roster is not the legacy roster; refusing to write members"
+		return 6
+	fi
+	rm -rf "$temp_dir"
 }
 
 migration_assert_stable_roster_unchanged() {
