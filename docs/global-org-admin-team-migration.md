@@ -103,14 +103,16 @@ With `--stable-roster-from-live`:
   team still equals the approved roster and exits 4 if it changed. If every live
   organization already holds the stable grant, `snapshot` → `plan` → `verify` → `cleanup` needs no
   `apply`; `verify` still requires the census difference to be approved.
-- `apply` writes members only for a plan whose roster is exactly the legacy roster, and only while
-  the stable team has no members outside that roster. A live plan whose `stable_roster_source` was
-  changed to `legacy` in `summary.json` exits 6 unless its roster equals the legacy roster, in which
-  case it behaves exactly like a legacy plan. A legacy plan against a curated stable team (members
-  added there that the legacy roster lacks) exits 4: re-run `plan` with `--stable-roster-from-live`.
+- `apply` writes members only for a plan whose roster is exactly the legacy roster, and only when
+  the stable team is empty (first migration) or already equals that roster (a rerun). A live plan
+  whose `stable_roster_source` was changed to `legacy` in `summary.json` exits 6 unless its roster
+  equals the legacy roster, in which case it behaves exactly like a legacy plan. A legacy plan
+  against a curated stable team (any member added or removed in sso-tools) exits 4: re-run `plan`
+  with `--stable-roster-from-live`.
 - The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
   `apply`, `verify`, or `cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` →
-  `plan` → review → `verify` after an edit.
+  `plan` → review → `verify` after an edit. `apply` checks the stable team and then writes in a
+  separate call, so it relies on that freeze for the brief gap between the two.
 
 ## 3. Preview and duplicate stable-team tuples
 
@@ -123,8 +125,8 @@ scripts/migrate-global-org-admin-team-openfga.sh apply \
 ```
 
 After peer review, replace `--dry-run` with `--confirm`. Rerunning is safe for the original migration
-(stable team empty or a subset of the legacy roster). Once the stable team is curated in sso-tools,
-use `plan --stable-roster-from-live` (section 2); a legacy `apply` refuses. After a confirmed
+(stable team empty or already equal to the legacy roster). Once the stable team is curated in
+sso-tools, use `plan --stable-roster-from-live` (section 2); a legacy `apply` refuses. After a confirmed
 `apply`, invalidate fga-sync's check cache (section 6), so new stable-team grants are not denied
 from cached decisions.
 

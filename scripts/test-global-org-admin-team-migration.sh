@@ -432,27 +432,48 @@ test_apply_refuses_live_plan_relabelled_legacy() {
 }
 
 test_legacy_apply_refuses_curated_stable_team() {
-	local dir census stable_members call_log status=0
+	local dir census stable_members call_log members status
 	dir=$(mktemp -d)
 	census=$(mktemp)
 	stable_members=$(mktemp)
 	call_log=$(mktemp)
 	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
 	write_live_roster_plan_fixture "$dir" "$census"
-	# The stable team was curated after cutover: bob was added there, and the
-	# legacy roster still holds dave, who was removed there.
-	printf '%s\n' alice bob >"$stable_members"
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
 	fga_read_all() {
-		jq -Rc '{user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+		jq -Rc 'select(length > 0) | {user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
 			"$stable_members"
 	}
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
 	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
 	migration_plan "$dir" "$census" 1 false >/dev/null
+
+	# The legacy plan holds alice and dave. Any curated stable team, whether
+	# members were added, only removed (dave), or replaced, must be refused.
+	for members in "alice bob" "alice" "bob"; do
+		tr ' ' '\n' <<<"$members" >"$stable_members"
+		: >"$call_log"
+		status=0
+		migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+		assert_eq "4" "$status" "a legacy apply against a curated stable team ($members) must refuse"
+		[[ ! -s "$call_log" ]] || fail "a legacy apply against stable team ($members) must not write: $(cat "$call_log")"
+	done
+
+	# A rerun against a stable team that already equals the legacy plan writes.
+	printf '%s\n' alice dave >"$stable_members"
+	: >"$call_log"
+	migration_apply "$dir" false true >/dev/null
+	assert_eq "writes:stable-roster-plan.jsonl,writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
+		"a legacy apply rerun against an equal stable team must proceed"
+
+	# A failed stable-team read fails closed.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_read_all() { return 5; }
+	: >"$call_log"
+	status=0
 	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
-	assert_eq "4" "$status" "a legacy apply against a curated stable team must refuse instead of re-adding dave"
-	[[ ! -s "$call_log" ]] || fail "a legacy apply against a curated stable team must not write: $(cat "$call_log")"
+	[[ "$status" -ne 0 ]] || fail "a legacy apply must fail when the stable team cannot be read"
+	[[ ! -s "$call_log" ]] || fail "a legacy apply must not write when the stable team cannot be read: $(cat "$call_log")"
 }
 
 test_verify_rejects_unapproved_census_difference() {

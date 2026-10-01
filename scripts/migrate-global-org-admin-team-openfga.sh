@@ -355,17 +355,21 @@ migration_apply() {
 		# hash-bound roster itself: a live plan relabelled "legacy" must not
 		# write its roster back over removals made since plan.
 		migration_assert_plan_roster_is_legacy "$directory" || return $?
-		# A legacy plan re-copies the legacy roster. If the stable team already
-		# has members outside it, the team is curated: copying would re-add
-		# members removed there. That needs --stable-roster-from-live instead.
-		migration_assert_stable_team_within_plan "$directory" || return $?
+		# A legacy plan re-copies the legacy roster. That is only safe on an
+		# empty stable team (first migration) or one already equal to it (a
+		# rerun). Any other state means the team was curated in sso-tools, by
+		# additions or removals, and copying would re-add removed members.
+		migration_assert_stable_roster_matches_plan "$directory" true \
+			"stable team is neither empty nor equal to the legacy plan, so it was curated (members added or removed); re-run plan with --stable-roster-from-live instead of copying the legacy roster" ||
+			return $?
 		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run"
 		;;
 	live)
 		# The approved roster is the stable team as it was at plan time. Never
 		# write it back: that would undo a removal made since, and verify
 		# would then pass. Refuse instead if the team changed.
-		migration_assert_stable_roster_unchanged "$directory" || return $?
+		migration_assert_stable_roster_matches_plan "$directory" false \
+			"stable team changed since plan; re-run snapshot and plan, then review again" || return $?
 		;;
 	*)
 		fga_error "summary.json has an unknown stable_roster_source"
@@ -412,9 +416,14 @@ migration_assert_plan_roster_is_legacy() {
 	rm -rf "$temp_dir"
 }
 
-migration_assert_stable_team_within_plan() {
+# Compares the live stable-team roster with the planned roster and exits 4 with
+# the given message unless they are equal. With allow_empty=true an empty stable
+# team also passes (the first legacy migration, before any member exists).
+migration_assert_stable_roster_matches_plan() {
 	local directory="$1"
-	local temp_dir status outside
+	local allow_empty="$2"
+	local message="$3"
+	local temp_dir status
 	temp_dir=$(mktemp -d)
 	if migration_sorted_read \
 		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
@@ -426,34 +435,14 @@ migration_assert_stable_team_within_plan() {
 		rm -rf "$temp_dir"
 		return "$status"
 	fi
-	outside=$(comm -23 "$temp_dir/actual-roster" "$temp_dir/planned-roster" | awk 'NF { n++ } END { print n + 0 }')
-	rm -rf "$temp_dir"
-	if [[ "$outside" -gt 0 ]]; then
-		fga_error "stable team has $outside member(s) outside the legacy plan, so it is curated; re-run plan with --stable-roster-from-live instead of copying the legacy roster"
-		return 4
-	fi
-}
-
-migration_assert_stable_roster_unchanged() {
-	local directory="$1"
-	local temp_dir status
-	temp_dir=$(mktemp -d)
-	if migration_sorted_read \
-		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
-		"$temp_dir/actual-roster" &&
-		migration_normalize_file "$directory/stable-roster-plan.jsonl" "$temp_dir/expected-roster"; then
-		:
-	else
-		status=$?
+	if { [[ "$allow_empty" == true && ! -s "$temp_dir/actual-roster" ]]; } ||
+		cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster"; then
 		rm -rf "$temp_dir"
-		return "$status"
-	fi
-	if ! cmp -s "$temp_dir/actual-roster" "$temp_dir/expected-roster"; then
-		rm -rf "$temp_dir"
-		fga_error "stable team changed since plan; re-run snapshot and plan, then review again"
-		return 4
+		return 0
 	fi
 	rm -rf "$temp_dir"
+	fga_error "$message"
+	return 4
 }
 
 migration_assert_live_stable_plan() {
