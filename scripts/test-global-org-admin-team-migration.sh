@@ -476,6 +476,48 @@ test_legacy_apply_refuses_curated_stable_team() {
 	[[ ! -s "$call_log" ]] || fail "a legacy apply must not write when the stable team cannot be read: $(cat "$call_log")"
 }
 
+test_legacy_apply_resumes_only_its_own_interrupted_write() {
+	local dir census stable_members call_log status
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	: >"$stable_members"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_read_all() {
+		jq -Rc 'select(length > 0) | {user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+			"$stable_members"
+	}
+	migration_plan "$dir" "$census" 1 false >/dev/null
+
+	# The first apply is interrupted after one roster batch: alice is written,
+	# dave is not.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { [[ "$2" == */stable-roster-plan.jsonl ]] && return 5; return 0; }
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	[[ "$status" -ne 0 ]] || fail "the simulated interruption must fail the first apply"
+	printf '%s\n' alice >"$stable_members"
+
+	# The same output directory resumes its own interrupted write.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	migration_apply "$dir" false true >/dev/null ||
+		fail "a legacy apply must resume a partial roster left by its own interrupted write"
+	assert_eq "writes:stable-roster-plan.jsonl,writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
+		"a resumed legacy apply writes the full roster and the grants"
+
+	# A new plan clears the resume marker, so the same subset is refused again.
+	migration_plan "$dir" "$census" 1 false >/dev/null
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "after a re-plan a partial stable team must be refused, not resumed"
+	[[ ! -s "$call_log" ]] || fail "a refused legacy apply must not write: $(cat "$call_log")"
+}
+
 test_verify_rejects_unapproved_census_difference() {
 	local dir census status=0
 	dir=$(mktemp -d)
@@ -1180,6 +1222,7 @@ test_apply_live_roster_writes_grants_only
 test_apply_unknown_roster_source_fails_closed
 test_apply_refuses_live_plan_relabelled_legacy
 test_legacy_apply_refuses_curated_stable_team
+test_legacy_apply_resumes_only_its_own_interrupted_write
 test_verify_rejects_unapproved_census_difference
 test_plan_live_roster_rejects_non_user_subjects
 test_plan_live_roster_rejects_empty_stable_team

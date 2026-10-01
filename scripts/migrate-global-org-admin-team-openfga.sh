@@ -243,6 +243,9 @@ migration_plan() {
 		fga_error "salesforce count must be a non-negative integer"
 		return 2
 	}
+	# A new plan starts a new apply: an interrupted apply's resume marker must
+	# not let a later legacy apply accept a subset left by sso-tools removals.
+	rm -f "$directory/legacy-roster-apply.started"
 
 	local census_uids source_uids orphan_uids missing_uids
 	census_uids=$(mktemp)
@@ -357,18 +360,32 @@ migration_apply() {
 		migration_assert_plan_roster_is_legacy "$directory" || return $?
 		# A legacy plan re-copies the legacy roster. That is only safe on an
 		# empty stable team (first migration) or one already equal to it (a
-		# rerun). Any other state means the team was curated in sso-tools, by
-		# additions or removals, and copying would re-add removed members.
-		migration_assert_stable_roster_matches_plan "$directory" true \
-			"stable team is neither empty nor equal to the legacy plan, so it was curated (members added or removed); re-run plan with --stable-roster-from-live instead of copying the legacy roster" ||
-			return $?
-		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run"
+		# rerun), or to resume this output directory's own interrupted apply:
+		# roster writes commit per batch, so an interruption can leave a
+		# partial subset. Any other state means the team was curated in
+		# sso-tools, and copying would re-add members removed there.
+		local roster_marker="$directory/legacy-roster-apply.started"
+		local planned_roster_hash
+		planned_roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
+		if [[ -f "$roster_marker" && "$(cat "$roster_marker")" == "$planned_roster_hash" ]]; then
+			migration_assert_stable_roster_matches_plan "$directory" subset \
+				"stable team has members outside the legacy plan, so it was curated after this apply started; re-run plan with --stable-roster-from-live" ||
+				return $?
+		else
+			migration_assert_stable_roster_matches_plan "$directory" empty-or-equal \
+				"stable team is neither empty nor equal to the legacy plan, and this output directory has no interrupted apply to resume. If members were added or removed in sso-tools, re-run plan with --stable-roster-from-live; if an earlier apply from another output directory was interrupted, resume it there" ||
+				return $?
+		fi
+		if [[ "$dry_run" == false ]]; then
+			printf '%s' "$planned_roster_hash" >"$roster_marker"
+		fi
+		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run" || return $?
 		;;
 	live)
 		# The approved roster is the stable team as it was at plan time. Never
 		# write it back: that would undo a removal made since, and verify
 		# would then pass. Refuse instead if the team changed.
-		migration_assert_stable_roster_matches_plan "$directory" false \
+		migration_assert_stable_roster_matches_plan "$directory" equal \
 			"stable team changed since plan; re-run snapshot and plan, then review again" || return $?
 		;;
 	*)
@@ -376,7 +393,7 @@ migration_apply() {
 		return 6
 		;;
 	esac
-	fga_apply_tuple_file writes "$directory/live-grants.jsonl" "$dry_run"
+	fga_apply_tuple_file writes "$directory/live-grants.jsonl" "$dry_run" || return $?
 	if [[ "$dry_run" == false ]]; then
 		local migrated_count summary_tmp
 		migrated_count=$(migration_line_count "$directory/live-grants.jsonl")
@@ -417,13 +434,15 @@ migration_assert_plan_roster_is_legacy() {
 }
 
 # Compares the live stable-team roster with the planned roster and exits 4 with
-# the given message unless they are equal. With allow_empty=true an empty stable
-# team also passes (the first legacy migration, before any member exists).
+# the given message unless it is accepted. accept is one of:
+#   equal          - the stable team equals the plan
+#   empty-or-equal - also accepts an empty stable team (first legacy migration)
+#   subset         - also accepts any part of the plan (resuming an apply)
 migration_assert_stable_roster_matches_plan() {
 	local directory="$1"
-	local allow_empty="$2"
+	local accept="$2"
 	local message="$3"
-	local temp_dir status
+	local temp_dir status accepted=false
 	temp_dir=$(mktemp -d)
 	if migration_sorted_read \
 		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
@@ -435,8 +454,24 @@ migration_assert_stable_roster_matches_plan() {
 		rm -rf "$temp_dir"
 		return "$status"
 	fi
-	if { [[ "$allow_empty" == true && ! -s "$temp_dir/actual-roster" ]]; } ||
-		cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster"; then
+	case "$accept" in
+	equal)
+		cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster" && accepted=true
+		;;
+	empty-or-equal)
+		{ [[ ! -s "$temp_dir/actual-roster" ]] ||
+			cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster"; } && accepted=true
+		;;
+	subset)
+		[[ -z "$(comm -23 "$temp_dir/actual-roster" "$temp_dir/planned-roster")" ]] && accepted=true
+		;;
+	*)
+		rm -rf "$temp_dir"
+		fga_error "unknown roster comparison mode: $accept"
+		return 2
+		;;
+	esac
+	if [[ "$accepted" == true ]]; then
 		rm -rf "$temp_dir"
 		return 0
 	fi
