@@ -355,6 +355,10 @@ migration_apply() {
 		# hash-bound roster itself: a live plan relabelled "legacy" must not
 		# write its roster back over removals made since plan.
 		migration_assert_plan_roster_is_legacy "$directory" || return $?
+		# A legacy plan re-copies the legacy roster. If the stable team already
+		# has members outside it, the team is curated: copying would re-add
+		# members removed there. That needs --stable-roster-from-live instead.
+		migration_assert_stable_team_within_plan "$directory" || return $?
 		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run"
 		;;
 	live)
@@ -406,6 +410,28 @@ migration_assert_plan_roster_is_legacy() {
 		return 6
 	fi
 	rm -rf "$temp_dir"
+}
+
+migration_assert_stable_team_within_plan() {
+	local directory="$1"
+	local temp_dir status outside
+	temp_dir=$(mktemp -d)
+	if migration_sorted_read \
+		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
+		"$temp_dir/actual-roster" &&
+		migration_normalize_file "$directory/stable-roster-plan.jsonl" "$temp_dir/planned-roster"; then
+		:
+	else
+		status=$?
+		rm -rf "$temp_dir"
+		return "$status"
+	fi
+	outside=$(comm -23 "$temp_dir/actual-roster" "$temp_dir/planned-roster" | awk 'NF { n++ } END { print n + 0 }')
+	rm -rf "$temp_dir"
+	if [[ "$outside" -gt 0 ]]; then
+		fga_error "stable team has $outside member(s) outside the legacy plan, so it is curated; re-run plan with --stable-roster-from-live instead of copying the legacy roster"
+		return 4
+	fi
 }
 
 migration_assert_stable_roster_unchanged() {

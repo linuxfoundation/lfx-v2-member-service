@@ -212,7 +212,8 @@ test_apply_records_migrated_count() {
 		>"$dir/live-grants.jsonl"
 	printf '%s\n' '{"store_id":"store","old_team":"old"}' >"$dir/manifest.json"
 	write_plan_summary_fixture "$dir"
-	fga_request() { printf '%s\n' '{}'; }
+	# Empty stable team, as in the original migration: a legacy apply may write it.
+	fga_request() { printf '%s\n' '{"tuples":[]}'; }
 	migration_apply "$dir" false true
 	assert_eq "1" "$(jq -r '.migrated_count' "$dir/summary.json")" \
 		"confirmed apply must record migrated grant count"
@@ -428,6 +429,30 @@ test_apply_refuses_live_plan_relabelled_legacy() {
 	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "apply must refuse a live-roster plan relabelled as legacy"
 	[[ ! -s "$call_log" ]] || fail "a relabelled live plan must not write members back: $(cat "$call_log")"
+}
+
+test_legacy_apply_refuses_curated_stable_team() {
+	local dir census stable_members call_log status=0
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	# The stable team was curated after cutover: bob was added there, and the
+	# legacy roster still holds dave, who was removed there.
+	printf '%s\n' alice bob >"$stable_members"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_read_all() {
+		jq -Rc '{user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+			"$stable_members"
+	}
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	migration_plan "$dir" "$census" 1 false >/dev/null
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a legacy apply against a curated stable team must refuse instead of re-adding dave"
+	[[ ! -s "$call_log" ]] || fail "a legacy apply against a curated stable team must not write: $(cat "$call_log")"
 }
 
 test_verify_rejects_unapproved_census_difference() {
@@ -1133,6 +1158,7 @@ test_apply_live_roster_refuses_changed_team
 test_apply_live_roster_writes_grants_only
 test_apply_unknown_roster_source_fails_closed
 test_apply_refuses_live_plan_relabelled_legacy
+test_legacy_apply_refuses_curated_stable_team
 test_verify_rejects_unapproved_census_difference
 test_plan_live_roster_rejects_non_user_subjects
 test_plan_live_roster_rejects_empty_stable_team
