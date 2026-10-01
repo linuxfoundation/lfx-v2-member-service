@@ -380,6 +380,9 @@ migration_apply() {
 			printf '%s' "$planned_roster_hash" >"$roster_marker"
 		fi
 		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run" || return $?
+		# The roster is complete: only an interrupted write may be resumed, so a
+		# later rerun must again require an empty or equal stable team.
+		[[ "$dry_run" == true ]] || rm -f "$roster_marker"
 		;;
 	live)
 		# The approved roster is the stable team as it was at plan time. Never

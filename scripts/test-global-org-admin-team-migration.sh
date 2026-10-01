@@ -508,6 +508,17 @@ test_legacy_apply_resumes_only_its_own_interrupted_write() {
 		fail "a legacy apply must resume a partial roster left by its own interrupted write"
 	assert_eq "writes:stable-roster-plan.jsonl,writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
 		"a resumed legacy apply writes the full roster and the grants"
+	[[ ! -f "$dir/legacy-roster-apply.started" ]] ||
+		fail "a completed roster write must clear the resume marker"
+
+	# After the apply completes, dave is removed in sso-tools. A rerun from the
+	# same output directory must refuse instead of writing him back.
+	printf '%s\n' alice >"$stable_members"
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a rerun after a completed apply must refuse a curated subset"
+	[[ ! -s "$call_log" ]] || fail "a rerun after a completed apply must not write members back: $(cat "$call_log")"
 
 	# A new plan clears the resume marker, so the same subset is refused again.
 	migration_plan "$dir" "$census" 1 false >/dev/null
