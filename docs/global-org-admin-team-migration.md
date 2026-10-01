@@ -104,11 +104,15 @@ With `--stable-roster-from-live`:
   organization already holds the stable grant, `snapshot` → `plan` → `verify` → `cleanup` needs no
   `apply`; `verify` still requires the census difference to be approved.
 - `apply` writes members only for a plan whose roster is exactly the legacy roster, and only when
-  the stable team is empty (first migration) or already equals that roster (a rerun). A live plan
-  whose `stable_roster_source` was changed to `legacy` in `summary.json` exits 6 unless its roster
-  equals the legacy roster, in which case it behaves exactly like a legacy plan. A legacy plan
-  against a curated stable team (any member added or removed in sso-tools) exits 4: re-run `plan`
-  with `--stable-roster-from-live`.
+  the stable team is empty (first migration) or already equals that roster (a rerun). Roster writes
+  commit per batch, so an interrupted `apply` can leave part of the roster written. Rerunning `apply`
+  from the same output directory resumes it: `apply` records `legacy-roster-apply.started` before
+  its first member write and then accepts any part of the planned roster. A new `plan` clears that
+  record. A live plan whose `stable_roster_source` was changed to `legacy` in `summary.json` exits 6
+  unless its roster equals the legacy roster, in which case it behaves exactly like a legacy plan.
+  Any other stable team (members added or removed in sso-tools, with no interrupted apply in this
+  output directory) exits 4: re-run `plan` with `--stable-roster-from-live`, or resume the earlier
+  apply from its own output directory.
 - The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
   `apply`, `verify`, or `cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` →
   `plan` → review → `verify` after an edit. `apply` checks the stable team and then writes in a
