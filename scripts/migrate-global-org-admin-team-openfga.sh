@@ -358,38 +358,49 @@ migration_apply() {
 		# hash-bound roster itself: a live plan relabelled "legacy" must not
 		# write its roster back over removals made since plan.
 		migration_assert_plan_roster_is_legacy "$directory" || return $?
-		# A legacy plan re-copies the legacy roster. That is only safe on an
-		# empty stable team (first migration) or one already equal to it (a
-		# rerun), or to resume this output directory's own interrupted apply:
-		# roster writes commit per batch, so an interruption can leave a
-		# partial subset. Any other state means the team was curated in
-		# sso-tools, and copying would re-add members removed there.
+		# A legacy plan re-copies the legacy roster. Write it only into an empty
+		# stable team (first migration), or to resume this output directory's
+		# own interrupted write: roster writes commit per batch, so an
+		# interruption can leave part of the roster. An equal team needs no
+		# write. Any other state means the team was curated in sso-tools, and
+		# copying would re-add members removed there.
 		local roster_marker="$directory/legacy-roster-apply.started"
-		local planned_roster_hash
+		local planned_roster_hash roster_state
 		planned_roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
-		if [[ -f "$roster_marker" && "$(cat "$roster_marker")" == "$planned_roster_hash" ]]; then
-			migration_assert_stable_roster_matches_plan "$directory" subset \
-				"stable team has members outside the legacy plan, so it was curated after this apply started; re-run plan with --stable-roster-from-live" ||
-				return $?
-		else
-			migration_assert_stable_roster_matches_plan "$directory" empty-or-equal \
-				"stable team is neither empty nor equal to the legacy plan, and this output directory has no interrupted apply to resume. If members were added or removed in sso-tools, re-run plan with --stable-roster-from-live; if an earlier apply from another output directory was interrupted, resume it there" ||
-				return $?
-		fi
-		if [[ "$dry_run" == false ]]; then
-			printf '%s' "$planned_roster_hash" >"$roster_marker"
-		fi
-		fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run" || return $?
-		# The roster is complete: only an interrupted write may be resumed, so a
-		# later rerun must again require an empty or equal stable team.
-		[[ "$dry_run" == true ]] || rm -f "$roster_marker"
+		roster_state=$(migration_stable_roster_state "$directory") || return $?
+		case "$roster_state" in
+		equal)
+			# Nothing to write, so no resume marker can be left behind; an
+			# earlier interrupted write from this directory is now complete.
+			[[ "$dry_run" == true ]] || rm -f "$roster_marker"
+			;;
+		empty | partial)
+			if [[ "$roster_state" == partial ]] &&
+				! [[ -f "$roster_marker" && "$(cat "$roster_marker")" == "$planned_roster_hash" ]]; then
+				fga_error "stable team holds only part of the legacy plan and this output directory has no interrupted apply to resume. If members were removed in sso-tools, re-run plan with --stable-roster-from-live; if an earlier apply from another output directory was interrupted, resume it there"
+				return 4
+			fi
+			[[ "$dry_run" == true ]] || printf '%s' "$planned_roster_hash" >"$roster_marker"
+			fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run" || return $?
+			# The roster is complete: only an interrupted write may be resumed.
+			[[ "$dry_run" == true ]] || rm -f "$roster_marker"
+			;;
+		*)
+			fga_error "stable team has members outside the legacy plan, so it was curated in sso-tools; re-run plan with --stable-roster-from-live instead of copying the legacy roster"
+			return 4
+			;;
+		esac
 		;;
 	live)
 		# The approved roster is the stable team as it was at plan time. Never
 		# write it back: that would undo a removal made since, and verify
 		# would then pass. Refuse instead if the team changed.
-		migration_assert_stable_roster_matches_plan "$directory" equal \
-			"stable team changed since plan; re-run snapshot and plan, then review again" || return $?
+		local live_state
+		live_state=$(migration_stable_roster_state "$directory") || return $?
+		[[ "$live_state" == equal ]] || {
+			fga_error "stable team changed since plan; re-run snapshot and plan, then review again"
+			return 4
+		}
 		;;
 	*)
 		fga_error "summary.json has an unknown stable_roster_source"
@@ -436,16 +447,12 @@ migration_assert_plan_roster_is_legacy() {
 	rm -rf "$temp_dir"
 }
 
-# Compares the live stable-team roster with the planned roster and exits 4 with
-# the given message unless it is accepted. accept is one of:
-#   equal          - the stable team equals the plan
-#   empty-or-equal - also accepts an empty stable team (first legacy migration)
-#   subset         - also accepts any part of the plan (resuming an apply)
-migration_assert_stable_roster_matches_plan() {
+# Prints the live stable team's state relative to the planned roster: equal,
+# empty, partial (a non-empty proper subset of the plan), or other. Returns the
+# read error if the stable team cannot be read.
+migration_stable_roster_state() {
 	local directory="$1"
-	local accept="$2"
-	local message="$3"
-	local temp_dir status accepted=false
+	local temp_dir status state
 	temp_dir=$(mktemp -d)
 	if migration_sorted_read \
 		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
@@ -457,30 +464,17 @@ migration_assert_stable_roster_matches_plan() {
 		rm -rf "$temp_dir"
 		return "$status"
 	fi
-	case "$accept" in
-	equal)
-		cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster" && accepted=true
-		;;
-	empty-or-equal)
-		{ [[ ! -s "$temp_dir/actual-roster" ]] ||
-			cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster"; } && accepted=true
-		;;
-	subset)
-		[[ -z "$(comm -23 "$temp_dir/actual-roster" "$temp_dir/planned-roster")" ]] && accepted=true
-		;;
-	*)
-		rm -rf "$temp_dir"
-		fga_error "unknown roster comparison mode: $accept"
-		return 2
-		;;
-	esac
-	if [[ "$accepted" == true ]]; then
-		rm -rf "$temp_dir"
-		return 0
+	if cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster"; then
+		state=equal
+	elif [[ ! -s "$temp_dir/actual-roster" ]]; then
+		state=empty
+	elif [[ -z "$(comm -23 "$temp_dir/actual-roster" "$temp_dir/planned-roster")" ]]; then
+		state=partial
+	else
+		state=other
 	fi
 	rm -rf "$temp_dir"
-	fga_error "$message"
-	return 4
+	printf '%s\n' "$state"
 }
 
 migration_assert_live_stable_plan() {

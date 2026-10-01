@@ -459,12 +459,22 @@ test_legacy_apply_refuses_curated_stable_team() {
 		[[ ! -s "$call_log" ]] || fail "a legacy apply against stable team ($members) must not write: $(cat "$call_log")"
 	done
 
-	# A rerun against a stable team that already equals the legacy plan writes.
+	# A rerun against a stable team that already equals the legacy plan writes
+	# grants only: no roster write, so no resume marker that a failed write
+	# could leave behind.
 	printf '%s\n' alice dave >"$stable_members"
 	: >"$call_log"
 	migration_apply "$dir" false true >/dev/null
-	assert_eq "writes:stable-roster-plan.jsonl,writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
-		"a legacy apply rerun against an equal stable team must proceed"
+	assert_eq "writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
+		"a legacy apply rerun against an equal stable team must not rewrite the roster"
+	[[ ! -f "$dir/legacy-roster-apply.started" ]] ||
+		fail "a legacy apply rerun against an equal stable team must not leave a resume marker"
+	printf '%s\n' alice >"$stable_members"
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "after an equal rerun, a member removed in sso-tools must not be written back"
+	[[ ! -s "$call_log" ]] || fail "after an equal rerun, a refused apply must not write: $(cat "$call_log")"
 
 	# A failed stable-team read fails closed.
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
