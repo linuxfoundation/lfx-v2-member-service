@@ -360,30 +360,36 @@ migration_apply() {
 		migration_assert_plan_roster_is_legacy "$directory" || return $?
 		# A legacy plan re-copies the legacy roster. Write it only into an empty
 		# stable team (first migration), or to resume this output directory's
-		# own interrupted write: roster writes commit per batch, so an
-		# interruption can leave part of the roster. An equal team needs no
-		# write. Any other state means the team was curated in sso-tools, and
-		# copying would re-add members removed there.
+		# own interrupted write: roster writes commit per batch, so a failed
+		# write can leave part of the roster. An equal team needs no write. Any
+		# other state means the team was curated in sso-tools, and copying
+		# would re-add members removed there.
 		local roster_marker="$directory/legacy-roster-apply.started"
-		local planned_roster_hash roster_state
+		local planned_roster_hash roster_snapshot roster_state live_roster_hash
 		planned_roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
-		roster_state=$(migration_stable_roster_state "$directory") || return $?
+		roster_snapshot=$(migration_stable_roster_state "$directory") || return $?
+		roster_state=${roster_snapshot%% *}
+		live_roster_hash=${roster_snapshot#* }
 		case "$roster_state" in
 		equal)
-			# Nothing to write, so no resume marker can be left behind; an
-			# earlier interrupted write from this directory is now complete.
+			# Nothing to write; an earlier interrupted write is now complete.
 			[[ "$dry_run" == true ]] || rm -f "$roster_marker"
 			;;
 		empty | partial)
+			# Resume only the exact partial roster this directory's failed write
+			# left and verified. Any other partial team may hide an sso-tools
+			# removal, which the write would undo.
 			if [[ "$roster_state" == partial ]] &&
-				! [[ -f "$roster_marker" && "$(cat "$roster_marker")" == "$planned_roster_hash" ]]; then
-				fga_error "stable team holds only part of the legacy plan and this output directory has no interrupted apply to resume. If members were removed in sso-tools, re-run plan with --stable-roster-from-live; if an earlier apply from another output directory was interrupted, resume it there"
+				! [[ -f "$roster_marker" &&
+					"$(cat "$roster_marker")" == "$planned_roster_hash $live_roster_hash" ]]; then
+				fga_error "stable team holds only part of the legacy plan and does not match an interrupted apply recorded in this output directory. If members were removed in sso-tools, re-run plan with --stable-roster-from-live; if an earlier apply from another output directory was interrupted, resume it there"
 				return 4
 			fi
-			[[ "$dry_run" == true ]] || printf '%s' "$planned_roster_hash" >"$roster_marker"
-			fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run" || return $?
-			# The roster is complete: only an interrupted write may be resumed.
-			[[ "$dry_run" == true ]] || rm -f "$roster_marker"
+			if [[ "$dry_run" == true ]]; then
+				fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" true
+			else
+				migration_write_legacy_roster "$directory" "$roster_marker" "$planned_roster_hash" || return $?
+			fi
 			;;
 		*)
 			fga_error "stable team has members outside the legacy plan, so it was curated in sso-tools; re-run plan with --stable-roster-from-live instead of copying the legacy roster"
@@ -395,9 +401,9 @@ migration_apply() {
 		# The approved roster is the stable team as it was at plan time. Never
 		# write it back: that would undo a removal made since, and verify
 		# would then pass. Refuse instead if the team changed.
-		local live_state
-		live_state=$(migration_stable_roster_state "$directory") || return $?
-		[[ "$live_state" == equal ]] || {
+		local live_snapshot
+		live_snapshot=$(migration_stable_roster_state "$directory") || return $?
+		[[ "${live_snapshot%% *}" == equal ]] || {
 			fga_error "stable team changed since plan; re-run snapshot and plan, then review again"
 			return 4
 		}
@@ -447,9 +453,28 @@ migration_assert_plan_roster_is_legacy() {
 	rm -rf "$temp_dir"
 }
 
-# Prints the live stable team's state relative to the planned roster: equal,
-# empty, partial (a non-empty proper subset of the plan), or other. Returns the
-# read error if the stable team cannot be read.
+# Writes the legacy roster. On success the resume marker is removed. If the
+# write fails partway, the marker records the planned roster hash and the hash
+# of the partial roster read back afterwards, so only that exact state can be
+# resumed; if the read-back fails or the team is not partial, no marker is kept.
+migration_write_legacy_roster() {
+	local directory="$1"
+	local roster_marker="$2"
+	local planned_roster_hash="$3"
+	local status=0 after
+	rm -f "$roster_marker"
+	fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" false || status=$?
+	[[ "$status" -ne 0 ]] || return 0
+	if after=$(migration_stable_roster_state "$directory") && [[ "${after%% *}" == partial ]]; then
+		printf '%s %s' "$planned_roster_hash" "${after#* }" >"$roster_marker"
+	fi
+	return "$status"
+}
+
+# Prints the live stable team's state relative to the planned roster (equal,
+# empty, partial for a non-empty proper subset of the plan, or other) followed
+# by the sha256 of the normalized live roster. Returns the read error if the
+# stable team cannot be read.
 migration_stable_roster_state() {
 	local directory="$1"
 	local temp_dir status state
@@ -473,8 +498,8 @@ migration_stable_roster_state() {
 	else
 		state=other
 	fi
+	printf '%s %s\n' "$state" "$(fga_hash_file "$temp_dir/actual-roster")"
 	rm -rf "$temp_dir"
-	printf '%s\n' "$state"
 }
 
 migration_assert_live_stable_plan() {

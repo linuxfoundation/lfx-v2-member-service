@@ -105,14 +105,17 @@ With `--stable-roster-from-live`:
   `apply`; `verify` still requires the census difference to be approved.
 - `apply` writes members only for a plan whose roster is exactly the legacy roster, and decides by
   the stable team's current state. Empty (first migration): it writes the roster. Already equal (a
-  rerun): it writes no members, only grants. Partial: roster writes commit per batch, so an
-  interrupted `apply` can leave part of the roster written; `apply` records
-  `legacy-roster-apply.started` before writing into an empty or partial team and deletes it once the
-  write completes, and a rerun from the same output directory resumes only while that record
-  exists. A new `plan` also clears it. A live plan whose `stable_roster_source` was changed to
-  `legacy` in `summary.json` exits 6 unless its roster equals the legacy roster, in which case it
-  behaves exactly like a legacy plan. Any other stable team (members added or removed in sso-tools,
-  with no interrupted apply in this output directory) exits 4: re-run `plan` with
+  rerun): it writes no members, only grants. Partial: roster writes commit per batch, so a failed
+  write can leave part of the roster. When a roster write fails and the team it reads back is
+  partial, `apply` records `legacy-roster-apply.started` with the planned roster hash and the hash of
+  that exact partial roster; a rerun from the same output directory resumes only while the team
+  still matches it, and the record is deleted once the write completes. A failed write that
+  committed nothing, or a read-back that fails, leaves no record. A new `plan` also clears it. If
+  `apply` is killed before it can record the partial roster, the team must be returned to empty or
+  the full legacy roster in sso-tools before rerunning. A live plan whose `stable_roster_source` was
+  changed to `legacy` in `summary.json` exits 6 unless its roster equals the legacy roster, in which
+  case it behaves exactly like a legacy plan. Any other stable team (members added or removed in
+  sso-tools, or a partial team that does not match the record) exits 4: re-run `plan` with
   `--stable-roster-from-live`, or resume the earlier apply from its own output directory.
 - The stable team is curated in sso-tools. Any membership edit between `plan` and `cleanup` makes
   `apply`, `verify`, or `cleanup` exit 4. Freeze edits for the change window, or re-run `snapshot` →

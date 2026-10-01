@@ -502,13 +502,37 @@ test_legacy_apply_resumes_only_its_own_interrupted_write() {
 	}
 	migration_plan "$dir" "$census" 1 false >/dev/null
 
-	# The first apply is interrupted after one roster batch: alice is written,
-	# dave is not.
+	# A write that fails before committing anything leaves an empty team and no
+	# resume marker: the rerun is a fresh first migration.
 	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
 	fga_apply_tuple_file() { [[ "$2" == */stable-roster-plan.jsonl ]] && return 5; return 0; }
 	status=0
 	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
-	[[ "$status" -ne 0 ]] || fail "the simulated interruption must fail the first apply"
+	[[ "$status" -ne 0 ]] || fail "a failed roster write must fail the apply"
+	[[ ! -f "$dir/legacy-roster-apply.started" ]] ||
+		fail "a write that committed nothing must not leave a resume marker"
+
+	# The next attempt commits one batch (alice) and then fails, so the marker
+	# records exactly that partial roster.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() {
+		[[ "$2" == */stable-roster-plan.jsonl ]] && { printf '%s\n' alice >"$stable_members"; return 5; }
+		return 0
+	}
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	[[ "$status" -ne 0 ]] || fail "the simulated interruption must fail the apply"
+	[[ -f "$dir/legacy-roster-apply.started" ]] || fail "a partial roster write must record a resume marker"
+
+	# If sso-tools then changes the partial team, it no longer matches what the
+	# failed write left, so the resume must refuse.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	printf '%s\n' dave >"$stable_members"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a partial team that differs from the recorded interrupted write must be refused"
+	[[ ! -s "$call_log" ]] || fail "a mismatched resume must not write: $(cat "$call_log")"
 	printf '%s\n' alice >"$stable_members"
 
 	# The same output directory resumes its own interrupted write.
