@@ -212,7 +212,8 @@ test_apply_records_migrated_count() {
 		>"$dir/live-grants.jsonl"
 	printf '%s\n' '{"store_id":"store","old_team":"old"}' >"$dir/manifest.json"
 	write_plan_summary_fixture "$dir"
-	fga_request() { printf '%s\n' '{}'; }
+	# Empty stable team, as in the original migration: a legacy apply may write it.
+	fga_request() { printf '%s\n' '{"tuples":[]}'; }
 	migration_apply "$dir" false true
 	assert_eq "1" "$(jq -r '.migrated_count' "$dir/summary.json")" \
 		"confirmed apply must record migrated grant count"
@@ -428,6 +429,138 @@ test_apply_refuses_live_plan_relabelled_legacy() {
 	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "apply must refuse a live-roster plan relabelled as legacy"
 	[[ ! -s "$call_log" ]] || fail "a relabelled live plan must not write members back: $(cat "$call_log")"
+}
+
+test_legacy_apply_refuses_curated_stable_team() {
+	local dir census stable_members call_log members status
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_read_all() {
+		jq -Rc 'select(length > 0) | {user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+			"$stable_members"
+	}
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	migration_plan "$dir" "$census" 1 false >/dev/null
+
+	# The legacy plan holds alice and dave. Any curated stable team, whether
+	# members were added, only removed (dave), or replaced, must be refused.
+	for members in "alice bob" "alice" "bob"; do
+		tr ' ' '\n' <<<"$members" >"$stable_members"
+		: >"$call_log"
+		status=0
+		migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+		assert_eq "4" "$status" "a legacy apply against a curated stable team ($members) must refuse"
+		[[ ! -s "$call_log" ]] || fail "a legacy apply against stable team ($members) must not write: $(cat "$call_log")"
+	done
+
+	# A rerun against a stable team that already equals the legacy plan writes
+	# grants only: no roster write, so no resume marker that a failed write
+	# could leave behind.
+	printf '%s\n' alice dave >"$stable_members"
+	: >"$call_log"
+	migration_apply "$dir" false true >/dev/null
+	assert_eq "writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
+		"a legacy apply rerun against an equal stable team must not rewrite the roster"
+	[[ ! -f "$dir/legacy-roster-apply.started" ]] ||
+		fail "a legacy apply rerun against an equal stable team must not leave a resume marker"
+	printf '%s\n' alice >"$stable_members"
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "after an equal rerun, a member removed in sso-tools must not be written back"
+	[[ ! -s "$call_log" ]] || fail "after an equal rerun, a refused apply must not write: $(cat "$call_log")"
+
+	# A failed stable-team read fails closed.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_read_all() { return 5; }
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	[[ "$status" -ne 0 ]] || fail "a legacy apply must fail when the stable team cannot be read"
+	[[ ! -s "$call_log" ]] || fail "a legacy apply must not write when the stable team cannot be read: $(cat "$call_log")"
+}
+
+test_legacy_apply_resumes_only_its_own_interrupted_write() {
+	local dir census stable_members call_log status
+	dir=$(mktemp -d)
+	census=$(mktemp)
+	stable_members=$(mktemp)
+	call_log=$(mktemp)
+	trap 'rm -rf "$dir"; rm -f "$census" "$stable_members" "$call_log"' RETURN
+	write_live_roster_plan_fixture "$dir" "$census"
+	: >"$stable_members"
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_read_all() {
+		jq -Rc 'select(length > 0) | {user:("user:" + .),relation:"member",object:"team:global_org_admin",condition:null}' \
+			"$stable_members"
+	}
+	migration_plan "$dir" "$census" 1 false >/dev/null
+
+	# A write that fails before committing anything leaves an empty team and no
+	# resume marker: the rerun is a fresh first migration.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { [[ "$2" == */stable-roster-plan.jsonl ]] && return 5; return 0; }
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	[[ "$status" -ne 0 ]] || fail "a failed roster write must fail the apply"
+	[[ ! -f "$dir/legacy-roster-apply.started" ]] ||
+		fail "a write that committed nothing must not leave a resume marker"
+
+	# The next attempt commits one batch (alice) and then fails, so the marker
+	# records exactly that partial roster.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() {
+		[[ "$2" == */stable-roster-plan.jsonl ]] && { printf '%s\n' alice >"$stable_members"; return 5; }
+		return 0
+	}
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	[[ "$status" -ne 0 ]] || fail "the simulated interruption must fail the apply"
+	[[ -f "$dir/legacy-roster-apply.started" ]] || fail "a partial roster write must record a resume marker"
+
+	# If sso-tools then changes the partial team, it no longer matches what the
+	# failed write left, so the resume must refuse.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	printf '%s\n' dave >"$stable_members"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a partial team that differs from the recorded interrupted write must be refused"
+	[[ ! -s "$call_log" ]] || fail "a mismatched resume must not write: $(cat "$call_log")"
+	printf '%s\n' alice >"$stable_members"
+
+	# The same output directory resumes its own interrupted write.
+	# shellcheck disable=SC2329 # Fixture override invoked through migration_apply.
+	fga_apply_tuple_file() { printf '%s:%s\n' "$1" "$(basename "$2")" >>"$call_log"; }
+	migration_apply "$dir" false true >/dev/null ||
+		fail "a legacy apply must resume a partial roster left by its own interrupted write"
+	assert_eq "writes:stable-roster-plan.jsonl,writes:live-grants.jsonl" "$(paste -sd, "$call_log")" \
+		"a resumed legacy apply writes the full roster and the grants"
+	[[ ! -f "$dir/legacy-roster-apply.started" ]] ||
+		fail "a completed roster write must clear the resume marker"
+
+	# After the apply completes, dave is removed in sso-tools. A rerun from the
+	# same output directory must refuse instead of writing him back.
+	printf '%s\n' alice >"$stable_members"
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a rerun after a completed apply must refuse a curated subset"
+	[[ ! -s "$call_log" ]] || fail "a rerun after a completed apply must not write members back: $(cat "$call_log")"
+
+	# A new plan clears the resume marker, so the same subset is refused again.
+	migration_plan "$dir" "$census" 1 false >/dev/null
+	: >"$call_log"
+	status=0
+	migration_apply "$dir" false true >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "after a re-plan a partial stable team must be refused, not resumed"
+	[[ ! -s "$call_log" ]] || fail "a refused legacy apply must not write: $(cat "$call_log")"
 }
 
 test_verify_rejects_unapproved_census_difference() {
@@ -1133,6 +1266,8 @@ test_apply_live_roster_refuses_changed_team
 test_apply_live_roster_writes_grants_only
 test_apply_unknown_roster_source_fails_closed
 test_apply_refuses_live_plan_relabelled_legacy
+test_legacy_apply_refuses_curated_stable_team
+test_legacy_apply_resumes_only_its_own_interrupted_write
 test_verify_rejects_unapproved_census_difference
 test_plan_live_roster_rejects_non_user_subjects
 test_plan_live_roster_rejects_empty_stable_team
