@@ -312,6 +312,18 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 			return org, ok, err
 		}
 
+		// Each matchSingleAccount call below is a single Salesforce HTTP
+		// request bounded only by the client's fixed httpTimeout, not by ctx:
+		// go-salesforce's QueryPage never propagates ctx into the underlying
+		// http.Request, so ctx expiring cannot abort an in-flight call. Check
+		// ctx between tiers so a deadline that has already passed (e.g. the
+		// first tier alone consumed the handler's budget) stops further
+		// tiers from running, rather than letting up to three more
+		// full-timeout requests run after the caller has given up.
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+
 		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
 			"Domain_Alias__c LIKE "+quoteLikeSOQL(domain), "domain_alias", accountLikeMatchPageSize,
 			func(o *model.B2BOrg) bool {
@@ -319,6 +331,10 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 			})
 		if err != nil || ok || ambiguous {
 			return org, ok, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
 		}
 
 		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
@@ -330,6 +346,9 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 	}
 
 	if name != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		org, ok, _, err := r.matchSingleAccount(ctx, "Name = "+quoteSOQL(name), "name", accountMatchPageSize, nil)
 		return org, ok, err
 	}

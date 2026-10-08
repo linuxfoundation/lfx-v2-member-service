@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -285,6 +286,31 @@ func TestAccountRepo_FindAccountByNameOrWebsite_QueryErrorPropagates(t *testing.
 	require.Error(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, org)
+}
+
+func TestAccountRepo_FindAccountByNameOrWebsite_ExpiredContextStopsBeforeLaterTiers(t *testing.T) {
+	t.Parallel()
+
+	// go-salesforce's QueryPage never binds ctx to the underlying HTTP
+	// request, so an already-expired ctx cannot abort the in-flight
+	// primary_domain call, but it must stop the domain_alias/website/name
+	// tiers from starting afterward: letting each subsequent tier consume a
+	// full httpTimeout after the caller's deadline has passed is how the
+	// handler's 30s budget gets blown across up to four sequential queries.
+	tr := &seqQueryTransport{responses: []string{
+		soqlAccountsResponse(), // primary_domain tier: no match
+	}}
+	repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	defer cancel()
+
+	org, ok, err := repo.FindAccountByNameOrWebsite(ctx, "", "acme.com")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, ok)
+	assert.Nil(t, org)
+	assert.Equal(t, 1, tr.queryCalls, "an expired context must stop before the domain_alias/website/name tiers")
 }
 
 func TestWebsiteDomain(t *testing.T) {
