@@ -274,7 +274,14 @@ func websiteDomain(website string) string {
 	if err != nil || u.Hostname() == "" {
 		return ""
 	}
-	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	return foldDomain(u.Hostname())
+}
+
+// foldDomain lowercases and strips a leading "www." so domains stored with
+// different case or www-prefixing (e.g. "ACME.COM", "www.acme.com") compare
+// equal to the lower/www-stripped form produced by websiteDomain.
+func foldDomain(s string) string {
+	return strings.TrimPrefix(strings.ToLower(s), "www.")
 }
 
 // FindAccountByNameOrWebsite resolves a single member-eligible Account by
@@ -294,14 +301,16 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 	if domain != "" {
 		org, ok, ambiguous, err := r.matchSingleAccount(ctx,
 			"Account_Domain__c = "+quoteSOQL(domain), "primary_domain", accountMatchPageSize,
-			func(o *model.B2BOrg) bool { return o.PrimaryDomain == domain })
+			func(o *model.B2BOrg) bool { return foldDomain(o.PrimaryDomain) == domain })
 		if err != nil || ok || ambiguous {
 			return org, ok, err
 		}
 
 		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
 			"Domain_Alias__c LIKE "+quoteLikeSOQL(domain), "domain_alias", accountLikeMatchPageSize,
-			func(o *model.B2BOrg) bool { return slices.Contains(o.DomainAliases, domain) })
+			func(o *model.B2BOrg) bool {
+				return slices.ContainsFunc(o.DomainAliases, func(alias string) bool { return foldDomain(alias) == domain })
+			})
 		if err != nil || ok || ambiguous {
 			return org, ok, err
 		}
@@ -329,14 +338,23 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 // expected verified-match count, since verify filtering happens after the
 // page is fetched and a true match could otherwise be truncated out of the
 // page before it's ever considered. ambiguous is true when more than one hit
-// survives: the predicate alone (e.g. a LIKE substring match) cannot be
-// trusted to prove uniqueness, so the caller should stop rather than treat
-// this as a miss.
+// survives, or when the raw page is saturated (== limit): SOQL applies no
+// ORDER BY here, so a saturated page cannot prove that no further hits (a
+// true match, or a second true match) exist beyond the cutoff. The predicate
+// alone (e.g. a LIKE substring match) cannot be trusted to prove uniqueness
+// in either case, so the caller should stop rather than treat this as a miss
+// or a confirmed unique match.
 func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label string, limit int, verify func(*model.B2BOrg) bool) (*model.B2BOrg, bool, bool, error) {
 	query := accountsSOQLBase + "\n    AND " + predicate + "\nLIMIT " + strconv.Itoa(limit)
 	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
 	if err != nil {
 		return nil, false, false, fmt.Errorf("matching accounts by %s: %w", label, err)
+	}
+
+	if len(sfResult.Records) >= limit {
+		slog.WarnContext(ctx, "b2b org name/website lookup skipped: raw match page saturated",
+			"match_type", label, "limit", limit)
+		return nil, false, true, nil
 	}
 
 	matches := make([]*model.B2BOrg, 0, len(sfResult.Records))

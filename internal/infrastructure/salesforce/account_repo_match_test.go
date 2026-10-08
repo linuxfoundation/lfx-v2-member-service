@@ -102,6 +102,65 @@ func TestAccountRepo_FindAccountByNameOrWebsite_AmbiguousStopsEscalation(t *test
 	assert.Equal(t, 1, tr.queryCalls, "ambiguity at the first tier must stop resolution immediately")
 }
 
+func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainMatchIgnoresCaseAndWWW(t *testing.T) {
+	t.Parallel()
+
+	sfid := batchParentSFID(10)
+	tr := &seqQueryTransport{responses: []string{
+		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "www.ACME.com", "")),
+	}}
+	repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
+	require.NoError(t, err)
+	require.True(t, ok, "stored primary domain www.ACME.com must match requested acme.com")
+	assert.Equal(t, "Acme Corp", org.Name)
+}
+
+func TestAccountRepo_FindAccountByNameOrWebsite_DomainAliasMatchIgnoresCaseAndWWW(t *testing.T) {
+	t.Parallel()
+
+	sfid := batchParentSFID(11)
+	tr := &seqQueryTransport{responses: []string{
+		soqlAccountsResponse(), // primary_domain tier: no match
+		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "other.com", "WWW.Acme.COM")),
+	}}
+	repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
+	require.NoError(t, err)
+	require.True(t, ok, "stored domain alias WWW.Acme.COM must match requested acme.com")
+	assert.Equal(t, "Acme Corp", org.Name)
+}
+
+func TestAccountRepo_FindAccountByNameOrWebsite_SaturatedRawPageIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	// A LIKE substring query can return up to accountLikeMatchPageSize raw hits
+	// before exact-hostname verification narrows them down. A page saturated at
+	// the limit (no ORDER BY in the query) cannot prove that no further match
+	// exists beyond the cutoff, so it must be treated as ambiguous rather than
+	// resolved from whichever hits happened to land within the page.
+	records := make([]string, accountLikeMatchPageSize)
+	for i := range records {
+		// None of these verify-match "acme.com" exactly: only the raw SOQL
+		// LIKE predicate matched. The saturation check must fire before
+		// verify-filtering ever runs, regardless of the post-filter count.
+		records[i] = soqlAccountRecord(batchParentSFID(100+i), "Irrelevant Co", "", "", "notacme.com")
+	}
+	tr := &seqQueryTransport{responses: []string{
+		soqlAccountsResponse(), // primary_domain tier: no match
+		soqlAccountsResponse(records...),
+	}}
+	repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Irrelevant Co", "acme.com")
+	require.NoError(t, err)
+	assert.False(t, ok, "a saturated raw domain_alias page must not resolve, even though no verified match survived")
+	assert.Nil(t, org)
+	assert.Equal(t, 2, tr.queryCalls, "ambiguity at domain_alias must stop before the website/name tiers")
+}
+
 func TestAccountRepo_FindAccountByNameOrWebsite_NameFallback(t *testing.T) {
 	t.Parallel()
 
