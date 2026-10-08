@@ -211,6 +211,27 @@ func TestAccountRepo_FindAccountByNameOrWebsite_SaturatedRawPageIsAmbiguous(t *t
 	assert.Equal(t, 2, tr.queryCalls, "ambiguity at domain_alias must stop before the website/name tiers")
 }
 
+func TestAccountRepo_FindAccountByNameOrWebsite_NonSaturatedPageWithNextPageTokenIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	// A page can report done:false (non-empty nextRecordsUrl) with fewer
+	// records than the SOQL LIMIT if Salesforce's batch size ever ends up
+	// smaller than the requested limit. len(Records) < limit alone cannot
+	// prove this was the final page in that case, so NextPageToken must be
+	// checked too, not just saturation.
+	record := soqlAccountRecord(batchParentSFID(13), "Acme US", "", "acme.com", "")
+	tr := &seqQueryTransport{responses: []string{
+		fmt.Sprintf(`{"totalSize":2,"done":false,"nextRecordsUrl":"/services/data/v63.0/query/01gXXX-2000","records":[%s]}`, record),
+	}}
+	repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
+	require.NoError(t, err)
+	assert.False(t, ok, "a page with a non-empty NextPageToken must not resolve, even with len(Records) < limit")
+	assert.Nil(t, org)
+	assert.Equal(t, 1, tr.queryCalls, "ambiguity from an unconsumed NextPageToken must stop before later tiers")
+}
+
 func TestAccountRepo_FindAccountByNameOrWebsite_NameFallback(t *testing.T) {
 	t.Parallel()
 

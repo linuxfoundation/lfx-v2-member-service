@@ -344,12 +344,13 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 // expected verified-match count, since verify filtering happens after the
 // page is fetched and a true match could otherwise be truncated out of the
 // page before it's ever considered. ambiguous is true when more than one hit
-// survives, or when the raw page is saturated (== limit): SOQL applies no
-// ORDER BY here, so a saturated page cannot prove that no further hits (a
-// true match, or a second true match) exist beyond the cutoff. The predicate
-// alone (e.g. a LIKE substring match) cannot be trusted to prove uniqueness
-// in either case, so the caller should stop rather than treat this as a miss
-// or a confirmed unique match.
+// survives, or when the raw page is saturated (>= limit) or a non-empty
+// NextPageToken shows Salesforce has more rows beyond this page: SOQL applies
+// no ORDER BY here, so neither case can prove that no further hits (a true
+// match, or a second true match) exist beyond the cutoff. The predicate alone
+// (e.g. a LIKE substring match) cannot be trusted to prove uniqueness in
+// either case, so the caller should stop rather than treat this as a miss or
+// a confirmed unique match.
 func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label string, limit int, verify func(*model.B2BOrg) bool) (*model.B2BOrg, bool, bool, error) {
 	query := accountsSOQLBase + "\n    AND " + predicate + "\nLIMIT " + strconv.Itoa(limit)
 	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
@@ -357,9 +358,9 @@ func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label s
 		return nil, false, false, fmt.Errorf("matching accounts by %s: %w", label, err)
 	}
 
-	if len(sfResult.Records) >= limit {
+	if len(sfResult.Records) >= limit || sfResult.NextPageToken != "" {
 		slog.WarnContext(ctx, "b2b org name/website lookup skipped: raw match page saturated",
-			"match_type", label, "limit", limit)
+			"match_type", label, "limit", limit, "records", len(sfResult.Records))
 		return nil, false, true, nil
 	}
 

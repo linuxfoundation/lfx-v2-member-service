@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	sf "github.com/k-capehart/go-salesforce/v3"
 )
@@ -22,6 +23,16 @@ const (
 	// producing a doubled path on the second page request and a NOT_FOUND error
 	// from the Salesforce REST API.
 	defaultAPIVersion = "v63.0"
+
+	// httpTimeout bounds every Salesforce HTTP call. go-salesforce's
+	// QueryPage accepts a context.Context but never propagates it into the
+	// underlying http.Request, so the NATS handler's own request deadline
+	// (30s, see b2bOrgLookupByWebsiteHandlerTimeout) does not actually bound
+	// this call; only the http.Client.Timeout set here does. Kept below that
+	// handler deadline so a slow Salesforce response fails fast enough for
+	// the handler to still return an error instead of the caller timing out
+	// first.
+	httpTimeout = 20 * time.Second
 )
 
 // Config holds the Salesforce connected-app credentials and instance URL
@@ -184,6 +195,7 @@ func (c Config) Init() (*sf.Salesforce, error) {
 	client, err := sf.Init(creds,
 		sf.WithAPIVersion(c.APIVersion),
 		sf.WithRoundTripper(NewRateLimitTransport(nil)),
+		sf.WithHTTPTimeout(httpTimeout),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("salesforce authentication failed: %w", err)
