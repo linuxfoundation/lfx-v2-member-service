@@ -299,8 +299,14 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 	name = strings.TrimSpace(name)
 
 	if domain != "" {
+		// Account_Domain__c is stored verbatim in Salesforce (no www./case
+		// folding applied on write), so an exact match against the folded
+		// domain alone would miss a record stored as "www.<domain>". Query
+		// both forms; the verify callback's fold still guards against case
+		// variants Salesforce's string equality wouldn't otherwise catch.
 		org, ok, ambiguous, err := r.matchSingleAccount(ctx,
-			"Account_Domain__c = "+quoteSOQL(domain), "primary_domain", accountMatchPageSize,
+			"Account_Domain__c IN ("+buildSOQLInClause([]string{domain, "www." + domain})+")",
+			"primary_domain", accountMatchPageSize,
 			func(o *model.B2BOrg) bool { return foldDomain(o.PrimaryDomain) == domain })
 		if err != nil || ok || ambiguous {
 			return org, ok, err

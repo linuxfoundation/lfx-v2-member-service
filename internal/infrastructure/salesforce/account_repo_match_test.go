@@ -6,11 +6,41 @@ package salesforce
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// predicateAssertingTransport returns the fixed /limits response for sf.Init,
+// then for each /query call returns response only if the decoded SOQL query
+// string contains wantSubstr, else an empty result. Unlike seqQueryTransport
+// (which returns canned responses regardless of query content), this
+// validates the actual SOQL predicate sent to Salesforce rather than just the
+// in-process verify filtering applied after a fetch.
+type predicateAssertingTransport struct {
+	wantSubstr string
+	response   string
+	queryCalls int
+}
+
+func (t *predicateAssertingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, "/limits") {
+		return fakeResponse(http.StatusOK, `{}`, nil), nil
+	}
+	t.queryCalls++
+	q, err := url.QueryUnescape(req.URL.RawQuery)
+	if err != nil {
+		return fakeResponse(http.StatusOK, `{"totalSize":0,"done":true,"records":[]}`, nil), nil
+	}
+	if strings.Contains(q, t.wantSubstr) {
+		return fakeResponse(http.StatusOK, t.response, nil), nil
+	}
+	return fakeResponse(http.StatusOK, `{"totalSize":0,"done":true,"records":[]}`, nil), nil
+}
 
 // soqlAccountRecord builds a single-record JSON fragment matching the
 // soqlAccount JSON tags, for use in a SOQL query response body.
@@ -102,6 +132,26 @@ func TestAccountRepo_FindAccountByNameOrWebsite_AmbiguousStopsEscalation(t *test
 	assert.Equal(t, 1, tr.queryCalls, "ambiguity at the first tier must stop resolution immediately")
 }
 
+func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainQueryIncludesWWWForm(t *testing.T) {
+	t.Parallel()
+
+	sfid := batchParentSFID(12)
+	tr := &predicateAssertingTransport{
+		wantSubstr: "'www.acme.com'",
+		response:   soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "www.acme.com", "")),
+	}
+	repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
+	require.NoError(t, err)
+	require.True(t, ok, "primary_domain SOQL predicate must include the www.-prefixed stored form, not just the folded form")
+	assert.Equal(t, "Acme Corp", org.Name)
+}
+
+// TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainMatchIgnoresCaseAndWWW
+// exercises the in-process fold-aware verify callback only; it uses an
+// unconditional fake transport, so it does not validate the SOQL predicate
+// itself (see PrimaryDomainQueryIncludesWWWForm above for that).
 func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainMatchIgnoresCaseAndWWW(t *testing.T) {
 	t.Parallel()
 
