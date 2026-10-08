@@ -11,13 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfig_Init_SetsHTTPTimeout exercises the exact option set Config.Init
-// passes to sf.Init (access-token flow substituted for the real auth flow, and
-// a fake transport in place of NewRateLimitTransport's inner http.DefaultTransport,
-// so no network call is needed). go-salesforce's QueryPage/DoRequest path has no
-// context parameter, so the handler's own request deadline never bounds a
-// Salesforce call — only http.Client.Timeout does. This guards against that
-// timeout option being dropped again.
+// TestConfig_Init_SetsHTTPTimeout exercises salesforceOptions, the exact
+// function Config.Init calls to build its sf.Init option list, so removing
+// sf.WithHTTPTimeout from production wiring fails this test (access-token
+// flow substituted for the real auth flow, and a fake transport in place of
+// NewRateLimitTransport's inner http.DefaultTransport, so no network call is
+// needed). go-salesforce's QueryPage/DoRequest path has no context parameter,
+// so the handler's own request deadline never bounds a Salesforce call — only
+// http.Client.Timeout does.
 func TestConfig_Init_SetsHTTPTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -26,9 +27,7 @@ func TestConfig_Init_SetsHTTPTimeout(t *testing.T) {
 			Domain:      "https://test.salesforce.com",
 			AccessToken: "fake-token-for-tests",
 		},
-		sf.WithAPIVersion(defaultAPIVersion),
-		sf.WithRoundTripper(NewRateLimitTransport(fakeLimitsRoundTripper{})),
-		sf.WithHTTPTimeout(httpTimeout),
+		salesforceOptions(defaultAPIVersion, fakeLimitsRoundTripper{})...,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, client.GetHTTPClient(), "sf.Init must configure an http.Client")

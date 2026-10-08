@@ -9,6 +9,7 @@ package salesforce
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
@@ -192,11 +193,7 @@ func (c Config) Init() (*sf.Salesforce, error) {
 		)
 	}
 
-	client, err := sf.Init(creds,
-		sf.WithAPIVersion(c.APIVersion),
-		sf.WithRoundTripper(NewRateLimitTransport(nil)),
-		sf.WithHTTPTimeout(httpTimeout),
-	)
+	client, err := sf.Init(creds, salesforceOptions(c.APIVersion, NewRateLimitTransport(nil))...)
 	if err != nil {
 		return nil, fmt.Errorf("salesforce authentication failed: %w", err)
 	}
@@ -208,4 +205,15 @@ func (c Config) Init() (*sf.Salesforce, error) {
 	)
 
 	return client, nil
+}
+
+// salesforceOptions builds the sf.Init option list shared by Init and its
+// regression test, so a test exercising this function actually guards the
+// production wiring (e.g. the HTTP timeout) rather than a parallel copy of it.
+func salesforceOptions(apiVersion string, roundTripper http.RoundTripper) []sf.Option {
+	return []sf.Option{
+		sf.WithAPIVersion(apiVersion),
+		sf.WithRoundTripper(roundTripper),
+		sf.WithHTTPTimeout(httpTimeout),
+	}
 }
