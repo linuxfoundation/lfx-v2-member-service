@@ -15,6 +15,10 @@ import (
 type stubB2BOrgReader struct {
 	org *model.B2BOrg
 	err error
+
+	websiteOrg   *model.B2BOrg
+	websiteFound bool
+	websiteErr   error
 }
 
 func (s stubB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg, error) {
@@ -30,6 +34,13 @@ func (s stubB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string)
 
 func (s stubB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	return nil, nil
+}
+
+func (s stubB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	if s.websiteErr != nil {
+		return nil, false, s.websiteErr
+	}
+	return s.websiteOrg, s.websiteFound, nil
 }
 
 func TestProcessB2BOrgLookupRequest_found(t *testing.T) {

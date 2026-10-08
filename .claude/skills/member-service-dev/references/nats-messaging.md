@@ -17,8 +17,9 @@ and their handler were removed in LFXV2-2049 — the canonical uid is now the
 18-char SFID itself.)
 
 ```go
-ProjectIDMapLookupSubject = "lfx.member.project-id-map.lookup"
-B2BOrgLookupSubject       = "lfx.member.b2b_org_lookup"
+ProjectIDMapLookupSubject      = "lfx.member.project-id-map.lookup"
+B2BOrgLookupSubject            = "lfx.member.b2b_org_lookup"
+B2BOrgLookupByWebsiteSubject     = "lfx.member.b2b_org_lookup_by_website"
 ```
 
 ### Project ID map lookup
@@ -92,6 +93,52 @@ infrastructure failures, not as a simple miss.
 
 Since LFXV2-2049, `b2b_org.uid` is the 18-char Account SFID — this RPC
 confirms existence and normalizes SFID form; it does not translate CDP UUIDs.
+
+### B2B org lookup by website
+
+Resolves a `b2b_org` by name/website when a caller cannot resolve it directly
+via `lfx.member.b2b_org_lookup` (e.g. a legacy, non-SFID id for an org that
+exists under a different SFID). Implemented in
+`internal/infrastructure/nats/b2b_org_lookup_by_website_handler.go`, backed by
+`AccountRepo.FindAccountByNameOrWebsite` (Salesforce SOQL).
+
+Resolution is tiered: primary domain (`Account_Domain__c`) → domain alias
+(`Domain_Alias__c`) → website (`Website`) → name (`Name`), in that priority
+order. A match at any domain tier is verified against the normalized hostname
+before being accepted (so a `Website LIKE '%hat.com%'` SOQL hit on
+`redhat.com` is rejected). An ambiguous result (more than one candidate) at
+any domain tier stops resolution entirely rather than falling through to a
+less specific tier, since a less specific matcher could otherwise resolve to
+a different, incorrect organization.
+
+| Field | Value |
+| --- | --- |
+| Subject | `lfx.member.b2b_org_lookup_by_website` |
+| Transport | NATS core request/reply |
+| Subscription | `QueueSubscribe` queue group `lfx-v2-member-service`; drained on shutdown |
+
+Request body (JSON):
+
+```json
+{"name": "<org name>", "website": "<org website or bare domain>"}
+```
+
+Success response:
+
+```json
+{"id": "<canonical 18-char Account SFID>"}
+```
+
+Error response (not found, ambiguous, or invalid):
+
+```json
+{"error": "b2b org not found"}
+```
+
+Other errors use the same `{"error": "..."}` shape (e.g.
+`name or website is required`, `b2b org lookup failed`). Callers must treat
+non-`b2b org not found` errors as infrastructure failures, not as a simple
+miss.
 
 ## Outbound RPC this service makes
 

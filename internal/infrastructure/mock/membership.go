@@ -374,6 +374,12 @@ func (m *MockB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []str
 	return map[string][]string{}, nil
 }
 
+// FindByNameOrWebsite always returns not-found. Satisfies port.B2BOrgReader
+// for local development without Salesforce.
+func (m *MockB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // compile-time check.
 var _ port.B2BOrgReader = (*MockB2BOrgReader)(nil)
 

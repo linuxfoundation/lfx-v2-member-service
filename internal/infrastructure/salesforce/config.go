@@ -9,7 +9,9 @@ package salesforce
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"time"
 
 	sf "github.com/k-capehart/go-salesforce/v3"
 )
@@ -22,6 +24,16 @@ const (
 	// producing a doubled path on the second page request and a NOT_FOUND error
 	// from the Salesforce REST API.
 	defaultAPIVersion = "v63.0"
+
+	// httpTimeout bounds every Salesforce HTTP call. go-salesforce's
+	// QueryPage accepts a context.Context but never propagates it into the
+	// underlying http.Request, so the NATS handler's own request deadline
+	// (30s, see b2bOrgLookupByWebsiteHandlerTimeout) does not actually bound
+	// this call; only the http.Client.Timeout set here does. Kept below that
+	// handler deadline so a slow Salesforce response fails fast enough for
+	// the handler to still return an error instead of the caller timing out
+	// first.
+	httpTimeout = 20 * time.Second
 )
 
 // Config holds the Salesforce connected-app credentials and instance URL
@@ -181,10 +193,7 @@ func (c Config) Init() (*sf.Salesforce, error) {
 		)
 	}
 
-	client, err := sf.Init(creds,
-		sf.WithAPIVersion(c.APIVersion),
-		sf.WithRoundTripper(NewRateLimitTransport(nil)),
-	)
+	client, err := sf.Init(creds, salesforceOptions(c.APIVersion, NewRateLimitTransport(nil))...)
 	if err != nil {
 		return nil, fmt.Errorf("salesforce authentication failed: %w", err)
 	}
@@ -196,4 +205,15 @@ func (c Config) Init() (*sf.Salesforce, error) {
 	)
 
 	return client, nil
+}
+
+// salesforceOptions builds the sf.Init option list shared by Init and its
+// regression test, so a test exercising this function actually guards the
+// production wiring (e.g. the HTTP timeout) rather than a parallel copy of it.
+func salesforceOptions(apiVersion string, roundTripper http.RoundTripper) []sf.Option {
+	return []sf.Option{
+		sf.WithAPIVersion(apiVersion),
+		sf.WithRoundTripper(roundTripper),
+		sf.WithHTTPTimeout(httpTimeout),
+	}
 }

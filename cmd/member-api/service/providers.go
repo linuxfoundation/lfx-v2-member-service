@@ -936,9 +936,10 @@ func InviteAcceptedServiceImpl(ctx context.Context) *usecaseSvc.InviteAcceptedSe
 
 // QueueSubscriptions registers all runAPI NATS subscriptions. It initialises
 // NATS, registers inbound RPC handlers (project-id-map when not in mock mode;
-// b2b_org_lookup whenever a B2BOrgReader is wired, including mock mode), and
-// always registers the invite_accepted handler. Drain callbacks are collected in
-// apiSubs; call DrainAPISubscriptions on shutdown.
+// b2b_org_lookup and b2b_org_lookup_by_website whenever a B2BOrgReader is wired,
+// including mock mode), and always registers the invite_accepted handler.
+// Drain callbacks are collected in apiSubs; call DrainAPISubscriptions on
+// shutdown.
 func QueueSubscriptions(ctx context.Context) error {
 	natsInit(ctx)
 
@@ -958,6 +959,14 @@ func QueueSubscriptions(ctx context.Context) error {
 			return fmt.Errorf("subscribe b2b_org_lookup: %w", err)
 		}
 		apiSubs = append(apiSubs, sub.Drain)
+
+		// b2b_org_lookup_by_website: resolve a b2b_org by name/website when
+		// callers cannot resolve it directly via b2b_org_lookup.
+		websiteSub, err := nats.SubscribeB2BOrgLookupByWebsite(natsClient.Conn(), reader)
+		if err != nil {
+			return fmt.Errorf("subscribe b2b_org_lookup_by_website: %w", err)
+		}
+		apiSubs = append(apiSubs, websiteSub.Drain)
 	}
 
 	// invite_accepted: always registered; mock mode wires a no-op invite sender.

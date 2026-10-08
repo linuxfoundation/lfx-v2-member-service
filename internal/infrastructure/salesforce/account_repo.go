@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -239,6 +241,171 @@ func (r *AccountRepo) FetchChildUIDsByParentUIDs(
 	ctx context.Context, parentUIDs []string,
 ) (map[string][]string, error) {
 	return r.fetchChildUIDsByParents(ctx, parentUIDs)
+}
+
+// accountMatchPageSize bounds the exact-equality match tiers' SOQL query
+// (primary_domain, name). A small cap is deliberate: these tiers exist to
+// find a single match, so more than a handful of hits already proves the
+// tier is ambiguous, and SOQL itself applies the equality predicate so no
+// true match can be truncated out of this page.
+const accountMatchPageSize = 5
+
+// accountLikeMatchPageSize bounds the substring (LIKE) match tiers'
+// (domain_alias, website) raw SOQL query, before the verify closure narrows
+// raw hits down to exact-hostname/exact-alias matches. This must stay well
+// above accountMatchPageSize: a LIKE predicate can return many irrelevant
+// substring hits, and if the raw page were capped at the same size as the
+// verified-match count, a second true match could be truncated out of the
+// page before verify ever saw it, masking real ambiguity.
+const accountLikeMatchPageSize = 50
+
+// websiteDomain extracts the lowercase, www-stripped hostname from a website
+// URL (with or without a scheme). Returns "" when website is empty or does
+// not parse to a usable host.
+func websiteDomain(website string) string {
+	website = strings.TrimSpace(website)
+	if website == "" {
+		return ""
+	}
+	if !strings.Contains(website, "://") {
+		website = "https://" + website
+	}
+	u, err := url.Parse(website)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return foldDomain(u.Hostname())
+}
+
+// foldDomain lowercases and strips a leading "www." so domains stored with
+// different case or www-prefixing (e.g. "ACME.COM", "www.acme.com") compare
+// equal to the lower/www-stripped form produced by websiteDomain.
+func foldDomain(s string) string {
+	return strings.TrimPrefix(strings.ToLower(s), "www.")
+}
+
+// FindAccountByNameOrWebsite resolves a single member-eligible Account by
+// primary domain, domain alias, website, then name, in that priority order. An ambiguous
+// result at any domain tier stops resolution entirely rather than falling
+// through to a lower-priority tier: a less specific matcher (website, then
+// name) could otherwise resolve to a different, incorrect organization than
+// the one the ambiguous, more specific matcher couldn't safely identify.
+// "no match" and "ambiguous match" are deliberately indistinguishable to the
+// caller (both return ok=false, err=nil): this method is read-only
+// resolution, never auto-provisioning, so both cases mean the same thing to
+// a caller — do not treat the id as confirmed.
+func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error) {
+	domain := websiteDomain(website)
+	name = strings.TrimSpace(name)
+
+	if domain != "" {
+		// Account_Domain__c is stored verbatim in Salesforce (no www./case
+		// folding applied on write), so an exact match against the folded
+		// domain alone would miss a record stored as "www.<domain>". Query
+		// both forms; the verify callback's fold still guards against case
+		// variants Salesforce's string equality wouldn't otherwise catch.
+		org, ok, ambiguous, err := r.matchSingleAccount(ctx,
+			"Account_Domain__c IN ("+buildSOQLInClause([]string{domain, "www." + domain})+")",
+			"primary_domain", accountMatchPageSize,
+			func(o *model.B2BOrg) bool { return foldDomain(o.PrimaryDomain) == domain })
+		if err != nil || ok || ambiguous {
+			return org, ok, err
+		}
+
+		// Each matchSingleAccount call below is a single Salesforce HTTP
+		// request bounded only by the client's fixed httpTimeout, not by ctx:
+		// go-salesforce's QueryPage never propagates ctx into the underlying
+		// http.Request, so ctx expiring cannot abort an in-flight call. Check
+		// ctx between tiers so a deadline that has already passed (e.g. the
+		// first tier alone consumed the handler's budget) stops further
+		// tiers from running, rather than letting up to three more
+		// full-timeout requests run after the caller has given up.
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+
+		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
+			"Domain_Alias__c LIKE "+quoteLikeSOQL(domain), "domain_alias", accountLikeMatchPageSize,
+			func(o *model.B2BOrg) bool {
+				return slices.ContainsFunc(o.DomainAliases, func(alias string) bool { return foldDomain(alias) == domain })
+			})
+		if err != nil || ok || ambiguous {
+			return org, ok, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+
+		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
+			"Website LIKE "+quoteLikeSOQL(domain), "website", accountLikeMatchPageSize,
+			func(o *model.B2BOrg) bool { return websiteDomain(o.Website) == domain })
+		if err != nil || ok || ambiguous {
+			return org, ok, err
+		}
+	}
+
+	if name != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		org, ok, _, err := r.matchSingleAccount(ctx, "Name = "+quoteSOQL(name), "name", accountMatchPageSize, nil)
+		return org, ok, err
+	}
+	return nil, false, nil
+}
+
+// matchSingleAccount runs predicate (a pre-quoted/escaped SOQL WHERE
+// fragment) against the member-eligible Account search base, filters hits
+// through verify (nil to skip filtering), and reports whether exactly one
+// match survives. limit bounds the raw SOQL page fetched before verify runs;
+// callers using a substring (LIKE) predicate must pass a limit well above the
+// expected verified-match count, since verify filtering happens after the
+// page is fetched and a true match could otherwise be truncated out of the
+// page before it's ever considered. ambiguous is true when more than one hit
+// survives, or when the raw page is saturated (>= limit) or a non-empty
+// NextPageToken shows Salesforce has more rows beyond this page: SOQL applies
+// no ORDER BY here, so neither case can prove that no further hits (a true
+// match, or a second true match) exist beyond the cutoff. The predicate alone
+// (e.g. a LIKE substring match) cannot be trusted to prove uniqueness in
+// either case, so the caller should stop rather than treat this as a miss or
+// a confirmed unique match.
+func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label string, limit int, verify func(*model.B2BOrg) bool) (*model.B2BOrg, bool, bool, error) {
+	query := accountsSOQLBase + "\n    AND " + predicate + "\nLIMIT " + strconv.Itoa(limit)
+	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
+	if err != nil {
+		return nil, false, false, fmt.Errorf("matching accounts by %s: %w", label, err)
+	}
+
+	if len(sfResult.Records) >= limit || sfResult.NextPageToken != "" {
+		slog.WarnContext(ctx, "b2b org name/website lookup skipped: raw match page saturated",
+			"match_type", label, "limit", limit, "records", len(sfResult.Records))
+		return nil, false, true, nil
+	}
+
+	matches := make([]*model.B2BOrg, 0, len(sfResult.Records))
+	for _, acc := range sfResult.Records {
+		org, convErr := convertSOQLToB2BOrg(ctx, acc)
+		if convErr != nil {
+			slog.WarnContext(ctx, "skipping account with invalid SFID in name/website match",
+				"match_type", label, "sfid", acc.ID, "error", convErr)
+			continue
+		}
+		if verify != nil && !verify(org) {
+			continue
+		}
+		matches = append(matches, org)
+	}
+
+	if len(matches) == 0 {
+		return nil, false, false, nil
+	}
+	if len(matches) > 1 {
+		slog.WarnContext(ctx, "b2b org name/website lookup skipped: ambiguous match",
+			"match_type", label, "candidates", len(matches))
+		return nil, false, true, nil
+	}
+	return matches[0], true, false, nil
 }
 
 // Ensure AccountRepo satisfies the port at compile time.
