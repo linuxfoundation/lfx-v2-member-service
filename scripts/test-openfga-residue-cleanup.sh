@@ -146,7 +146,8 @@ test_list_guard_rejects_unsafe_or_malformed_tuples() {
 		"$(tuple "user:alice" writer "project:33333333-3333-3333-3333-333333333333")" \
 		'{"user":"team:global_org_admin#member","relation":"global_org_admin"}' \
 		'{"relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222"}' \
-		"$(tuple "user:alice" writer "b2b_org")"; do
+		"$(tuple "user:alice" writer "b2b_org")" \
+		'{"user":"user:alice","relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222","condition":{"name":"c"}}'; do
 		{ cat "$LIST"; printf '%s\n' "$bad"; } >"$WORK/bad.jsonl"
 		status=0
 		residue_load_list "$WORK/bad.jsonl" "$(list_hash "$WORK/bad.jsonl")" "$OUT" >/dev/null 2>&1 || status=$?
@@ -187,6 +188,26 @@ test_unexpected_tuple_on_listed_object_fails_closed() {
 	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
 	assert_eq "4" "$status" "a tuple on a listed object that the list lacks must fail closed"
 	! grep -q '^deletes' "$CALL_LOG" || fail "an unexpected tuple must stop the run before any delete"
+}
+
+test_conditional_tuple_on_listed_object_fails_closed() {
+	local status=0 listed
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	# OpenFGA reports unconditional tuples with a null condition: those still match.
+	listed=$(tuple "user:alice" writer "b2b_org:22222222-2222-2222-2222-222222222222")
+	jq -c --argjson l "$listed" 'if . == $l then . + {condition: null} else . end' "$STORE_FILE" >"$STORE_FILE.next"
+	mv "$STORE_FILE.next" "$STORE_FILE"
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	residue_verify "$OUT" 2 >/dev/null
+	assert_eq "4" "$(residue_line_count "$OUT/present.jsonl")" "a null condition must compare equal to the listed tuple"
+	# The same grant carrying a real condition must never be deleted as if unconditional.
+	jq -c --argjson l "$listed" 'if {user, relation, object} == $l then . + {condition: {name: "c"}} else . end' \
+		"$STORE_FILE" >"$STORE_FILE.next"
+	mv "$STORE_FILE.next" "$STORE_FILE"
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "a conditional tuple on a listed object must fail closed"
+	! grep -q '^deletes' "$CALL_LOG" || fail "a conditional tuple must stop the run before any delete"
 }
 
 test_verify_catches_unlisted_subject_on_listed_object() {
@@ -325,6 +346,7 @@ test_missing_flag_value_is_rejected
 test_list_guard_rejects_unsafe_or_malformed_tuples
 test_delete_removes_only_listed_present_tuples
 test_unexpected_tuple_on_listed_object_fails_closed
+test_conditional_tuple_on_listed_object_fails_closed
 test_verify_catches_unlisted_subject_on_listed_object
 test_failed_reader_stops_before_any_delete
 test_dry_run_and_mode_write_nothing

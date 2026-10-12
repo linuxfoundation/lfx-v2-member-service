@@ -17,8 +17,10 @@ and the tool deletes only tuples from that list.
 
 - The list is bound to its reviewed content hash (`--expect-sha256`). A mismatch stops before any
   OpenFGA call.
-- The list may only contain tuples on `b2b_org` and `project_membership` objects and must never grant
-  `team:global_org_admin#member`. Lists that violate this are refused even when the hash matches.
+- The list may only contain unconditional tuples on `b2b_org` and `project_membership` objects and
+  must never grant `team:global_org_admin#member`. Lists that violate this are refused even when the
+  hash matches. A conditional tuple found on a listed object fails `verify` as unexpected, so a
+  conditional grant is never deleted or restored without its condition.
 - `verify` reads every listed object in full, in parallel (`--concurrency`, default 16). Any failed
   read fails the run before anything is written. Tuples already gone are recorded and skipped. A
   tuple on a listed object that the list lacks fails closed: the list is stale and must be rebuilt.

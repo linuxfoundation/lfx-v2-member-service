@@ -46,10 +46,16 @@ residue_line_count() {
 }
 
 # Canonical form: one compact, key-sorted tuple per line, sorted and unique.
+# OpenFGA reports unconditional tuples with a null condition; a non-null
+# condition is kept, so a conditional tuple never compares equal to its
+# unconditional form. The list guard refuses conditional tuples and verify
+# reports a conditional tuple on a listed object as unexpected, so a
+# conditional grant is never deleted or restored without its condition.
 residue_canonicalize() {
 	local input="$1"
 	local output="$2"
-	jq -cS '{user, relation, object}' "$input" | LC_ALL=C sort -u >"$output"
+	jq -cS 'if .condition == null then {user, relation, object} else {user, relation, object, condition} end' \
+		"$input" | LC_ALL=C sort -u >"$output"
 }
 
 residue_require_execution_mode() {
@@ -100,6 +106,7 @@ residue_load_list() {
 		'select(
 			([.user, .relation, .object] | any(type != "string" or . == ""))
 			or .user == $stable
+			or has("condition")
 			or (.object | test("^[a-z0-9_]+:[^[:space:]]+$") | not)
 			or ((.object | split(":")[0]) as $t | $allowed | index($t) | not))' \
 		"$canonical" | residue_line_count /dev/stdin) || {
@@ -178,7 +185,7 @@ residue_verify() {
 		fga_error "OpenFGA read failed"
 		return "$status"
 	fi
-	jq -cS '{user, relation, object}' "$temp_dir/read" | LC_ALL=C sort -u >"$temp_dir/current"
+	residue_canonicalize "$temp_dir/read" "$temp_dir/current"
 	comm -12 "$list" "$temp_dir/current" >"$directory/present.jsonl"
 	comm -23 "$list" "$temp_dir/current" >"$directory/gone.jsonl"
 	comm -13 "$list" "$temp_dir/current" >"$directory/unexpected.jsonl"
