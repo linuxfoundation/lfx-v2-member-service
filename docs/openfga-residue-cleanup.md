@@ -38,9 +38,14 @@ and the tool deletes only tuples from that list.
   seal. Like `delete`, it then reads the affected objects back and fails if any recorded tuple is
   still missing (listed in `missing.jsonl`), so a write that was acknowledged but not persisted
   cannot pass as a completed rollback.
-- Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output. The
-  only file an interrupted delete or restore leaves behind is its current `batch.*` file, inside the
-  output directory.
+- Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output, so
+  nothing is left in `TMPDIR`. Staging files an interrupted run can leave are all inside the
+  owner-only output directory: the current `batch.*` file, `list.*` from loading the list, and,
+  if the interrupt lands while the deleted-set record is being committed, `deleted-set.next.*`,
+  `deleted-set.sha256.next`, or an uncommitted `deleted-set.<sha256>.jsonl`. None of them is used
+  unless the seal names it: the last committed record stays valid, and the next successful commit
+  prunes uncommitted generations. Treat the leftovers like any other output file under the
+  retention policy below.
 - Output files contain principal identifiers and are written with owner-only permissions. Keep them
   outside the repository and delete them according to the approved operational retention policy.
 
