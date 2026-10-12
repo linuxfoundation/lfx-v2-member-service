@@ -132,17 +132,27 @@ residue_load_list() {
 # so this sees each listed tuple and anything else on those objects. Shards live
 # beside the output so the caller's cleanup removes them; the caller's interrupt
 # trap stops the readers through the dynamically scoped `pids`.
+#
+# Callers invoke this in `||` contexts, where errexit is off, so every step is
+# checked explicitly, and the run fails unless the readers together confirm
+# reading exactly as many objects as were requested.
 residue_read_objects() {
 	local objects="$1"
 	local output="$2"
 	local concurrency="$3"
 	local shard_dir shard
 	local -a pids=()
-	shard_dir=$(mktemp -d "$(dirname "$output")/shards.XXXXXX")
+	shard_dir=$(mktemp -d "$(dirname "$output")/shards.XXXXXX") || return 3
 	jq -Rc '{object: .}' "$objects" |
-		awk -v n="$concurrency" -v d="$shard_dir" '{ print > (d "/shard." (NR % n)) }'
+		awk -v n="$concurrency" -v d="$shard_dir" '{ print > (d "/shard." (NR % n)) }' || {
+		rm -rf "$shard_dir"
+		fga_error "could not shard the object list"
+		return 3
+	}
 	for shard in "$shard_dir"/shard.*; do
 		[[ -e "$shard" ]] || continue
+		: >"$shard.out"
+		: >"$shard.done"
 		(
 			while IFS= read -r filter; do
 				# Another reader failed; the run is already lost.
@@ -158,7 +168,10 @@ residue_read_objects() {
 					attempt=$((attempt + 1))
 					sleep "$RESIDUE_READ_RETRY_SECONDS"
 				done
-				cat "$shard.object" >>"$shard.out"
+				if ! { cat "$shard.object" >>"$shard.out" && printf '%s\n' "$filter" >>"$shard.done"; }; then
+					printf '3\n' >"$shard_dir/failed"
+					exit 3
+				fi
 			done <"$shard"
 		) &
 		pids+=("$!")
@@ -171,7 +184,17 @@ residue_read_objects() {
 		status=$(head -n 1 "$shard_dir/failed")
 	fi
 	if [[ "$status" -eq 0 ]]; then
-		cat "$shard_dir"/shard.*.out >"$output" 2>/dev/null || : >"$output"
+		local requested read_count
+		requested=$(residue_line_count "$objects")
+		read_count=$(cat "$shard_dir"/shard.*.done 2>/dev/null | residue_line_count /dev/stdin)
+		if [[ "$read_count" -ne "$requested" ]]; then
+			fga_error "read $read_count of $requested objects"
+			status=3
+		elif [[ "$requested" -gt 0 ]]; then
+			cat "$shard_dir"/shard.*.out >"$output" || status=3
+		else
+			: >"$output" || status=3
+		fi
 	fi
 	rm -rf "$shard_dir"
 	return "$status"
@@ -188,10 +211,12 @@ residue_read_current() {
 	# Background readers ignore SIGINT, so stop them and remove every
 	# principal-bearing temp file explicitly when the operator interrupts.
 	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$temp_dir"; exit 130' INT TERM
-	jq -r '.object' "$tuples" | LC_ALL=C sort -u >"$temp_dir/objects"
-	residue_read_objects "$temp_dir/objects" "$temp_dir/read" "$concurrency" || status=$?
+	jq -r '.object' "$tuples" | LC_ALL=C sort -u >"$temp_dir/objects" || status=3
 	if [[ "$status" -eq 0 ]]; then
-		residue_canonicalize "$temp_dir/read" "$output"
+		residue_read_objects "$temp_dir/objects" "$temp_dir/read" "$concurrency" || status=$?
+	fi
+	if [[ "$status" -eq 0 ]]; then
+		residue_canonicalize "$temp_dir/read" "$output" || status=3
 	fi
 	rm -rf "$temp_dir"
 	trap - INT TERM
@@ -209,9 +234,14 @@ residue_verify() {
 	local concurrency="$2"
 	local list="$directory/list.jsonl"
 	residue_read_current "$list" "$directory/current.jsonl" "$concurrency" || return $?
-	comm -12 "$list" "$directory/current.jsonl" >"$directory/present.jsonl"
-	comm -23 "$list" "$directory/current.jsonl" >"$directory/gone.jsonl"
-	comm -13 "$list" "$directory/current.jsonl" >"$directory/unexpected.jsonl"
+	if ! {
+		comm -12 "$list" "$directory/current.jsonl" >"$directory/present.jsonl" &&
+			comm -23 "$list" "$directory/current.jsonl" >"$directory/gone.jsonl" &&
+			comm -13 "$list" "$directory/current.jsonl" >"$directory/unexpected.jsonl"
+	}; then
+		fga_error "could not compare the list with OpenFGA"
+		return 3
+	fi
 	echo "Verify: $(residue_line_count "$list") listed, $(residue_line_count "$directory/present.jsonl") present," \
 		"$(residue_line_count "$directory/gone.jsonl") already gone," \
 		"$(residue_line_count "$directory/unexpected.jsonl") unexpected"
@@ -230,7 +260,7 @@ residue_apply_paced() {
 	local batch_file count=0 batches=0 status=0
 	# Inside the owner-only output directory, so an interrupted run leaves no
 	# principal-bearing file outside the retention scope.
-	batch_file=$(mktemp "$(dirname "$tuple_file")/batch.XXXXXX")
+	batch_file=$(mktemp "$(dirname "$tuple_file")/batch.XXXXXX") || return 3
 	while IFS= read -r tuple; do
 		[[ -z "$tuple" ]] && continue
 		printf '%s\n' "$tuple" >>"$batch_file"
@@ -278,11 +308,15 @@ residue_delete() {
 		residue_validate_deleted_set "$directory" || return $?
 		previous=$(residue_deleted_set_path "$directory")
 	fi
-	candidate=$(mktemp "$directory/deleted-set.next.XXXXXX")
+	candidate=$(mktemp "$directory/deleted-set.next.XXXXXX") || return 3
 	{
-		cat "$directory/present.jsonl"
-		if [[ -n "$previous" ]]; then cat "$previous"; fi
-	} | LC_ALL=C sort -u >"$candidate"
+		cat "$directory/present.jsonl" &&
+			if [[ -n "$previous" ]]; then cat "$previous"; fi
+	} | LC_ALL=C sort -u >"$candidate" || {
+		rm -f "$candidate"
+		fga_error "could not build the deleted-set record"
+		return 3
+	}
 	residue_commit_deleted_set "$directory" "$candidate" || return $?
 	residue_apply_paced deletes "$directory/present.jsonl" "$pause" || return $?
 	residue_verify "$directory" "$concurrency" || return $?
@@ -348,7 +382,10 @@ residue_restore() {
 	# Mirror delete's post-check: an acknowledged write that did not persist
 	# must fail the rollback, not report success.
 	residue_read_current "$set_file" "$directory/current.jsonl" "$concurrency" || return $?
-	comm -23 "$set_file" "$directory/current.jsonl" >"$directory/missing.jsonl"
+	comm -23 "$set_file" "$directory/current.jsonl" >"$directory/missing.jsonl" || {
+		fga_error "could not compare the restored set with OpenFGA"
+		return 3
+	}
 	if [[ -s "$directory/missing.jsonl" ]]; then
 		fga_error "$(residue_line_count "$directory/missing.jsonl") recorded tuples are still missing after restore; see missing.jsonl"
 		return 4

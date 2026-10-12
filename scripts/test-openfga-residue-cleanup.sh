@@ -96,6 +96,30 @@ mv() {
 	command mv "$@"
 }
 
+# Breaks sharding of the object list: "error" fails it outright; "partial"
+# succeeds but loses one shard, as a silently truncated write would.
+# shellcheck disable=SC2329 # Fixture override invoked through residue_read_objects.
+awk() {
+	if [[ -z "${BREAK_SHARDING:-}" || "$*" != *'/shard.'* ]]; then
+		command awk "$@"
+		return
+	fi
+	[[ "$BREAK_SHARDING" != error ]] || return 1
+	local arg dir=""
+	for arg in "$@"; do
+		[[ "$arg" != d=* ]] || dir="${arg#d=}"
+	done
+	command awk "$@" || return
+	rm -f "$dir/shard.1"
+}
+
+# Fails the comparison of the list with OpenFGA, as a full disk would.
+# shellcheck disable=SC2329 # Fixture override invoked through residue_verify.
+comm() {
+	[[ -z "${FAIL_COMPARE:-}" ]] || return 1
+	command comm "$@"
+}
+
 list_hash() {
 	local file="$1"
 	local canon
@@ -272,6 +296,33 @@ test_transient_read_failure_is_retried() {
 	[[ -e "$WORK/flaked" ]] || fail "the fixture must have failed one read"
 	assert_eq "4" "$(residue_line_count "$OUT/present.jsonl")" "a read that fails once must be retried, not fail the pass"
 	assert_eq "0" "$(residue_line_count "$OUT/unexpected.jsonl")" "a retried read must not duplicate or invent tuples"
+}
+
+test_broken_object_sharding_fails_before_any_delete() {
+	local mode status
+	for mode in error partial; do
+		setup_fixture
+		residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+		BREAK_SHARDING="$mode"
+		status=0
+		residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+		BREAK_SHARDING=""
+		assert_eq "3" "$status" "a $mode while sharding the object list must fail the read"
+		! grep -q '^deletes' "$CALL_LOG" || fail "a $mode while sharding must never lead to a delete"
+		[[ ! -f "$OUT/deleted-set.sha256" ]] || fail "a $mode while sharding must not record a restore set"
+		rm -rf "$WORK"
+	done
+}
+
+test_failed_comparison_fails_before_any_delete() {
+	local status=0
+	setup_fixture
+	trap 'rm -rf "$WORK"; unset FAIL_COMPARE' RETURN
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	FAIL_COMPARE=1
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "3" "$status" "a failed comparison with OpenFGA must fail the run"
+	! grep -q '^deletes' "$CALL_LOG" || fail "a failed comparison must never lead to a delete"
 }
 
 test_failed_reader_stops_before_any_delete() {
@@ -494,6 +545,8 @@ test_conditional_tuple_on_listed_object_fails_closed
 test_transient_read_failure_is_retried
 test_verify_catches_unlisted_subject_on_listed_object
 test_failed_reader_stops_before_any_delete
+test_broken_object_sharding_fails_before_any_delete
+test_failed_comparison_fails_before_any_delete
 test_dry_run_and_mode_write_nothing
 test_restore_writes_only_recorded_set_and_rejects_tampering
 test_delete_batches_at_most_one_hundred
