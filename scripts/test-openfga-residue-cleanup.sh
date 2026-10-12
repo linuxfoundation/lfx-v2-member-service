@@ -64,7 +64,10 @@ fga_apply_batch() {
 		jq -cS '{user, relation, object}' "$STORE_FILE" | LC_ALL=C sort -u |
 			comm -23 - <(printf '%s\n' "$keys") >"$STORE_FILE.next"
 	else
-		{ jq -cS '{user, relation, object}' "$STORE_FILE"; printf '%s\n' "$keys"; } | LC_ALL=C sort -u >"$STORE_FILE.next"
+		{
+			jq -cS '{user, relation, object}' "$STORE_FILE"
+			printf '%s\n' "$keys"
+		} | LC_ALL=C sort -u >"$STORE_FILE.next"
 	fi
 	mv "$STORE_FILE.next" "$STORE_FILE"
 }
@@ -113,6 +116,18 @@ store_has() {
 	jq -cS '{user, relation, object}' "$STORE_FILE" | grep -qxF "$(printf '%s' "$1" | jq -cS .)"
 }
 
+# Removes one listed tuple from the store before the run (e.g. reaped by
+# fga-sync), then runs a confirmed delete. Prints the removed tuple.
+delete_with_one_listed_tuple_gone() {
+	local gone
+	gone=$(tuple "user:alice" writer "b2b_org:22222222-2222-2222-2222-222222222222")
+	jq -c --argjson g "$gone" 'select(. != $g)' "$STORE_FILE" >"$STORE_FILE.next"
+	mv "$STORE_FILE.next" "$STORE_FILE"
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	residue_delete "$OUT" false true 2 0 >/dev/null
+	printf '%s\n' "$gone"
+}
+
 test_hash_mismatch_refuses_before_any_read() {
 	local status=0
 	setup_fixture
@@ -148,7 +163,10 @@ test_list_guard_rejects_unsafe_or_malformed_tuples() {
 		'{"relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222"}' \
 		"$(tuple "user:alice" writer "b2b_org")" \
 		'{"user":"user:alice","relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222","condition":{"name":"c"}}'; do
-		{ cat "$LIST"; printf '%s\n' "$bad"; } >"$WORK/bad.jsonl"
+		{
+			cat "$LIST"
+			printf '%s\n' "$bad"
+		} >"$WORK/bad.jsonl"
 		status=0
 		residue_load_list "$WORK/bad.jsonl" "$(list_hash "$WORK/bad.jsonl")" "$OUT" >/dev/null 2>&1 || status=$?
 		assert_eq "4" "$status" "a list containing $bad must be refused even with a matching hash"
@@ -158,12 +176,8 @@ test_list_guard_rejects_unsafe_or_malformed_tuples() {
 test_delete_removes_only_listed_present_tuples() {
 	setup_fixture
 	trap 'rm -rf "$WORK"' RETURN
-	# One listed tuple was already removed elsewhere (e.g. reaped by fga-sync).
 	local gone
-	gone=$(tuple "user:alice" writer "b2b_org:22222222-2222-2222-2222-222222222222")
-	jq -c --argjson g "$gone" 'select(. != $g)' "$STORE_FILE" >"$STORE_FILE.next" && mv "$STORE_FILE.next" "$STORE_FILE"
-	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
-	residue_delete "$OUT" false true 2 0 >/dev/null
+	gone=$(delete_with_one_listed_tuple_gone)
 	assert_eq "3" "$(residue_line_count "$OUT/deleted-set.jsonl")" "the restore record must hold exactly the tuples this run deleted"
 	! grep -qxF "$(printf '%s' "$gone" | jq -cS .)" "$OUT/deleted-set.jsonl" ||
 		fail "a tuple removed before the run must not enter the restore record"
@@ -252,10 +266,7 @@ test_restore_writes_only_recorded_set_and_rejects_tampering() {
 	setup_fixture
 	trap 'rm -rf "$WORK"' RETURN
 	local gone
-	gone=$(tuple "user:alice" writer "b2b_org:22222222-2222-2222-2222-222222222222")
-	jq -c --argjson g "$gone" 'select(. != $g)' "$STORE_FILE" >"$STORE_FILE.next" && mv "$STORE_FILE.next" "$STORE_FILE"
-	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
-	residue_delete "$OUT" false true 2 0 >/dev/null
+	gone=$(delete_with_one_listed_tuple_gone)
 	residue_restore "$OUT" false true 0 >/dev/null
 	while IFS= read -r t; do
 		store_has "$t" || fail "restore must bring back every deleted tuple: $t"

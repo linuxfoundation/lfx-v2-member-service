@@ -312,16 +312,47 @@ residue_parse_args() {
 			;;
 		esac
 		case "$1" in
-		--store-id) RESIDUE_STORE_ID="$2"; shift 2 ;;
-		--list) RESIDUE_LIST="$2"; shift 2 ;;
-		--expect-sha256) RESIDUE_EXPECTED="$2"; shift 2 ;;
-		--output-dir) RESIDUE_OUTPUT_DIR="$2"; shift 2 ;;
-		--openfga-url) RESIDUE_BASE_URL="$2"; shift 2 ;;
-		--concurrency) RESIDUE_CONCURRENCY="$2"; shift 2 ;;
-		--pause-seconds) RESIDUE_PAUSE="$2"; shift 2 ;;
-		--dry-run) RESIDUE_DRY_RUN=true; shift ;;
-		--confirm) RESIDUE_CONFIRM=true; shift ;;
-		*) fga_error "unknown argument: $1"; residue_usage; return 2 ;;
+		--store-id)
+			RESIDUE_STORE_ID="$2"
+			shift 2
+			;;
+		--list)
+			RESIDUE_LIST="$2"
+			shift 2
+			;;
+		--expect-sha256)
+			RESIDUE_EXPECTED="$2"
+			shift 2
+			;;
+		--output-dir)
+			RESIDUE_OUTPUT_DIR="$2"
+			shift 2
+			;;
+		--openfga-url)
+			RESIDUE_BASE_URL="$2"
+			shift 2
+			;;
+		--concurrency)
+			RESIDUE_CONCURRENCY="$2"
+			shift 2
+			;;
+		--pause-seconds)
+			RESIDUE_PAUSE="$2"
+			shift 2
+			;;
+		--dry-run)
+			RESIDUE_DRY_RUN=true
+			shift
+			;;
+		--confirm)
+			RESIDUE_CONFIRM=true
+			shift
+			;;
+		*)
+			fga_error "unknown argument: $1"
+			residue_usage
+			return 2
+			;;
 		esac
 	done
 }
@@ -371,7 +402,11 @@ residue_main() {
 			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
 		;;
 	restore) residue_restore "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" "$RESIDUE_PAUSE" ;;
-	*) fga_error "unknown phase: $RESIDUE_PHASE"; residue_usage; return 2 ;;
+	*)
+		fga_error "unknown phase: $RESIDUE_PHASE"
+		residue_usage
+		return 2
+		;;
 	esac
 }
 
