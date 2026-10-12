@@ -6,7 +6,7 @@
 This runbook removes a reviewed list of leftover OpenFGA tuples with
 `scripts/cleanup-openfga-residue.sh`. The tool exists for the residue left by LFXV2-2049, which moved
 the public `uid` of `b2b_org` and `project_membership` from UUID v8 to the 18-character Salesforce
-ID without deleting the UUID-keyed objects. It also covers reviewed anomalies on those object types.
+ID without deleting the UUID-keyed objects.
 No member-service code path reads or writes UUID-keyed objects, so nothing republishes or repairs
 them; they stay in OpenFGA until deleted.
 
@@ -17,9 +17,10 @@ and the tool deletes only tuples from that list.
 
 - The list is bound to its reviewed content hash (`--expect-sha256`). A mismatch stops before any
   OpenFGA call.
-- The list may only contain unconditional tuples on `b2b_org` and `project_membership` objects and
-  must never grant `team:global_org_admin#member`. Lists that violate this are refused even when the
-  hash matches. A conditional tuple found on a listed object fails `verify` as unexpected, so a
+- The list may only contain unconditional tuples on UUID-keyed `b2b_org` and `project_membership`
+  objects and must never grant `team:global_org_admin#member`; a tuple on a live Salesforce-ID object
+  cannot be listed. Lists that violate this are refused even when the hash matches. A conditional
+  tuple found on a listed object fails `verify` as unexpected, so a
   conditional grant is never deleted or restored without its condition.
 - `verify` reads every listed object in full, in parallel (`--concurrency`, default 16). Each read is
   retried up to 3 times; a read that still fails fails the run before anything is written. Tuples
@@ -67,12 +68,15 @@ LIST_SHA256=$(jq -cS '{user, relation, object}' list.jsonl | LC_ALL=C sort -u | 
 
 Build it read-only from OpenFGA and review it before the change window:
 
-1. Enumerate every `b2b_org` and `project_membership` object whose ID is not an 18-character
-   Salesforce ID, and read each object's tuples in full.
-2. Add the tuples where those objects are the subject, for example `parent` and `child` edges and the
-   `b2b_org` relation on `project_membership`.
-3. Confirm that no live Salesforce-ID object depends on a listed object. A live object that would lose
-   access through the list is a blocker, not residue.
+1. Enumerate every `b2b_org` and `project_membership` object whose ID is a UUID, and read each
+   object's tuples in full. Those tuples are the list. They include edges between residue objects,
+   for example `parent`/`child` between UUID orgs and the `b2b_org` relation of a UUID membership.
+2. Find tuples on live Salesforce-ID objects whose subject is a listed object, for example a live
+   org's `child` edge to a UUID org or a live membership's `b2b_org` pointing at one. These are out of
+   scope: the tool refuses any tuple on a non-UUID object, and removing a reference from a live
+   object needs its own reviewed change.
+3. Confirm that no live object depends on a listed object. A live object that would lose access
+   through the list (step 2 found a reference) is a blocker for that object, not residue.
 4. Leave out legacy global org-admin team grants. `docs/global-org-admin-team-migration.md` removes
    those, and its cleanup must be complete in the environment first: `verify` reads every listed
    object in full, so a legacy grant still on a listed organization fails the run as unexpected.

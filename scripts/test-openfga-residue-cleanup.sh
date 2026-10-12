@@ -266,6 +266,7 @@ test_list_guard_rejects_unsafe_or_malformed_tuples() {
 		'{"user":"team:global_org_admin#member","relation":"global_org_admin"}' \
 		'{"relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222"}' \
 		"$(tuple "user:alice" writer "b2b_org")" \
+		"$(tuple "b2b_org:22222222-2222-2222-2222-222222222222" child "b2b_org:001LIVEORG0000000A")" \
 		'{"user":"user:alice","relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222","condition":{"name":"c"}}'; do
 		{
 			cat "$LIST"

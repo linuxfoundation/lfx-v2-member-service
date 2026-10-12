@@ -2,11 +2,12 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# Removes a reviewed list of leftover OpenFGA tuples (UUID-keyed b2b_org and
-# project_membership residue from LFXV2-2049, plus reviewed anomalies) in
-# explicit verify, delete, and restore phases. The list is produced read-only
-# elsewhere and bound by its content hash. Nothing outside the list is ever
-# written or deleted.
+# Removes a reviewed list of leftover OpenFGA tuples on UUID-keyed b2b_org and
+# project_membership objects (residue of LFXV2-2049) in explicit verify, delete,
+# and restore phases. The list is produced read-only elsewhere and bound by its
+# content hash. Only UUID-keyed objects are accepted, so no tuple on a live
+# Salesforce-ID object can be listed. Nothing outside the list is ever written
+# or deleted.
 #
 # This script writes principal-bearing artifacts with owner-only permissions.
 # Keep output outside the repository and follow the retention guidance in
@@ -115,7 +116,7 @@ residue_load_list() {
 			([.user, .relation, .object] | any(type != "string" or . == ""))
 			or .user == $stable
 			or has("condition")
-			or (.object | test("^[a-z0-9_]+:[^[:space:]]+$") | not)
+			or (.object | test("^[a-z0-9_]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$") | not)
 			or ((.object | split(":")[0]) as $t | $allowed | index($t) | not))' \
 		"$canonical" | residue_line_count /dev/stdin) || {
 		rm -f "$canonical"
@@ -124,7 +125,7 @@ residue_load_list() {
 	}
 	if [[ "$bad" -gt 0 ]]; then
 		rm -f "$canonical"
-		fga_error "list has $bad malformed tuple(s), tuple(s) outside ${RESIDUE_ALLOWED_TYPES[*]}, or grants to team:$FGA_STABLE_TEAM; refusing"
+		fga_error "list has $bad malformed or conditional tuple(s), tuple(s) not on a UUID-keyed ${RESIDUE_ALLOWED_TYPES[*]} object, or grants to team:$FGA_STABLE_TEAM; refusing"
 		return 4
 	fi
 	mv "$canonical" "$directory/list.jsonl" || {
