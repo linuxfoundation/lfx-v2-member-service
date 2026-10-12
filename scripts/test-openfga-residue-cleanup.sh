@@ -67,6 +67,8 @@ fga_apply_batch() {
 		# A store that acknowledges deletes without applying them.
 		[[ -z "${DROP_DELETES:-}" ]] || return 0
 	fi
+	# A store that acknowledges writes without applying them.
+	[[ "$mode" != writes || -z "${DROP_WRITES:-}" ]] || return 0
 	local keys
 	keys=$(jq -cS '{user, relation, object}' "$batch" | LC_ALL=C sort -u)
 	if [[ "$mode" == deletes ]]; then
@@ -113,6 +115,7 @@ setup_fixture() {
 	DELETE_BATCHES=0
 	FAIL_DELETE_BATCH=0
 	DROP_DELETES=""
+	DROP_WRITES=""
 	mkdir -p "$OUT"
 	: >"$CALL_LOG"
 	# Listed residue: a UUID org's edges and grants, and a UUID membership.
@@ -303,13 +306,13 @@ test_restore_writes_only_recorded_set_and_rejects_tampering() {
 	trap 'rm -rf "$WORK"' RETURN
 	local gone
 	gone=$(delete_with_one_listed_tuple_gone)
-	residue_restore "$OUT" false true 0 >/dev/null
+	residue_restore "$OUT" false true 2 0 >/dev/null
 	while IFS= read -r t; do
 		store_has "$t" || fail "restore must bring back every deleted tuple: $t"
 	done <"$(committed_set)"
 	! store_has "$gone" || fail "restore must not revive a tuple this tool never deleted"
 	printf '%s\n' "$gone" >>"$(committed_set)"
-	residue_restore "$OUT" false true 0 >/dev/null 2>&1 || status=$?
+	residue_restore "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "restore must refuse a deleted set that no longer matches its hash"
 }
 
@@ -348,7 +351,7 @@ test_retry_after_failed_batch_restores_every_run() {
 	[[ ! -s "$STORE_FILE" ]] || fail "the retry must delete what the first run left"
 	assert_eq "250" "$(residue_line_count "$(committed_set)")" \
 		"the restore record must cover the first run's deletions and the retry's"
-	residue_restore "$OUT" false true 0 >/dev/null
+	residue_restore "$OUT" false true 2 0 >/dev/null
 	assert_eq "250" "$(residue_line_count "$STORE_FILE")" "restore must bring back every run's deletions"
 }
 
@@ -362,6 +365,77 @@ test_deletes_that_do_not_take_effect_fail() {
 	assert_eq "4" "$status" "listed tuples still present after delete must fail the run"
 }
 
+test_restores_that_do_not_take_effect_fail() {
+	local status=0
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	delete_with_one_listed_tuple_gone >/dev/null
+	DROP_WRITES=1
+	residue_restore "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "recorded tuples still missing after restore must fail the rollback"
+	assert_eq "3" "$(residue_line_count "$OUT/missing.jsonl")" "the missing tuples must be reported"
+}
+
+test_real_read_pagination_returns_every_page() {
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	(
+		# Restore the library's real paginating fga_read_all and fake only the
+		# HTTP layer: one tuple per page, so every listed object needs a
+		# continuation token to be read in full.
+		# shellcheck source=scripts/lib/openfga-global-org-admin-migration.sh
+		source "$SCRIPT_DIR/lib/openfga-global-org-admin-migration.sh"
+		# shellcheck disable=SC2329 # Fixture override invoked through fga_read_all.
+		fga_request() {
+			printf '%s' "$2" | jq -c . >>"$WORK/requests.jsonl"
+			jq -cn --argjson b "$2" --slurpfile s "$STORE_FILE" '
+				[$s[] | select(.object == $b.tuple_key.object)] as $m
+				| (($b.continuation_token // "0") | tonumber) as $i
+				| {tuples: [$m[$i:$i + 1][] | {key: .}],
+				   continuation_token: (if $i + 1 < ($m | length) then ($i + 1 | tostring) else "" end)}'
+		}
+		residue_verify "$OUT" 2 >/dev/null
+	)
+	assert_eq "4" "$(residue_line_count "$OUT/present.jsonl")" "every page of every listed object must be read"
+	assert_eq "0" "$(residue_line_count "$OUT/unexpected.jsonl")" "pagination must not duplicate or invent tuples"
+	assert_eq "2" "$(jq -r 'select(.continuation_token) | .tuple_key.object' "$WORK/requests.jsonl" | sort -u | wc -l | tr -d ' ')" \
+		"both listed objects must have been read past their first page"
+}
+
+test_interrupted_delete_leaves_one_batch_file_and_resumes() {
+	local pid i
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	write_large_fixture
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	mkdir "$WORK/tmp"
+	(
+		export TMPDIR="$WORK/tmp"
+		# A slow batch, so the signal lands while it is being applied.
+		# shellcheck disable=SC2329 # Fixture override invoked through residue_apply_paced.
+		fga_apply_batch() {
+			: >"$WORK/applying"
+			command sleep 1
+		}
+		residue_delete "$OUT" false true 2 0 >/dev/null 2>&1
+	) &
+	pid=$!
+	for i in $(seq 1 100); do
+		[[ -e "$WORK/applying" ]] && break
+		command sleep 0.1
+	done
+	[[ -e "$WORK/applying" ]] || fail "the fixture delete never reached a batch (iterations: $i)"
+	kill -TERM "$pid"
+	# The shell reports the deliberately killed job on stderr; that is expected.
+	{ wait "$pid" || true; } 2>/dev/null
+	assert_eq "1" "$(find "$OUT" -name 'batch.*' | wc -l | tr -d ' ')" \
+		"an interrupted apply leaves exactly its current batch file, in the output directory"
+	assert_eq "0" "$(find "$WORK/tmp" -mindepth 1 | wc -l | tr -d ' ')" "an interrupted apply leaves nothing in TMPDIR"
+	residue_delete "$OUT" false true 2 0 >/dev/null
+	[[ ! -s "$STORE_FILE" ]] || fail "the next run must resume and finish the delete"
+}
+
 test_deleted_set_is_bound_to_its_store() {
 	local status
 	setup_fixture
@@ -373,7 +447,7 @@ test_deleted_set_is_bound_to_its_store() {
 	# The same output directory pointed at another store.
 	STORE_ID="store-b"
 	status=0
-	residue_restore "$OUT" false true 0 >/dev/null 2>&1 || status=$?
+	residue_restore "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "restore must refuse a deleted set recorded for another store"
 	status=0
 	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
@@ -402,7 +476,7 @@ test_interrupted_checkpoint_commit_keeps_previous_record() {
 	assert_eq "$deletes_before" "$(grep -c '^deletes' "$CALL_LOG")" "nothing may be deleted before the record is committed"
 	# The previous generation and its seal still validate: restore brings back
 	# exactly what the first run deleted.
-	residue_restore "$OUT" false true 0 >/dev/null
+	residue_restore "$OUT" false true 2 0 >/dev/null
 	assert_eq "writes:3" "$(grep '^writes' "$CALL_LOG" | paste -sd, -)" "restore must use the last committed record"
 	# A clean retry commits a merged record that covers both runs.
 	residue_delete "$OUT" false true 2 0 >/dev/null
@@ -425,6 +499,9 @@ test_restore_writes_only_recorded_set_and_rejects_tampering
 test_delete_batches_at_most_one_hundred
 test_retry_after_failed_batch_restores_every_run
 test_deletes_that_do_not_take_effect_fail
+test_restores_that_do_not_take_effect_fail
+test_real_read_pagination_returns_every_page
+test_interrupted_delete_leaves_one_batch_file_and_resumes
 test_deleted_set_is_bound_to_its_store
 test_interrupted_checkpoint_commit_keeps_previous_record
 

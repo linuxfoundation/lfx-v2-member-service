@@ -33,7 +33,7 @@ Usage: cleanup-openfga-residue.sh PHASE --store-id ID --list FILE --expect-sha25
 Phases: verify, delete, restore
 Options:
   --openfga-url URL
-  --concurrency N       parallel OpenFGA readers during verify, 1-32 (default 16)
+  --concurrency N       parallel OpenFGA readers for verification, 1-32 (default 16)
   --pause-seconds S     pause between delete/restore batches (default 0.2)
   --dry-run
   --confirm
@@ -41,7 +41,8 @@ Options:
 verify reads every listed object in full. Tuples already gone are recorded and
 skipped; any tuple on a listed object that the list lacks fails closed. delete runs
 verify, records exactly the tuples it is about to delete (hash-bound), then deletes
-them in batches of at most 100. restore writes back only that recorded set.
+them in batches of at most 100. restore writes back only that recorded set, then
+verifies every restored tuple is present.
 USAGE
 }
 
@@ -176,6 +177,30 @@ residue_read_objects() {
 	return "$status"
 }
 
+# Reads every object named in a tuple file in full and writes their current
+# tuples, canonicalized, to the output file.
+residue_read_current() {
+	local tuples="$1"
+	local output="$2"
+	local concurrency="$3"
+	local temp_dir status=0
+	temp_dir=$(mktemp -d)
+	# Background readers ignore SIGINT, so stop them and remove every
+	# principal-bearing temp file explicitly when the operator interrupts.
+	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$temp_dir"; exit 130' INT TERM
+	jq -r '.object' "$tuples" | LC_ALL=C sort -u >"$temp_dir/objects"
+	residue_read_objects "$temp_dir/objects" "$temp_dir/read" "$concurrency" || status=$?
+	if [[ "$status" -eq 0 ]]; then
+		residue_canonicalize "$temp_dir/read" "$output"
+	fi
+	rm -rf "$temp_dir"
+	trap - INT TERM
+	if [[ "$status" -ne 0 ]]; then
+		fga_error "OpenFGA read failed"
+		return "$status"
+	fi
+}
+
 # Re-reads every listed object in full. Writes present.jsonl (still in OpenFGA),
 # gone.jsonl (already removed; skipped) and unexpected.jsonl (on a listed object
 # but not in the list). Any unexpected tuple fails closed.
@@ -183,25 +208,10 @@ residue_verify() {
 	local directory="$1"
 	local concurrency="$2"
 	local list="$directory/list.jsonl"
-	local temp_dir status=0
-	temp_dir=$(mktemp -d)
-	# Background readers ignore SIGINT, so stop them and remove every
-	# principal-bearing temp file explicitly when the operator interrupts.
-	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$temp_dir"; exit 130' INT TERM
-	jq -r '.object' "$list" | LC_ALL=C sort -u >"$temp_dir/objects"
-	residue_read_objects "$temp_dir/objects" "$temp_dir/read" "$concurrency" || status=$?
-	if [[ "$status" -ne 0 ]]; then
-		rm -rf "$temp_dir"
-		trap - INT TERM
-		fga_error "OpenFGA read failed"
-		return "$status"
-	fi
-	residue_canonicalize "$temp_dir/read" "$temp_dir/current"
-	comm -12 "$list" "$temp_dir/current" >"$directory/present.jsonl"
-	comm -23 "$list" "$temp_dir/current" >"$directory/gone.jsonl"
-	comm -13 "$list" "$temp_dir/current" >"$directory/unexpected.jsonl"
-	rm -rf "$temp_dir"
-	trap - INT TERM
+	residue_read_current "$list" "$directory/current.jsonl" "$concurrency" || return $?
+	comm -12 "$list" "$directory/current.jsonl" >"$directory/present.jsonl"
+	comm -23 "$list" "$directory/current.jsonl" >"$directory/gone.jsonl"
+	comm -13 "$list" "$directory/current.jsonl" >"$directory/unexpected.jsonl"
 	echo "Verify: $(residue_line_count "$list") listed, $(residue_line_count "$directory/present.jsonl") present," \
 		"$(residue_line_count "$directory/gone.jsonl") already gone," \
 		"$(residue_line_count "$directory/unexpected.jsonl") unexpected"
@@ -324,7 +334,8 @@ residue_restore() {
 	local directory="$1"
 	local dry_run="$2"
 	local confirm="$3"
-	local pause="$4"
+	local concurrency="$4"
+	local pause="$5"
 	residue_require_execution_mode restore "$dry_run" "$confirm" || return $?
 	residue_validate_deleted_set "$directory" || return $?
 	local set_file
@@ -333,7 +344,16 @@ residue_restore() {
 		echo "[dry-run] would restore $(residue_line_count "$set_file") tuples"
 		return 0
 	fi
-	residue_apply_paced writes "$set_file" "$pause"
+	residue_apply_paced writes "$set_file" "$pause" || return $?
+	# Mirror delete's post-check: an acknowledged write that did not persist
+	# must fail the rollback, not report success.
+	residue_read_current "$set_file" "$directory/current.jsonl" "$concurrency" || return $?
+	comm -23 "$set_file" "$directory/current.jsonl" >"$directory/missing.jsonl"
+	if [[ -s "$directory/missing.jsonl" ]]; then
+		fga_error "$(residue_line_count "$directory/missing.jsonl") recorded tuples are still missing after restore; see missing.jsonl"
+		return 4
+	fi
+	echo "Restore complete: $(residue_line_count "$set_file") tuples present"
 }
 
 residue_parse_args() {
@@ -436,7 +456,10 @@ residue_main() {
 		residue_delete "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" \
 			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
 		;;
-	restore) residue_restore "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" "$RESIDUE_PAUSE" ;;
+	restore)
+		residue_restore "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" \
+			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
+		;;
 	*)
 		fga_error "unknown phase: $RESIDUE_PHASE"
 		residue_usage

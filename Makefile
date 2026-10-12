@@ -117,7 +117,7 @@ test: test-scripts ## Run tests
 	go test -v -race -coverprofile=coverage.out ./...
 
 .PHONY: test-scripts
-test-scripts: ## Run shell migration tests
+test-scripts: ## Run shell operator-script tests (global org-admin migration + OpenFGA residue cleanup)
 	@bash scripts/test-global-org-admin-team-migration.sh
 	@bash scripts/test-openfga-residue-cleanup.sh
 

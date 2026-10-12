@@ -35,7 +35,9 @@ and the tool deletes only tuples from that list.
 - Deletes and restores use batches of at most 100, pause between batches (`--pause-seconds`), and
   ignore tuples that are already absent or already present, so every phase can be retried.
 - `restore` writes back only the recorded deleted set and refuses a set that no longer matches its
-  seal.
+  seal. Like `delete`, it then reads the affected objects back and fails if any recorded tuple is
+  still missing (listed in `missing.jsonl`), so a write that was acknowledged but not persisted
+  cannot pass as a completed rollback.
 - Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output. The
   only file an interrupted delete or restore leaves behind is its current `batch.*` file, inside the
   output directory.
@@ -46,10 +48,12 @@ and the tool deletes only tuples from that list.
 
 The list is JSONL, one tuple per line: `{"user": ..., "relation": ..., "object": ...}`. Field order,
 duplicates, and extra fields do not matter; the tool canonicalizes before hashing. Compute the hash
-the tool expects with:
+the tool expects with `sha256sum` where available (Linux) and `shasum -a 256` otherwise (macOS), the
+same precedence the tool uses:
 
 ```bash
-LIST_SHA256=$(jq -cS '{user, relation, object}' list.jsonl | LC_ALL=C sort -u | shasum -a 256 | awk '{print $1}')
+if command -v sha256sum >/dev/null; then SHA256="sha256sum"; else SHA256="shasum -a 256"; fi
+LIST_SHA256=$(jq -cS '{user, relation, object}' list.jsonl | LC_ALL=C sort -u | $SHA256 | awk '{print $1}')
 ```
 
 Build it read-only from OpenFGA and review it before the change window:
@@ -125,4 +129,5 @@ scripts/cleanup-openfga-residue.sh restore \
 
 Review the count, then replace `--dry-run` with `--confirm`. `restore` writes back only the deleted
 set named by `deleted-set.sha256` in the same output directory and refuses if it no longer matches
-the content hash and store ID sealed there. Invalidate `fga-sync-cache` afterwards.
+the content hash and store ID sealed there. A confirmed restore ends with `Restore complete` only
+after every recorded tuple reads back as present. Invalidate `fga-sync-cache` afterwards.
