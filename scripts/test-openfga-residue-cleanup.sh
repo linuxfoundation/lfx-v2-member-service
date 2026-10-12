@@ -221,6 +221,41 @@ test_missing_flag_value_is_rejected() {
 	assert_eq "2" "$status" "a value flag without a value must be rejected, not loop"
 }
 
+test_one_run_per_output_directory() {
+	local status=0 pid i
+	local -a run=(verify --store-id store-a --list "" --expect-sha256 "" --output-dir "")
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	run[4]="$LIST"
+	run[6]=$(list_hash "$LIST")
+	run[8]="$OUT"
+	mkdir "$OUT/.lock"
+	residue_main "${run[@]}" >/dev/null 2>&1 || status=$?
+	assert_eq "7" "$status" "a run must refuse an output directory another run holds"
+	[[ ! -s "$CALL_LOG" && ! -e "$OUT/list.jsonl" ]] || fail "a refused run must not read OpenFGA or touch the directory"
+	rmdir "$OUT/.lock"
+	residue_main "${run[@]}" >/dev/null
+	[[ ! -e "$OUT/.lock" ]] || fail "a finished run must release the lock"
+	# An interrupted run releases it too.
+	(
+		# shellcheck disable=SC2329 # Fixture override invoked through residue_read_objects.
+		fga_read_all() {
+			: >"$WORK/reading"
+			command sleep 1
+		}
+		residue_main "${run[@]}" >/dev/null 2>&1
+	) &
+	pid=$!
+	for i in $(seq 1 100); do
+		[[ -e "$WORK/reading" ]] && break
+		command sleep 0.1
+	done
+	[[ -e "$OUT/.lock" ]] || fail "the run must hold the lock while reading (iterations: $i)"
+	kill -TERM "$pid"
+	{ wait "$pid" || true; } 2>/dev/null
+	[[ ! -e "$OUT/.lock" ]] || fail "an interrupted run must release the lock"
+}
+
 test_list_guard_rejects_unsafe_or_malformed_tuples() {
 	local bad status
 	setup_fixture
@@ -581,6 +616,7 @@ test_interrupted_checkpoint_commit_keeps_previous_record() {
 test_hash_mismatch_refuses_before_any_read
 test_reusing_canonical_list_as_input_keeps_it
 test_missing_flag_value_is_rejected
+test_one_run_per_output_directory
 test_list_guard_rejects_unsafe_or_malformed_tuples
 test_delete_removes_only_listed_present_tuples
 test_unexpected_tuple_on_listed_object_fails_closed

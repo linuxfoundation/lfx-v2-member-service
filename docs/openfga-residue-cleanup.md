@@ -32,6 +32,10 @@ and the tool deletes only tuples from that list.
   replacing the seal, so an interrupted retry leaves the previous record valid and restore covers
   every committed run. Use one output directory per environment; a directory sealed for another
   store is refused.
+- Only one run at a time may use an output directory. A run holds `<output-dir>/.lock` from before
+  it touches any file until it exits, including on Ctrl-C; a second run exits 7 without reading or
+  writing anything. A lock left by a killed process (`kill -9`, lost host) must be removed by hand,
+  and only after confirming no run is active.
 - Deletes and restores use batches of at most 100, pause between batches (`--pause-seconds`), and
   ignore tuples that are already absent or already present, so every phase can be retried.
 - `restore` writes back only the recorded deleted set and refuses a set that no longer matches its

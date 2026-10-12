@@ -465,6 +465,22 @@ residue_parse_args() {
 	done
 }
 
+residue_run_phase() {
+	echo "OpenFGA target: $BASE_URL store=$STORE_ID phase=$RESIDUE_PHASE"
+	residue_load_list "$RESIDUE_LIST" "$RESIDUE_EXPECTED" "$RESIDUE_OUTPUT_DIR" || return $?
+	case "$RESIDUE_PHASE" in
+	verify) residue_verify "$RESIDUE_OUTPUT_DIR" "$RESIDUE_CONCURRENCY" ;;
+	delete)
+		residue_delete "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" \
+			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
+		;;
+	restore)
+		residue_restore "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" \
+			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
+		;;
+	esac
+}
+
 residue_main() {
 	[[ $# -ge 1 ]] || {
 		residue_usage
@@ -472,6 +488,14 @@ residue_main() {
 	}
 	RESIDUE_PHASE="$1"
 	shift
+	case "$RESIDUE_PHASE" in
+	verify | delete | restore) ;;
+	*)
+		fga_error "unknown phase: $RESIDUE_PHASE"
+		residue_usage
+		return 2
+		;;
+	esac
 	RESIDUE_STORE_ID="" RESIDUE_LIST="" RESIDUE_EXPECTED="" RESIDUE_OUTPUT_DIR=""
 	RESIDUE_BASE_URL="${OPENFGA_URL:-http://localhost:8080}"
 	RESIDUE_CONCURRENCY=16 RESIDUE_PAUSE=0.2 RESIDUE_DRY_RUN=false RESIDUE_CONFIRM=false
@@ -503,24 +527,19 @@ residue_main() {
 		fga_error "could not prepare the owner-only output directory $RESIDUE_OUTPUT_DIR"
 		return 3
 	fi
-	echo "OpenFGA target: $BASE_URL store=$STORE_ID phase=$RESIDUE_PHASE"
-	residue_load_list "$RESIDUE_LIST" "$RESIDUE_EXPECTED" "$RESIDUE_OUTPUT_DIR" || return $?
-	case "$RESIDUE_PHASE" in
-	verify) residue_verify "$RESIDUE_OUTPUT_DIR" "$RESIDUE_CONCURRENCY" ;;
-	delete)
-		residue_delete "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" \
-			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
-		;;
-	restore)
-		residue_restore "$RESIDUE_OUTPUT_DIR" "$RESIDUE_DRY_RUN" "$RESIDUE_CONFIRM" \
-			"$RESIDUE_CONCURRENCY" "$RESIDUE_PAUSE"
-		;;
-	*)
-		fga_error "unknown phase: $RESIDUE_PHASE"
-		residue_usage
-		return 2
-		;;
-	esac
+	# Phases share the output directory's files, so only one run may use it at a
+	# time. mkdir is atomic; the lock is released on every exit, including an
+	# interrupt (the readers' trap exits, which runs the EXIT trap).
+	if ! mkdir "$RESIDUE_OUTPUT_DIR/.lock" 2>/dev/null; then
+		fga_error "another run holds $RESIDUE_OUTPUT_DIR/.lock; remove it only if no run is active"
+		return 7
+	fi
+	trap 'rmdir "$RESIDUE_OUTPUT_DIR/.lock" 2>/dev/null' EXIT
+	local status=0
+	residue_run_phase || status=$?
+	rmdir "$RESIDUE_OUTPUT_DIR/.lock" 2>/dev/null
+	trap - EXIT
+	return "$status"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
