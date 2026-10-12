@@ -27,9 +27,11 @@ and the tool deletes only tuples from that list.
   the list is stale and must be rebuilt.
 - `delete` and `restore` require exactly one of `--dry-run` or `--confirm`.
 - Before the first delete, `delete --confirm` records exactly the tuples it is about to remove in
-  `deleted-set.jsonl`, sealed in `deleted-set.sha256` with its content hash and the store ID. A retry
-  merges into that record, so restore covers every run. Use one output directory per environment; a
-  directory sealed for another store is refused.
+  `deleted-set.<sha256>.jsonl`. The seal `deleted-set.sha256` names that file and binds it to its
+  content hash and the store ID. A retry merges into a new file and commits it by atomically
+  replacing the seal, so an interrupted retry leaves the previous record valid and restore covers
+  every committed run. Use one output directory per environment; a directory sealed for another
+  store is refused.
 - Deletes and restores use batches of at most 100, pause between batches (`--pause-seconds`), and
   ignore tuples that are already absent or already present, so every phase can be retried.
 - `restore` writes back only the recorded deleted set and refuses a set that no longer matches its
@@ -121,6 +123,6 @@ scripts/cleanup-openfga-residue.sh restore \
   --dry-run
 ```
 
-Review the count, then replace `--dry-run` with `--confirm`. `restore` writes back only
-`deleted-set.jsonl` from the same output directory and refuses if it no longer matches the content
-hash and store ID sealed in `deleted-set.sha256`. Invalidate `fga-sync-cache` afterwards.
+Review the count, then replace `--dry-run` with `--confirm`. `restore` writes back only the deleted
+set named by `deleted-set.sha256` in the same output directory and refuses if it no longer matches
+the content hash and store ID sealed there. Invalidate `fga-sync-cache` afterwards.

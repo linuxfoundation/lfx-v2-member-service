@@ -261,17 +261,19 @@ residue_delete() {
 		echo "Nothing left to delete"
 		return 0
 	fi
-	# Record exactly what this run deletes, bound by hash, before the first write.
-	# A retry merges into the existing record so restore covers every run.
-	if [[ -f "$directory/deleted-set.jsonl" ]]; then
+	# Record exactly what this run deletes, sealed, before the first write. A
+	# retry merges into the committed record so restore covers every run.
+	local previous="" candidate
+	if [[ -f "$directory/deleted-set.sha256" ]]; then
 		residue_validate_deleted_set "$directory" || return $?
+		previous=$(residue_deleted_set_path "$directory")
 	fi
+	candidate=$(mktemp "$directory/deleted-set.next.XXXXXX")
 	{
 		cat "$directory/present.jsonl"
-		if [[ -f "$directory/deleted-set.jsonl" ]]; then cat "$directory/deleted-set.jsonl"; fi
-	} | LC_ALL=C sort -u >"$directory/deleted-set.tmp"
-	mv "$directory/deleted-set.tmp" "$directory/deleted-set.jsonl"
-	residue_deleted_set_seal "$directory" >"$directory/deleted-set.sha256"
+		if [[ -n "$previous" ]]; then cat "$previous"; fi
+	} | LC_ALL=C sort -u >"$candidate"
+	residue_commit_deleted_set "$directory" "$candidate" || return $?
 	residue_apply_paced deletes "$directory/present.jsonl" "$pause" || return $?
 	residue_verify "$directory" "$concurrency" || return $?
 	if [[ -s "$directory/present.jsonl" ]]; then
@@ -281,21 +283,39 @@ residue_delete() {
 	echo "Delete complete"
 }
 
-# The seal binds the deleted set to its content and to the store it was deleted
-# from, so an output directory reused against another store cannot be merged
-# into or restored there.
-residue_deleted_set_seal() {
-	printf '%s %s\n' "$(fga_hash_file "$1/deleted-set.jsonl")" "$STORE_ID"
+# The deleted set is content-addressed (deleted-set.<sha256>.jsonl) and the seal
+# deleted-set.sha256 ("<sha256> <store-id>") names the one generation it vouches
+# for. Replacing the seal with a single rename is the only commit point, so an
+# interrupted commit leaves the previous generation and its seal intact, and an
+# output directory reused against another store cannot be merged into or
+# restored there.
+residue_deleted_set_path() {
+	printf '%s/deleted-set.%s.jsonl\n' "$1" "$(awk '{ print $1; exit }' "$1/deleted-set.sha256")"
+}
+
+residue_commit_deleted_set() {
+	local directory="$1"
+	local candidate="$2"
+	local hash generation
+	hash=$(fga_hash_file "$candidate")
+	mv "$candidate" "$directory/deleted-set.$hash.jsonl" || return $?
+	printf '%s %s\n' "$hash" "$STORE_ID" >"$directory/deleted-set.sha256.next" || return $?
+	mv "$directory/deleted-set.sha256.next" "$directory/deleted-set.sha256" || return $?
+	for generation in "$directory"/deleted-set.*.jsonl; do
+		[[ "$generation" == "$directory/deleted-set.$hash.jsonl" ]] || rm -f "$generation"
+	done
 }
 
 residue_validate_deleted_set() {
 	local directory="$1"
-	[[ -f "$directory/deleted-set.jsonl" && -f "$directory/deleted-set.sha256" ]] || {
+	local set_file
+	[[ -f "$directory/deleted-set.sha256" ]] || {
 		fga_error "no recorded deleted set in $directory"
 		return 6
 	}
-	if [[ "$(residue_deleted_set_seal "$directory")" != "$(cat "$directory/deleted-set.sha256")" ]]; then
-		fga_error "deleted-set.jsonl does not match its recorded hash and store $STORE_ID"
+	set_file=$(residue_deleted_set_path "$directory")
+	if [[ ! -f "$set_file" || "$(fga_hash_file "$set_file") $STORE_ID" != "$(cat "$directory/deleted-set.sha256")" ]]; then
+		fga_error "the recorded deleted set does not match its seal (content hash and store $STORE_ID)"
 		return 6
 	fi
 }
@@ -307,11 +327,13 @@ residue_restore() {
 	local pause="$4"
 	residue_require_execution_mode restore "$dry_run" "$confirm" || return $?
 	residue_validate_deleted_set "$directory" || return $?
+	local set_file
+	set_file=$(residue_deleted_set_path "$directory")
 	if [[ "$dry_run" == true ]]; then
-		echo "[dry-run] would restore $(residue_line_count "$directory/deleted-set.jsonl") tuples"
+		echo "[dry-run] would restore $(residue_line_count "$set_file") tuples"
 		return 0
 	fi
-	residue_apply_paced writes "$directory/deleted-set.jsonl" "$pause"
+	residue_apply_paced writes "$set_file" "$pause"
 }
 
 residue_parse_args() {

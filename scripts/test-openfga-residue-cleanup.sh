@@ -84,6 +84,16 @@ fga_apply_batch() {
 # shellcheck disable=SC2329 # Fixture override invoked through residue_apply_paced.
 sleep() { :; }
 
+# Fails the rename that commits a new deleted-set seal, as an interrupt between
+# writing a new generation and committing it would.
+# shellcheck disable=SC2329 # Fixture override invoked through residue_commit_deleted_set.
+mv() {
+	if [[ -n "${FAIL_SEAL_COMMIT:-}" && "${!#}" == */deleted-set.sha256 ]]; then
+		return 1
+	fi
+	command mv "$@"
+}
+
 list_hash() {
 	local file="$1"
 	local canon
@@ -123,6 +133,11 @@ setup_fixture() {
 
 store_has() {
 	jq -cS '{user, relation, object}' "$STORE_FILE" | grep -qxF "$(printf '%s' "$1" | jq -cS .)"
+}
+
+# The deleted-set generation the current seal vouches for.
+committed_set() {
+	residue_deleted_set_path "$OUT"
 }
 
 # Removes one listed tuple from the store before the run (e.g. reaped by
@@ -187,8 +202,8 @@ test_delete_removes_only_listed_present_tuples() {
 	trap 'rm -rf "$WORK"' RETURN
 	local gone
 	gone=$(delete_with_one_listed_tuple_gone)
-	assert_eq "3" "$(residue_line_count "$OUT/deleted-set.jsonl")" "the restore record must hold exactly the tuples this run deleted"
-	! grep -qxF "$(printf '%s' "$gone" | jq -cS .)" "$OUT/deleted-set.jsonl" ||
+	assert_eq "3" "$(residue_line_count "$(committed_set)")" "the restore record must hold exactly the tuples this run deleted"
+	! grep -qxF "$(printf '%s' "$gone" | jq -cS .)" "$(committed_set)" ||
 		fail "a tuple removed before the run must not enter the restore record"
 	while IFS= read -r t; do
 		! store_has "$t" || fail "listed tuple survived delete: $t"
@@ -267,7 +282,7 @@ test_failed_reader_stops_before_any_delete() {
 	assert_eq "5" "$status" "a failed OpenFGA read must fail the run with the read error"
 	assert_eq "3" "$(grep -c "^read $FAIL_OBJECT\$" "$CALL_LOG")" "a failing read must be retried exactly up to the attempt limit"
 	! grep -q '^deletes' "$CALL_LOG" || fail "a partial read must never lead to a delete"
-	[[ ! -f "$OUT/deleted-set.jsonl" ]] || fail "a partial read must not record a restore set"
+	[[ ! -f "$OUT/deleted-set.sha256" ]] || fail "a partial read must not record a restore set"
 }
 
 test_dry_run_and_mode_write_nothing() {
@@ -279,7 +294,7 @@ test_dry_run_and_mode_write_nothing() {
 	residue_delete "$OUT" false false 2 0 >/dev/null 2>&1 || status=$?
 	assert_eq "2" "$status" "delete must require exactly one of --dry-run or --confirm"
 	! grep -q '^deletes' "$CALL_LOG" || fail "dry-run and a missing mode must not delete"
-	[[ ! -f "$OUT/deleted-set.jsonl" ]] || fail "a dry run must not record a restore set"
+	[[ ! -f "$OUT/deleted-set.sha256" ]] || fail "a dry run must not record a restore set"
 }
 
 test_restore_writes_only_recorded_set_and_rejects_tampering() {
@@ -291,9 +306,9 @@ test_restore_writes_only_recorded_set_and_rejects_tampering() {
 	residue_restore "$OUT" false true 0 >/dev/null
 	while IFS= read -r t; do
 		store_has "$t" || fail "restore must bring back every deleted tuple: $t"
-	done <"$OUT/deleted-set.jsonl"
+	done <"$(committed_set)"
 	! store_has "$gone" || fail "restore must not revive a tuple this tool never deleted"
-	printf '%s\n' "$gone" >>"$OUT/deleted-set.jsonl"
+	printf '%s\n' "$gone" >>"$(committed_set)"
 	residue_restore "$OUT" false true 0 >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "restore must refuse a deleted set that no longer matches its hash"
 }
@@ -331,7 +346,7 @@ test_retry_after_failed_batch_restores_every_run() {
 	assert_eq "150" "$(residue_line_count "$STORE_FILE")" "the first run must stop at the failed batch"
 	residue_delete "$OUT" false true 2 0 >/dev/null
 	[[ ! -s "$STORE_FILE" ]] || fail "the retry must delete what the first run left"
-	assert_eq "250" "$(residue_line_count "$OUT/deleted-set.jsonl")" \
+	assert_eq "250" "$(residue_line_count "$(committed_set)")" \
 		"the restore record must cover the first run's deletions and the retry's"
 	residue_restore "$OUT" false true 0 >/dev/null
 	assert_eq "250" "$(residue_line_count "$STORE_FILE")" "restore must bring back every run's deletions"
@@ -366,10 +381,33 @@ test_deleted_set_is_bound_to_its_store() {
 	assert_eq "150" "$(residue_line_count "$STORE_FILE")" "a refused retry must not delete anything"
 	# Back on the right store, a tampered record is refused the same way.
 	STORE_ID="store-a"
-	tuple "user:alice" writer "b2b_org:001LIVEORG0000000A" >>"$OUT/deleted-set.jsonl"
+	tuple "user:alice" writer "b2b_org:001LIVEORG0000000A" >>"$(committed_set)"
 	status=0
 	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "a retry must refuse a tampered deleted set"
+}
+
+test_interrupted_checkpoint_commit_keeps_previous_record() {
+	local status=0 gone deletes_before
+	setup_fixture
+	trap 'rm -rf "$WORK"; unset FAIL_SEAL_COMMIT' RETURN
+	gone=$(delete_with_one_listed_tuple_gone)
+	# The previously gone tuple comes back, so the retry's record differs.
+	printf '%s\n' "$gone" >>"$STORE_FILE"
+	deletes_before=$(grep -c '^deletes' "$CALL_LOG")
+	FAIL_SEAL_COMMIT=1
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	unset FAIL_SEAL_COMMIT
+	[[ "$status" -ne 0 ]] || fail "a failed checkpoint commit must fail the run"
+	assert_eq "$deletes_before" "$(grep -c '^deletes' "$CALL_LOG")" "nothing may be deleted before the record is committed"
+	# The previous generation and its seal still validate: restore brings back
+	# exactly what the first run deleted.
+	residue_restore "$OUT" false true 0 >/dev/null
+	assert_eq "writes:3" "$(grep '^writes' "$CALL_LOG" | paste -sd, -)" "restore must use the last committed record"
+	# A clean retry commits a merged record that covers both runs.
+	residue_delete "$OUT" false true 2 0 >/dev/null
+	assert_eq "4" "$(residue_line_count "$(committed_set)")" "the retry must commit a record covering every run"
+	assert_eq "1" "$(find "$OUT" -name 'deleted-set.*.jsonl' | wc -l | tr -d ' ')" "only the committed generation is kept"
 }
 
 test_hash_mismatch_refuses_before_any_read
@@ -388,5 +426,6 @@ test_delete_batches_at_most_one_hundred
 test_retry_after_failed_batch_restores_every_run
 test_deletes_that_do_not_take_effect_fail
 test_deleted_set_is_bound_to_its_store
+test_interrupted_checkpoint_commit_keeps_previous_record
 
 echo "PASS: OpenFGA residue cleanup"
