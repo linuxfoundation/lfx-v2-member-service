@@ -24,12 +24,14 @@ and the tool deletes only tuples from that list.
   tuple on a listed object that the list lacks fails closed: the list is stale and must be rebuilt.
 - `delete` and `restore` require exactly one of `--dry-run` or `--confirm`.
 - Before the first delete, `delete --confirm` records exactly the tuples it is about to remove in
-  `deleted-set.jsonl`, bound by `deleted-set.sha256`. A retry merges into that record, so restore
-  covers every run.
+  `deleted-set.jsonl`, sealed in `deleted-set.sha256` with its content hash and the store ID. A retry
+  merges into that record, so restore covers every run. Use one output directory per environment; a
+  directory sealed for another store is refused.
 - Deletes and restores use batches of at most 100, pause between batches (`--pause-seconds`), and
   ignore tuples that are already absent or already present, so every phase can be retried.
 - `restore` writes back only the recorded deleted set and refuses a set that no longer matches its
-  hash.
+  seal.
+- Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output.
 - Output files contain principal identifiers and are written with owner-only permissions. Keep them
   outside the repository and delete them according to the approved operational retention policy.
 
@@ -51,8 +53,9 @@ Build it read-only from OpenFGA and review it before the change window:
    `b2b_org` relation on `project_membership`.
 3. Confirm that no live Salesforce-ID object depends on a listed object. A live object that would lose
    access through the list is a blocker, not residue.
-4. Leave out legacy global org-admin team grants; `docs/global-org-admin-team-migration.md` removes
-   those.
+4. Leave out legacy global org-admin team grants. `docs/global-org-admin-team-migration.md` removes
+   those, and its cleanup must be complete in the environment first: `verify` reads every listed
+   object in full, so a legacy grant still on a listed organization fails the run as unexpected.
 5. Record the canonical content hash next to the list and have it peer-reviewed.
 
 ## 1. Verify
@@ -114,5 +117,5 @@ scripts/cleanup-openfga-residue.sh restore \
 ```
 
 Review the count, then replace `--dry-run` with `--confirm`. `restore` writes back only
-`deleted-set.jsonl` from the same output directory and refuses if it no longer matches
-`deleted-set.sha256`. Invalidate `fga-sync-cache` afterwards.
+`deleted-set.jsonl` from the same output directory and refuses if it no longer matches the content
+hash and store ID sealed in `deleted-set.sha256`. Invalidate `fga-sync-cache` afterwards.

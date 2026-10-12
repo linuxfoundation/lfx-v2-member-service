@@ -63,8 +63,10 @@ residue_require_execution_mode() {
 }
 
 # Binds the reviewed list to its content hash and rejects anything the list must
-# never contain: object types outside the residue types, and the stable
-# global org-admin team (its grants are the live administrator path).
+# never contain: malformed tuples, object types outside the residue types, and the
+# stable global org-admin team (its grants are the live administrator path). The
+# canonical copy replaces list.jsonl only after every check passes, so the input
+# may itself be a previous run's list.jsonl.
 residue_load_list() {
 	local list="$1"
 	local expected="$2"
@@ -73,29 +75,44 @@ residue_load_list() {
 		fga_error "list not found: $list"
 		return 2
 	}
-	residue_canonicalize "$list" "$directory/list.jsonl" || {
+	local canonical
+	canonical=$(mktemp "$directory/list.XXXXXX")
+	residue_canonicalize "$list" "$canonical" || {
+		rm -f "$canonical"
 		fga_error "list is not valid tuple JSONL"
 		return 2
 	}
 	local actual
-	actual=$(fga_hash_file "$directory/list.jsonl")
+	actual=$(fga_hash_file "$canonical")
 	if [[ -z "$expected" || "$actual" != "$expected" ]]; then
+		rm -f "$canonical"
 		fga_error "list content sha256 $actual does not match the reviewed hash"
 		return 6
 	fi
-	[[ -s "$directory/list.jsonl" ]] || {
+	[[ -s "$canonical" ]] || {
+		rm -f "$canonical"
 		fga_error "list is empty"
 		return 4
 	}
 	local allowed_types bad
 	allowed_types=$(printf '%s\n' "${RESIDUE_ALLOWED_TYPES[@]}" | jq -R . | jq -sc .)
 	bad=$(jq -c --argjson allowed "$allowed_types" --arg stable "team:$FGA_STABLE_TEAM#member" \
-		'select(((.object | split(":")[0]) as $t | $allowed | index($t) | not) or .user == $stable)' \
-		"$directory/list.jsonl" | residue_line_count /dev/stdin)
+		'select(
+			([.user, .relation, .object] | any(type != "string" or . == ""))
+			or .user == $stable
+			or (.object | test("^[a-z0-9_]+:[^[:space:]]+$") | not)
+			or ((.object | split(":")[0]) as $t | $allowed | index($t) | not))' \
+		"$canonical" | residue_line_count /dev/stdin) || {
+		rm -f "$canonical"
+		fga_error "list guard could not be evaluated"
+		return 4
+	}
 	if [[ "$bad" -gt 0 ]]; then
-		fga_error "list has $bad tuple(s) outside ${RESIDUE_ALLOWED_TYPES[*]} or granting team:$FGA_STABLE_TEAM; refusing"
+		rm -f "$canonical"
+		fga_error "list has $bad malformed tuple(s), tuple(s) outside ${RESIDUE_ALLOWED_TYPES[*]}, or grants to team:$FGA_STABLE_TEAM; refusing"
 		return 4
 	fi
+	mv "$canonical" "$directory/list.jsonl"
 }
 
 # Reads every listed object in full, sharded across parallel readers; any reader
@@ -108,13 +125,22 @@ residue_read_objects() {
 	local shard_dir shard
 	local -a pids=()
 	shard_dir=$(mktemp -d)
+	# Background jobs ignore SIGINT, so stop the readers and remove their
+	# principal-bearing output explicitly when the operator interrupts.
+	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$shard_dir"; exit 130' INT TERM
 	jq -Rc '{object: .}' "$objects" |
 		awk -v n="$concurrency" -v d="$shard_dir" '{ print > (d "/shard." (NR % n)) }'
 	for shard in "$shard_dir"/shard.*; do
 		[[ -e "$shard" ]] || continue
 		(
 			while IFS= read -r filter; do
-				fga_read_all "$filter" || exit $?
+				# Another reader failed; the run is already lost.
+				[[ -e "$shard_dir/failed" ]] && exit 0
+				fga_read_all "$filter" || {
+					reader_status=$?
+					printf '%s\n' "$reader_status" >"$shard_dir/failed"
+					exit "$reader_status"
+				}
 			done <"$shard"
 		) >"$shard.out" &
 		pids+=("$!")
@@ -123,6 +149,10 @@ residue_read_objects() {
 	for pid in ${pids[@]+"${pids[@]}"}; do
 		wait "$pid" || status=$?
 	done
+	trap - INT TERM
+	if [[ -e "$shard_dir/failed" ]]; then
+		status=$(head -n 1 "$shard_dir/failed")
+	fi
 	if [[ "$status" -eq 0 ]]; then
 		cat "$shard_dir"/shard.*.out >"$output" 2>/dev/null || : >"$output"
 	fi
@@ -218,7 +248,7 @@ residue_delete() {
 		if [[ -f "$directory/deleted-set.jsonl" ]]; then cat "$directory/deleted-set.jsonl"; fi
 	} | LC_ALL=C sort -u >"$directory/deleted-set.tmp"
 	mv "$directory/deleted-set.tmp" "$directory/deleted-set.jsonl"
-	fga_hash_file "$directory/deleted-set.jsonl" >"$directory/deleted-set.sha256"
+	residue_deleted_set_seal "$directory" >"$directory/deleted-set.sha256"
 	residue_apply_paced deletes "$directory/present.jsonl" "$pause" || return $?
 	residue_verify "$directory" "$concurrency" || return $?
 	if [[ -s "$directory/present.jsonl" ]]; then
@@ -228,14 +258,21 @@ residue_delete() {
 	echo "Delete complete"
 }
 
+# The seal binds the deleted set to its content and to the store it was deleted
+# from, so an output directory reused against another store cannot be merged
+# into or restored there.
+residue_deleted_set_seal() {
+	printf '%s %s\n' "$(fga_hash_file "$1/deleted-set.jsonl")" "$STORE_ID"
+}
+
 residue_validate_deleted_set() {
 	local directory="$1"
 	[[ -f "$directory/deleted-set.jsonl" && -f "$directory/deleted-set.sha256" ]] || {
 		fga_error "no recorded deleted set in $directory"
 		return 6
 	}
-	if [[ "$(fga_hash_file "$directory/deleted-set.jsonl")" != "$(cat "$directory/deleted-set.sha256")" ]]; then
-		fga_error "deleted-set.jsonl does not match its recorded hash"
+	if [[ "$(residue_deleted_set_seal "$directory")" != "$(cat "$directory/deleted-set.sha256")" ]]; then
+		fga_error "deleted-set.jsonl does not match its recorded hash and store $STORE_ID"
 		return 6
 	fi
 }
@@ -257,13 +294,21 @@ residue_restore() {
 residue_parse_args() {
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
-		--store-id) RESIDUE_STORE_ID="${2:-}"; shift 2 ;;
-		--list) RESIDUE_LIST="${2:-}"; shift 2 ;;
-		--expect-sha256) RESIDUE_EXPECTED="${2:-}"; shift 2 ;;
-		--output-dir) RESIDUE_OUTPUT_DIR="${2:-}"; shift 2 ;;
-		--openfga-url) RESIDUE_BASE_URL="${2:-}"; shift 2 ;;
-		--concurrency) RESIDUE_CONCURRENCY="${2:-}"; shift 2 ;;
-		--pause-seconds) RESIDUE_PAUSE="${2:-}"; shift 2 ;;
+		--store-id | --list | --expect-sha256 | --output-dir | --openfga-url | --concurrency | --pause-seconds)
+			[[ $# -ge 2 ]] || {
+				fga_error "$1 requires a value"
+				return 2
+			}
+			;;
+		esac
+		case "$1" in
+		--store-id) RESIDUE_STORE_ID="$2"; shift 2 ;;
+		--list) RESIDUE_LIST="$2"; shift 2 ;;
+		--expect-sha256) RESIDUE_EXPECTED="$2"; shift 2 ;;
+		--output-dir) RESIDUE_OUTPUT_DIR="$2"; shift 2 ;;
+		--openfga-url) RESIDUE_BASE_URL="$2"; shift 2 ;;
+		--concurrency) RESIDUE_CONCURRENCY="$2"; shift 2 ;;
+		--pause-seconds) RESIDUE_PAUSE="$2"; shift 2 ;;
 		--dry-run) RESIDUE_DRY_RUN=true; shift ;;
 		--confirm) RESIDUE_CONFIRM=true; shift ;;
 		*) fga_error "unknown argument: $1"; residue_usage; return 2 ;;

@@ -48,6 +48,16 @@ fga_apply_batch() {
 	local mode="$1"
 	local batch="$2"
 	printf '%s:%s\n' "$mode" "$(awk 'NF { n++ } END { print n + 0 }' "$batch")" >>"$CALL_LOG"
+	if [[ "$mode" == deletes ]]; then
+		DELETE_BATCHES=$((DELETE_BATCHES + 1))
+		# Fail one delete batch once, as a transient OpenFGA error would.
+		if [[ "$DELETE_BATCHES" -eq "${FAIL_DELETE_BATCH:-0}" ]]; then
+			FAIL_DELETE_BATCH=0
+			return 5
+		fi
+		# A store that acknowledges deletes without applying them.
+		[[ -z "${DROP_DELETES:-}" ]] || return 0
+	fi
 	local keys
 	keys=$(jq -cS '{user, relation, object}' "$batch" | LC_ALL=C sort -u)
 	if [[ "$mode" == deletes ]]; then
@@ -77,6 +87,10 @@ setup_fixture() {
 	CALL_LOG="$WORK/calls.log"
 	OUT="$WORK/out"
 	LIST="$WORK/list.jsonl"
+	STORE_ID="store-a"
+	DELETE_BATCHES=0
+	FAIL_DELETE_BATCH=0
+	DROP_DELETES=""
 	mkdir -p "$OUT"
 	: >"$CALL_LOG"
 	# Listed residue: a UUID org's edges and grants, and a UUID membership.
@@ -103,18 +117,36 @@ test_hash_mismatch_refuses_before_any_read() {
 	local status=0
 	setup_fixture
 	trap 'rm -rf "$WORK"' RETURN
-	residue_load_list "$LIST" "0000" "$OUT" >/dev/null 2>&1 || status=$?
+	residue_main delete --store-id "$STORE_ID" --list "$LIST" --expect-sha256 0000 \
+		--output-dir "$OUT" --confirm >/dev/null 2>&1 || status=$?
 	assert_eq "6" "$status" "a list that does not match the reviewed hash must be refused"
 	[[ ! -s "$CALL_LOG" ]] || fail "a hash mismatch must stop before any OpenFGA call"
 }
 
-test_list_guard_rejects_stable_team_and_foreign_types() {
+test_reusing_canonical_list_as_input_keeps_it() {
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	residue_load_list "$OUT/list.jsonl" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	assert_eq "4" "$(residue_line_count "$OUT/list.jsonl")" "loading the output directory's own list must not erase it"
+}
+
+test_missing_flag_value_is_rejected() {
+	local status=0
+	residue_main verify --list >/dev/null 2>&1 || status=$?
+	assert_eq "2" "$status" "a value flag without a value must be rejected, not loop"
+}
+
+test_list_guard_rejects_unsafe_or_malformed_tuples() {
 	local bad status
 	setup_fixture
 	trap 'rm -rf "$WORK"' RETURN
 	for bad in \
 		"$(tuple "team:global_org_admin#member" global_org_admin "b2b_org:22222222-2222-2222-2222-222222222222")" \
-		"$(tuple "user:alice" writer "project:33333333-3333-3333-3333-333333333333")"; do
+		"$(tuple "user:alice" writer "project:33333333-3333-3333-3333-333333333333")" \
+		'{"user":"team:global_org_admin#member","relation":"global_org_admin"}' \
+		'{"relation":"writer","object":"b2b_org:22222222-2222-2222-2222-222222222222"}' \
+		"$(tuple "user:alice" writer "b2b_org")"; do
 		{ cat "$LIST"; printf '%s\n' "$bad"; } >"$WORK/bad.jsonl"
 		status=0
 		residue_load_list "$WORK/bad.jsonl" "$(list_hash "$WORK/bad.jsonl")" "$OUT" >/dev/null 2>&1 || status=$?
@@ -213,16 +245,20 @@ test_restore_writes_only_recorded_set_and_rejects_tampering() {
 	assert_eq "6" "$status" "restore must refuse a deleted set that no longer matches its hash"
 }
 
-test_delete_batches_at_most_one_hundred() {
+write_large_fixture() {
 	local i
-	setup_fixture
-	trap 'rm -rf "$WORK"' RETURN
 	: >"$LIST"
 	for i in $(seq 1 250); do
 		tuple "project:33333333-3333-3333-3333-333333333333" project \
 			"project_membership:$(printf '%08d-0000-0000-0000-000000000000' "$i")" >>"$LIST"
 	done
 	cp "$LIST" "$STORE_FILE"
+}
+
+test_delete_batches_at_most_one_hundred() {
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	write_large_fixture
 	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
 	residue_delete "$OUT" false true 2 0 >/dev/null
 	assert_eq "deletes:100,deletes:100,deletes:50" "$(grep '^deletes' "$CALL_LOG" | paste -sd, -)" \
@@ -230,8 +266,63 @@ test_delete_batches_at_most_one_hundred() {
 	[[ ! -s "$STORE_FILE" ]] || fail "every listed tuple must be deleted"
 }
 
+test_retry_after_failed_batch_restores_every_run() {
+	local status=0
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	write_large_fixture
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	FAIL_DELETE_BATCH=2
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "5" "$status" "a failed delete batch must fail the run"
+	assert_eq "150" "$(residue_line_count "$STORE_FILE")" "the first run must stop at the failed batch"
+	residue_delete "$OUT" false true 2 0 >/dev/null
+	[[ ! -s "$STORE_FILE" ]] || fail "the retry must delete what the first run left"
+	assert_eq "250" "$(residue_line_count "$OUT/deleted-set.jsonl")" \
+		"the restore record must cover the first run's deletions and the retry's"
+	residue_restore "$OUT" false true 0 >/dev/null
+	assert_eq "250" "$(residue_line_count "$STORE_FILE")" "restore must bring back every run's deletions"
+}
+
+test_deletes_that_do_not_take_effect_fail() {
+	local status=0
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	DROP_DELETES=1
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "4" "$status" "listed tuples still present after delete must fail the run"
+}
+
+test_deleted_set_is_bound_to_its_store() {
+	local status
+	setup_fixture
+	trap 'rm -rf "$WORK"' RETURN
+	write_large_fixture
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	FAIL_DELETE_BATCH=2
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || true
+	# The same output directory pointed at another store.
+	STORE_ID="store-b"
+	status=0
+	residue_restore "$OUT" false true 0 >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "restore must refuse a deleted set recorded for another store"
+	status=0
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "a retry must not merge into a deleted set recorded for another store"
+	assert_eq "150" "$(residue_line_count "$STORE_FILE")" "a refused retry must not delete anything"
+	# Back on the right store, a tampered record is refused the same way.
+	STORE_ID="store-a"
+	tuple "user:alice" writer "b2b_org:001LIVEORG0000000A" >>"$OUT/deleted-set.jsonl"
+	status=0
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "6" "$status" "a retry must refuse a tampered deleted set"
+}
+
 test_hash_mismatch_refuses_before_any_read
-test_list_guard_rejects_stable_team_and_foreign_types
+test_reusing_canonical_list_as_input_keeps_it
+test_missing_flag_value_is_rejected
+test_list_guard_rejects_unsafe_or_malformed_tuples
 test_delete_removes_only_listed_present_tuples
 test_unexpected_tuple_on_listed_object_fails_closed
 test_verify_catches_unlisted_subject_on_listed_object
@@ -239,5 +330,8 @@ test_failed_reader_stops_before_any_delete
 test_dry_run_and_mode_write_nothing
 test_restore_writes_only_recorded_set_and_rejects_tampering
 test_delete_batches_at_most_one_hundred
+test_retry_after_failed_batch_restores_every_run
+test_deletes_that_do_not_take_effect_fail
+test_deleted_set_is_bound_to_its_store
 
 echo "PASS: OpenFGA residue cleanup"
