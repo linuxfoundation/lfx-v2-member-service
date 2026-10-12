@@ -21,6 +21,10 @@ RESIDUE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$RESIDUE_SCRIPT_DIR/lib/openfga-global-org-admin-migration.sh"
 
 RESIDUE_ALLOWED_TYPES=("b2b_org" "project_membership")
+# Reads are idempotent, so a transient failure (a port-forward or gateway
+# hiccup) is retried rather than discarding a full verify pass.
+RESIDUE_READ_ATTEMPTS=3
+RESIDUE_READ_RETRY_SECONDS=2
 
 residue_usage() {
 	cat <<'USAGE'
@@ -142,13 +146,20 @@ residue_read_objects() {
 			while IFS= read -r filter; do
 				# Another reader failed; the run is already lost.
 				[[ -e "$shard_dir/failed" ]] && exit 0
-				fga_read_all "$filter" || {
+				attempt=1
+				# Buffer per object so a retried read never duplicates a page.
+				until fga_read_all "$filter" >"$shard.object"; do
 					reader_status=$?
-					printf '%s\n' "$reader_status" >"$shard_dir/failed"
-					exit "$reader_status"
-				}
+					if [[ "$attempt" -ge "$RESIDUE_READ_ATTEMPTS" ]]; then
+						printf '%s\n' "$reader_status" >"$shard_dir/failed"
+						exit "$reader_status"
+					fi
+					attempt=$((attempt + 1))
+					sleep "$RESIDUE_READ_RETRY_SECONDS"
+				done
+				cat "$shard.object" >>"$shard.out"
 			done <"$shard"
-		) >"$shard.out" &
+		) &
 		pids+=("$!")
 	done
 	local pid status=0
@@ -207,7 +218,9 @@ residue_apply_paced() {
 	local tuple_file="$2"
 	local pause="$3"
 	local batch_file count=0 batches=0 status=0
-	batch_file=$(mktemp)
+	# Inside the owner-only output directory, so an interrupted run leaves no
+	# principal-bearing file outside the retention scope.
+	batch_file=$(mktemp "$(dirname "$tuple_file")/batch.XXXXXX")
 	while IFS= read -r tuple; do
 		[[ -z "$tuple" ]] && continue
 		printf '%s\n' "$tuple" >>"$batch_file"

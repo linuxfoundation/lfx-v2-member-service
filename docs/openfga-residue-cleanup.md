@@ -21,9 +21,10 @@ and the tool deletes only tuples from that list.
   must never grant `team:global_org_admin#member`. Lists that violate this are refused even when the
   hash matches. A conditional tuple found on a listed object fails `verify` as unexpected, so a
   conditional grant is never deleted or restored without its condition.
-- `verify` reads every listed object in full, in parallel (`--concurrency`, default 16). Any failed
-  read fails the run before anything is written. Tuples already gone are recorded and skipped. A
-  tuple on a listed object that the list lacks fails closed: the list is stale and must be rebuilt.
+- `verify` reads every listed object in full, in parallel (`--concurrency`, default 16). Each read is
+  retried up to 3 times; a read that still fails fails the run before anything is written. Tuples
+  already gone are recorded and skipped. A tuple on a listed object that the list lacks fails closed:
+  the list is stale and must be rebuilt.
 - `delete` and `restore` require exactly one of `--dry-run` or `--confirm`.
 - Before the first delete, `delete --confirm` records exactly the tuples it is about to remove in
   `deleted-set.jsonl`, sealed in `deleted-set.sha256` with its content hash and the store ID. A retry
@@ -33,7 +34,9 @@ and the tool deletes only tuples from that list.
   ignore tuples that are already absent or already present, so every phase can be retried.
 - `restore` writes back only the recorded deleted set and refuses a set that no longer matches its
   seal.
-- Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output.
+- Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output. The
+  only file an interrupted delete or restore leaves behind is its current `batch.*` file, inside the
+  output directory.
 - Output files contain principal identifiers and are written with owner-only permissions. Keep them
   outside the repository and delete them according to the approved operational retention policy.
 

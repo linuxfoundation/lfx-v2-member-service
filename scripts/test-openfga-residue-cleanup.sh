@@ -32,8 +32,17 @@ tuple() {
 # The fake store: STORE_FILE holds the tuples OpenFGA would return.
 # shellcheck disable=SC2329 # Fixture override invoked through residue_verify.
 fga_read_all() {
-	printf 'read\n' >>"$CALL_LOG"
-	if [[ -n "${FAIL_OBJECT:-}" && "$(printf '%s' "$1" | jq -r '.object')" == "$FAIL_OBJECT" ]]; then
+	local object
+	object=$(printf '%s' "$1" | jq -r '.object')
+	printf 'read %s\n' "$object" >>"$CALL_LOG"
+	if [[ -n "${FAIL_OBJECT:-}" && "$object" == "$FAIL_OBJECT" ]]; then
+		return 5
+	fi
+	# Fails the first read of this object after printing a partial page, as a
+	# connection dropped mid-pagination would.
+	if [[ -n "${FLAKY_OBJECT:-}" && "$object" == "$FLAKY_OBJECT" && ! -e "$WORK/flaked" ]]; then
+		: >"$WORK/flaked"
+		jq -c --arg o "$object" 'select(.object == $o)' "$STORE_FILE" | head -n 1
 		return 5
 	fi
 	jq -c --argjson f "$1" '
@@ -236,6 +245,17 @@ test_verify_catches_unlisted_subject_on_listed_object() {
 	assert_eq "4" "$status" "verify must catch an unlisted subject on a listed object"
 }
 
+test_transient_read_failure_is_retried() {
+	setup_fixture
+	trap 'rm -rf "$WORK"; unset FLAKY_OBJECT' RETURN
+	FLAKY_OBJECT="b2b_org:22222222-2222-2222-2222-222222222222"
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	residue_verify "$OUT" 2 >/dev/null
+	[[ -e "$WORK/flaked" ]] || fail "the fixture must have failed one read"
+	assert_eq "4" "$(residue_line_count "$OUT/present.jsonl")" "a read that fails once must be retried, not fail the pass"
+	assert_eq "0" "$(residue_line_count "$OUT/unexpected.jsonl")" "a retried read must not duplicate or invent tuples"
+}
+
 test_failed_reader_stops_before_any_delete() {
 	local status=0
 	setup_fixture
@@ -245,6 +265,7 @@ test_failed_reader_stops_before_any_delete() {
 	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
 	residue_delete "$OUT" false true 3 0 >/dev/null 2>&1 || status=$?
 	assert_eq "5" "$status" "a failed OpenFGA read must fail the run with the read error"
+	assert_eq "3" "$(grep -c "^read $FAIL_OBJECT\$" "$CALL_LOG")" "a failing read must be retried exactly up to the attempt limit"
 	! grep -q '^deletes' "$CALL_LOG" || fail "a partial read must never lead to a delete"
 	[[ ! -f "$OUT/deleted-set.jsonl" ]] || fail "a partial read must not record a restore set"
 }
@@ -358,6 +379,7 @@ test_list_guard_rejects_unsafe_or_malformed_tuples
 test_delete_removes_only_listed_present_tuples
 test_unexpected_tuple_on_listed_object_fails_closed
 test_conditional_tuple_on_listed_object_fails_closed
+test_transient_read_failure_is_retried
 test_verify_catches_unlisted_subject_on_listed_object
 test_failed_reader_stops_before_any_delete
 test_dry_run_and_mode_write_nothing
