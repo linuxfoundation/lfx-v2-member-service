@@ -120,6 +120,24 @@ comm() {
 	command comm "$@"
 }
 
+# Fails hashing the deleted-set record before it is committed.
+eval "real_$(declare -f fga_hash_file)"
+fga_hash_file() {
+	if [[ -n "${FAIL_RECORD_HASH:-}" && "$1" == */deleted-set.next.* ]]; then
+		return 1
+	fi
+	real_fga_hash_file "$@"
+}
+
+# Fails creating the read path's private temporary directory.
+# shellcheck disable=SC2329 # Fixture override invoked through residue_read_current.
+mktemp() {
+	if [[ -n "${FAIL_TEMP_DIR:-}" && "$*" == "-d" ]]; then
+		return 1
+	fi
+	command mktemp "$@"
+}
+
 list_hash() {
 	local file="$1"
 	local canon
@@ -323,6 +341,31 @@ test_failed_comparison_fails_before_any_delete() {
 	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
 	assert_eq "3" "$status" "a failed comparison with OpenFGA must fail the run"
 	! grep -q '^deletes' "$CALL_LOG" || fail "a failed comparison must never lead to a delete"
+}
+
+test_failed_record_hash_stops_before_any_delete() {
+	local status=0
+	setup_fixture
+	trap 'rm -rf "$WORK"; unset FAIL_RECORD_HASH' RETURN
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	FAIL_RECORD_HASH=1
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "3" "$status" "a failed hash of the deleted-set record must fail the run"
+	! grep -q '^deletes' "$CALL_LOG" || fail "nothing may be deleted without a committed record"
+	[[ ! -f "$OUT/deleted-set.sha256" ]] || fail "a failed hash must not commit a seal"
+	assert_eq "0" "$(find "$OUT" -name 'deleted-set.*' | wc -l | tr -d ' ')" "a failed hash must leave no record files"
+}
+
+test_failed_temp_dir_fails_the_read() {
+	local status=0
+	setup_fixture
+	trap 'rm -rf "$WORK"; unset FAIL_TEMP_DIR' RETURN
+	residue_load_list "$LIST" "$(list_hash "$LIST")" "$OUT" >/dev/null
+	FAIL_TEMP_DIR=1
+	residue_delete "$OUT" false true 2 0 >/dev/null 2>&1 || status=$?
+	assert_eq "3" "$status" "a failed temporary directory must fail the read"
+	assert_eq "0" "$(grep -c '^read' "$CALL_LOG")" "no OpenFGA read may run without a private temporary directory"
+	[[ ! -e "$OUT/present.jsonl" ]] || fail "a failed read must not write verification results"
 }
 
 test_failed_reader_stops_before_any_delete() {
@@ -547,6 +590,8 @@ test_verify_catches_unlisted_subject_on_listed_object
 test_failed_reader_stops_before_any_delete
 test_broken_object_sharding_fails_before_any_delete
 test_failed_comparison_fails_before_any_delete
+test_failed_record_hash_stops_before_any_delete
+test_failed_temp_dir_fails_the_read
 test_dry_run_and_mode_write_nothing
 test_restore_writes_only_recorded_set_and_rejects_tampering
 test_delete_batches_at_most_one_hundred

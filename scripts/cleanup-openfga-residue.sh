@@ -86,15 +86,18 @@ residue_load_list() {
 		fga_error "list not found: $list"
 		return 2
 	}
-	local canonical
-	canonical=$(mktemp "$directory/list.XXXXXX")
+	local canonical actual
+	canonical=$(mktemp "$directory/list.XXXXXX") || return 3
 	residue_canonicalize "$list" "$canonical" || {
 		rm -f "$canonical"
 		fga_error "list is not valid tuple JSONL"
 		return 2
 	}
-	local actual
-	actual=$(fga_hash_file "$canonical")
+	actual=$(fga_hash_file "$canonical") || {
+		rm -f "$canonical"
+		fga_error "could not hash the list"
+		return 3
+	}
 	if [[ -z "$expected" || "$actual" != "$expected" ]]; then
 		rm -f "$canonical"
 		fga_error "list content sha256 $actual does not match the reviewed hash"
@@ -124,7 +127,11 @@ residue_load_list() {
 		fga_error "list has $bad malformed tuple(s), tuple(s) outside ${RESIDUE_ALLOWED_TYPES[*]}, or grants to team:$FGA_STABLE_TEAM; refusing"
 		return 4
 	fi
-	mv "$canonical" "$directory/list.jsonl"
+	mv "$canonical" "$directory/list.jsonl" || {
+		rm -f "$canonical"
+		fga_error "could not store the checked list"
+		return 3
+	}
 }
 
 # Reads every listed object in full, sharded across parallel readers; any reader
@@ -185,15 +192,14 @@ residue_read_objects() {
 	fi
 	if [[ "$status" -eq 0 ]]; then
 		local requested read_count
-		requested=$(residue_line_count "$objects")
-		read_count=$(cat "$shard_dir"/shard.*.done 2>/dev/null | residue_line_count /dev/stdin)
-		if [[ "$read_count" -ne "$requested" ]]; then
+		if ! requested=$(residue_line_count "$objects") ||
+			! read_count=$(cat "$shard_dir"/shard.*.done | residue_line_count /dev/stdin); then
+			status=3
+		elif [[ "$requested" -eq 0 || "$read_count" -ne "$requested" ]]; then
 			fga_error "read $read_count of $requested objects"
 			status=3
-		elif [[ "$requested" -gt 0 ]]; then
-			cat "$shard_dir"/shard.*.out >"$output" || status=3
 		else
-			: >"$output" || status=3
+			cat "$shard_dir"/shard.*.out >"$output" || status=3
 		fi
 	fi
 	rm -rf "$shard_dir"
@@ -207,7 +213,10 @@ residue_read_current() {
 	local output="$2"
 	local concurrency="$3"
 	local temp_dir status=0
-	temp_dir=$(mktemp -d)
+	temp_dir=$(mktemp -d) || {
+		fga_error "could not create a temporary directory"
+		return 3
+	}
 	# Background readers ignore SIGINT, so stop them and remove every
 	# principal-bearing temp file explicitly when the operator interrupts.
 	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$temp_dir"; exit 130' INT TERM
@@ -263,7 +272,10 @@ residue_apply_paced() {
 	batch_file=$(mktemp "$(dirname "$tuple_file")/batch.XXXXXX") || return 3
 	while IFS= read -r tuple; do
 		[[ -z "$tuple" ]] && continue
-		printf '%s\n' "$tuple" >>"$batch_file"
+		printf '%s\n' "$tuple" >>"$batch_file" || {
+			status=3
+			break
+		}
 		count=$((count + 1))
 		if [[ "$count" -eq "$FGA_BATCH_SIZE" ]]; then
 			fga_apply_batch "$mode" "$batch_file" || {
@@ -341,7 +353,11 @@ residue_commit_deleted_set() {
 	local directory="$1"
 	local candidate="$2"
 	local hash generation
-	hash=$(fga_hash_file "$candidate")
+	if ! hash=$(fga_hash_file "$candidate") || [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+		rm -f "$candidate"
+		fga_error "could not hash the deleted-set record"
+		return 3
+	fi
 	mv "$candidate" "$directory/deleted-set.$hash.jsonl" || return $?
 	printf '%s %s\n' "$hash" "$STORE_ID" >"$directory/deleted-set.sha256.next" || return $?
 	mv "$directory/deleted-set.sha256.next" "$directory/deleted-set.sha256" || return $?
@@ -483,8 +499,10 @@ residue_main() {
 	BASE_URL="$RESIDUE_BASE_URL"
 	STORE_ID="$RESIDUE_STORE_ID"
 	export BASE_URL STORE_ID
-	mkdir -p "$RESIDUE_OUTPUT_DIR"
-	chmod 700 "$RESIDUE_OUTPUT_DIR"
+	if ! { mkdir -p "$RESIDUE_OUTPUT_DIR" && chmod 700 "$RESIDUE_OUTPUT_DIR"; }; then
+		fga_error "could not prepare the owner-only output directory $RESIDUE_OUTPUT_DIR"
+		return 3
+	fi
 	echo "OpenFGA target: $BASE_URL store=$STORE_ID phase=$RESIDUE_PHASE"
 	residue_load_list "$RESIDUE_LIST" "$RESIDUE_EXPECTED" "$RESIDUE_OUTPUT_DIR" || return $?
 	case "$RESIDUE_PHASE" in
