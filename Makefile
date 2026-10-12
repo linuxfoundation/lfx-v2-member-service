@@ -119,6 +119,7 @@ test: test-scripts ## Run tests
 .PHONY: test-scripts
 test-scripts: ## Run shell migration tests
 	@bash scripts/test-global-org-admin-team-migration.sh
+	@bash scripts/test-openfga-residue-cleanup.sh
 
 .PHONY: build
 build: ## Build the application for local OS
