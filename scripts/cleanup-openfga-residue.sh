@@ -117,17 +117,16 @@ residue_load_list() {
 
 # Reads every listed object in full, sharded across parallel readers; any reader
 # failure fails the whole read. Every tuple in the list sits on a listed object,
-# so this sees each listed tuple and anything else on those objects.
+# so this sees each listed tuple and anything else on those objects. Shards live
+# beside the output so the caller's cleanup removes them; the caller's interrupt
+# trap stops the readers through the dynamically scoped `pids`.
 residue_read_objects() {
 	local objects="$1"
 	local output="$2"
 	local concurrency="$3"
 	local shard_dir shard
 	local -a pids=()
-	shard_dir=$(mktemp -d)
-	# Background jobs ignore SIGINT, so stop the readers and remove their
-	# principal-bearing output explicitly when the operator interrupts.
-	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$shard_dir"; exit 130' INT TERM
+	shard_dir=$(mktemp -d "$(dirname "$output")/shards.XXXXXX")
 	jq -Rc '{object: .}' "$objects" |
 		awk -v n="$concurrency" -v d="$shard_dir" '{ print > (d "/shard." (NR % n)) }'
 	for shard in "$shard_dir"/shard.*; do
@@ -149,7 +148,6 @@ residue_read_objects() {
 	for pid in ${pids[@]+"${pids[@]}"}; do
 		wait "$pid" || status=$?
 	done
-	trap - INT TERM
 	if [[ -e "$shard_dir/failed" ]]; then
 		status=$(head -n 1 "$shard_dir/failed")
 	fi
@@ -169,10 +167,14 @@ residue_verify() {
 	local list="$directory/list.jsonl"
 	local temp_dir status=0
 	temp_dir=$(mktemp -d)
+	# Background readers ignore SIGINT, so stop them and remove every
+	# principal-bearing temp file explicitly when the operator interrupts.
+	trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$temp_dir"; exit 130' INT TERM
 	jq -r '.object' "$list" | LC_ALL=C sort -u >"$temp_dir/objects"
 	residue_read_objects "$temp_dir/objects" "$temp_dir/read" "$concurrency" || status=$?
 	if [[ "$status" -ne 0 ]]; then
 		rm -rf "$temp_dir"
+		trap - INT TERM
 		fga_error "OpenFGA read failed"
 		return "$status"
 	fi
@@ -181,6 +183,7 @@ residue_verify() {
 	comm -23 "$list" "$temp_dir/current" >"$directory/gone.jsonl"
 	comm -13 "$list" "$temp_dir/current" >"$directory/unexpected.jsonl"
 	rm -rf "$temp_dir"
+	trap - INT TERM
 	echo "Verify: $(residue_line_count "$list") listed, $(residue_line_count "$directory/present.jsonl") present," \
 		"$(residue_line_count "$directory/gone.jsonl") already gone," \
 		"$(residue_line_count "$directory/unexpected.jsonl") unexpected"

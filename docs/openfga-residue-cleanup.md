@@ -42,7 +42,7 @@ duplicates, and extra fields do not matter; the tool canonicalizes before hashin
 the tool expects with:
 
 ```bash
-jq -cS '{user, relation, object}' list.jsonl | LC_ALL=C sort -u | shasum -a 256
+LIST_SHA256=$(jq -cS '{user, relation, object}' list.jsonl | LC_ALL=C sort -u | shasum -a 256 | awk '{print $1}')
 ```
 
 Build it read-only from OpenFGA and review it before the change window:
