@@ -212,9 +212,22 @@ Then run the direct authorization checks.
 
 ## Rollback
 
-Before cleanup, revert the GitOps value to the old team identifier; both tuple sets still exist.
-After cleanup, first restore the hash-verified final pre-cleanup tuple set while the service still
-targets the stable team:
+fga-sync v0.3.12 and later reconcile `global_*` relations: every member-service publish that carries
+the admin grant (organization creation, CDC Account upserts, and backfill or reindex runs) replaces
+whichever team holds `global_org_admin` on that organization with the configured team. Plan rollback
+around that:
+
+- **Primary path: team membership.** After the cutover every live organization holds the
+  `team:global_org_admin` grant, so access is restored by adding the principal to the
+  `global_org_admin` team in sso-tools. Invalidate `fga-sync-cache` (section 6) and verify the
+  principal directly.
+- **Never revert the GitOps value to the old team identifier**, before or after cleanup. Publishes
+  would then reconcile organizations to the old team and remove their `team:global_org_admin`
+  grants one organization at a time, while the old team's grants are already being removed in the
+  same way.
+- **`restore` is a short-term stopgap only.** It writes back the hash-verified final pre-cleanup
+  tuple set, but the next publish of each live organization removes the restored old-team grant
+  again. Use it only to cover the time needed to fix team membership.
 
 ```bash
 scripts/migrate-global-org-admin-team-openfga.sh restore \
@@ -227,11 +240,5 @@ scripts/migrate-global-org-admin-team-openfga.sh restore \
 Review that the preview covers `precleanup-old-roster.jsonl` and `precleanup-old-grants.jsonl`, then
 replace `--dry-run` with `--confirm`. The command refuses to proceed if either file differs from its
 hash binding in `precleanup.checkpoint`; writes ignore tuples that already exist, so a confirmed
-restore can be retried.
-
-After the confirmed restore, invalidate `fga-sync-cache` with the command in section 6 so restored
-access is visible through the API,
-then directly verify the known allowed and denied principals against a
-representative organization. Only then revert the GitOps value to the old team identifier and wait
-for both the API and CDC consumer Deployments to complete. Keep the stable tuples in place until the
-rollback has been verified; normal service reconciliation does not restore team-subject tuples.
+restore can be retried. Afterwards invalidate `fga-sync-cache` with the command in section 6 and
+directly verify the known allowed and denied principals against a representative organization.
