@@ -135,6 +135,7 @@ endpoint is (re)added:
   `constants.ServiceName`, i.e. `lfx-v2-member-service`) and drained during shutdown:
   - project-id-map lookup (`lfx.member.project-id-map.lookup`)
   - b2b_org lookup (`lfx.member.b2b_org_lookup`)
+  - b2b_org lookup by website (`lfx.member.b2b_org_lookup_by_website`)
   The earlier SFID/UUID lookup subjects were removed in LFXV2-2049 (the
   canonical uid is now the 18-char SFID).
 - If adding another horizontally scaled request/reply handler, use the same

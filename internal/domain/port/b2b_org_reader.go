@@ -29,4 +29,15 @@ type B2BOrgReader interface {
 	// Used to bulk-compute is_parent and FGA parent tuples for a batch of orgs in
 	// place of N individual FetchChildUIDsByParentUID calls.
 	FetchChildUIDsByParentUIDs(ctx context.Context, parentUIDs []string) (map[string][]string, error)
+
+	// FindByNameOrWebsite resolves a single member-eligible Account by primary
+	// domain, domain alias, website, then name, in that priority order. Consulted by
+	// committee-service when an organization.id does not resolve directly via
+	// GetB2BOrg (e.g. a legacy, non-SFID id for an org that exists under a
+	// different SFID). Returns found=false (not an error) when no tier
+	// produces exactly one match, including when a tier's result is
+	// ambiguous — a less specific tier could otherwise resolve to a
+	// different, incorrect organization than the one a more specific tier
+	// couldn't safely identify.
+	FindByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error)
 }

@@ -66,6 +66,10 @@ func (r *seededOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []stri
 	return map[string][]string{}, nil
 }
 
+func (r *seededOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // capturingPublisher captures published indexer messages to inspect payload contents.
 type capturingPublisher struct {
 	mu               sync.Mutex

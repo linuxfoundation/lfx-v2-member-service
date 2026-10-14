@@ -33,10 +33,12 @@ replica dependency from the v1 platform has been fully removed. The service now:
 5. Stores authoritative b2b_org access-control state (writers, auditors, pending invites) in the
    `org-settings` KV bucket.
 6. Handles inbound NATS RPC to resolve a v2 project UID to its Salesforce `Project__c.Id`
-   (`lfx.member.project-id-map.lookup`) and to validate a `b2b_org` id
-   (`lfx.member.b2b_org_lookup`). The earlier SFID ↔ UUID translation RPCs were removed
-   in LFXV2-2049: the canonical `uid` for Salesforce-backed entities is now the 18-char SFID
-   itself (`pkg/sfuuid` only normalizes 15↔18-char forms).
+   (`lfx.member.project-id-map.lookup`), to validate a `b2b_org` id
+   (`lfx.member.b2b_org_lookup`), and to resolve a `b2b_org` by name/website when a caller
+   cannot resolve it directly via `b2b_org_lookup` (`lfx.member.b2b_org_lookup_by_website`,
+   tiered primary-domain → domain-alias → website → name resolution). The earlier SFID ↔
+   UUID translation RPCs were removed in LFXV2-2049: the canonical `uid` for Salesforce-backed
+   entities is now the 18-char SFID itself (`pkg/sfuuid` only normalizes 15↔18-char forms).
 7. Resolves project UIDs ↔ slugs via NATS RPC calls to the project-service.
 8. Runs a Salesforce Pub/Sub CDC consumer (`RUN_MODE=consumer`, single replica) that
    invalidates the sObject cache and re-publishes indexer + FGA-sync messages on

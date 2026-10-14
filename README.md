@@ -58,6 +58,7 @@ Key-Value cache to minimise round-trips.
   resolve identifiers without querying Salesforce directly:
   - `lfx.member.project-id-map.lookup` — v2 project UID → Salesforce `Project__c.Id`
   - `lfx.member.b2b_org_lookup` — validate a `b2b_org` id and return the canonical 18-char Account SFID
+  - `lfx.member.b2b_org_lookup_by_website` — resolve a `b2b_org` by name/website when a caller cannot resolve it directly via `b2b_org_lookup`
 - **Clean Architecture**: Follows hexagonal architecture with clear separation of
   domain, service, and infrastructure layers.
 - **Authorization**: JWT-based authentication with Heimdall middleware integration
@@ -203,6 +204,57 @@ The reply is always valid JSON. Check for the presence of the `"error"` key to
 detect failure. A not-found response means the id does not resolve to a `b2b_org`
 (e.g. CDP UUID, unknown SFID); infrastructure failures return a distinct error
 message.
+
+### B2B Org Lookup By Website
+
+Resolves a `b2b_org` by name/website when a caller cannot resolve it directly
+via `lfx.member.b2b_org_lookup` (e.g. a legacy, non-SFID id for an org that
+exists under a different SFID). Resolution is tiered: primary domain →
+domain alias → website → name, in that priority order. A match at any domain
+tier is verified against the normalized hostname before being accepted, and
+an ambiguous result (more than one candidate) at any domain tier stops
+resolution entirely rather than falling through to a less specific tier.
+
+| Field | Value |
+|-------|-------|
+| **Subject** | `lfx.member.b2b_org_lookup_by_website` |
+| **Transport** | NATS core request/reply |
+| **Queue group** | `lfx-v2-member-service` |
+
+**Request body (JSON):**
+
+```json
+{"name": "<org name>", "website": "<org website or bare domain>"}
+```
+
+**Response — success:**
+
+```json
+{"id": "<canonical 18-char Account SFID>"}
+```
+
+**Response — not found, ambiguous, or invalid:**
+
+```json
+{"error": "b2b org not found"}
+```
+
+**Response — bad request:**
+
+```json
+{"error": "name or website is required"}
+```
+
+**Response — lookup failure (infrastructure error):**
+
+```json
+{"error": "b2b org lookup failed"}
+```
+
+The reply is always valid JSON. Check for the presence of the `"error"` key to
+detect failure. A not-found response covers both "no match" and "ambiguous
+match" cases alike, since this RPC is read-only resolution and both mean the
+same thing to a caller: do not treat the id as confirmed.
 
 ### B2B Org UID Resolution
 

@@ -63,3 +63,11 @@ func (r *B2BOrgReader) FetchChildUIDsByParentUIDs(ctx context.Context, parentUID
 	}
 	return r.accountRepo.FetchChildUIDsByParentUIDs(ctx, parentUIDs)
 }
+
+// FindByNameOrWebsite delegates to AccountRepo for the SOQL name/website match.
+func (r *B2BOrgReader) FindByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error) {
+	if r.accountRepo == nil {
+		return nil, false, fmt.Errorf("accountRepo not initialised")
+	}
+	return r.accountRepo.FindAccountByNameOrWebsite(ctx, name, website)
+}
