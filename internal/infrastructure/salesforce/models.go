@@ -3,6 +3,8 @@
 
 package salesforce
 
+import "github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+
 // soqlAsset represents a Salesforce Asset record returned by a SOQL query.
 // Relationship fields (Account, Product2, Project) are populated via SOQL
 // relationship sub-selects. The Contact sub-select is intentionally omitted —
@@ -156,10 +158,42 @@ type soqlAccountParent struct {
 	LogoURL *string `salesforce:"Logo_URL__c" json:"Logo_URL__c"`
 }
 
+// accountEligibilitySOQLFields selects the two inputs of model.IsB2BOrgEligible.
+// Every Account query that must honour the eligibility rule includes it and
+// decodes the result through soqlEligibility.
+const accountEligibilitySOQLFields = "RecordType.DeveloperName," +
+	" (SELECT Id FROM Assets WHERE Product2.Family = 'Membership' AND IsDeleted = false LIMIT 1)"
+
+// soqlEligibility decodes accountEligibilitySOQLFields. Salesforce returns
+// "RecordType": null for an Account without a record type and "Assets": null
+// when the child subquery matches no row.
+type soqlEligibility struct {
+	RecordType *soqlRecordType       `salesforce:"RecordType" json:"RecordType"`
+	Assets     *soqlMembershipAssets `salesforce:"Assets"     json:"Assets"`
+}
+
+type soqlRecordType struct {
+	DeveloperName string `salesforce:"DeveloperName" json:"DeveloperName"`
+}
+
+type soqlMembershipAssets struct {
+	TotalSize int             `json:"totalSize"`
+	Records   []soqlAccountID `json:"records"`
+}
+
+// eligible applies model.IsB2BOrgEligible to the decoded record.
+func (e soqlEligibility) eligible() bool {
+	recordType := ""
+	if e.RecordType != nil {
+		recordType = e.RecordType.DeveloperName
+	}
+	hasMembership := e.Assets != nil && len(e.Assets.Records) > 0
+	return model.IsB2BOrgEligible(recordType, hasMembership)
+}
+
 // soqlAccount represents a Salesforce Account record returned by a SOQL query.
-// Used for B2BOrg search and list operations. Only non-deleted Accounts that
-// have at least one membership Asset are returned — the WHERE clause filters
-// by IsDeleted = false and a semi-join on Asset.
+// Used for B2BOrg search and list operations. The query returns every
+// non-deleted Account; callers keep only those for which eligible() is true.
 //
 // Both salesforce and json tags are present so that the struct can be decoded
 // by either the go-salesforce library (client.Query) or by json.Unmarshal
@@ -201,6 +235,7 @@ type soqlAccount struct {
 	// Parent is the parent Account sub-object from the SOQL relationship sub-select.
 	// Present when the query includes `Parent.Name, Parent.Logo_URL__c` in the SELECT clause.
 	Parent *soqlAccountParent `salesforce:"Parent"                  json:"Parent"`
+	soqlEligibility
 }
 
 // derefString returns the string value of a *string pointer, or an empty string

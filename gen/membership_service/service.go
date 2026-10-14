@@ -1058,6 +1058,11 @@ func MakeServiceUnavailable(err error) *goa.ServiceError {
 	return goa.NewServiceError(err, "ServiceUnavailable", false, true, false)
 }
 
+// MakeUnprocessableEntity builds a goa.ServiceError from an error.
+func MakeUnprocessableEntity(err error) *goa.ServiceError {
+	return goa.NewServiceError(err, "UnprocessableEntity", false, false, false)
+}
+
 // MakeConflict builds a goa.ServiceError from an error.
 func MakeConflict(err error) *goa.ServiceError {
 	return goa.NewServiceError(err, "Conflict", false, false, false)

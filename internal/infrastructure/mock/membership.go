@@ -377,8 +377,14 @@ func (m *MockB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []str
 // compile-time check.
 var _ port.B2BOrgReader = (*MockB2BOrgReader)(nil)
 
+// MockIneligibleAccountSFID is the one SFID for which MockB2BOrgWriter's
+// CreateB2BOrg returns UnprocessableEntity, so the mock source can exercise the
+// 422 path. Mock data carries no record types to derive it from.
+const MockIneligibleAccountSFID = "001000000000422AAA"
+
 // MockB2BOrgWriter is a stub implementation of port.B2BOrgWriter for local
-// development when REPOSITORY_SOURCE=mock. All methods return NotImplemented.
+// development when REPOSITORY_SOURCE=mock. All methods return NotImplemented,
+// except CreateB2BOrg for MockIneligibleAccountSFID.
 type MockB2BOrgWriter struct{}
 
 // NewMockB2BOrgWriter creates a new MockB2BOrgWriter.
@@ -386,8 +392,12 @@ func NewMockB2BOrgWriter() *MockB2BOrgWriter {
 	return &MockB2BOrgWriter{}
 }
 
-// CreateB2BOrg always returns not-implemented.
-func (m *MockB2BOrgWriter) CreateB2BOrg(_ context.Context, _ string, _ model.B2BOrgInput) (*model.B2BOrg, error) {
+// CreateB2BOrg returns UnprocessableEntity for MockIneligibleAccountSFID and
+// not-implemented otherwise.
+func (m *MockB2BOrgWriter) CreateB2BOrg(_ context.Context, sfid string, _ model.B2BOrgInput) (*model.B2BOrg, error) {
+	if sfid == MockIneligibleAccountSFID {
+		return nil, errors.NewUnprocessableEntity("account is not eligible as a b2b org: record type Partner_Restricted without a membership")
+	}
 	return nil, errors.NewNotImplemented("create-b2b-org not implemented in mock")
 }
 

@@ -338,7 +338,7 @@ func B2BOrgWriterImpl(ctx context.Context) port.B2BOrgWriter {
 	case "salesforce":
 		slog.InfoContext(ctx, "initialising Salesforce B2B org writer with sObject cache")
 		sObjectClientInit(ctx)
-		return salesforce.NewB2BOrgWriter(sObjectClient)
+		return salesforce.NewB2BOrgWriter(sObjectClient, salesforce.NewAccountRepo(sfClient))
 
 	default:
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
@@ -687,6 +687,7 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
 			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
+			usecaseSvc.WithB2BOrgEligibilityReader(salesforce.NewAccountRepo(sfClient)),
 			// Fresh-fetch sibling reader for the Inactive-revoke check (never
 			// served from the stale membership-group cache).
 			usecaseSvc.WithRunnerKeyContactsByMembershipReader(salesforce.NewKeyContactRepo(sfClient)),

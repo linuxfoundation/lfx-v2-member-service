@@ -22,6 +22,13 @@ type soqlAccountID struct {
 	ID string `salesforce:"Id" json:"Id"`
 }
 
+// soqlEligibleAccountID is soqlAccountID plus the eligibility inputs, for the
+// single-parent child-list query.
+type soqlEligibleAccountID struct {
+	ID string `json:"Id"`
+	soqlEligibility
+}
+
 // accountsSOQLSelect is the fixed Account projection shared by every list/search
 // query. The organization slug is not a Salesforce field: it is derived from Name
 // by model.Slugify when the record is converted (spec 050, DR-007).
@@ -31,20 +38,16 @@ const accountsSOQLSelect = "Id, Name, Logo_URL__c, Website," +
 	" Parent.Id, Parent.Name, Parent.Logo_URL__c," +
 	" Industry, Sector__c, CrunchBase_URL__c," +
 	" NumberOfEmployees, LF_Membership_Status__c, IsMember__c," +
-	" CreatedDate, LastModifiedDate"
+	" CreatedDate, LastModifiedDate, " + accountEligibilitySOQLFields
 
 // accountsSOQLWhere is the fixed WHERE base for Account search/list queries.
-// Only Accounts that are not deleted and have at least one membership Asset are
-// returned — the SOQL semi-join on Asset ensures we do not expose arbitrary
-// Account records to the API.
+// It returns every non-deleted Account. Eligibility (model.IsB2BOrgEligible) is
+// applied in Go to the decoded records, because the rule needs a semi-join
+// inside OR, which SOQL rejects; callers must drop records whose eligible() is
+// false before exposing them.
 const accountsSOQLWhere = `
 FROM Account
-WHERE IsDeleted = false
-    AND Id IN (
-        SELECT AccountId FROM Asset
-        WHERE Product2.Family = 'Membership'
-            AND IsDeleted = false
-    )`
+WHERE IsDeleted = false`
 
 // accountsSOQLBase is the SELECT + fixed WHERE base for Account search/list
 // queries. The caller appends optional predicates and an ORDER BY clause before
@@ -61,12 +64,11 @@ func NewAccountRepo(client *sf.Salesforce) *AccountRepo {
 	return &AccountRepo{client: client}
 }
 
-// FetchChildUIDsByParentUID returns the SFIDs of member-eligible Salesforce
-// Accounts whose ParentId matches the SFID derived from parentUID (uid == SFID).
-// Only accounts with at least one membership Asset are returned — matching the
-// same gate used by accountsSOQLBase so the result contains only UIDs that exist
-// in the index. Returns an empty slice (no error) when the parent has no
-// member-eligible children.
+// FetchChildUIDsByParentUID returns the SFIDs of eligible Salesforce Accounts
+// (model.IsB2BOrgEligible) whose ParentId matches the SFID derived from
+// parentUID (uid == SFID). It applies the same rule as the list queries so the
+// result contains only UIDs that exist in the index. Returns an empty slice
+// (no error) when the parent has no eligible children.
 func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID string) ([]string, error) {
 	parentSFID, err := sfuuid.Normalize18(parentUID)
 	if err != nil {
@@ -74,16 +76,19 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 	}
 	slog.DebugContext(ctx, "fetching child account SFIDs from Salesforce", "parent_sfid", parentSFID)
 
-	query := "SELECT Id FROM Account WHERE ParentId = " + quoteSOQL(parentSFID) +
-		" AND IsDeleted = false" +
-		" AND Id IN (SELECT AccountId FROM Asset WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
-	records, _, err := QueryAllPages[soqlAccountID](ctx, r.client, query, "")
+	query := "SELECT Id, " + accountEligibilitySOQLFields +
+		" FROM Account WHERE ParentId = " + quoteSOQL(parentSFID) +
+		" AND IsDeleted = false"
+	records, _, err := QueryAllPages[soqlEligibleAccountID](ctx, r.client, query, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching children of parent %s: %w", parentSFID, err)
 	}
 
 	uids := make([]string, 0, len(records))
 	for _, rec := range records {
+		if !rec.eligible() {
+			continue
+		}
 		uid, convErr := sfuuid.Normalize18(rec.ID)
 		if convErr != nil {
 			slog.WarnContext(ctx, "child account SFID could not be normalized, skipping",
@@ -96,7 +101,8 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 }
 
 // FetchAccountBySFID fetches a single Account record from Salesforce by its
-// Salesforce Id. Returns nil, nil when no matching record is found.
+// Salesforce Id. Returns nil, nil when no matching record is found or the
+// Account is not eligible (model.IsB2BOrgEligible).
 func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*model.B2BOrg, error) {
 	slog.DebugContext(ctx, "fetching account by SFID from Salesforce", "sfid", sfid)
 	query := accountsSOQLBase + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
@@ -104,7 +110,7 @@ func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*mod
 	if err != nil {
 		return nil, fmt.Errorf("fetching account by SFID %s: %w", sfid, err)
 	}
-	if len(sfResult.Records) == 0 {
+	if len(sfResult.Records) == 0 || !sfResult.Records[0].eligible() {
 		return nil, nil
 	}
 	return convertSOQLToB2BOrg(ctx, sfResult.Records[0])
@@ -112,9 +118,11 @@ func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*mod
 
 // FetchAccountsBySFIDs fetches multiple Account records from Salesforce by
 // their Salesforce Ids in a single batched SOQL query. Records absent from
-// the result set have been soft-deleted or no longer hold a membership Asset
-// (the membership semi-join in accountsSOQLBase excludes them). Returns an
-// empty slice when none are found.
+// the result set have been soft-deleted or are not eligible
+// (model.IsB2BOrgEligible); ineligible records are dropped here, not reported
+// as conversion errors, so callers treat them as absent. Every page of each
+// chunk is read: a short result would read as absence. Returns an empty slice
+// when none are found.
 func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) ([]*model.B2BOrg, []string, error) {
 	if len(sfids) == 0 {
 		return []*model.B2BOrg{}, nil, nil
@@ -132,11 +140,14 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 		chunk := sfids[start:end]
 
 		query := accountsSOQLBase + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
-		sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
+		records, _, err := QueryAllPages[soqlAccount](ctx, r.client, query, "")
 		if err != nil {
 			return nil, nil, fmt.Errorf("batch fetching accounts (chunk %d-%d): %w", start, end, err)
 		}
-		for _, acc := range sfResult.Records {
+		for _, acc := range records {
+			if !acc.eligible() {
+				continue
+			}
 			org, convErr := convertSOQLToB2BOrg(ctx, acc)
 			if convErr != nil {
 				slog.WarnContext(ctx, "skipping account with invalid SFID in batch",
@@ -150,11 +161,43 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 	return all, conversionErrorSFIDs, nil
 }
 
+// fetchAccountEligibility returns the eligibility inputs of the non-deleted
+// Account with the given SFID, or nil when there is none.
+func (r *AccountRepo) fetchAccountEligibility(ctx context.Context, sfid string) (*soqlEligibility, error) {
+	query := "SELECT Id, " + accountEligibilitySOQLFields +
+		" FROM Account WHERE Id = " + quoteSOQL(sfid) + " AND IsDeleted = false LIMIT 1"
+	result, err := QueryPage[soqlEligibleAccountID](ctx, r.client, query, "")
+	if err != nil {
+		return nil, fmt.Errorf("fetching eligibility of account %s: %w", sfid, err)
+	}
+	if len(result.Records) == 0 {
+		return nil, nil
+	}
+	return &result.Records[0].soqlEligibility, nil
+}
+
+// IsB2BOrgEligible reports whether the Account with the given UID is a
+// non-deleted, eligible B2B organization.
+func (r *AccountRepo) IsB2BOrgEligible(ctx context.Context, uid string) (bool, error) {
+	sfid, err := sfuuid.Normalize18(uid)
+	if err != nil {
+		return false, fmt.Errorf("normalizing uid %q to sfid: %w", uid, err)
+	}
+	e, err := r.fetchAccountEligibility(ctx, sfid)
+	if err != nil {
+		return false, err
+	}
+	return e != nil && e.eligible(), nil
+}
+
+var _ port.B2BOrgEligibilityReader = (*AccountRepo)(nil)
+
 // soqlParentChild is a minimal projection for the batched child-list query.
 // No aggregate alias — uses the same plain json.Unmarshal path as soqlAccountID.
 type soqlParentChild struct {
 	ParentID string `json:"ParentId"`
 	ID       string `json:"Id"`
+	soqlEligibility
 }
 
 // normalizeParentUIDs converts caller UIDs to 18-char SFIDs and builds a
@@ -177,8 +220,8 @@ func normalizeParentUIDs(ctx context.Context, parentUIDs []string) (sfids []stri
 
 // fetchChildUIDsByParents issues one chunked SOQL query per <=200 parents and
 // returns child UIDs grouped by caller-supplied parent UID. Chunking mirrors
-// FetchAccountsBySFIDs (account_repo.go:117). All normalization and the
-// membership Asset semi-join live here; callers see only domain UIDs.
+// FetchAccountsBySFIDs. All normalization and the eligibility rule
+// (model.IsB2BOrgEligible) live here; callers see only domain UIDs.
 func (r *AccountRepo) fetchChildUIDsByParents(
 	ctx context.Context, parentUIDs []string,
 ) (map[string][]string, error) {
@@ -199,11 +242,9 @@ func (r *AccountRepo) fetchChildUIDsByParents(
 	for start := 0; start < len(sfids); start += chunkSize {
 		chunk := sfids[start:min(start+chunkSize, len(sfids))]
 
-		query := "SELECT ParentId, Id FROM Account" +
+		query := "SELECT ParentId, Id, " + accountEligibilitySOQLFields + " FROM Account" +
 			" WHERE ParentId IN (" + buildSOQLInClause(chunk) + ")" +
-			" AND IsDeleted = false" +
-			" AND Id IN (SELECT AccountId FROM Asset" +
-			" WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
+			" AND IsDeleted = false"
 
 		records, _, err := QueryAllPages[soqlParentChild](ctx, r.client, query, "")
 		if err != nil {
@@ -212,6 +253,9 @@ func (r *AccountRepo) fetchChildUIDsByParents(
 		}
 
 		for _, rec := range records {
+			if !rec.eligible() {
+				continue
+			}
 			pid, pidErr := sfuuid.Normalize18(rec.ParentID)
 			if pidErr != nil {
 				continue
@@ -339,11 +383,25 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 // IterB2BOrgs iterates over B2B orgs (Accounts) from Salesforce, applying an
 // optional LastModifiedDate filter when since is provided. Calls fn for each
 // page of converted records. Conversion errors are logged and skipped.
+// Ineligible Accounts (model.IsB2BOrgEligible) are skipped silently: the
+// converter yields nil for them rather than an error, which IterPages would
+// log as a warning for every non-member Account in the scan.
 func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
 	query := accountsSOQLBase + lastModifiedWindowClause(since, until)
 	return IterPages[soqlAccount, *model.B2BOrg](ctx, r.client, query, func(acc soqlAccount) (*model.B2BOrg, error) {
+		if !acc.eligible() {
+			return nil, nil
+		}
 		return convertSOQLToB2BOrg(ctx, acc)
-	}, fn)
+	}, func(orgs []*model.B2BOrg) error {
+		eligible := orgs[:0]
+		for _, org := range orgs {
+			if org != nil {
+				eligible = append(eligible, org)
+			}
+		}
+		return fn(eligible)
+	})
 }
 
 // normalizeDomain validates and returns the host portion of a bare domain

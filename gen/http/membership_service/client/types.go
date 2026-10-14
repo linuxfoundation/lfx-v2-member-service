@@ -478,6 +478,25 @@ type CreateB2bOrgPreconditionFailedResponseBody struct {
 	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
 }
 
+// CreateB2bOrgUnprocessableEntityResponseBody is the type of the
+// "membership-service" service "create-b2b-org" endpoint HTTP response body
+// for the "UnprocessableEntity" error.
+type CreateB2bOrgUnprocessableEntityResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
 // CreateB2bOrgInternalServerErrorResponseBody is the type of the
 // "membership-service" service "create-b2b-org" endpoint HTTP response body
 // for the "InternalServerError" error.
@@ -3446,6 +3465,21 @@ func NewCreateB2bOrgBadRequest(body *CreateB2bOrgBadRequestResponseBody) *goa.Se
 // NewCreateB2bOrgPreconditionFailed builds a membership-service service
 // create-b2b-org endpoint PreconditionFailed error.
 func NewCreateB2bOrgPreconditionFailed(body *CreateB2bOrgPreconditionFailedResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
+// NewCreateB2bOrgUnprocessableEntity builds a membership-service service
+// create-b2b-org endpoint UnprocessableEntity error.
+func NewCreateB2bOrgUnprocessableEntity(body *CreateB2bOrgUnprocessableEntityResponseBody) *goa.ServiceError {
 	v := &goa.ServiceError{
 		Name:      *body.Name,
 		ID:        *body.ID,
@@ -6438,6 +6472,30 @@ func ValidateCreateB2bOrgBadRequestResponseBody(body *CreateB2bOrgBadRequestResp
 // ValidateCreateB2bOrgPreconditionFailedResponseBody runs the validations
 // defined on create-b2b-org_PreconditionFailed_response_body
 func ValidateCreateB2bOrgPreconditionFailedResponseBody(body *CreateB2bOrgPreconditionFailedResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateCreateB2bOrgUnprocessableEntityResponseBody runs the validations
+// defined on create-b2b-org_UnprocessableEntity_response_body
+func ValidateCreateB2bOrgUnprocessableEntityResponseBody(body *CreateB2bOrgUnprocessableEntityResponseBody) (err error) {
 	if body.Name == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
 	}

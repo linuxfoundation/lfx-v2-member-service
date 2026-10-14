@@ -118,6 +118,10 @@ type Runner struct {
 	// Inactive-revoke check via a fresh fetch, not the stale
 	// membership-group cache. Nil disables the sibling check.
 	keyContactsByMembership port.KeyContactsByMembershipReader
+
+	// b2bEligibility gates per-item b2b_org reindex: GetB2BOrg reads the
+	// sObject, which does not apply the eligibility rule. Nil skips the check.
+	b2bEligibility port.B2BOrgEligibilityReader
 }
 
 // RunnerOption configures optional Runner collaborators. The avatar-enrichment path (the
@@ -157,6 +161,12 @@ func WithKeyContactGrantIndex(i port.KeyContactGrantIndex) RunnerOption {
 // WithQuotaGauge wires the Salesforce quota gauge used to gate cdc_repair drains.
 func WithQuotaGauge(g port.SalesforceQuotaGauge) RunnerOption {
 	return func(r *Runner) { r.quotaGauge = g }
+}
+
+// WithB2BOrgEligibilityReader wires the eligibility check applied to targeted
+// and cdc_repair b2b_org items.
+func WithB2BOrgEligibilityReader(e port.B2BOrgEligibilityReader) RunnerOption {
+	return func(r *Runner) { r.b2bEligibility = e }
 }
 
 // WithMembershipBatchReader wires the batch SOQL reader used to fetch
@@ -651,6 +661,24 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		org, err := r.b2bReader.GetB2BOrg(ctx, uid)
 		if err != nil {
 			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+		}
+		if r.b2bEligibility != nil {
+			eligible, eligErr := r.b2bEligibility.IsB2BOrgEligible(ctx, org.UID)
+			if eligErr != nil {
+				log.WarnContext(ctx, "failed to check b2b_org eligibility — retaining for retry",
+					"type", sfType, "uid", org.UID, "error", eligErr, "publish_failed_for_backfill_repair", true)
+				return outcomeRetry
+			}
+			if !eligible {
+				// Same convergence as the CDC absent path: leave the index,
+				// keep authorization.
+				log.InfoContext(ctx, "b2b_org not eligible — removing from index",
+					"type", sfType, "uid", org.UID, "not_found", true)
+				if !req.DryRun {
+					PublishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: org.UID}, indexerConstants.ActionDeleted)
+				}
+				return outcomeNotFound
+			}
 		}
 		// Resolve all dependencies before publishing so we never leave a partial
 		// projection (indexer without the matching parent FGA tuple).

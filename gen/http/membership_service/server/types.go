@@ -482,6 +482,25 @@ type CreateB2bOrgPreconditionFailedResponseBody struct {
 	Fault bool `form:"fault" json:"fault" xml:"fault"`
 }
 
+// CreateB2bOrgUnprocessableEntityResponseBody is the type of the
+// "membership-service" service "create-b2b-org" endpoint HTTP response body
+// for the "UnprocessableEntity" error.
+type CreateB2bOrgUnprocessableEntityResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
 // CreateB2bOrgInternalServerErrorResponseBody is the type of the
 // "membership-service" service "create-b2b-org" endpoint HTTP response body
 // for the "InternalServerError" error.
@@ -3720,6 +3739,21 @@ func NewCreateB2bOrgBadRequestResponseBody(res *goa.ServiceError) *CreateB2bOrgB
 // service.
 func NewCreateB2bOrgPreconditionFailedResponseBody(res *goa.ServiceError) *CreateB2bOrgPreconditionFailedResponseBody {
 	body := &CreateB2bOrgPreconditionFailedResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewCreateB2bOrgUnprocessableEntityResponseBody builds the HTTP response body
+// from the result of the "create-b2b-org" endpoint of the "membership-service"
+// service.
+func NewCreateB2bOrgUnprocessableEntityResponseBody(res *goa.ServiceError) *CreateB2bOrgUnprocessableEntityResponseBody {
+	body := &CreateB2bOrgUnprocessableEntityResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,

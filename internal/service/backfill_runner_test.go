@@ -139,6 +139,59 @@ func TestBackfillRunner_TargetedMode_NotFoundIsSkipped(t *testing.T) {
 	assert.Equal(t, int32(0), publishCount.Load(), "not-found items must not publish")
 }
 
+type fakeEligibility struct {
+	eligible bool
+	err      error
+}
+
+func (f fakeEligibility) IsB2BOrgEligible(_ context.Context, _ string) (bool, error) {
+	return f.eligible, f.err
+}
+
+// TestBackfillRunner_TargetedB2BOrg_Eligibility: GetB2BOrg does not apply the
+// eligibility rule, so the per-item path must, or a targeted reindex would
+// re-index and grant an Account CDC removed.
+func TestBackfillRunner_TargetedB2BOrg_Eligibility(t *testing.T) {
+	const orgUID = "00000000-0000-0000-0000-000000000003"
+
+	run := func(t *testing.T, e fakeEligibility, dryRun bool) *subjectCapturingPublisher {
+		t.Helper()
+		pub := &subjectCapturingPublisher{}
+		runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: &model.B2BOrg{UID: orgUID}},
+			mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "global_org_admin", nil,
+			svc.WithB2BOrgEligibilityReader(e))
+		require.NoError(t, runner.Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "b2b_org", Items: []string{orgUID}, DryRun: dryRun}))
+		return pub
+	}
+
+	t.Run("ineligible is removed from the index and keeps its grants", func(t *testing.T) {
+		pub := run(t, fakeEligibility{eligible: false}, false)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Equal(t, "deleted", pub.indexerAction(0))
+		assert.Empty(t, pub.accessMessages, "no FGA message: neither a grant nor a delete_access")
+	})
+
+	t.Run("eligible publishes as before", func(t *testing.T) {
+		pub := run(t, fakeEligibility{eligible: true}, false)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Equal(t, "updated", pub.indexerAction(0))
+		assert.NotEmpty(t, pub.accessMessages)
+	})
+
+	t.Run("lookup error publishes nothing", func(t *testing.T) {
+		pub := run(t, fakeEligibility{err: errors.New("salesforce timeout")}, false)
+		assert.Empty(t, pub.indexerMessages)
+		assert.Empty(t, pub.accessMessages)
+	})
+
+	t.Run("dry run publishes nothing", func(t *testing.T) {
+		pub := run(t, fakeEligibility{eligible: false}, true)
+		assert.Empty(t, pub.indexerMessages)
+		assert.Empty(t, pub.accessMessages)
+	})
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 // countingPublisher counts how many times Indexer is called.
@@ -453,6 +506,27 @@ func (r *multiOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) 
 
 func (r *multiOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	return map[string][]string{}, nil
+}
+
+// TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant: the backfill
+// treats a non-member org the iterator returns like any other org.
+func TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant(t *testing.T) {
+	org := &model.B2BOrg{UID: "org-non-member", Name: "Non-member Co", IsMember: false}
+	iter := &mock.MockBackfillIterator{B2BOrgs: [][]*model.B2BOrg{{org}}}
+	pub := &subjectCapturingPublisher{}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "global_org_admin", nil)
+
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}))
+
+	require.Len(t, pub.indexerMessages, 1)
+	assert.Equal(t, "updated", pub.indexerAction(0))
+	var granted bool
+	for _, data := range pub.b2bOrgUpdateAccess(t) {
+		if data.UID == org.UID && len(data.References["global_org_admin"]) > 0 {
+			granted = true
+		}
+	}
+	assert.True(t, granted, "the non-member org must receive the global org admin team grant")
 }
 
 // ── GlobalOrgAdminFGA publish ────────────────────────────────────────────────

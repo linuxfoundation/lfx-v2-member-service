@@ -95,6 +95,7 @@ var _ = dsl.Service("membership-service", func() {
 		dsl.Error("NotFound", dsl.ErrorResult, "Resource not found")
 		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request")
 		dsl.Error("PreconditionFailed", dsl.ErrorResult, "Precondition failed")
+		dsl.Error("UnprocessableEntity", dsl.ErrorResult, "Account is not eligible as a B2B organization")
 		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
 		dsl.Error("ServiceUnavailable", dsl.ErrorResult, "Service unavailable", func() { dsl.Temporary() })
 
@@ -111,6 +112,7 @@ var _ = dsl.Service("membership-service", func() {
 			dsl.Response("NotFound", dsl.StatusNotFound)
 			dsl.Response("BadRequest", dsl.StatusBadRequest)
 			dsl.Response("PreconditionFailed", dsl.StatusPreconditionFailed)
+			dsl.Response("UnprocessableEntity", dsl.StatusUnprocessableEntity)
 			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
 			dsl.Response("ServiceUnavailable", dsl.StatusServiceUnavailable)
 		})

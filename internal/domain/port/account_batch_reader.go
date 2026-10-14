@@ -13,9 +13,10 @@ import (
 // SOQL query. Used by the CDC consumer to replace per-record sObject fan-out
 // with batched IN-clause fetches.
 type AccountBatchReader interface {
-	// FetchAccountsBySFIDs returns all member-eligible Account records whose
-	// Salesforce Id matches one of the given SFIDs. Records absent from the
-	// result set have been soft-deleted or no longer hold a membership Asset.
+	// FetchAccountsBySFIDs returns all eligible Account records
+	// (model.IsB2BOrgEligible) whose Salesforce Id matches one of the given
+	// SFIDs. Records absent from the result set have been soft-deleted or are
+	// no longer eligible.
 	// The second return value is the subset of requested SFIDs that were
 	// present in the SOQL result but could not be converted to domain objects;
 	// callers must NOT treat these as absent.
