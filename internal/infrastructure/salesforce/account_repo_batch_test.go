@@ -381,6 +381,44 @@ func TestAccountRepo_FetchAccountsBySFIDs_ReadsEveryPage(t *testing.T) {
 	assert.ElementsMatch(t, []string{first, second}, orgUIDs(orgs))
 }
 
+// TestAccountRepo_FetchAccountsBySFIDs_ChunkBoundary: 201 SFIDs span two
+// 200-id chunks; both are queried and merged, and a failing second chunk
+// returns an error with no partial result, so callers never read the
+// missing half as absent.
+func TestAccountRepo_FetchAccountsBySFIDs_ChunkBoundary(t *testing.T) {
+	t.Parallel()
+
+	sfids := make([]string, 201)
+	for i := range sfids {
+		sfids[i] = batchParentSFID(8000 + i)
+	}
+	first := soqlPageJSON("", accountRecordJSON(sfids[0], model.RecordTypeCompanyAccount, false))
+	last := soqlPageJSON("", accountRecordJSON(sfids[200], model.RecordTypeCompanyAccount, false))
+
+	t.Run("both chunks are merged", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{responses: []string{first, last}}
+		orgs, convErrs, err := NewAccountRepo(fakeSalesforce(t, tr)).FetchAccountsBySFIDs(context.Background(), sfids)
+		require.NoError(t, err)
+		assert.Empty(t, convErrs)
+		assert.Equal(t, 2, tr.queryCalls)
+		assert.ElementsMatch(t, []string{sfids[0], sfids[200]}, orgUIDs(orgs))
+	})
+
+	t.Run("a failing second chunk returns no partial result", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{
+			responses:     []string{first, `[{"message":"temporarily unavailable","errorCode":"SERVER_UNAVAILABLE"}]`},
+			queryStatuses: []int{200, 500},
+		}
+		orgs, convErrs, err := NewAccountRepo(fakeSalesforce(t, tr)).FetchAccountsBySFIDs(context.Background(), sfids)
+		require.Error(t, err)
+		assert.Nil(t, orgs)
+		assert.Nil(t, convErrs)
+		assert.Equal(t, 2, tr.queryCalls)
+	})
+}
+
 // TestAccountRepo_IterB2BOrgs_Eligibility swaps the default logger, so it must
 // not run in parallel.
 func TestAccountRepo_IterB2BOrgs_Eligibility(t *testing.T) {

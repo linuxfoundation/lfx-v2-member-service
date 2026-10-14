@@ -676,6 +676,9 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		usecaseSvc.WithUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithRunnerB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 	}
+	if repoSource == "mock" {
+		opts = append(opts, usecaseSvc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+	}
 
 	// cdc_repair drain collaborators — only wired in Salesforce mode where the
 	// NATS cdc-repair bucket and a real quota gauge exist. In mock mode the

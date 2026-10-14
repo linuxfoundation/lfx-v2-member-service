@@ -154,6 +154,15 @@ func (r *MockAccountBatchReader) FetchAccountsBySFIDs(_ context.Context, _ []str
 	return r.Orgs, r.ConvErrSFIDs, r.Err
 }
 
+// MockB2BOrgEligibilityReader is a port.B2BOrgEligibilityReader for mock mode.
+// The mock B2BOrgReader serves only fixture orgs, so every org it returns is
+// treated as eligible.
+type MockB2BOrgEligibilityReader struct{}
+
+func (MockB2BOrgEligibilityReader) IsB2BOrgEligible(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+
 // MockSalesforceQuotaGauge is a test double for port.SalesforceQuotaGauge.
 // Set Current and Limit to simulate quota states; the zero value (0, 0) is
 // treated as limit ≤ 0 by quotaExceeded, so the guard fails open by default.

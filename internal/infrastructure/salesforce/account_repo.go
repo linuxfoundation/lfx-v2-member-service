@@ -25,7 +25,7 @@ type soqlAccountID struct {
 // soqlEligibleAccountID is soqlAccountID plus the eligibility inputs, for the
 // single-parent child-list query.
 type soqlEligibleAccountID struct {
-	ID string `json:"Id"`
+	ID string `salesforce:"Id" json:"Id"`
 	soqlEligibility
 }
 
@@ -385,7 +385,7 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 // page of converted records. Conversion errors are logged and skipped.
 // Ineligible Accounts (model.IsB2BOrgEligible) are skipped silently: the
 // converter yields nil for them rather than an error, which IterPages would
-// log as a warning for every non-member Account in the scan.
+// log as a warning for every ineligible Account in the scan.
 func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
 	query := accountsSOQLBase + lastModifiedWindowClause(since, until)
 	return IterPages[soqlAccount, *model.B2BOrg](ctx, r.client, query, func(acc soqlAccount) (*model.B2BOrg, error) {

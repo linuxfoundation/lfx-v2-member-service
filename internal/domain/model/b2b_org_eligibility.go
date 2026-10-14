@@ -11,7 +11,9 @@ const RecordTypeCompanyAccount = "Company_Account"
 // IsB2BOrgEligible reports whether a non-deleted Salesforce Account is a B2B
 // organization: every Company Account is, and any other record type
 // (Partner_Restricted, Project_Account, PersonAccount, or none) is only while
-// it holds a live Membership Asset.
+// it holds a non-deleted Membership Asset. The Asset's Status and dates are not
+// checked, matching the membership filter used before Company Accounts
+// qualified.
 //
 // The rule lives here rather than in SOQL because Salesforce rejects a
 // semi-join inside OR, so the queries fetch both inputs and every caller

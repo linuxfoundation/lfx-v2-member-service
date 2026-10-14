@@ -391,7 +391,8 @@ renames or disambiguates slugs.
 ## Company Account Rollout (lfx-self-serve#3401)
 
 A `b2b_org` is any non-deleted Account that is a Company Account (`RecordType.DeveloperName =
-'Company_Account'`) or holds a live Membership Asset (`model.IsB2BOrgEligible`). Before this rule
+'Company_Account'`) or holds a non-deleted Membership Asset; `model.IsB2BOrgEligible` evaluates
+the whole rule. Before this rule
 only the second group was indexed, so the first deploy leaves non-member Company Accounts missing
 until a reindex publishes them. Every org indexed under the old rule still qualifies, so the
 reindex only adds. On the full and filtered scan, ineligible Accounts are dropped inside
