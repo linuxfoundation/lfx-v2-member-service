@@ -1081,6 +1081,43 @@ func TestBackfillRunner_RunRepair_B2BOrg_ChildFetchError_RetriesAndKeepsMarker(t
 	assert.Empty(t, repairStore.Deletes, "retry outcome must retain the marker (no delete)")
 }
 
+type failingIndexerPublisher struct{ *subjectCapturingPublisher }
+
+func (failingIndexerPublisher) Indexer(context.Context, string, any, bool) error {
+	return errors.New("nats unavailable")
+}
+
+func TestBackfillRunner_RunRepair_B2BOrg_Ineligible(t *testing.T) {
+	org := &model.B2BOrg{UID: "001000000000003AAA"}
+	reader := &configurableB2BOrgReaderForRepair{orgs: map[string]*model.B2BOrg{org.UID: org}}
+	markers := []port.RepairMarker{{Type: "b2b_org", SFID: org.UID, Revision: 4}}
+
+	run := func(pub port.MemberPublisher) *mock.MockCDCRepairStore {
+		repairStore := &mock.MockCDCRepairStore{}
+		runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(repairStore), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(fakeEligibility{eligible: false}))
+		runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
+		return repairStore
+	}
+
+	t.Run("index delete sent deletes the marker", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		repairStore := run(pub)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Equal(t, "deleted", pub.indexerAction(0))
+		assert.Empty(t, pub.accessMessages)
+		assert.Len(t, repairStore.Deletes, 1)
+	})
+
+	t.Run("failed index delete keeps the marker", func(t *testing.T) {
+		pub := failingIndexerPublisher{&subjectCapturingPublisher{}}
+		repairStore := run(pub)
+		assert.Empty(t, pub.accessMessages)
+		assert.Empty(t, repairStore.Deletes, "the delete is the only convergence step, so the marker must be retained")
+	})
+}
+
 func TestBackfillRunner_RunRepair_ProjectMembership_Issued_DeletesMarker(t *testing.T) {
 	pm := &model.ProjectMembership{UID: "001000000000003AAA", ProjectSlug: "my-project", B2BOrgUID: "org-1"}
 	resolver := mock.NewMockProjectResolver()

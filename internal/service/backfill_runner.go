@@ -671,11 +671,14 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			}
 			if !eligible {
 				// Same convergence as the CDC absent path: leave the index,
-				// keep authorization.
+				// keep authorization. This delete is the only convergence step,
+				// so a failed send must retain the repair marker.
 				log.InfoContext(ctx, "b2b_org not eligible — removing from index",
 					"type", sfType, "uid", org.UID, "not_found", true)
 				if !req.DryRun {
-					PublishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: org.UID}, indexerConstants.ActionDeleted)
+					if pubErr := publishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: org.UID}, indexerConstants.ActionDeleted); pubErr != nil {
+						return outcomeRetry
+					}
 				}
 				return outcomeNotFound
 			}
