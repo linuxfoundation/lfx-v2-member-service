@@ -1107,6 +1107,7 @@ func TestBackfillRunner_RunRepair_B2BOrg_Ineligible(t *testing.T) {
 		require.Len(t, pub.indexerMessages, 1)
 		assert.Equal(t, "deleted", pub.indexerAction(0))
 		assert.Empty(t, pub.accessMessages)
+		assert.Equal(t, 1, pub.flushCount, "the delete must be flushed before the marker goes")
 		assert.Len(t, repairStore.Deletes, 1)
 	})
 
@@ -1115,6 +1116,13 @@ func TestBackfillRunner_RunRepair_B2BOrg_Ineligible(t *testing.T) {
 		repairStore := run(pub)
 		assert.Empty(t, pub.accessMessages)
 		assert.Empty(t, repairStore.Deletes, "the delete is the only convergence step, so the marker must be retained")
+	})
+
+	t.Run("unconfirmed index delete keeps the marker", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{flushErr: errors.New("flush timeout")}
+		repairStore := run(pub)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Empty(t, repairStore.Deletes, "a buffered delete may never reach the broker")
 	})
 }
 

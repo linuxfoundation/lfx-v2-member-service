@@ -4,11 +4,10 @@
 package service
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 
 	goa "goa.design/goa/v3/pkg"
@@ -16,28 +15,47 @@ import (
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
+type captureCtxKey struct{}
+
+// levelCapture records the level of records logged with a context carrying
+// captureCtxKey. The default logger is process-wide, and goroutines started by
+// other tests in this package (admin reindex runs) keep logging into it.
+type levelCapture struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (c *levelCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *levelCapture) Handle(ctx context.Context, r slog.Record) error {
+	if ctx.Value(captureCtxKey{}) == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.levels = append(c.levels, r.Level)
+	return nil
+}
+
+func (c *levelCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *levelCapture) WithGroup(string) slog.Handler      { return c }
+
 func captureLevel(t *testing.T, err error) (slog.Level, error) {
 	t.Helper()
 
-	var buf bytes.Buffer
+	capture := &levelCapture{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(capture))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	mapped := wrapError(context.Background(), err)
+	mapped := wrapError(context.WithValue(context.Background(), captureCtxKey{}, true), err)
 
-	var record struct {
-		Level string `json:"level"`
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if len(capture.levels) != 1 {
+		t.Fatalf("expected exactly one log record from wrapError, got %d", len(capture.levels))
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &record); err != nil {
-		t.Fatalf("failed to decode log record %q: %v", buf.String(), err)
-	}
-
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(record.Level)); err != nil {
-		t.Fatalf("unexpected level %q: %v", record.Level, err)
-	}
-	return level, mapped
+	return capture.levels[0], mapped
 }
 
 func TestWrapErrorLogLevels(t *testing.T) {

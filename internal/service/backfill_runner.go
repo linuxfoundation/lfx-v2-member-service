@@ -671,12 +671,18 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			}
 			if !eligible {
 				// Same convergence as the CDC absent path: leave the index,
-				// keep authorization. This delete is the only convergence step,
-				// so a failed send must retain the repair marker.
+				// keep authorization. Full scans skip this Account, so this
+				// delete is the only convergence step: the marker is kept until
+				// the broker has it.
 				log.InfoContext(ctx, "b2b_org not eligible — removing from index",
 					"type", sfType, "uid", org.UID, "not_found", true)
 				if !req.DryRun {
 					if pubErr := publishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: org.UID}, indexerConstants.ActionDeleted); pubErr != nil {
+						return outcomeRetry
+					}
+					if flushErr := r.publisher.Flush(ctx); flushErr != nil {
+						log.WarnContext(ctx, "b2b_org index delete not confirmed — retaining for retry",
+							"type", sfType, "uid", org.UID, "error", flushErr, "publish_failed_for_backfill_repair", true)
 						return outcomeRetry
 					}
 				}
