@@ -245,6 +245,10 @@ func (r *seededB2BOrgReaderForBackfill) FetchChildUIDsByParentUIDs(_ context.Con
 	return map[string][]string{}, nil
 }
 
+func (r *seededB2BOrgReaderForBackfill) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // seededB2BOrgReaderWithChildren returns orgs with configurable child relationships and tracks fetch calls.
 type seededB2BOrgReaderWithChildren struct {
 	orgs                []*model.B2BOrg
@@ -290,6 +294,10 @@ func (r *seededB2BOrgReaderWithChildren) FetchChildUIDsByParentUIDs(_ context.Co
 		}
 	}
 	return result, nil
+}
+
+func (r *seededB2BOrgReaderWithChildren) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
 }
 
 func (r *seededB2BOrgReaderWithChildren) getFetchCallCount() int32 {
@@ -527,6 +535,8 @@ func TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant(t *testing.T)
 		}
 	}
 	assert.True(t, granted, "the non-member org must receive the global org admin team grant")
+func (r *multiOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
 }
 
 // ── GlobalOrgAdminFGA publish ────────────────────────────────────────────────
@@ -1021,6 +1031,10 @@ func (r *configurableB2BOrgReaderForRepair) FetchChildUIDsByParentUID(_ context.
 
 func (r *configurableB2BOrgReaderForRepair) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	return map[string][]string{}, nil
+}
+
+func (r *configurableB2BOrgReaderForRepair) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
 }
 
 func TestBackfillRunner_RunRepair_B2BOrg_Issued_DeletesMarker(t *testing.T) {

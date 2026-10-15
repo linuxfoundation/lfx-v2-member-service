@@ -132,6 +132,9 @@ func (r *reparentingB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, p
 func (r *reparentingB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	return map[string][]string{}, nil
 }
+func (r *reparentingB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
 
 // fakeB2BOrgReader returns a pre-seeded org.
 type fakeB2BOrgReader struct {
@@ -157,6 +160,9 @@ func (r *fakeB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []str
 		return r.childMap, r.batchErr
 	}
 	return map[string][]string{}, r.batchErr
+}
+func (r *fakeB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
 }
 
 // sequencedSiblingReader returns a different contact set on each successive
