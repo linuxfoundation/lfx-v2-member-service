@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 )
 
 // predicateAssertingTransport returns the fixed /limits response for sf.Init,
@@ -44,12 +46,19 @@ func (t *predicateAssertingTransport) RoundTrip(req *http.Request) (*http.Respon
 }
 
 // soqlAccountRecord builds a single-record JSON fragment matching the
-// soqlAccount JSON tags, for use in a SOQL query response body.
+// soqlAccount JSON tags for a b2b_org-eligible Company Account, for use in a
+// SOQL query response body.
 func soqlAccountRecord(id, name, website, primaryDomain, domainAlias string) string {
+	return soqlAccountRecordWithType(id, name, website, primaryDomain, domainAlias, model.RecordTypeCompanyAccount)
+}
+
+// soqlAccountRecordWithType is soqlAccountRecord with an explicit record type
+// and no Membership Asset, so a non-Company type yields an ineligible Account.
+func soqlAccountRecordWithType(id, name, website, primaryDomain, domainAlias, recordType string) string {
 	return fmt.Sprintf(
-		`{"Id":%q,"Name":%q,"Website":%q,"Account_Domain__c":%q,"Domain_Alias__c":%q}`,
+		`{"Id":%q,"Name":%q,"Website":%q,"Account_Domain__c":%q,"Domain_Alias__c":%q,`,
 		id, name, website, primaryDomain, domainAlias,
-	)
+	) + eligibilityFields(recordType, false) + `}`
 }
 
 func soqlAccountsResponse(records ...string) string {
@@ -131,6 +140,55 @@ func TestAccountRepo_FindAccountByNameOrWebsite_AmbiguousStopsEscalation(t *test
 	assert.False(t, ok, "ambiguous primary_domain match must not fall through to the name tier")
 	assert.Nil(t, org)
 	assert.Equal(t, 1, tr.queryCalls, "ambiguity at the first tier must stop resolution immediately")
+}
+
+func TestAccountRepo_FindAccountByNameOrWebsite_IneligibleAccountsExcluded(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		records   []string
+		wantOK    bool
+		wantName  string
+		wantCalls int
+	}{
+		{
+			name: "only ineligible match falls through to no match",
+			records: []string{
+				soqlAccountRecordWithType(batchParentSFID(20), "Acme Project", "", "acme.com", "", "Project_Account"),
+			},
+			wantOK:    false,
+			wantCalls: 4,
+		},
+		{
+			name: "ineligible duplicate does not make an eligible match ambiguous",
+			records: []string{
+				soqlAccountRecord(batchParentSFID(21), "Acme Corp", "", "acme.com", ""),
+				soqlAccountRecordWithType(batchParentSFID(22), "Acme Person", "", "acme.com", "", ""),
+			},
+			wantOK:    true,
+			wantName:  "Acme Corp",
+			wantCalls: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := &seqQueryTransport{responses: []string{soqlAccountsResponse(tc.records...)}}
+			repo := NewAccountRepo(fakeSalesforce(t, tr))
+
+			org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Acme Corp", "acme.com")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				require.NotNil(t, org)
+				assert.Equal(t, tc.wantName, org.Name)
+			} else {
+				assert.Nil(t, org)
+			}
+			assert.Equal(t, tc.wantCalls, tr.queryCalls)
+		})
+	}
 }
 
 func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainQueryIncludesWWWForm(t *testing.T) {

@@ -328,7 +328,7 @@ func foldDomain(s string) string {
 	return strings.TrimPrefix(strings.ToLower(s), "www.")
 }
 
-// FindAccountByNameOrWebsite resolves a single member-eligible Account by
+// FindAccountByNameOrWebsite resolves a single b2b_org-eligible Account by
 // primary domain, domain alias, website, then name, in that priority order. An ambiguous
 // result at any domain tier stops resolution entirely rather than falling
 // through to a lower-priority tier: a less specific matcher (website, then
@@ -400,8 +400,10 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 }
 
 // matchSingleAccount runs predicate (a pre-quoted/escaped SOQL WHERE
-// fragment) against the member-eligible Account search base, filters hits
-// through verify (nil to skip filtering), and reports whether exactly one
+// fragment) against the non-deleted Account search base, drops Accounts that
+// are not b2b_org-eligible (the eligibility rule cannot be expressed in the
+// WHERE clause), filters hits through verify (nil to skip filtering), and
+// reports whether exactly one
 // match survives. limit bounds the raw SOQL page fetched before verify runs;
 // callers using a substring (LIKE) predicate must pass a limit well above the
 // expected verified-match count, since verify filtering happens after the
@@ -429,6 +431,9 @@ func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label s
 
 	matches := make([]*model.B2BOrg, 0, len(sfResult.Records))
 	for _, acc := range sfResult.Records {
+		if !acc.eligible() {
+			continue
+		}
 		org, convErr := convertSOQLToB2BOrg(ctx, acc)
 		if convErr != nil {
 			slog.WarnContext(ctx, "skipping account with invalid SFID in name/website match",

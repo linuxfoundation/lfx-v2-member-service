@@ -516,6 +516,10 @@ func (r *multiOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []strin
 	return map[string][]string{}, nil
 }
 
+func (r *multiOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant: the backfill
 // treats a non-member org the iterator returns like any other org.
 func TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant(t *testing.T) {
@@ -535,8 +539,6 @@ func TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant(t *testing.T)
 		}
 	}
 	assert.True(t, granted, "the non-member org must receive the global org admin team grant")
-func (r *multiOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
-	return nil, false, nil
 }
 
 // ── GlobalOrgAdminFGA publish ────────────────────────────────────────────────
