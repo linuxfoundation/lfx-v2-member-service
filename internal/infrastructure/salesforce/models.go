@@ -182,13 +182,13 @@ type soqlMembershipAssets struct {
 }
 
 // eligible applies model.IsB2BOrgEligible to the decoded record.
-func (e soqlEligibility) eligible() bool {
+func (e soqlEligibility) eligible(includeCompanyAccounts bool) bool {
 	recordType := ""
 	if e.RecordType != nil {
 		recordType = e.RecordType.DeveloperName
 	}
 	hasMembership := e.Assets != nil && len(e.Assets.Records) > 0
-	return model.IsB2BOrgEligible(recordType, hasMembership)
+	return model.IsB2BOrgEligible(recordType, hasMembership, includeCompanyAccounts)
 }
 
 // soqlAccount represents a Salesforce Account record returned by a SOQL query.

@@ -185,15 +185,21 @@ func TestBuildAccountPatch(t *testing.T) {
 }
 
 // fakeEligibilityReader returns a fixed eligibility result and counts calls.
+// The zero value includes Company Accounts.
 type fakeEligibilityReader struct {
-	result *soqlEligibility
-	err    error
-	calls  int
+	result                 *soqlEligibility
+	err                    error
+	calls                  int
+	excludeCompanyAccounts bool
 }
 
 func (f *fakeEligibilityReader) fetchAccountEligibility(_ context.Context, _ string) (*soqlEligibility, error) {
 	f.calls++
 	return f.result, f.err
+}
+
+func (f *fakeEligibilityReader) eligible(e soqlEligibility) bool {
+	return e.eligible(!f.excludeCompanyAccounts)
 }
 
 func eligibilityOf(recordType string, member bool) *fakeEligibilityReader {
@@ -335,6 +341,37 @@ func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, uid, org.UID)
+	})
+
+	t.Run("Company Accounts excluded: non-member refused, member accepted", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			member bool
+			wantOK bool
+		}{
+			{member: false, wantOK: false},
+			{member: true, wantOK: true},
+		} {
+			transport := &writerTestTransport{
+				getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+			}
+			client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
+			reader := eligibilityOf(model.RecordTypeCompanyAccount, tc.member)
+			reader.excludeCompanyAccounts = true
+			writer := NewB2BOrgWriter(client, reader)
+
+			org, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
+
+			if tc.wantOK {
+				require.NoError(t, err)
+				assert.Equal(t, uid, org.UID)
+				continue
+			}
+			var unprocessable errs.UnprocessableEntity
+			require.True(t, errors.As(err, &unprocessable), "expected UnprocessableEntity, got %T: %v", err, err)
+			assert.Equal(t, "account is not eligible as a b2b org: record type Company_Account without a membership", unprocessable.Message())
+		}
 	})
 
 	t.Run("Account missing from the eligibility query returns NotFound", func(t *testing.T) {

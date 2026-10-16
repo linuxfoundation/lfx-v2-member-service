@@ -90,7 +90,7 @@ func TestAccountRepo_FetchChildUIDsByParentUIDs_EmptyInput(t *testing.T) {
 
 	tr := &seqQueryTransport{}
 	sfClient := fakeSalesforce(t, tr)
-	repo := NewAccountRepo(sfClient)
+	repo := NewAccountRepo(sfClient, true)
 
 	got, err := repo.FetchChildUIDsByParentUIDs(context.Background(), nil)
 	require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestAccountRepo_FetchChildUIDsByParentUIDs_InvalidParentSFIDSkipped(t *test
 		responses: []string{soqlParentChildJSON(validParent, child)},
 	}
 	sfClient := fakeSalesforce(t, tr)
-	repo := NewAccountRepo(sfClient)
+	repo := NewAccountRepo(sfClient, true)
 
 	got, err := repo.FetchChildUIDsByParentUIDs(context.Background(), []string{validParent, invalidParent})
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestAccountRepo_FetchChildUIDsByParentUIDs_InvalidChildSFIDSkipped(t *testi
 
 	tr := &seqQueryTransport{responses: []string{response}}
 	sfClient := fakeSalesforce(t, tr)
-	repo := NewAccountRepo(sfClient)
+	repo := NewAccountRepo(sfClient, true)
 
 	got, err := repo.FetchChildUIDsByParentUIDs(context.Background(), []string{parent})
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestAccountRepo_FetchChildUIDsByParentUIDs_OrphanedParentIDSkipped(t *testi
 		responses: []string{soqlParentChildJSON(orphanParent, child)},
 	}
 	sfClient := fakeSalesforce(t, tr)
-	repo := NewAccountRepo(sfClient)
+	repo := NewAccountRepo(sfClient, true)
 
 	got, err := repo.FetchChildUIDsByParentUIDs(context.Background(), []string{requestedParent})
 	require.NoError(t, err)
@@ -207,7 +207,7 @@ func TestAccountRepo_FetchChildUIDsByParentUIDs_MultipleChildrenPerParent(t *tes
 		responses: []string{soqlMultiChildJSON(parent, child1, child2)},
 	}
 	sfClient := fakeSalesforce(t, tr)
-	repo := NewAccountRepo(sfClient)
+	repo := NewAccountRepo(sfClient, true)
 
 	got, err := repo.FetchChildUIDsByParentUIDs(context.Background(), []string{parent})
 	require.NoError(t, err)
@@ -250,7 +250,7 @@ func TestAccountRepo_FetchChildUIDsByParentUIDs_ChunkBoundary(t *testing.T) {
 		responses: []string{chunk1Response, chunk2Response},
 	}
 	sfClient := fakeSalesforce(t, tr)
-	repo := NewAccountRepo(sfClient)
+	repo := NewAccountRepo(sfClient, true)
 
 	got, err := repo.FetchChildUIDsByParentUIDs(context.Background(), parents)
 	require.NoError(t, err)
@@ -329,7 +329,7 @@ func TestSOQLEligibility_Decode(t *testing.T) {
 	for _, tt := range tests {
 		var acc soqlAccount
 		require.NoError(t, json.Unmarshal([]byte(tt.record), &acc), tt.name)
-		assert.Equal(t, tt.eligible, acc.eligible(), tt.name)
+		assert.Equal(t, tt.eligible, acc.eligible(true), tt.name)
 	}
 }
 
@@ -349,7 +349,7 @@ func TestAccountRepo_FetchAccountsBySFIDs_Eligibility(t *testing.T) {
 		accountRecordJSON(projectMember, "Project_Account", true),
 		accountRecordJSON(personMember, "PersonAccount", true),
 	)}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	orgs, convErrs, err := repo.FetchAccountsBySFIDs(context.Background(),
 		[]string{company, partnerNoMembership, partnerMember, projectMember, personMember})
@@ -372,7 +372,7 @@ func TestAccountRepo_FetchAccountsBySFIDs_ReadsEveryPage(t *testing.T) {
 		soqlPageJSON("/services/data/v63.0/query/01gNEXT-2000", accountRecordJSON(first, "Company_Account", false)),
 		soqlPageJSON("", accountRecordJSON(second, "Company_Account", false)),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	orgs, _, err := repo.FetchAccountsBySFIDs(context.Background(), []string{first, second})
 	require.NoError(t, err)
@@ -398,7 +398,7 @@ func TestAccountRepo_FetchAccountsBySFIDs_ChunkBoundary(t *testing.T) {
 	t.Run("both chunks are merged", func(t *testing.T) {
 		t.Parallel()
 		tr := &seqQueryTransport{responses: []string{first, last}}
-		orgs, convErrs, err := NewAccountRepo(fakeSalesforce(t, tr)).FetchAccountsBySFIDs(context.Background(), sfids)
+		orgs, convErrs, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchAccountsBySFIDs(context.Background(), sfids)
 		require.NoError(t, err)
 		assert.Empty(t, convErrs)
 		assert.Equal(t, 2, tr.queryCalls)
@@ -411,7 +411,7 @@ func TestAccountRepo_FetchAccountsBySFIDs_ChunkBoundary(t *testing.T) {
 			responses:     []string{first, `[{"message":"temporarily unavailable","errorCode":"SERVER_UNAVAILABLE"}]`},
 			queryStatuses: []int{200, 500},
 		}
-		orgs, convErrs, err := NewAccountRepo(fakeSalesforce(t, tr)).FetchAccountsBySFIDs(context.Background(), sfids)
+		orgs, convErrs, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchAccountsBySFIDs(context.Background(), sfids)
 		require.Error(t, err)
 		assert.Nil(t, orgs)
 		assert.Nil(t, convErrs)
@@ -446,7 +446,7 @@ func TestAccountRepo_IterB2BOrgs_Eligibility(t *testing.T) {
 			accountRecordJSON(personMember, "PersonAccount", true),
 		),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	var pages [][]string
 	err := repo.IterB2BOrgs(context.Background(), nil, nil, func(orgs []*model.B2BOrg) error {
@@ -470,13 +470,13 @@ func TestAccountRepo_FetchAccountEligibility(t *testing.T) {
 		soqlPageJSON("", `{"Id":"`+sfid+`",`+eligibilityFields("Partner_Restricted", false)+`}`),
 		soqlPageJSON(""),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	got, err := repo.fetchAccountEligibility(context.Background(), sfid)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "Partner_Restricted", got.RecordType.DeveloperName)
-	assert.False(t, got.eligible())
+	assert.False(t, got.eligible(true))
 	assert.Contains(t, tr.queries[0], "IsDeleted = false")
 
 	missing, err := repo.fetchAccountEligibility(context.Background(), sfid)
@@ -493,7 +493,7 @@ func TestAccountRepo_IsB2BOrgEligible(t *testing.T) {
 		soqlPageJSON("", `{"Id":"`+sfid+`",`+eligibilityFields("Project_Account", false)+`}`),
 		soqlPageJSON(""),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	for _, want := range []bool{true, false, false} {
 		got, err := repo.IsB2BOrgEligible(context.Background(), sfid)
@@ -524,7 +524,7 @@ func TestAccountRepo_ChildLists_Eligibility(t *testing.T) {
 		`{"ParentId":"`+parent+`","Id":"`+partnerMemberChild+`",`+eligibilityFields("Partner_Restricted", true)+`}`,
 	)
 	tr := &seqQueryTransport{responses: []string{singleResp, batchResp}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	// The child list replaces the parent's whole FGA child set, so an
 	// ineligible child left in it would be granted a parent tuple.
@@ -541,4 +541,109 @@ func TestAccountRepo_ChildLists_Eligibility(t *testing.T) {
 		assert.NotContains(t, q, "Id IN (SELECT AccountId FROM Asset")
 		assert.Contains(t, q, "RecordType.DeveloperName")
 	}
+}
+
+// TestAccountRepo_CompanyAccountsExcluded checks that a repo built without
+// Company Accounts keeps only members on every path that applies the rule.
+func TestAccountRepo_CompanyAccountsExcluded(t *testing.T) {
+	t.Parallel()
+
+	parent := batchParentSFID(7700)
+	nonMember := batchParentSFID(7701)
+	member := batchParentSFID(7702)
+	company := model.RecordTypeCompanyAccount
+	var tr *seqQueryTransport
+	newRepo := func(t *testing.T, responses ...string) *AccountRepo {
+		tr = &seqQueryTransport{responses: responses}
+		return NewAccountRepo(fakeSalesforce(t, tr), false)
+	}
+	const membershipFilter = "AND Id IN (SELECT AccountId FROM Asset WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
+
+	// Subtests share tr, so they run sequentially.
+	t.Run("batch fetch", func(t *testing.T) {
+		repo := newRepo(t, soqlPageJSON("",
+			accountRecordJSON(nonMember, company, false),
+			accountRecordJSON(member, company, true),
+		))
+		orgs, convErrs, err := repo.FetchAccountsBySFIDs(context.Background(), []string{nonMember, member})
+		require.NoError(t, err)
+		assert.Empty(t, convErrs)
+		assert.Equal(t, []string{member}, orgUIDs(orgs))
+		require.Len(t, tr.queries, 1)
+		assert.Contains(t, tr.queries[0], membershipFilter)
+	})
+
+	t.Run("backfill iterator", func(t *testing.T) {
+		repo := newRepo(t, soqlPageJSON("",
+			accountRecordJSON(nonMember, company, false),
+			accountRecordJSON(member, company, true),
+		))
+		var got []string
+		err := repo.IterB2BOrgs(context.Background(), nil, nil, func(orgs []*model.B2BOrg) error {
+			got = append(got, orgUIDs(orgs)...)
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{member}, got)
+		require.Len(t, tr.queries, 1)
+		assert.Contains(t, tr.queries[0], membershipFilter)
+	})
+
+	t.Run("registration eligibility read stays unfiltered", func(t *testing.T) {
+		repo := newRepo(t, soqlPageJSON("", `{"Id":"`+nonMember+`",`+eligibilityFields(company, false)+`}`))
+		e, err := repo.fetchAccountEligibility(context.Background(), nonMember)
+		require.NoError(t, err)
+		require.NotNil(t, e, "a non-member must be found so registration answers 422, not 404")
+		assert.False(t, repo.eligible(*e))
+		require.Len(t, tr.queries, 1)
+		assert.NotContains(t, tr.queries[0], "SELECT AccountId FROM Asset")
+	})
+
+	t.Run("child lists", func(t *testing.T) {
+		repo := newRepo(t,
+			soqlPageJSON("",
+				`{"Id":"`+nonMember+`",`+eligibilityFields(company, false)+`}`,
+				`{"Id":"`+member+`",`+eligibilityFields(company, true)+`}`,
+			),
+			soqlPageJSON("",
+				`{"ParentId":"`+parent+`","Id":"`+nonMember+`",`+eligibilityFields(company, false)+`}`,
+				`{"ParentId":"`+parent+`","Id":"`+member+`",`+eligibilityFields(company, true)+`}`,
+			),
+		)
+		single, err := repo.FetchChildUIDsByParentUID(context.Background(), parent)
+		require.NoError(t, err)
+		assert.Equal(t, []string{member}, single)
+
+		batch, err := repo.FetchChildUIDsByParentUIDs(context.Background(), []string{parent})
+		require.NoError(t, err)
+		assert.Equal(t, []string{member}, batch[parent])
+	})
+
+	t.Run("reindex eligibility check", func(t *testing.T) {
+		repo := newRepo(t,
+			soqlPageJSON("", `{"Id":"`+nonMember+`",`+eligibilityFields(company, false)+`}`),
+			soqlPageJSON("", `{"Id":"`+member+`",`+eligibilityFields(company, true)+`}`),
+		)
+		got, err := repo.IsB2BOrgEligible(context.Background(), nonMember)
+		require.NoError(t, err)
+		assert.False(t, got)
+
+		got, err = repo.IsB2BOrgEligible(context.Background(), member)
+		require.NoError(t, err)
+		assert.True(t, got)
+	})
+
+	t.Run("website lookup", func(t *testing.T) {
+		repo := newRepo(t, soqlAccountsResponse(
+			soqlAccountRecord(nonMember, "Acme Corp", "", "acme.com", ""),
+		))
+		org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Acme Corp", "acme.com")
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Nil(t, org)
+		require.NotEmpty(t, tr.queries)
+		for _, q := range tr.queries {
+			assert.Contains(t, q, membershipFilter, "the LIMIT and saturation check must count members only")
+		}
+	})
 }

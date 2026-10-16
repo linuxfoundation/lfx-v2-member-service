@@ -80,7 +80,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainMatch(t *testing.T)
 	tr := &seqQueryTransport{responses: []string{
 		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "https://acme.com", "acme.com", "")),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "https://acme.com")
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_DomainAliasMatch(t *testing.T) {
 		soqlAccountsResponse(), // primary_domain tier: no match
 		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "other.com", "acme.com, acme.io")),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
 	require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_WebsiteSubstringVerifiesExactDom
 		soqlAccountsResponse(), // domain_alias: no match
 		soqlAccountsResponse(soqlAccountRecord(batchParentSFID(3), "Red Hat", "https://redhat.com", "", "")),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "hat.com")
 	require.NoError(t, err)
@@ -133,7 +133,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_AmbiguousStopsEscalation(t *test
 			soqlAccountRecord(batchParentSFID(5), "Acme EU", "", "acme.com", ""),
 		),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Acme US", "acme.com")
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_IneligibleAccountsExcluded(t *te
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tr := &seqQueryTransport{responses: []string{soqlAccountsResponse(tc.records...)}}
-			repo := NewAccountRepo(fakeSalesforce(t, tr))
+			repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 			org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Acme Corp", "acme.com")
 			require.NoError(t, err)
@@ -199,7 +199,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainQueryIncludesWWWFor
 		wantSubstr: "'www.acme.com'",
 		response:   soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "www.acme.com", "")),
 	}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
 	require.NoError(t, err)
@@ -218,7 +218,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_PrimaryDomainMatchIgnoresCaseAnd
 	tr := &seqQueryTransport{responses: []string{
 		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "www.ACME.com", "")),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
 	require.NoError(t, err)
@@ -234,7 +234,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_DomainAliasMatchIgnoresCaseAndWW
 		soqlAccountsResponse(), // primary_domain tier: no match
 		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "other.com", "WWW.Acme.COM")),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
 	require.NoError(t, err)
@@ -261,7 +261,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_SaturatedRawPageIsAmbiguous(t *t
 		soqlAccountsResponse(), // primary_domain tier: no match
 		soqlAccountsResponse(records...),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Irrelevant Co", "acme.com")
 	require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_NonSaturatedPageWithNextPageToke
 	tr := &seqQueryTransport{responses: []string{
 		fmt.Sprintf(`{"totalSize":2,"done":false,"nextRecordsUrl":"/services/data/v63.0/query/01gXXX-2000","records":[%s]}`, record),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
 	require.NoError(t, err)
@@ -298,7 +298,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_NameFallback(t *testing.T) {
 	tr := &seqQueryTransport{responses: []string{
 		soqlAccountsResponse(soqlAccountRecord(sfid, "Acme Corp", "", "", "")),
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Acme Corp", "")
 	require.NoError(t, err)
@@ -310,7 +310,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_NotFound(t *testing.T) {
 	t.Parallel()
 
 	tr := &seqQueryTransport{}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Nonexistent Org", "nowhere.example")
 	require.NoError(t, err)
@@ -322,7 +322,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_EmptyInputsReturnNotFound(t *tes
 	t.Parallel()
 
 	tr := &seqQueryTransport{}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "")
 	require.NoError(t, err)
@@ -338,7 +338,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_QueryErrorPropagates(t *testing.
 		responses:     []string{`{"message":"boom"}`},
 		queryStatuses: []int{500},
 	}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "", "acme.com")
 	require.Error(t, err)
@@ -358,7 +358,7 @@ func TestAccountRepo_FindAccountByNameOrWebsite_ExpiredContextStopsBeforeLaterTi
 	tr := &seqQueryTransport{responses: []string{
 		soqlAccountsResponse(), // primary_domain tier: no match
 	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr))
+	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
 
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
 	defer cancel()

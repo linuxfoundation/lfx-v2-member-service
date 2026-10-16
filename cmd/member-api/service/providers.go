@@ -314,7 +314,7 @@ func B2BOrgReaderImpl(ctx context.Context) port.B2BOrgReader {
 	case "salesforce":
 		slog.InfoContext(ctx, "initialising Salesforce B2B org reader with sObject cache")
 		sObjectClientInit(ctx) // also calls sfInit internally
-		return salesforce.NewB2BOrgReader(sObjectClient, sfClient)
+		return salesforce.NewB2BOrgReader(sObjectClient, sfClient, B2BOrgIncludeCompanyAccounts(ctx))
 
 	default:
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
@@ -338,7 +338,7 @@ func B2BOrgWriterImpl(ctx context.Context) port.B2BOrgWriter {
 	case "salesforce":
 		slog.InfoContext(ctx, "initialising Salesforce B2B org writer with sObject cache")
 		sObjectClientInit(ctx)
-		return salesforce.NewB2BOrgWriter(sObjectClient, salesforce.NewAccountRepo(sfClient))
+		return salesforce.NewB2BOrgWriter(sObjectClient, salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx)))
 
 	default:
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
@@ -504,6 +504,40 @@ func UserReaderImpl(ctx context.Context) port.UserReader {
 	}
 }
 
+var (
+	includeCompanyAccounts     bool
+	includeCompanyAccountsOnce sync.Once
+)
+
+// B2BOrgIncludeCompanyAccounts reads B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS once and
+// returns whether every Company Account is a b2b_org (model.IsB2BOrgEligible).
+// Unset means false: only Accounts holding a membership qualify, and
+// registration refuses other Company Accounts with 422. A value that does not
+// parse as a boolean stops startup.
+//
+// Turning it off stops new additions but removes nothing already published;
+// turning it on publishes existing Accounts only on their next change or the
+// next b2b_org reindex.
+func B2BOrgIncludeCompanyAccounts(ctx context.Context) bool {
+	includeCompanyAccountsOnce.Do(func() {
+		v, err := parseIncludeCompanyAccounts(os.Getenv("B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS"))
+		if err != nil {
+			log.Fatalf("invalid B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS: %v", err)
+		}
+		includeCompanyAccounts = v
+		slog.InfoContext(ctx, "b2b_org eligibility rule", "include_company_accounts", v)
+	})
+	return includeCompanyAccounts
+}
+
+func parseIncludeCompanyAccounts(raw string) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, nil
+	}
+	return strconv.ParseBool(raw)
+}
+
 // GlobalOrgAdminTeamName reads the GLOBAL_ORG_ADMIN_TEAM_NAME environment variable.
 // Returns empty string when not set (allowed in mock/messaging=mock mode; the
 // FGA message simply omits the global_org_admin reference).
@@ -581,7 +615,7 @@ func BackfillIteratorImpl(ctx context.Context) usecaseSvc.BackfillIterator {
 		slog.InfoContext(ctx, "initialising Salesforce backfill iterator")
 		sfInit(ctx)
 		return salesforce.NewBackfillIterator(
-			salesforce.NewAccountRepo(sfClient),
+			salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx)),
 			salesforce.NewMembershipRepo(sfClient),
 			salesforce.NewKeyContactRepo(sfClient),
 		)
@@ -690,7 +724,7 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
 			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
-			usecaseSvc.WithB2BOrgEligibilityReader(salesforce.NewAccountRepo(sfClient)),
+			usecaseSvc.WithB2BOrgEligibilityReader(salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx))),
 			// Fresh-fetch sibling reader for the Inactive-revoke check (never
 			// served from the stale membership-group cache).
 			usecaseSvc.WithRunnerKeyContactsByMembershipReader(salesforce.NewKeyContactRepo(sfClient)),
@@ -1047,7 +1081,7 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 	// directly — so the published record always reflects the CDC change.
 	cdcMembershipRepo := salesforce.NewMembershipRepo(sfClient)
 	cdcKeyContactRepo := salesforce.NewKeyContactRepo(sfClient)
-	cdcAccountRepo := salesforce.NewAccountRepo(sfClient)
+	cdcAccountRepo := salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx))
 
 	consumer := usecaseSvc.NewCDCConsumer(
 		usecaseSvc.WithCDCSubscriber(pubsubClient),

@@ -24,9 +24,11 @@ type B2BOrgWriter struct {
 }
 
 // accountEligibilityReader reads the inputs of model.IsB2BOrgEligible for one
-// Account. *AccountRepo implements it.
+// Account and applies the rule the reader is configured with, so registration
+// refuses exactly the Accounts the queries drop. *AccountRepo implements it.
 type accountEligibilityReader interface {
 	fetchAccountEligibility(ctx context.Context, sfid string) (*soqlEligibility, error)
+	eligible(e soqlEligibility) bool
 }
 
 // NewB2BOrgWriter creates a B2BOrgWriter backed by the given SObjectClient,
@@ -65,7 +67,7 @@ func (w *B2BOrgWriter) CreateB2BOrg(ctx context.Context, sfid string, input mode
 	if eligibility == nil {
 		return nil, errs.NewNotFound("b2b org not found", fmt.Errorf("sfid: %s", sfid))
 	}
-	if !eligibility.eligible() {
+	if !w.eligibility.eligible(*eligibility) {
 		return nil, errs.NewUnprocessableEntity(ineligibleAccountMessage(eligibility), fmt.Errorf("sfid: %s", sfid))
 	}
 

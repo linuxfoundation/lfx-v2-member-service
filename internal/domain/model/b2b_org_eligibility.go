@@ -9,15 +9,15 @@ package model
 const RecordTypeCompanyAccount = "Company_Account"
 
 // IsB2BOrgEligible reports whether a non-deleted Salesforce Account is a B2B
-// organization: every Company Account is, and any other record type
-// (Partner_Restricted, Project_Account, PersonAccount, or none) is only while
-// it holds a non-deleted Membership Asset. The Asset's Status and dates are not
-// checked, matching the membership filter used before Company Accounts
-// qualified.
+// organization. An Account holding a non-deleted Membership Asset always is.
+// With includeCompanyAccounts, every Company Account is as well; without it,
+// a Company Account without a membership is not, which is the rule that
+// applied before Company Accounts qualified. The Asset's Status and dates are
+// not checked.
 //
 // The rule lives here rather than in SOQL because Salesforce rejects a
 // semi-join inside OR, so the queries fetch both inputs and every caller
 // decides through this one function.
-func IsB2BOrgEligible(recordTypeDeveloperName string, hasMembership bool) bool {
-	return recordTypeDeveloperName == RecordTypeCompanyAccount || hasMembership
+func IsB2BOrgEligible(recordTypeDeveloperName string, hasMembership, includeCompanyAccounts bool) bool {
+	return hasMembership || (includeCompanyAccounts && recordTypeDeveloperName == RecordTypeCompanyAccount)
 }

@@ -46,7 +46,8 @@ const accountsSOQLSelect = "Id, Name, Logo_URL__c, Website," +
 // It returns every non-deleted Account. Eligibility (model.IsB2BOrgEligible) is
 // applied in Go to the decoded records, because the rule needs a semi-join
 // inside OR, which SOQL rejects; callers must drop records whose eligible() is
-// false before exposing them.
+// false before exposing them. Callers build on AccountRepo.searchBase, which
+// adds the membership filter when Company Accounts are excluded.
 const accountsSOQLWhere = `
 FROM Account
 WHERE IsDeleted = false`
@@ -58,12 +59,39 @@ const accountsSOQLBase = "\nSELECT\n    " + accountsSOQLSelect + accountsSOQLWhe
 
 // AccountRepo handles Salesforce SOQL queries for Account (B2BOrg) records.
 type AccountRepo struct {
-	client *sf.Salesforce
+	client                 *sf.Salesforce
+	includeCompanyAccounts bool
 }
 
-// NewAccountRepo creates a new AccountRepo backed by the given Salesforce client.
-func NewAccountRepo(client *sf.Salesforce) *AccountRepo {
-	return &AccountRepo{client: client}
+// NewAccountRepo creates a new AccountRepo backed by the given Salesforce
+// client. includeCompanyAccounts selects the eligibility rule
+// (model.IsB2BOrgEligible) for every query and check made through the repo.
+// The API and the CDC consumer must be given the same value: if they differ,
+// one publishes an org that the other removes on its next change event.
+func NewAccountRepo(client *sf.Salesforce, includeCompanyAccounts bool) *AccountRepo {
+	return &AccountRepo{client: client, includeCompanyAccounts: includeCompanyAccounts}
+}
+
+// eligible applies the repo's eligibility rule to a decoded record.
+func (r *AccountRepo) eligible(e soqlEligibility) bool {
+	return e.eligible(r.includeCompanyAccounts)
+}
+
+// accountsMembershipFilter limits a query to Accounts holding a non-deleted
+// Membership Asset. Without Company Accounts this is the whole rule, so it can
+// be applied in SOQL.
+const accountsMembershipFilter = "\n    AND Id IN (SELECT AccountId FROM Asset" +
+	" WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
+
+// searchBase returns accountsSOQLBase, narrowed to members when Company
+// Accounts are excluded. The narrowing matters where a LIMIT or a page-full
+// check runs before the Go eligibility filter: the website/name lookup would
+// otherwise count non-members toward its ambiguity cap.
+func (r *AccountRepo) searchBase() string {
+	if r.includeCompanyAccounts {
+		return accountsSOQLBase
+	}
+	return accountsSOQLBase + accountsMembershipFilter
 }
 
 // FetchChildUIDsByParentUID returns the SFIDs of eligible Salesforce Accounts
@@ -88,7 +116,7 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 
 	uids := make([]string, 0, len(records))
 	for _, rec := range records {
-		if !rec.eligible() {
+		if !rec.eligible(r.includeCompanyAccounts) {
 			continue
 		}
 		uid, convErr := sfuuid.Normalize18(rec.ID)
@@ -107,12 +135,12 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 // Account is not eligible (model.IsB2BOrgEligible).
 func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*model.B2BOrg, error) {
 	slog.DebugContext(ctx, "fetching account by SFID from Salesforce", "sfid", sfid)
-	query := accountsSOQLBase + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
+	query := r.searchBase() + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
 	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching account by SFID %s: %w", sfid, err)
 	}
-	if len(sfResult.Records) == 0 || !sfResult.Records[0].eligible() {
+	if len(sfResult.Records) == 0 || !sfResult.Records[0].eligible(r.includeCompanyAccounts) {
 		return nil, nil
 	}
 	return convertSOQLToB2BOrg(ctx, sfResult.Records[0])
@@ -141,13 +169,13 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 		}
 		chunk := sfids[start:end]
 
-		query := accountsSOQLBase + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
+		query := r.searchBase() + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
 		records, _, err := QueryAllPages[soqlAccount](ctx, r.client, query, "")
 		if err != nil {
 			return nil, nil, fmt.Errorf("batch fetching accounts (chunk %d-%d): %w", start, end, err)
 		}
 		for _, acc := range records {
-			if !acc.eligible() {
+			if !acc.eligible(r.includeCompanyAccounts) {
 				continue
 			}
 			org, convErr := convertSOQLToB2BOrg(ctx, acc)
@@ -189,7 +217,7 @@ func (r *AccountRepo) IsB2BOrgEligible(ctx context.Context, uid string) (bool, e
 	if err != nil {
 		return false, err
 	}
-	return e != nil && e.eligible(), nil
+	return e != nil && e.eligible(r.includeCompanyAccounts), nil
 }
 
 var _ port.B2BOrgEligibilityReader = (*AccountRepo)(nil)
@@ -255,7 +283,7 @@ func (r *AccountRepo) fetchChildUIDsByParents(
 		}
 
 		for _, rec := range records {
-			if !rec.eligible() {
+			if !rec.eligible(r.includeCompanyAccounts) {
 				continue
 			}
 			pid, pidErr := sfuuid.Normalize18(rec.ParentID)
@@ -417,7 +445,7 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 // either case, so the caller should stop rather than treat this as a miss or
 // a confirmed unique match.
 func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label string, limit int, verify func(*model.B2BOrg) bool) (*model.B2BOrg, bool, bool, error) {
-	query := accountsSOQLBase + "\n    AND " + predicate + "\nLIMIT " + strconv.Itoa(limit)
+	query := r.searchBase() + "\n    AND " + predicate + "\nLIMIT " + strconv.Itoa(limit)
 	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
 	if err != nil {
 		return nil, false, false, fmt.Errorf("matching accounts by %s: %w", label, err)
@@ -431,7 +459,7 @@ func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label s
 
 	matches := make([]*model.B2BOrg, 0, len(sfResult.Records))
 	for _, acc := range sfResult.Records {
-		if !acc.eligible() {
+		if !acc.eligible(r.includeCompanyAccounts) {
 			continue
 		}
 		org, convErr := convertSOQLToB2BOrg(ctx, acc)
@@ -559,9 +587,9 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 // converter yields nil for them rather than an error, which IterPages would
 // log as a warning for every ineligible Account in the scan.
 func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
-	query := accountsSOQLBase + lastModifiedWindowClause(since, until)
+	query := r.searchBase() + lastModifiedWindowClause(since, until)
 	return IterPages[soqlAccount, *model.B2BOrg](ctx, r.client, query, func(acc soqlAccount) (*model.B2BOrg, error) {
-		if !acc.eligible() {
+		if !acc.eligible(r.includeCompanyAccounts) {
 			return nil, nil
 		}
 		return convertSOQLToB2BOrg(ctx, acc)

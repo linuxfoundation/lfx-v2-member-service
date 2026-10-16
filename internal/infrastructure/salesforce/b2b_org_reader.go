@@ -23,11 +23,12 @@ type B2BOrgReader struct {
 
 // NewB2BOrgReader creates a B2BOrgReader backed by the given SObjectClient and
 // an optional Salesforce SOQL client (used for child-list queries). sfClient
-// may be nil in tests that only exercise GetB2BOrg.
-func NewB2BOrgReader(client *SObjectClient, sfClient *sf.Salesforce) *B2BOrgReader {
+// may be nil in tests that only exercise GetB2BOrg. includeCompanyAccounts is
+// passed to NewAccountRepo.
+func NewB2BOrgReader(client *SObjectClient, sfClient *sf.Salesforce, includeCompanyAccounts bool) *B2BOrgReader {
 	var repo *AccountRepo
 	if sfClient != nil {
-		repo = NewAccountRepo(sfClient)
+		repo = NewAccountRepo(sfClient, includeCompanyAccounts)
 	}
 	return &B2BOrgReader{client: client, accountRepo: repo}
 }

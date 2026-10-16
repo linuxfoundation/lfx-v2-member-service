@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.app.globalOrgAdminTeamName | trim | quote }}
             - name: LF_STAFF_TEAM_NAME
               value: {{ .Values.app.lfStaffTeamName | trim | quote }}
+            - name: B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS
+              value: {{ .Values.app.includeCompanyAllAccounts | quote }}
             - name: SF_PUBSUB_ENDPOINT
               value: {{ .Values.consumer.pubsubEndpoint | quote }}
             - name: SF_CDC_CHANNEL
