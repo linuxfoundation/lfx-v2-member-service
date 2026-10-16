@@ -396,12 +396,18 @@ any non-deleted Account that is a Company Account (`RecordType.DeveloperName =
 the whole rule. With it off (the default), only the second group qualifies, as before this rule,
 and registration refuses non-member Company Accounts with 422. The chart injects the one value
 into both the API and the CDC consumer; they must agree, or one publishes an org the other
-removes on its next change event. Turning the setting on leaves non-member Company Accounts
-missing until a reindex publishes them, so in each environment the order is: set it on, let both
-deployments roll, then run the steps below. Run an EasyCLA import against an environment only
-after this, since its non-member rows get 422 while the setting is off. Turning it off again
-stops new additions but removes nothing already published. Every org indexed under the old rule still qualifies, so the
-reindex only adds. On the full and filtered scan, ineligible Accounts are dropped inside
+removes on its next change event. Turning the setting on publishes a non-member Company Account
+only when its Account next changes; the rest stay missing until a reindex publishes them, so in
+each environment the order is: set it on, let both deployments roll, then run the steps below.
+Run an EasyCLA import against an environment only after this, since its non-member rows get 422
+while the setting is off. Every org indexed under the old rule still qualifies, so the reindex
+only adds.
+
+Turning it off again stops new additions and does no bulk cleanup, but published non-member
+orgs do not stay put: each one is removed from the index, with its FGA grants kept, the next time
+its Account changes (the CDC absent path) or a targeted or `cdc_repair` run reaches it. A full
+or filtered reindex skips it, so it neither removes nor refreshes it. Removing the rest after a
+switch-off is a manual step. On the full and filtered scan, ineligible Accounts are dropped inside
 `AccountRepo`, before the runner sees them, so they are neither counted nor logged. Targeted
 (`items`) and `cdc_repair` runs read each Account through `GetB2BOrg`, which does not apply the
 rule, so `reindexItem` checks eligibility separately: an ineligible Account gets an index delete,

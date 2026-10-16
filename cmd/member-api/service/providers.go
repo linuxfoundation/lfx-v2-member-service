@@ -515,9 +515,10 @@ var (
 // registration refuses other Company Accounts with 422. A value that does not
 // parse as a boolean stops startup.
 //
-// Turning it off stops new additions but removes nothing already published;
-// turning it on publishes existing Accounts only on their next change or the
-// next b2b_org reindex.
+// Turning it on publishes existing Accounts only on their next change or the
+// next b2b_org reindex. Turning it off does no bulk cleanup, but a published
+// non-member leaves the index (grants kept) on its next change or targeted
+// reindex; a full reindex skips it, so removing the rest is a manual step.
 func B2BOrgIncludeCompanyAccounts(ctx context.Context) bool {
 	includeCompanyAccountsOnce.Do(func() {
 		v, err := parseIncludeCompanyAccounts(os.Getenv("B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS"))
