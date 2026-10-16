@@ -36,7 +36,9 @@ approved change window and an explicit store ID.
 - `curl`, `jq`, and access to the target OpenFGA API.
 - The target OpenFGA store ID and the environment's old team identifier.
 - A fresh census from `scripts/export-b2b-org-uids-from-opensearch.sh`.
-- A fresh Salesforce Membership Asset account count for comparison.
+- A fresh Salesforce count of eligible Accounts for comparison: non-deleted Accounts holding a
+  Membership Asset, plus, when `B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS=true`, the other non-deleted
+  Company Accounts.
 - One known allowed principal, one known denied principal, and one representative live organization.
 
 Use a dedicated output directory for each environment:

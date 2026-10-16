@@ -28,11 +28,12 @@ const testB2BOrgUID = "00000000-0000-0000-0000-000000000011"
 // seededOrgWriter returns pre-seeded orgs for CreateB2BOrg and UpdateB2BOrg.
 type seededOrgWriter struct {
 	createOrg *model.B2BOrg
+	createErr error
 	updateOrg *model.B2BOrg
 }
 
 func (w *seededOrgWriter) CreateB2BOrg(_ context.Context, _ string, _ model.B2BOrgInput) (*model.B2BOrg, error) {
-	return w.createOrg, nil
+	return w.createOrg, w.createErr
 }
 
 func (w *seededOrgWriter) UpdateB2BOrg(_ context.Context, _ string, _ model.B2BOrgInput) (*model.B2BOrg, error) {
@@ -155,6 +156,23 @@ func TestB2BOrgWriter_Create_PublishesAtLeastOneAccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, countCalls(pub.calls(), "access:"), 0,
 		"create must emit at least one FGA access call")
+}
+
+func TestB2BOrgWriter_Create_Unprocessable_PublishesNothing(t *testing.T) {
+	pub := &capturingPublisher{}
+	w := newB2BOrgWriter(
+		&seededOrgReader{},
+		&seededOrgWriter{createErr: pkgerrors.NewUnprocessableEntity("account is not eligible as a b2b org")},
+		pub,
+		"admin-team-uid",
+	)
+
+	_, err := w.Create(context.Background(), "sf-account-001")
+
+	var unprocessable pkgerrors.UnprocessableEntity
+	require.ErrorAs(t, err, &unprocessable)
+	assert.Zero(t, pub.indexerCallCount, "a rejected registration must publish no indexer message")
+	assert.Zero(t, pub.accessCallCount, "a rejected registration must publish no FGA message")
 }
 
 // ── Update tests ──────────────────────────────────────────────────────────

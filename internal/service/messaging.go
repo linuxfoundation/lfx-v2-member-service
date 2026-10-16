@@ -547,11 +547,17 @@ func buildB2BOrgIndexerInput(org *model.B2BOrg, action indexerConstants.MessageA
 // PublishB2BOrgIndexer builds and publishes a MemberIndexerMessage for a B2BOrg.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, action indexerConstants.MessageAction) {
+	_ = publishB2BOrgIndexer(ctx, p, org, action)
+}
+
+// publishB2BOrgIndexer is PublishB2BOrgIndexer for callers that must act on a
+// failed build or publish. A skipped transient-logo publish is not an error.
+func publishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, action indexerConstants.MessageAction) error {
 	if action != indexerConstants.ActionDeleted && isScratchLogoURL(org.LogoURL) {
 		slog.WarnContext(ctx, "skipping b2b org indexer publish for transient logo URL",
 			"uid", org.UID,
 			"publish_failed_for_backfill_repair", true)
-		return
+		return nil
 	}
 	if action != indexerConstants.ActionDeleted &&
 		org.ParentDetail != nil &&
@@ -578,17 +584,18 @@ func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *mode
 			"uid", org.UID,
 			"error", err,
 			"publish_failed_for_backfill_repair", true)
-		return
+		return err
 	}
 	if pubErr := p.Indexer(ctx, constants.IndexB2BOrgSubject, builtMsg, false); pubErr != nil {
 		slog.WarnContext(ctx, "b2b org indexer publish failed",
 			"uid", org.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)
-	} else {
-		slog.DebugContext(ctx, "b2b org indexer published",
-			"uid", org.UID, "subject", constants.IndexB2BOrgSubject)
+		return pubErr
 	}
+	slog.DebugContext(ctx, "b2b org indexer published",
+		"uid", org.UID, "subject", constants.IndexB2BOrgSubject)
+	return nil
 }
 
 // scratchPathPattern matches the scratch key shape minted by

@@ -85,6 +85,16 @@ app:
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.
   lfxSelfServeBaseURL: ""
+  # includeCompanyAllAccounts makes every Company Account a b2b_org, member or
+  # not. When false, only Accounts holding a membership qualify and
+  # registration refuses other Company Accounts with 422. Both deployment
+  # templates inject it, because the API and the CDC consumer must agree: if
+  # they differ, one publishes an org the other removes on its next change.
+  # Turning it on publishes a non-member Account on its next change and the
+  # rest on the next b2b_org reindex. Turning it off does no bulk cleanup: a
+  # published non-member leaves the index (grants kept) on its next change or
+  # targeted reindex, and a full reindex leaves it; remove the rest manually.
+  includeCompanyAllAccounts: false
   # adminReindexQuotaThreshold is the Salesforce API usage ratio (0,1] at or
   # above which POST /admin/reindex {cdc_repair:true} refuses to start a drain
   # (ServiceUnavailable). Leave empty to use the in-code default (0.80).

@@ -154,7 +154,7 @@ func TestAdminReindex_CdcRepair_SupportedTypesAccepted(t *testing.T) {
 			}
 			gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 			runner := usecaseSvc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), mock.NewMockKeyContactSObjectReader(), mock.NewMockB2BOrgSettings(), mock.NewMockMemberPublisher(), nil, "",
-				nil, usecaseSvc.WithRepairStore(repairStore), usecaseSvc.WithQuotaGauge(gauge))
+				nil, usecaseSvc.WithRepairStore(repairStore), usecaseSvc.WithQuotaGauge(gauge), usecaseSvc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 			svc := newTestSvc(withBackfillRunner(runner))
 
 			result, err := svc.AdminReindex(context.Background(), &membershipservice.AdminReindexPayload{Type: tt, CdcRepair: true})
@@ -275,5 +275,5 @@ func newTestBackfillRunner(iter usecaseSvc.BackfillIterator) *usecaseSvc.Runner 
 	if iter == nil {
 		iter = &mock.MockBackfillIterator{}
 	}
-	return usecaseSvc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, mock.NewMockB2BOrgSettings(), mock.NewMockMemberPublisher(), nil, "", nil)
+	return usecaseSvc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, mock.NewMockB2BOrgSettings(), mock.NewMockMemberPublisher(), nil, "", nil, usecaseSvc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 }

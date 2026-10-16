@@ -11,8 +11,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
+
+func TestMockB2BOrgWriter_CreateSentinelIsUnprocessable(t *testing.T) {
+	w := NewMockB2BOrgWriter()
+
+	_, err := w.CreateB2BOrg(context.Background(), MockIneligibleAccountSFID, model.B2BOrgInput{})
+	var unprocessable errors.UnprocessableEntity
+	assert.ErrorAs(t, err, &unprocessable)
+
+	_, err = w.CreateB2BOrg(context.Background(), "001000000000001AAA", model.B2BOrgInput{})
+	var notImplemented errors.NotImplemented
+	assert.ErrorAs(t, err, &notImplemented)
+}
 
 // Callers derive further keys from VersionedURL before ever calling Put, so an
 // unusable URL would fail them earlier and hide the typed NotImplemented error

@@ -36,6 +36,13 @@ func wrapError(ctx context.Context, err error) error {
 		return membershipservice.MakeConflict(err)
 	}
 
+	var unprocessable pkgerrors.UnprocessableEntity
+	if errors.As(err, &unprocessable) {
+		// 422 is caller error, not a service failure.
+		slog.InfoContext(ctx, "request rejected as unprocessable", "error", err)
+		return membershipservice.MakeUnprocessableEntity(errors.New(unprocessable.Message()))
+	}
+
 	var serviceUnavailable pkgerrors.ServiceUnavailable
 	if errors.As(err, &serviceUnavailable) {
 		// The full cause (upstream NATS, fga-sync, or Salesforce error text)

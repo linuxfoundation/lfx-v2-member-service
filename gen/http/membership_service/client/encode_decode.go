@@ -276,6 +276,7 @@ func EncodeCreateB2bOrgRequest(encoder func(*http.Request) goahttp.Encoder) func
 //   - "NotFound" (type *goa.ServiceError): http.StatusNotFound
 //   - "BadRequest" (type *goa.ServiceError): http.StatusBadRequest
 //   - "PreconditionFailed" (type *goa.ServiceError): http.StatusPreconditionFailed
+//   - "UnprocessableEntity" (type *goa.ServiceError): http.StatusUnprocessableEntity
 //   - "InternalServerError" (type *goa.ServiceError): http.StatusInternalServerError
 //   - "ServiceUnavailable" (type *goa.ServiceError): http.StatusServiceUnavailable
 //   - error: internal error
@@ -377,6 +378,20 @@ func DecodeCreateB2bOrgResponse(decoder func(*http.Response) goahttp.Decoder, re
 				return nil, goahttp.ErrValidationError("membership-service", "create-b2b-org", err)
 			}
 			return nil, NewCreateB2bOrgPreconditionFailed(&body)
+		case http.StatusUnprocessableEntity:
+			var (
+				body CreateB2bOrgUnprocessableEntityResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "create-b2b-org", err)
+			}
+			err = ValidateCreateB2bOrgUnprocessableEntityResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "create-b2b-org", err)
+			}
+			return nil, NewCreateB2bOrgUnprocessableEntity(&body)
 		case http.StatusInternalServerError:
 			var (
 				body CreateB2bOrgInternalServerErrorResponseBody

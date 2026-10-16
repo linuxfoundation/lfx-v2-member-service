@@ -3720,6 +3720,63 @@ func TestCDCConsumer_Account_Absent_PublishesNoDeleteAccess(t *testing.T) {
 		"an org absent from SOQL may still exist — purging it locks out live admins")
 }
 
+// TestCDCConsumer_Account_DroppedByReader_DeletesIndexKeepsGrants: an Account
+// the batch reader omits without a conversion error (soft-deleted, or
+// reclassified to an ineligible record type; the reader-side filtering is
+// covered in the salesforce package) must leave the index and keep its grants.
+func TestCDCConsumer_Account_DroppedByReader_DeletesIndexKeepsGrants(t *testing.T) {
+	pub := &subjectCapturingPublisher{}
+	reclassified := sfid("org-now-partner")
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Account", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{reclassified}, ReplayID: []byte("rc-partner")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"admin-team-uid",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{}),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	require.Len(t, pub.indexerMessages, 1)
+	assert.Equal(t, "deleted", pub.indexerAction(0), "an ineligible Account must leave the index")
+	assert.Empty(t, pub.deleteAccessUIDs(t, "b2b_org"), "an ineligible Account keeps its grants")
+}
+
+// TestCDCConsumer_Account_NonMemberCompany_PublishesIndexAndTeamGrant: a
+// Company Account with no membership is eligible, so creating or editing it
+// indexes it and grants the global org admin team.
+func TestCDCConsumer_Account_NonMemberCompany_PublishesIndexAndTeamGrant(t *testing.T) {
+	for _, change := range []model.CDCChangeType{model.CDCChangeCreate, model.CDCChangeUpdate} {
+		t.Run(string(change), func(t *testing.T) {
+			org := &model.B2BOrg{UID: sfid("org-non-member"), Name: "Non-member Co", IsMember: false}
+			pub := &subjectCapturingPublisher{}
+			consumer := newTestCDCConsumer(
+				&fakeCDCSubscriber{events: []model.CDCEvent{
+					{Entity: "Account", ChangeType: change, RecordIDs: []string{org.UID}, ReplayID: []byte("nm")},
+				}},
+				&fakeB2BOrgReader{org: org},
+				&mock.MockCacheInvalidator{},
+				pub,
+				"admin-team-uid",
+				svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{Orgs: []*model.B2BOrg{org}}),
+			)
+			require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+			require.Len(t, pub.indexerMessages, 1)
+			assert.Equal(t, "updated", pub.indexerAction(0), "the Account path publishes updated for create and edit")
+			var granted bool
+			for _, data := range pub.b2bOrgUpdateAccess(t) {
+				if data.UID == org.UID && len(data.References["global_org_admin"]) > 0 {
+					granted = true
+				}
+			}
+			assert.True(t, granted, "the non-member org must receive the global org admin team grant")
+		})
+	}
+}
+
 func TestCDCConsumer_Asset_Absent_PublishesNoDeleteAccess(t *testing.T) {
 	pub := &subjectCapturingPublisher{}
 	runAbsentAssetBatch(t, pub)

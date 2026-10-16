@@ -859,9 +859,10 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		return nil
 	}
 
-	// SFIDs absent from the SOQL result are soft-deleted or no longer hold a
-	// membership Asset — route them to the absent path for *index* convergence.
-	// The second case is a live org, so this path withdraws no authorization.
+	// SFIDs absent from the SOQL result are soft-deleted or no longer eligible
+	// (record type and membership rule, model.IsB2BOrgEligible) — route them to
+	// the absent path for *index* convergence. The second case is a live org,
+	// so this path withdraws no authorization.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
 	// handleAccountAbsent always returns nil, so this can never produce a
@@ -1001,8 +1002,9 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 
 // handleAccountAbsent handles an Account that was requested in a batch upsert
 // but did not come back from SOQL. Absence is not deletion: an org that still
-// exists but no longer holds a qualifying membership lands here too, which is
-// why this entry point exists separately rather than sharing the delete one.
+// exists but is no longer eligible (record type and membership rule,
+// model.IsB2BOrgEligible) lands here too, which is why this entry point exists
+// separately rather than sharing the delete one.
 func (o *CDCConsumer) handleAccountAbsent(ctx context.Context, uid string) error {
 	o.publishAccountDeleteIndex(ctx, uid)
 	return nil

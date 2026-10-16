@@ -102,6 +102,7 @@ func (c *Client) GetB2bOrg(ctx context.Context, p *GetB2bOrgPayload) (res *GetB2
 //   - "NotFound" (type *goa.ServiceError): Resource not found
 //   - "BadRequest" (type *goa.ServiceError): Bad request
 //   - "PreconditionFailed" (type *goa.ServiceError): Precondition failed
+//   - "UnprocessableEntity" (type *goa.ServiceError): Account is not eligible as a B2B organization
 //   - "InternalServerError" (type *goa.ServiceError): Internal server error
 //   - "ServiceUnavailable" (type *goa.ServiceError): Service unavailable
 //   - error: internal error

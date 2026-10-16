@@ -9,6 +9,12 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 )
 
+// B2BOrgEligibilityReader reports whether a Salesforce Account is a B2B
+// organization (model.IsB2BOrgEligible). A missing or deleted Account is not.
+type B2BOrgEligibilityReader interface {
+	IsB2BOrgEligible(ctx context.Context, uid string) (bool, error)
+}
+
 // B2BOrgReader provides read access to B2BOrg (Salesforce Account) records.
 // Implementations are responsible for resolving the UUID from the Salesforce
 // Account.Id and populating all fields of the returned model.B2BOrg.
@@ -24,7 +30,8 @@ type B2BOrgReader interface {
 	FetchChildUIDsByParentUID(ctx context.Context, parentUID string) ([]string, error)
 
 	// FetchChildUIDsByParentUIDs returns a map of parentUID → []childUID for all
-	// given parent UIDs that have at least one direct member-eligible child Account.
+	// given parent UIDs that have at least one direct eligible child Account
+	// (model.IsB2BOrgEligible).
 	// Parents with no qualifying children are absent from the result map.
 	// Used to bulk-compute is_parent and FGA parent tuples for a batch of orgs in
 	// place of N individual FetchChildUIDsByParentUID calls.

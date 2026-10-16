@@ -19,12 +19,22 @@ import (
 // B2BOrgWriter implements port.B2BOrgWriter using the Salesforce sObject REST
 // API for conditional writes and FetchB2BOrg for post-write re-fetches.
 type B2BOrgWriter struct {
-	client *SObjectClient
+	client      *SObjectClient
+	eligibility accountEligibilityReader
 }
 
-// NewB2BOrgWriter creates a B2BOrgWriter backed by the given SObjectClient.
-func NewB2BOrgWriter(client *SObjectClient) *B2BOrgWriter {
-	return &B2BOrgWriter{client: client}
+// accountEligibilityReader reads the inputs of model.IsB2BOrgEligible for one
+// Account and applies the rule the reader is configured with, so registration
+// refuses exactly the Accounts the queries drop. *AccountRepo implements it.
+type accountEligibilityReader interface {
+	fetchAccountEligibility(ctx context.Context, sfid string) (*soqlEligibility, error)
+	eligible(e soqlEligibility) bool
+}
+
+// NewB2BOrgWriter creates a B2BOrgWriter backed by the given SObjectClient,
+// using eligibility to reject Accounts that are not B2B organizations.
+func NewB2BOrgWriter(client *SObjectClient, eligibility accountEligibilityReader) *B2BOrgWriter {
+	return &B2BOrgWriter{client: client, eligibility: eligibility}
 }
 
 // Ensure B2BOrgWriter satisfies the port at compile time.
@@ -34,6 +44,8 @@ var _ port.B2BOrgWriter = (*B2BOrgWriter)(nil)
 // the corresponding B2BOrg. The Account is expected to already exist in
 // Salesforce (created by EasyCLA or Enrollment); this method is idempotent —
 // a repeated call with the same SFID has no side-effects and returns the same record.
+// It returns NotFound when no Account exists and UnprocessableEntity when the
+// Account is not eligible (model.IsB2BOrgEligible).
 func (w *B2BOrgWriter) CreateB2BOrg(ctx context.Context, sfid string, input model.B2BOrgInput) (*model.B2BOrg, error) {
 	uid, err := sfuuid.Normalize18(sfid)
 	if err != nil {
@@ -48,8 +60,28 @@ func (w *B2BOrgWriter) CreateB2BOrg(ctx context.Context, sfid string, input mode
 		return nil, errs.NewNotFound("b2b org not found", fmt.Errorf("sfid: %s", sfid))
 	}
 
+	eligibility, err := w.eligibility.fetchAccountEligibility(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("checking eligibility for sfid %s: %w", sfid, err)
+	}
+	if eligibility == nil {
+		return nil, errs.NewNotFound("b2b org not found", fmt.Errorf("sfid: %s", sfid))
+	}
+	if !w.eligibility.eligible(*eligibility) {
+		return nil, errs.NewUnprocessableEntity(ineligibleAccountMessage(eligibility), fmt.Errorf("sfid: %s", sfid))
+	}
+
 	slog.DebugContext(ctx, "b2b org created (fetched from Salesforce)", "uid", uid, "sfid", sfid)
 	return org, nil
+}
+
+// ineligibleAccountMessage is returned to the caller, so it names the record
+// type and never the Account's Id or name.
+func ineligibleAccountMessage(e *soqlEligibility) string {
+	if e.RecordType == nil || e.RecordType.DeveloperName == "" {
+		return "account is not eligible as a b2b org: no record type and no membership"
+	}
+	return fmt.Sprintf("account is not eligible as a b2b org: record type %s without a membership", e.RecordType.DeveloperName)
 }
 
 // UpdateB2BOrg applies a partial update to the Salesforce Account identified

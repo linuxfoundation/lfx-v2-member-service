@@ -184,6 +184,40 @@ func TestBuildAccountPatch(t *testing.T) {
 	}
 }
 
+// fakeEligibilityReader returns a fixed eligibility result and counts calls.
+// The zero value includes Company Accounts.
+type fakeEligibilityReader struct {
+	result                 *soqlEligibility
+	err                    error
+	calls                  int
+	excludeCompanyAccounts bool
+}
+
+func (f *fakeEligibilityReader) fetchAccountEligibility(_ context.Context, _ string) (*soqlEligibility, error) {
+	f.calls++
+	return f.result, f.err
+}
+
+func (f *fakeEligibilityReader) eligible(e soqlEligibility) bool {
+	return e.eligible(!f.excludeCompanyAccounts)
+}
+
+func eligibilityOf(recordType string, member bool) *fakeEligibilityReader {
+	e := &soqlEligibility{}
+	if recordType != "" {
+		e.RecordType = &soqlRecordType{DeveloperName: recordType}
+	}
+	if member {
+		e.Assets = &soqlMembershipAssets{TotalSize: 1, Records: []soqlAccountID{{ID: "02i000000000001AAA"}}}
+	}
+	return &fakeEligibilityReader{result: e}
+}
+
+// companyEligibility is a Company Account without a membership: eligible.
+func companyEligibility() *fakeEligibilityReader {
+	return eligibilityOf(model.RecordTypeCompanyAccount, false)
+}
+
 // ── TestB2BOrgWriter_CreateB2BOrg ─────────────────────────────────────────────
 
 func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
@@ -199,7 +233,7 @@ func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
 			getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
 		}
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		org, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
 
@@ -217,7 +251,7 @@ func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
 			getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
 		}
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		org1, err1 := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
 		org2, err2 := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
@@ -232,7 +266,7 @@ func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
 
 		transport := &writerTestTransport{}
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		org, err := writer.CreateB2BOrg(context.Background(), "not-a-valid-sfid", model.B2BOrgInput{})
 
@@ -252,7 +286,8 @@ func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
 				`[{"errorCode":"NOT_FOUND","message":"Record not found"}]`, nil),
 		}
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		eligibility := companyEligibility()
+		writer := NewB2BOrgWriter(client, eligibility)
 
 		org, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
 
@@ -262,6 +297,96 @@ func TestB2BOrgWriter_CreateB2BOrg(t *testing.T) {
 		var notFound errs.NotFound
 		assert.True(t, errors.As(err, &notFound),
 			"expected NotFound error, got %T: %v", err, err)
+		assert.Zero(t, eligibility.calls, "a missing Account must not reach the eligibility check")
+	})
+
+	t.Run("ineligible Account returns UnprocessableEntity", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			recordType string
+			message    string
+		}{
+			{"Partner_Restricted", "account is not eligible as a b2b org: record type Partner_Restricted without a membership"},
+			{"", "account is not eligible as a b2b org: no record type and no membership"},
+		} {
+			transport := &writerTestTransport{
+				getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+			}
+			client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
+			writer := NewB2BOrgWriter(client, eligibilityOf(tc.recordType, false))
+
+			org, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
+
+			require.Error(t, err)
+			assert.Nil(t, org)
+			var unprocessable errs.UnprocessableEntity
+			require.True(t, errors.As(err, &unprocessable), "expected UnprocessableEntity, got %T: %v", err, err)
+			assert.Equal(t, tc.message, unprocessable.Message())
+			assert.NotContains(t, unprocessable.Message(), uid)
+			assert.NotContains(t, unprocessable.Message(), "Linux Foundation")
+		}
+	})
+
+	t.Run("excluded type with membership is accepted", func(t *testing.T) {
+		t.Parallel()
+
+		transport := &writerTestTransport{
+			getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		}
+		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
+		writer := NewB2BOrgWriter(client, eligibilityOf("Partner_Restricted", true))
+
+		org, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
+
+		require.NoError(t, err)
+		assert.Equal(t, uid, org.UID)
+	})
+
+	t.Run("Company Accounts excluded: non-member refused, member accepted", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			member bool
+			wantOK bool
+		}{
+			{member: false, wantOK: false},
+			{member: true, wantOK: true},
+		} {
+			transport := &writerTestTransport{
+				getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+			}
+			client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
+			reader := eligibilityOf(model.RecordTypeCompanyAccount, tc.member)
+			reader.excludeCompanyAccounts = true
+			writer := NewB2BOrgWriter(client, reader)
+
+			org, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
+
+			if tc.wantOK {
+				require.NoError(t, err)
+				assert.Equal(t, uid, org.UID)
+				continue
+			}
+			var unprocessable errs.UnprocessableEntity
+			require.True(t, errors.As(err, &unprocessable), "expected UnprocessableEntity, got %T: %v", err, err)
+			assert.Equal(t, "account is not eligible as a b2b org: record type Company_Account without a membership", unprocessable.Message())
+		}
+	})
+
+	t.Run("Account missing from the eligibility query returns NotFound", func(t *testing.T) {
+		t.Parallel()
+
+		transport := &writerTestTransport{
+			getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+		}
+		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
+		writer := NewB2BOrgWriter(client, &fakeEligibilityReader{})
+
+		_, err := writer.CreateB2BOrg(context.Background(), canonicalAccountSFID, model.B2BOrgInput{})
+
+		var notFound errs.NotFound
+		assert.True(t, errors.As(err, &notFound), "expected NotFound, got %T: %v", err, err)
 	})
 }
 
@@ -301,7 +426,7 @@ func TestB2BOrgWriter_UpdateB2BOrg(t *testing.T) {
 			getResponse: fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
 		}
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		org, err := writer.UpdateB2BOrg(context.Background(), uid, model.B2BOrgInput{})
 
@@ -320,7 +445,7 @@ func TestB2BOrgWriter_UpdateB2BOrg(t *testing.T) {
 			fakeResponse(http.StatusOK, updatedAccountJSON, nil), // re-fetch GET
 		)
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		input := model.B2BOrgInput{Name: "Linux Foundation (Updated)"}
 		org, err := writer.UpdateB2BOrg(context.Background(), uid, input)
@@ -342,7 +467,7 @@ func TestB2BOrgWriter_UpdateB2BOrg(t *testing.T) {
 			fakeResponse(http.StatusOK, updatedAccountJSON, nil),
 		)
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		input := model.B2BOrgInput{
 			Name:              "Linux Foundation (Updated)",
@@ -366,7 +491,7 @@ func TestB2BOrgWriter_UpdateB2BOrg(t *testing.T) {
 			nil, // re-fetch should not occur
 		)
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		input := model.B2BOrgInput{
 			Name:              "Linux Foundation",
@@ -387,7 +512,7 @@ func TestB2BOrgWriter_UpdateB2BOrg(t *testing.T) {
 
 		transport := &writerTestTransport{}
 		client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-		writer := NewB2BOrgWriter(client)
+		writer := NewB2BOrgWriter(client, companyEligibility())
 
 		org, err := writer.UpdateB2BOrg(context.Background(), "not-a-valid-uid",
 			model.B2BOrgInput{Name: "Anything"})
