@@ -313,7 +313,8 @@ nats:
 
   # kv_bucket_cdc_repair is the configuration for the cdc-repair KV bucket.
   # Holds durable pending markers for CDC upserts skipped due to Salesforce API
-  # quota exhaustion, keyed "pending.{reindex_type}.{sfid}", drained via
+  # quota exhaustion, and for key contacts whose LFID lookup failed, keyed
+  # "pending.{reindex_type}.{sfid}", drained via
   # POST /admin/reindex {cdc_repair:true}. No MaxAge TTL — a pending marker must
   # never be silently evicted before it is drained. History is 1 (a pending set —
   # old marker revisions are never needed, only the current revision for

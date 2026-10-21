@@ -9,8 +9,9 @@ import (
 )
 
 // RepairMarker is one pending entry in the CDC quota-repair queue: a record the
-// CDC consumer skipped while the Salesforce API quota was exhausted, awaiting
-// repair via POST /admin/reindex {cdc_repair:true}.
+// CDC consumer skipped while the Salesforce API quota was exhausted, or a
+// key_contact whose LFID lookup failed when the CDC consumer or /admin/reindex
+// published it, awaiting repair via POST /admin/reindex {cdc_repair:true}.
 type RepairMarker struct {
 	// Type is the reindex target type: "b2b_org", "project_membership", or
 	// "key_contact".
@@ -23,11 +24,17 @@ type RepairMarker struct {
 	// revision-conditional delete that guards against a concurrent re-skip or a
 	// concurrent drain.
 	Revision uint64
+	// LookupAttempts counts the drains whose key_contact LFID lookup failed
+	// for this marker. Markers written before the field existed, and every
+	// fresh PutPending, read as 0.
+	LookupAttempts int
 }
 
 // CDCRepairStore is the durable queue of records skipped by the CDC consumer's
-// quota guard. Writes happen on the consumer side (on skip); listing and
-// deletion happen on the API side (during a cdc_repair drain).
+// quota guard, plus key contacts published without a username because their
+// LFID lookup failed. Writes happen on the consumer side (on skip or lookup
+// failure) and in /admin/reindex (on lookup failure); listing and deletion
+// happen on the API side (during a cdc_repair drain).
 //
 // There is no distributed lock: concurrent drains are made safe by idempotent
 // targeted reindex plus the revision-conditional DeletePending below.
@@ -39,8 +46,16 @@ type CDCRepairStore interface {
 
 	// ListPending returns up to limit pending markers for reindexType, each
 	// carrying the KV revision observed at selection. It does not enumerate the
-	// full bucket and does not promise any particular ordering.
+	// full bucket. Markers come back oldest write first, so a marker rewritten
+	// by RequeuePending is selected after every marker not rewritten since.
 	ListPending(ctx context.Context, reindexType string, limit int) ([]RepairMarker, error)
+
+	// RequeuePending revision-conditionally rewrites marker with the given
+	// LookupAttempts, keeping its SkippedAt. The rewrite moves it behind every
+	// other pending marker of its type. Returns Conflict when the stored
+	// revision no longer matches (a fresh write or a concurrent drain won) or
+	// the marker is gone; the stored marker is then left as it is.
+	RequeuePending(ctx context.Context, marker RepairMarker, lookupAttempts int) error
 
 	// DeletePending revision-conditionally deletes the marker for
 	// (reindexType, sfid). It returns a Conflict error when the stored revision

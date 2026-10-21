@@ -526,10 +526,13 @@ func reindexTypeForCDCEntity(entity string) (string, bool) {
 }
 
 // recordSkippedForRepair writes one pending repair marker per skipped record so
-// it can be repaired later. ids are already canonical 18-character SFIDs
-// (partitionRecordIDs normalizes before the quota check). Each marker is written
-// once; on any failure the exact failed IDs are logged at ERROR (chunked) as the
-// recovery backstop. The caller still advances the replay cursor regardless.
+// it can be repaired later: every record of an upsert batch the quota guard
+// skipped, and each key contact whose LFID lookup failed in processKeyContact.
+// ids are already canonical 18-character SFIDs (partitionRecordIDs normalizes
+// before the quota check; batch readers return canonical UIDs). Each marker is
+// written once; on any failure the exact failed IDs are logged at ERROR
+// (chunked) as the recovery backstop. The caller still advances the replay
+// cursor regardless.
 func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string, ids []string) {
 	if o.repairStore == nil || len(ids) == 0 {
 		return
@@ -1490,8 +1493,10 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 
 	// Attempt LFID resolution when the contact has no stored username. CDC is a
 	// passive sync and must never send emails — provisioning is always silent.
+	// A whitespace-only email is no email: auth-service would reject it.
 	var revokeErr error
-	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
+	lookupFailed := false
+	if o.userReader != nil && kc.Username == "" && strings.TrimSpace(kc.Email) != "" {
 		if username, usernameErr := o.userReader.UsernameByEmail(ctx, kc.Email); usernameErr != nil {
 			if pkgerrors.IsNotFound(usernameErr) {
 				// A definitive miss: the email no longer resolves to any registered
@@ -1504,9 +1509,13 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				}
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
-				// leave Username empty and any existing grant untouched.
+				// leave Username empty and any existing grant untouched. The
+				// contact is queued for a cdc_repair drain once its publishes below
+				// are out: the doc goes out without a username, and nothing else
+				// revisits it until its Project_Role__c record changes again.
 				slog.WarnContext(ctx, "cdc: resolve LFID for key contact failed",
 					"uid", kc.UID, "error", usernameErr)
+				lookupFailed = true
 			}
 		} else {
 			kc.Username = username
@@ -1542,6 +1551,13 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				"uid", kc.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
 			pubErr = nil
 		}
+	}
+
+	// Queued only after this contact's publishes: a marker visible earlier lets
+	// a concurrent drain repair the username and settle the marker before the
+	// empty-username publish above lands on top of it.
+	if lookupFailed {
+		o.recordSkippedForRepair(ctx, "Project_Role__c", []string{kc.UID})
 	}
 
 	inactive := strings.EqualFold(kc.Status, constants.RoleStatusInactive)
