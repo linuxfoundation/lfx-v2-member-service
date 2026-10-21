@@ -446,9 +446,7 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
-					if lookupErr := r.resolveKeyContactUsername(ctx, log, kc, live); lookupErr != nil {
-						r.queueKeyContactUsernameRetry(ctx, log, kc.UID)
-					}
+					lookupErr := r.resolveKeyContactUsername(ctx, log, kc, live)
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					if ok {
 						kc.ProjectUID = uid
@@ -458,6 +456,9 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 							"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 					}
 					PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister, live)
+					if lookupErr != nil {
+						r.queueKeyContactUsernameRetry(ctx, log, kc.UID)
+					}
 					published++
 				}
 			}
@@ -956,9 +957,7 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			published++
 			continue
 		}
-		if lookupErr := r.resolveKeyContactUsername(ctx, log, kc, live); lookupErr != nil {
-			r.queueKeyContactUsernameRetry(ctx, log, kc.UID)
-		}
+		lookupErr := r.resolveKeyContactUsername(ctx, log, kc, live)
 		uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if ok {
 			kc.ProjectUID = uid
@@ -968,6 +967,9 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 				"uid", kc.UID, "slug", kc.ProjectSlug, "publish_failed_for_backfill_repair", true)
 		}
 		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister, live)
+		if lookupErr != nil {
+			r.queueKeyContactUsernameRetry(ctx, log, kc.UID)
+		}
 		published++
 	}
 
@@ -1017,7 +1019,10 @@ func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger
 
 // queueKeyContactUsernameRetry records a key_contact marker in the cdc-repair
 // queue for a contact whose LFID lookup failed, so a cdc_repair drain retries
-// it. A nil repair store (mock mode) leaves only the lookup warning.
+// it. Callers queue only after the contact's publishes: a marker visible
+// earlier lets a concurrent drain repair the username and settle the marker
+// before the empty-username publish lands on top of it. A nil repair store
+// (mock mode) leaves only the lookup warning.
 func (r *Runner) queueKeyContactUsernameRetry(ctx context.Context, log *slog.Logger, uid string) {
 	if r.repairStore == nil {
 		return

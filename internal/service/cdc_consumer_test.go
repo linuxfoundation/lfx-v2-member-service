@@ -226,9 +226,16 @@ type subjectCapturingPublisher struct {
 	// returned instead of accessErr. Use it to fail a specific message rather
 	// than every access publish.
 	beforeAccess func(subject string, msg any) error
+
+	// beforeIndexer, when set, runs at the top of Indexer, before the message
+	// is recorded. Use it to observe other state at the moment of a publish.
+	beforeIndexer func()
 }
 
 func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, msg any, _ bool) error {
+	if p.beforeIndexer != nil {
+		p.beforeIndexer()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.indexer = append(p.indexer, subject)
@@ -2415,8 +2422,10 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailTransientFailure_LeavesGrantUntouch
 // the indexer doc. A definitive miss publishes the doc without one and queues
 // nothing. A failed lookup also publishes without one and does not fail the
 // event, but queues a key_contact cdc-repair marker: the record may never
-// change again in Salesforce, so no later CDC event would retry it. A
-// whitespace-only email is no email: no lookup, nothing queued.
+// change again in Salesforce, so no later CDC event would retry it. The marker
+// must not exist yet when the doc is published, or a concurrent drain could
+// repair the username and settle it before this empty-username publish lands.
+// A whitespace-only email is no email: no lookup, nothing queued.
 func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -2460,6 +2469,8 @@ func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
 			pub := &subjectCapturingPublisher{}
 			repairStore := &mock.MockCDCRepairStore{}
 			replay := &fakeReplayStore{}
+			var queuedAtPublish []int
+			pub.beforeIndexer = func() { queuedAtPublish = append(queuedAtPublish, len(repairStore.Puts)) }
 
 			consumer := newProjectRoleCDCConsumer(kc, pub,
 				svc.WithCDCUserReader(tc.reader),
@@ -2470,6 +2481,7 @@ func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
 
 			require.Len(t, pub.indexerMessages, 1, "the key contact must be published whatever the lookup outcome")
 			assert.Equal(t, tc.wantUsername, indexerDataUsername(t, pub, 0))
+			assert.Equal(t, []int{0}, queuedAtPublish, "no retry marker may be selectable while the empty-username doc is in flight")
 			if tc.wantQueued {
 				assert.Equal(t, []mock.MockRepairPut{{Type: "key_contact", SFID: kc.UID}}, repairStore.Puts)
 			} else {

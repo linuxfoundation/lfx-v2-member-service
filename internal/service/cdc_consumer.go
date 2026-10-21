@@ -1495,6 +1495,7 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 	// passive sync and must never send emails — provisioning is always silent.
 	// A whitespace-only email is no email: auth-service would reject it.
 	var revokeErr error
+	lookupFailed := false
 	if o.userReader != nil && kc.Username == "" && strings.TrimSpace(kc.Email) != "" {
 		if username, usernameErr := o.userReader.UsernameByEmail(ctx, kc.Email); usernameErr != nil {
 			if pkgerrors.IsNotFound(usernameErr) {
@@ -1508,13 +1509,13 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				}
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
-				// leave Username empty and any existing grant untouched. Queue the
-				// contact for a cdc_repair drain: the doc below is published without
-				// a username, and nothing else revisits it until its
-				// Project_Role__c record changes again.
+				// leave Username empty and any existing grant untouched. The
+				// contact is queued for a cdc_repair drain once its publishes below
+				// are out: the doc goes out without a username, and nothing else
+				// revisits it until its Project_Role__c record changes again.
 				slog.WarnContext(ctx, "cdc: resolve LFID for key contact failed",
 					"uid", kc.UID, "error", usernameErr)
-				o.recordSkippedForRepair(ctx, "Project_Role__c", []string{kc.UID})
+				lookupFailed = true
 			}
 		} else {
 			kc.Username = username
@@ -1550,6 +1551,13 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				"uid", kc.UID, "error", pubErr, "publish_failed_for_backfill_repair", true)
 			pubErr = nil
 		}
+	}
+
+	// Queued only after this contact's publishes: a marker visible earlier lets
+	// a concurrent drain repair the username and settle the marker before the
+	// empty-username publish above lands on top of it.
+	if lookupFailed {
+		o.recordSkippedForRepair(ctx, "Project_Role__c", []string{kc.UID})
 	}
 
 	inactive := strings.EqualFold(kc.Status, constants.RoleStatusInactive)

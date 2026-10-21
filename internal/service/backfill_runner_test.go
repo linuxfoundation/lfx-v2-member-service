@@ -967,8 +967,10 @@ func lookupUnavailable(context.Context, string) (string, error) {
 // A failed lookup also publishes without one and does not fail the run; it is
 // not evidence the email is unregistered, so a still-valid recorded grant is
 // neither revoked nor cleared, and the contact is queued in cdc-repair so a
-// drain retries the lookup. A whitespace-only email is no email: no lookup,
-// nothing queued.
+// drain retries the lookup. The marker must not exist yet when the doc is
+// published, or a concurrent drain could repair the username and settle it
+// before this empty-username publish lands. A whitespace-only email is no
+// email: no lookup, nothing queued.
 func TestBackfillRunner_KeyContact_UsernameResolution(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -1024,6 +1026,8 @@ func TestBackfillRunner_KeyContact_UsernameResolution(t *testing.T) {
 
 			pub := &subjectCapturingPublisher{}
 			repairStore := &mock.MockCDCRepairStore{}
+			var queuedAtPublish []int
+			pub.beforeIndexer = func() { queuedAtPublish = append(queuedAtPublish, len(repairStore.Puts)) }
 			grants := &mock.MockKeyContactGrantIndex{}
 			if tc.seedGrant {
 				grants.Entries = map[string]port.KeyContactGrant{kc.UID: {MembershipUID: "pm-1", Username: "jdoe", Revision: 1}}
@@ -1045,6 +1049,7 @@ func TestBackfillRunner_KeyContact_UsernameResolution(t *testing.T) {
 
 			require.Len(t, pub.indexerMessages, 1, "the key contact must be published whatever the lookup outcome")
 			assert.Equal(t, tc.wantUsername, indexerDataUsername(t, pub, 0))
+			assert.Equal(t, []int{0}, queuedAtPublish, "no retry marker may be selectable while the empty-username doc is in flight")
 			if tc.wantQueued {
 				assert.Equal(t, []mock.MockRepairPut{{Type: "key_contact", SFID: kc.UID}}, repairStore.Puts)
 			} else {
