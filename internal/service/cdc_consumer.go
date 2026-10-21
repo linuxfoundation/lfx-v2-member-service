@@ -1493,8 +1493,9 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 
 	// Attempt LFID resolution when the contact has no stored username. CDC is a
 	// passive sync and must never send emails — provisioning is always silent.
+	// A whitespace-only email is no email: auth-service would reject it.
 	var revokeErr error
-	if o.userReader != nil && kc.Username == "" && kc.Email != "" {
+	if o.userReader != nil && kc.Username == "" && strings.TrimSpace(kc.Email) != "" {
 		if username, usernameErr := o.userReader.UsernameByEmail(ctx, kc.Email); usernameErr != nil {
 			if pkgerrors.IsNotFound(usernameErr) {
 				// A definitive miss: the email no longer resolves to any registered

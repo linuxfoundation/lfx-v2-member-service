@@ -24,6 +24,10 @@ type RepairMarker struct {
 	// revision-conditional delete that guards against a concurrent re-skip or a
 	// concurrent drain.
 	Revision uint64
+	// LookupAttempts counts the drains whose key_contact LFID lookup failed
+	// for this marker. Markers written before the field existed, and every
+	// fresh PutPending, read as 0.
+	LookupAttempts int
 }
 
 // CDCRepairStore is the durable queue of records skipped by the CDC consumer's
@@ -42,8 +46,16 @@ type CDCRepairStore interface {
 
 	// ListPending returns up to limit pending markers for reindexType, each
 	// carrying the KV revision observed at selection. It does not enumerate the
-	// full bucket and does not promise any particular ordering.
+	// full bucket. Markers come back oldest write first, so a marker rewritten
+	// by RequeuePending is selected after every marker not rewritten since.
 	ListPending(ctx context.Context, reindexType string, limit int) ([]RepairMarker, error)
+
+	// RequeuePending revision-conditionally rewrites marker with the given
+	// LookupAttempts, keeping its SkippedAt. The rewrite moves it behind every
+	// other pending marker of its type. Returns Conflict when the stored
+	// revision no longer matches (a fresh write or a concurrent drain won) or
+	// the marker is gone; the stored marker is then left as it is.
+	RequeuePending(ctx context.Context, marker RepairMarker, lookupAttempts int) error
 
 	// DeletePending revision-conditionally deletes the marker for
 	// (reindexType, sfid). It returns a Conflict error when the stored revision

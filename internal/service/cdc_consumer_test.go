@@ -2410,15 +2410,17 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailTransientFailure_LeavesGrantUntouch
 	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
 }
 
-// TestCDCConsumer_ProjectRole_Upsert_UsernameResolution covers the three LFID
-// lookup outcomes on a Project_Role__c upsert. A resolved username is published
-// on the indexer doc. A definitive miss publishes the doc without one and
-// queues nothing. A failed lookup also publishes without one and does not fail
-// the event, but queues a key_contact cdc-repair marker: the record may never
-// change again in Salesforce, so no later CDC event would retry it.
+// TestCDCConsumer_ProjectRole_Upsert_UsernameResolution covers the LFID lookup
+// outcomes on a Project_Role__c upsert. A resolved username is published on
+// the indexer doc. A definitive miss publishes the doc without one and queues
+// nothing. A failed lookup also publishes without one and does not fail the
+// event, but queues a key_contact cdc-repair marker: the record may never
+// change again in Salesforce, so no later CDC event would retry it. A
+// whitespace-only email is no email: no lookup, nothing queued.
 func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
 	cases := []struct {
 		name         string
+		email        string
 		reader       *fakeUserReader
 		wantUsername string
 		wantQueued   bool
@@ -2437,12 +2439,23 @@ func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
 			reader:     &fakeUserReader{err: pkgerrors.NewUnexpected("auth-service unreachable", nil)},
 			wantQueued: true,
 		},
+		{
+			// The reader would fail, so a lookup would queue: no marker proves
+			// the whitespace-only email was never sent to auth-service.
+			name:   "whitespace-only email is not looked up or queued",
+			email:  " \t ",
+			reader: &fakeUserReader{err: pkgerrors.NewValidation("email is required")},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			email := tc.email
+			if email == "" {
+				email = "jdoe@example.com"
+			}
 			kc := &model.KeyContact{
 				UID: sfid("kc-res-6"), MembershipUID: "pm-6",
-				B2BOrgUID: "001000000000006AAA", Email: "jdoe@example.com",
+				B2BOrgUID: "001000000000006AAA", Email: email,
 			}
 			pub := &subjectCapturingPublisher{}
 			repairStore := &mock.MockCDCRepairStore{}
@@ -2945,6 +2958,10 @@ func (s *failFirstPutRepairStore) PutPending(ctx context.Context, reindexType, s
 
 func (s *failFirstPutRepairStore) ListPending(ctx context.Context, reindexType string, limit int) ([]port.RepairMarker, error) {
 	return s.inner.ListPending(ctx, reindexType, limit)
+}
+
+func (s *failFirstPutRepairStore) RequeuePending(ctx context.Context, marker port.RepairMarker, lookupAttempts int) error {
+	return s.inner.RequeuePending(ctx, marker, lookupAttempts)
 }
 
 func (s *failFirstPutRepairStore) DeletePending(ctx context.Context, reindexType, sfid string, revision uint64) error {
