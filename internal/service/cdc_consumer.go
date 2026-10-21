@@ -526,10 +526,13 @@ func reindexTypeForCDCEntity(entity string) (string, bool) {
 }
 
 // recordSkippedForRepair writes one pending repair marker per skipped record so
-// it can be repaired later. ids are already canonical 18-character SFIDs
-// (partitionRecordIDs normalizes before the quota check). Each marker is written
-// once; on any failure the exact failed IDs are logged at ERROR (chunked) as the
-// recovery backstop. The caller still advances the replay cursor regardless.
+// it can be repaired later: every record of an upsert batch the quota guard
+// skipped, and each key contact whose LFID lookup failed in processKeyContact.
+// ids are already canonical 18-character SFIDs (partitionRecordIDs normalizes
+// before the quota check; batch readers return canonical UIDs). Each marker is
+// written once; on any failure the exact failed IDs are logged at ERROR
+// (chunked) as the recovery backstop. The caller still advances the replay
+// cursor regardless.
 func (o *CDCConsumer) recordSkippedForRepair(ctx context.Context, entity string, ids []string) {
 	if o.repairStore == nil || len(ids) == 0 {
 		return
@@ -1504,9 +1507,13 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 				}
 			} else {
 				// Transport-level failure — not evidence the email is unregistered;
-				// leave Username empty and any existing grant untouched.
+				// leave Username empty and any existing grant untouched. Queue the
+				// contact for a cdc_repair drain: the doc below is published without
+				// a username, and nothing else revisits it until its
+				// Project_Role__c record changes again.
 				slog.WarnContext(ctx, "cdc: resolve LFID for key contact failed",
 					"uid", kc.UID, "error", usernameErr)
+				o.recordSkippedForRepair(ctx, "Project_Role__c", []string{kc.UID})
 			}
 		} else {
 			kc.Username = username

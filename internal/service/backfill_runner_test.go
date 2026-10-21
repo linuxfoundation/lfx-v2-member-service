@@ -974,6 +974,93 @@ func TestBackfillRunner_KeyContact_TransientLookupFailure_LeavesGrantUntouched(t
 	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
 }
 
+// lookupNotFound and lookupUnavailable are the two non-success outcomes of the
+// auth-service email_to_username lookup: a definitive "no registered account"
+// answer, and a failure that says nothing about the email.
+func lookupNotFound(context.Context, string) (string, error) {
+	return "", pkgerrors.NewNotFound("user not found")
+}
+
+func lookupUnavailable(context.Context, string) (string, error) {
+	return "", pkgerrors.NewUnexpected("auth-service unreachable", nil)
+}
+
+// TestBackfillRunner_KeyContact_UsernameResolution covers the three LFID lookup
+// outcomes on a full key_contact reindex. A resolved username is published on
+// the indexer doc. A definitive miss publishes the doc without one and queues
+// nothing: an unregistered email is a final answer. A failed lookup also
+// publishes without one and does not fail the run, but queues the contact in
+// cdc-repair; otherwise the doc stays username-less until its Project_Role__c
+// record next changes, which for most key contacts is never.
+func TestBackfillRunner_KeyContact_UsernameResolution(t *testing.T) {
+	cases := []struct {
+		name         string
+		lookup       userReaderFunc
+		wantUsername string
+		wantQueued   bool
+	}{
+		{
+			name:         "resolved username is set",
+			lookup:       func(context.Context, string) (string, error) { return "jdoe", nil },
+			wantUsername: "jdoe",
+		},
+		{
+			name:   "definitive miss leaves username empty without queuing",
+			lookup: lookupNotFound,
+		},
+		{
+			name:       "lookup error still publishes and queues a retry",
+			lookup:     lookupUnavailable,
+			wantQueued: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := &model.KeyContact{UID: "a0J000000000021AAA", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "jdoe@example.com"}
+			resolver := mock.NewMockProjectResolver()
+			resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+
+			pub := &subjectCapturingPublisher{}
+			repairStore := &mock.MockCDCRepairStore{}
+			iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
+			runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+				svc.WithUserReader(tc.lookup), svc.WithRepairStore(repairStore), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+			require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
+
+			require.Len(t, pub.indexerMessages, 1, "the key contact must be published whatever the lookup outcome")
+			assert.Equal(t, tc.wantUsername, indexerDataUsername(t, pub, 0))
+			if tc.wantQueued {
+				assert.Equal(t, []mock.MockRepairPut{{Type: "key_contact", SFID: kc.UID}}, repairStore.Puts)
+			} else {
+				assert.Empty(t, repairStore.Puts)
+			}
+		})
+	}
+}
+
+// TestBackfillRunner_TargetedKeyContact_LookupError_QueuesRetry covers the
+// batched targeted path, the operator's tool for repairing named contacts: a
+// failed lookup must not drop the contact silently there either.
+func TestBackfillRunner_TargetedKeyContact_LookupError_QueuesRetry(t *testing.T) {
+	kc := &model.KeyContact{UID: "a0J000000000022AAA", ProjectSlug: "proj", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "jdoe@example.com"}
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "proj"})
+
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+		svc.WithKeyContactBatchReader(&countingKeyContactBatchReader{contacts: []*model.KeyContact{kc}}),
+		svc.WithUserReader(userReaderFunc(lookupUnavailable)), svc.WithRepairStore(repairStore),
+		svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact", Items: []string{kc.UID}}))
+
+	require.Len(t, pub.indexerMessages, 1, "a failed lookup must not block the publish")
+	assert.Empty(t, indexerDataUsername(t, pub, 0))
+	assert.Equal(t, []mock.MockRepairPut{{Type: "key_contact", SFID: kc.UID}}, repairStore.Puts)
+}
+
 func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
 	kc := &model.KeyContact{UID: "kc-tgt-1", ProjectSlug: "unknown-slug", MembershipUID: "pm-1", B2BOrgUID: "org-tgt-1", Username: "jdoe"}
 	resolver := mock.NewMockProjectResolver()
@@ -1261,6 +1348,61 @@ func TestBackfillRunner_RunRepair_KeyContact_UnresolvedProjectUID_RetriesAndKeep
 	assert.Empty(t, pub.indexerMessages, "unresolved project_uid must skip the indexer publish")
 	assert.NotEmpty(t, pub.accessMessages, "unresolved project_uid must still publish OpenFGA")
 	assert.Empty(t, repairStore.Deletes, "a partial projection (retry) must retain the marker")
+}
+
+// TestBackfillRunner_RunRepair_KeyContact_UsernameLookup covers the drain end of
+// a queued username retry: the marker is cleared once the lookup succeeds and
+// the doc carries the username, and retained while the lookup keeps failing,
+// with the record still republished each time.
+func TestBackfillRunner_RunRepair_KeyContact_UsernameLookup(t *testing.T) {
+	cases := []struct {
+		name         string
+		lookup       userReaderFunc
+		wantUsername string
+		wantDeleted  bool
+	}{
+		{
+			name:         "resolved username clears the marker",
+			lookup:       func(context.Context, string) (string, error) { return "jdoe", nil },
+			wantUsername: "jdoe",
+			wantDeleted:  true,
+		},
+		{
+			name:        "definitive miss clears the marker",
+			lookup:      lookupNotFound,
+			wantDeleted: true,
+		},
+		{
+			name:   "lookup error retains the marker",
+			lookup: lookupUnavailable,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := &model.KeyContact{UID: "001000000000023AAA", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "jdoe@example.com"}
+			resolver := mock.NewMockProjectResolver()
+			resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+			pub := &subjectCapturingPublisher{}
+			repairStore := &mock.MockCDCRepairStore{}
+			gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+
+			runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver,
+				svc.WithUserReader(tc.lookup), svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge),
+				svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+			markers := []port.RepairMarker{{Type: "key_contact", SFID: kc.UID, Revision: 4}}
+			runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}, markers)
+
+			require.Len(t, pub.indexerMessages, 1, "the record must be republished whatever the lookup outcome")
+			assert.Equal(t, tc.wantUsername, indexerDataUsername(t, pub, 0))
+			if tc.wantDeleted {
+				assert.Equal(t, []mock.MockRepairDelete{{Type: "key_contact", SFID: kc.UID, Revision: 4}}, repairStore.Deletes)
+			} else {
+				assert.Empty(t, repairStore.Deletes, "an unresolved username must keep the marker for the next drain")
+			}
+			assert.Empty(t, repairStore.Puts, "the drain retains the selected marker rather than writing another")
+		})
+	}
 }
 
 // ── cdc_repair drain (RunRepair) batch/gate tests ─────────────────────────────

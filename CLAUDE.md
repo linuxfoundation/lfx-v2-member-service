@@ -309,7 +309,7 @@ Stores the Salesforce Pub/Sub replay cursor (opaque `[]byte`) per CDC channel. *
 
 ### `cdc-repair` Bucket
 
-Stores durable pending markers for records the CDC consumer's quota guard skipped while the Salesforce API quota was near-exhausted. **Authoritative state** — no MaxAge TTL, `history: 1`. Key pattern: `pending.{reindex_type}.{sfid}` → `{"skipped_at": "<RFC 3339>"}`. Written by the consumer (`recordSkippedForRepair`); listed and revision-conditionally deleted by `POST /admin/reindex {cdc_repair:true}` (no distributed lock — idempotent reindex + revision-conditional delete is the sole race guard). See [docs/backfill-reindex.md](./docs/backfill-reindex.md#cdc-quota-repair-drain) and [docs/cdc-consumer.md](./docs/cdc-consumer.md#quota-guard).
+Stores durable pending markers for records the CDC consumer's quota guard skipped while the Salesforce API quota was near-exhausted, and for key contacts published without a username because their LFID lookup failed. **Authoritative state** — no MaxAge TTL, `history: 1`. Key pattern: `pending.{reindex_type}.{sfid}` → `{"skipped_at": "<RFC 3339>"}`. Written by the consumer (`recordSkippedForRepair`) and by `key_contact` reindex runs (`queueKeyContactUsernameRetry`); listed and revision-conditionally deleted by `POST /admin/reindex {cdc_repair:true}` (no distributed lock — idempotent reindex + revision-conditional delete is the sole race guard). See [docs/backfill-reindex.md](./docs/backfill-reindex.md#cdc-quota-repair-drain) and [docs/cdc-consumer.md](./docs/cdc-consumer.md#quota-guard).
 
 ### `key-contact-grants` Bucket
 

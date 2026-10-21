@@ -2410,6 +2410,62 @@ func TestCDCConsumer_ProjectRole_Upsert_EmailTransientFailure_LeavesGrantUntouch
 	assert.Empty(t, grants.Deletes, "the recorded grant must survive an inconclusive lookup")
 }
 
+// TestCDCConsumer_ProjectRole_Upsert_UsernameResolution covers the three LFID
+// lookup outcomes on a Project_Role__c upsert. A resolved username is published
+// on the indexer doc. A definitive miss publishes the doc without one and
+// queues nothing. A failed lookup also publishes without one and does not fail
+// the event, but queues a key_contact cdc-repair marker: the record may never
+// change again in Salesforce, so no later CDC event would retry it.
+func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
+	cases := []struct {
+		name         string
+		reader       *fakeUserReader
+		wantUsername string
+		wantQueued   bool
+	}{
+		{
+			name:         "resolved username is set",
+			reader:       &fakeUserReader{sub: "jdoe"},
+			wantUsername: "jdoe",
+		},
+		{
+			name:   "definitive miss leaves username empty without queuing",
+			reader: &fakeUserReader{err: pkgerrors.NewNotFound("user not found")},
+		},
+		{
+			name:       "lookup error still publishes and queues a retry",
+			reader:     &fakeUserReader{err: pkgerrors.NewUnexpected("auth-service unreachable", nil)},
+			wantQueued: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := &model.KeyContact{
+				UID: sfid("kc-res-6"), MembershipUID: "pm-6",
+				B2BOrgUID: "001000000000006AAA", Email: "jdoe@example.com",
+			}
+			pub := &subjectCapturingPublisher{}
+			repairStore := &mock.MockCDCRepairStore{}
+			replay := &fakeReplayStore{}
+
+			consumer := newProjectRoleCDCConsumer(kc, pub,
+				svc.WithCDCUserReader(tc.reader),
+				svc.WithCDCRepairStore(repairStore),
+			)
+
+			require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+			require.Len(t, pub.indexerMessages, 1, "the key contact must be published whatever the lookup outcome")
+			assert.Equal(t, tc.wantUsername, indexerDataUsername(t, pub, 0))
+			if tc.wantQueued {
+				assert.Equal(t, []mock.MockRepairPut{{Type: "key_contact", SFID: kc.UID}}, repairStore.Puts)
+			} else {
+				assert.Empty(t, repairStore.Puts)
+			}
+		})
+	}
+}
+
 func TestCDCConsumer_ProjectRole_Upsert_NilUserReader_PreservesExistingBehavior(t *testing.T) {
 	// nil userReader must not regress existing behavior: a contact with a stored
 	// Username still gets FGA member_put; no provisioning attempt is made.

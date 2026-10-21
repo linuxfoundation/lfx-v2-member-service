@@ -102,7 +102,8 @@ type Runner struct {
 	resolver               port.ProjectResolver
 	grantIndex             port.KeyContactGrantIndex
 
-	// cdc_repair collaborators (optional; only the repair path uses them).
+	// cdc_repair collaborators (optional). The drain uses all three;
+	// key_contact runs also write repairStore markers for failed LFID lookups.
 	repairStore          port.CDCRepairStore
 	quotaGauge           port.SalesforceQuotaGauge
 	repairQuotaThreshold float64
@@ -147,7 +148,7 @@ func WithRunnerB2BOrgAuditorTeams(teams []string) RunnerOption {
 }
 
 // WithRepairStore wires the durable CDC quota-repair queue drained by cdc_repair
-// runs.
+// runs. key_contact reindex runs also queue contacts whose LFID lookup failed.
 func WithRepairStore(s port.CDCRepairStore) RunnerOption {
 	return func(r *Runner) { r.repairStore = s }
 }
@@ -438,7 +439,9 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			for _, kc := range kcs {
 				total++
 				if !req.DryRun {
-					r.resolveKeyContactUsername(ctx, log, kc, live)
+					if r.resolveKeyContactUsername(ctx, log, kc, live) {
+						r.queueKeyContactUsernameRetry(ctx, log, kc.UID)
+					}
 					uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 					if ok {
 						kc.ProjectUID = uid
@@ -752,7 +755,7 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			return outcomeIssued
 		}
 		lister := siblingListerFor(r.keyContactsByMembership, r.userReader)
-		r.resolveKeyContactUsername(ctx, log, kc, lister)
+		lookupFailed := r.resolveKeyContactUsername(ctx, log, kc, lister)
 		resolvedUID, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if !ok {
 			log.ErrorContext(ctx, "skipping key_contact indexer publish; project_uid unresolved — publishing OpenFGA only",
@@ -763,6 +766,11 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		kc.ProjectUID = resolvedUID
 		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
 		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister, lister)
+		if lookupFailed {
+			// Published without a username: retain the repair marker so the
+			// next drain retries the lookup instead of settling the record.
+			return outcomeRetry
+		}
 		return outcomeIssued
 
 	case entityTypeB2BOrgSettings:
@@ -926,7 +934,9 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 			published++
 			continue
 		}
-		r.resolveKeyContactUsername(ctx, log, kc, live)
+		if r.resolveKeyContactUsername(ctx, log, kc, live) {
+			r.queueKeyContactUsernameRetry(ctx, log, kc.UID)
+		}
 		uid, ok := resolveProjectUID(ctx, r.resolver, kc.ProjectSlug, kc.ProjectUID)
 		if ok {
 			kc.ProjectUID = uid
@@ -953,26 +963,45 @@ func (r *Runner) runTargetedKeyContacts(ctx context.Context, log *slog.Logger, r
 // The caller supplies the live sibling lister so each mode keeps its own
 // quota policy: full/filtered runs pass the guarded lister, targeted and
 // single-item repairs pass the unguarded one.
-func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger, kc *model.KeyContact, live membershipKeyContactLister) {
+//
+// lookupFailed reports a lookup that failed without a definitive answer
+// (auth-service unreachable, rate-limited): Username stays empty and the
+// caller must keep the record queued for another attempt, since nothing else
+// revisits it until its Project_Role__c record changes.
+func (r *Runner) resolveKeyContactUsername(ctx context.Context, log *slog.Logger, kc *model.KeyContact, live membershipKeyContactLister) (lookupFailed bool) {
 	if r.userReader == nil || kc.Username != "" || kc.Email == "" {
-		return
+		return false
 	}
 	username, err := r.userReader.UsernameByEmail(ctx, kc.Email)
-	if err != nil {
-		if errs.IsNotFound(err) {
-			// A definitive miss: revoke any grant still recorded for this contact.
-			// Best-effort: this runner has no per-contact retry path, the next
-			// backfill or CDC pass revisits an unrevoked grant.
-			_ = revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered)
-		} else {
-			// Transport-level failure — not evidence the email is unregistered;
-			// leave Username empty and any existing grant untouched.
-			log.WarnContext(ctx, "resolve LFID for key contact failed",
-				"uid", kc.UID, "error", err)
-		}
+	if err == nil {
+		kc.Username = username
+		return false
+	}
+	if errs.IsNotFound(err) {
+		// A definitive miss: revoke any grant still recorded for this contact.
+		// Best-effort: this runner has no per-contact retry path, the next
+		// backfill or CDC pass revisits an unrevoked grant.
+		_ = revokeKeyContactGrantIfNoLongerLive(ctx, r.publisher, r.grantIndex, live, live, kc.UID, "", "", reasonEmailUnregistered)
+		return false
+	}
+	// Transport-level failure — not evidence the email is unregistered;
+	// leave Username empty and any existing grant untouched.
+	log.WarnContext(ctx, "resolve LFID for key contact failed",
+		"uid", kc.UID, "error", err)
+	return true
+}
+
+// queueKeyContactUsernameRetry records a key_contact marker in the cdc-repair
+// queue for a contact whose LFID lookup failed, so a cdc_repair drain retries
+// it. A nil repair store (mock mode) leaves only the lookup warning.
+func (r *Runner) queueKeyContactUsernameRetry(ctx context.Context, log *slog.Logger, uid string) {
+	if r.repairStore == nil {
 		return
 	}
-	kc.Username = username
+	if err := r.repairStore.PutPending(ctx, entityTypeKeyContact, uid); err != nil {
+		log.ErrorContext(ctx, "failed to queue key_contact for LFID re-resolution — recover with a targeted reindex",
+			"uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+	}
 }
 
 // backfillQuotaGuardedLister wraps the LIVE base sibling fetch so each

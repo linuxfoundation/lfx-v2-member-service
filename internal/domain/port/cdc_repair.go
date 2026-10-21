@@ -9,8 +9,9 @@ import (
 )
 
 // RepairMarker is one pending entry in the CDC quota-repair queue: a record the
-// CDC consumer skipped while the Salesforce API quota was exhausted, awaiting
-// repair via POST /admin/reindex {cdc_repair:true}.
+// CDC consumer skipped while the Salesforce API quota was exhausted, or a
+// key_contact whose LFID lookup failed when the CDC consumer or /admin/reindex
+// published it, awaiting repair via POST /admin/reindex {cdc_repair:true}.
 type RepairMarker struct {
 	// Type is the reindex target type: "b2b_org", "project_membership", or
 	// "key_contact".
@@ -26,8 +27,10 @@ type RepairMarker struct {
 }
 
 // CDCRepairStore is the durable queue of records skipped by the CDC consumer's
-// quota guard. Writes happen on the consumer side (on skip); listing and
-// deletion happen on the API side (during a cdc_repair drain).
+// quota guard, plus key contacts published without a username because their
+// LFID lookup failed. Writes happen on the consumer side (on skip or lookup
+// failure) and in /admin/reindex (on lookup failure); listing and deletion
+// happen on the API side (during a cdc_repair drain).
 //
 // There is no distributed lock: concurrent drains are made safe by idempotent
 // targeted reindex plus the revision-conditional DeletePending below.
