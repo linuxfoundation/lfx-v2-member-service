@@ -5684,3 +5684,46 @@ func TestCDCConsumer_Account_ParentRefresh_ChildReadFails_QueuesParent(t *testin
 
 	assert.Equal(t, []string{parent}, repairPutsOfType(repair, "b2b_org"))
 }
+
+// handlerBoundRepairStore refuses a write made on the handler's own context:
+// that context's deadline may be what failed the read, so a write on it could
+// fail the same way.
+type handlerBoundRepairStore struct {
+	mock.MockCDCRepairStore
+	handlerDone func() <-chan struct{}
+}
+
+func (s *handlerBoundRepairStore) PutPending(ctx context.Context, reindexType, sfid string) error {
+	if done := s.handlerDone(); done != nil && ctx.Done() == done {
+		return context.DeadlineExceeded
+	}
+	return s.MockCDCRepairStore.PutPending(ctx, reindexType, sfid)
+}
+
+// timingOutAccountBatch fails as a read that ran into the handler deadline and
+// records that handler's context.
+type timingOutAccountBatch struct{ done <-chan struct{} }
+
+func (b *timingOutAccountBatch) FetchAccountsBySFIDs(ctx context.Context, _ []string) ([]*model.B2BOrg, []string, error) {
+	b.done = ctx.Done()
+	return nil, nil, context.DeadlineExceeded
+}
+
+func TestCDCConsumer_AssetCreate_OwnerReadTimesOut_StillQueuesOwner(t *testing.T) {
+	owner := sfid("owner-timeout")
+	pm := &model.ProjectMembership{UID: sfid("pm-timeout"), B2BOrgUID: owner, ProjectUID: "p1"}
+	accounts := &timingOutAccountBatch{}
+	repair := &handlerBoundRepairStore{handlerDone: func() <-chan struct{} { return accounts.done }}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Asset", ChangeType: model.CDCChangeCreate, RecordIDs: []string{pm.UID}, ReplayID: []byte("to")}}},
+		&fakeB2BOrgReader{}, &mock.MockCacheInvalidator{}, &subjectCapturingPublisher{}, "",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCAccountBatchReader(accounts),
+		svc.WithCDCRepairStore(repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	require.NotNil(t, accounts.done, "the owner read ran")
+	assert.Equal(t, []string{owner}, repairPutsOfType(&repair.MockCDCRepairStore, "b2b_org"),
+		"the owner marker is written on a context detached from the handler's")
+}

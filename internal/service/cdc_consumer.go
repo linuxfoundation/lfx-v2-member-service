@@ -863,7 +863,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	if err != nil {
 		logBatchFetchError(ctx, "Account", upsertIDs, changeType, err)
 		if ownerRecheck {
-			o.recordSkippedForRepair(ctx, "Account", upsertIDs)
+			o.queueForRepairDetached(ctx, "Account", upsertIDs)
 		}
 		if isRestore(changeType) {
 			return errors.Join(errRestoreIncomplete, err)
@@ -904,7 +904,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		if childMap == nil {
 			childMap = map[string][]string{}
 		}
-		o.recordSkippedForRepair(ctx, "Account", staleParents)
+		o.queueForRepairDetached(ctx, "Account", staleParents)
 		if ownerRecheck {
 			// The owners did not change: publishing them with an empty child
 			// list would clear a correct is_parent.
@@ -912,7 +912,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 			for _, org := range orgs {
 				owners = append(owners, org.UID)
 			}
-			o.recordSkippedForRepair(ctx, "Account", owners)
+			o.queueForRepairDetached(ctx, "Account", owners)
 			return nil
 		}
 	}
@@ -1013,7 +1013,7 @@ func (o *CDCConsumer) refreshParentIndex(ctx context.Context, parentUIDs []strin
 	if err != nil {
 		slog.WarnContext(ctx, "cdc: parent read failed — is_parent refresh queued for the repair run",
 			"parent_count", len(parentUIDs), "error", err, "publish_failed_for_backfill_repair", true)
-		o.recordSkippedForRepair(ctx, "Account", parentUIDs)
+		o.queueForRepairDetached(ctx, "Account", parentUIDs)
 		return
 	}
 	for _, parent := range parents {
@@ -1155,11 +1155,15 @@ func (o *CDCConsumer) removeAbsentFromIndex(ctx context.Context, entity string, 
 	}
 }
 
-// queueUnconfirmedIndexDeletes writes repair markers on a detached context: the
-// handler's own deadline may be what made the delete unconfirmed.
 func (o *CDCConsumer) queueUnconfirmedIndexDeletes(ctx context.Context, entity string, uids []string, cause error) {
 	slog.WarnContext(ctx, "cdc: index delete not confirmed — queued for the repair run",
 		"entity", entity, "uids", uids, "error", cause, "publish_failed_for_backfill_repair", true)
+	o.queueForRepairDetached(ctx, entity, uids)
+}
+
+// queueForRepairDetached writes repair markers on a detached, bounded context:
+// the handler's own deadline may be what made the read or delete fail.
+func (o *CDCConsumer) queueForRepairDetached(ctx context.Context, entity string, uids []string) {
 	markerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteAccessMarkerTimeout)
 	defer cancel()
 	o.recordSkippedForRepair(markerCtx, entity, uids)

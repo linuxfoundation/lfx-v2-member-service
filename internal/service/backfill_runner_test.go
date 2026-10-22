@@ -1506,10 +1506,14 @@ type pageEligibility struct {
 	missing    map[string]bool
 	err        error
 	calls      [][]string
+	afterCall  func()
 }
 
 func (e *pageEligibility) FetchB2BOrgEligibility(_ context.Context, uids []string) (map[string]bool, error) {
 	e.calls = append(e.calls, append([]string(nil), uids...))
+	if e.afterCall != nil {
+		defer e.afterCall()
+	}
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -1657,4 +1661,62 @@ func TestBackfillRunner_Settings_Full_CountingDryRun_ReadsNoEligibility(t *testi
 	require.NoError(t, settingsRunner(elig, &subjectCapturingPublisher{}, &mock.MockCDCRepairStore{}, uid).Run(context.Background(),
 		svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings", DryRun: true}))
 	assert.Empty(t, elig.calls, "a counting dry run makes no Salesforce read")
+}
+
+func TestBackfillRunner_Settings_Full_QuotaStopsBetweenEligibilityPages(t *testing.T) {
+	uids := make([]string, 250)
+	settingsStore := mock.NewMockB2BOrgSettings()
+	orgs := make(map[string]*model.B2BOrg, len(uids))
+	for i := range uids {
+		uids[i] = fmt.Sprintf("001%012dAAA", 100+i)
+		settingsStore.Seed(uids[i], &model.B2BOrgSettings{UID: uids[i]}, 1)
+		orgs[uids[i]] = &model.B2BOrg{UID: uids[i]}
+	}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+	elig := &pageEligibility{afterCall: func() { gauge.Current = 99 }}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &multiOrgReader{orgs: orgs}, mock.NewMockProjectMembershipReader(), nil, settingsStore,
+		&subjectCapturingPublisher{}, nil, "", nil, svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(elig))
+
+	err := runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings"})
+
+	require.ErrorContains(t, err, "quota threshold reached")
+	require.Len(t, elig.calls, 1, "the quota check stops the run before the next page is read")
+	assert.Len(t, elig.calls[0], 200)
+}
+
+// ── Membership repair queues its owner for an eligibility re-check ───────────
+
+func TestBackfillRunner_RunRepair_Membership_QueuesOwner(t *testing.T) {
+	const pmUID, owner = "11111111-1111-1111-1111-111111111111", "org-1"
+	newRunner := func(store *mock.MockCDCRepairStore, pub *subjectCapturingPublisher) *svc.Runner {
+		return svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(store), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+	}
+	repairReq := svc.BackfillRequest{RunID: "r", Type: "project_membership", CDCRepair: true}
+
+	t.Run("owner queued before the marker is cleared", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{}, &subjectCapturingPublisher{}
+		newRunner(store, pub).RunRepair(context.Background(), repairReq, repairMarkers("project_membership", pmUID))
+
+		assert.Equal(t, []string{owner}, repairPutsOfType(store, "b2b_org"))
+		assert.Len(t, store.Deletes, 1)
+		assert.Len(t, pub.indexerMessages, 1)
+	})
+
+	t.Run("failed owner write keeps the marker", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{PutErr: assert.AnError}, &subjectCapturingPublisher{}
+		newRunner(store, pub).RunRepair(context.Background(), repairReq, repairMarkers("project_membership", pmUID))
+
+		assert.Empty(t, store.Deletes, "the membership marker stays until its owner is queued")
+		assert.Empty(t, pub.indexerMessages)
+	})
+
+	t.Run("targeted reindex queues nothing", func(t *testing.T) {
+		store := &mock.MockCDCRepairStore{}
+		require.NoError(t, newRunner(store, &subjectCapturingPublisher{}).Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "project_membership", Items: []string{pmUID}}))
+
+		assert.Empty(t, store.Puts)
+	})
 }

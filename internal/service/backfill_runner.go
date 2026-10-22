@@ -74,6 +74,11 @@ const repairPageCap = 100
 // stops mid-run.
 const settingsQuotaCheckInterval = 100
 
+// settingsEligibilityPageSize is how many settings orgs share one eligibility
+// read. It must be a multiple of settingsQuotaCheckInterval so every read after
+// the first follows a quota check.
+const settingsEligibilityPageSize = 2 * settingsQuotaCheckInterval
+
 // errQuotaStop is returned from a full/filtered page callback (or the settings
 // flat loop) when the passive quota gauge reaches the admin threshold. runType
 // propagates it and Run treats it as a clean stop (stopped_early), not a
@@ -470,12 +475,6 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			return fmt.Errorf("listing org-settings keys: %w", listErr)
 		}
 		var eligible map[string]bool
-		if !req.DryRun || req.EnrichAvatars {
-			var eligErr error
-			if eligible, eligErr = r.b2bEligibility.FetchB2BOrgEligibility(ctx, orgUIDs); eligErr != nil {
-				return fmt.Errorf("reading org eligibility for settings backfill: %w", eligErr)
-			}
-		}
 		var avatarFailures int
 		for i, uid := range orgUIDs {
 			// Flat loop (no pages): check the passive gauge every N iterations so a
@@ -487,6 +486,13 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			// Non-enrich dry-run keeps the original "count only, no reads" behavior.
 			if req.DryRun && !req.EnrichAvatars {
 				continue
+			}
+			if i%settingsEligibilityPageSize == 0 {
+				page := orgUIDs[i:min(i+settingsEligibilityPageSize, len(orgUIDs))]
+				var eligErr error
+				if eligible, eligErr = r.b2bEligibility.FetchB2BOrgEligibility(ctx, page); eligErr != nil {
+					return fmt.Errorf("reading org eligibility for settings backfill: %w", eligErr)
+				}
 			}
 			if !eligible[uid] {
 				log.InfoContext(ctx, "org deleted or not eligible — skipping settings backfill", "uid", uid, "not_found", true)
@@ -778,6 +784,16 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			return outcomeRetry
 		}
 		pm.ProjectUID = resolvedUID
+		if req.CDCRepair && pm.B2BOrgUID != "" && r.repairStore != nil {
+			// The marker does not record a creation, and a first membership can
+			// make its owner eligible with no Account event; the b2b_org drain
+			// re-checks it. Queued before this marker is cleared so it survives.
+			if err := r.repairStore.PutPending(ctx, entityTypeB2BOrg, pm.B2BOrgUID); err != nil {
+				log.WarnContext(ctx, "failed to queue membership owner for re-check — retaining for retry",
+					"uid", uid, "owner_uid", pm.B2BOrgUID, "error", err, "publish_failed_for_backfill_repair", true)
+				return outcomeRetry
+			}
+		}
 		PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
 		PublishProjectMembershipFGA(ctx, r.publisher, pm)
 		return outcomeIssued
