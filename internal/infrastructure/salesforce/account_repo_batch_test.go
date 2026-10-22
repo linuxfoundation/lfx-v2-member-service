@@ -484,25 +484,82 @@ func TestAccountRepo_FetchAccountEligibility(t *testing.T) {
 	assert.Nil(t, missing, "no row means no non-deleted Account")
 }
 
-func TestAccountRepo_IsB2BOrgEligible(t *testing.T) {
+func eligibilityRecordJSON(id, recordType string, member bool) string {
+	return `{"Id":"` + id + `",` + eligibilityFields(recordType, member) + `}`
+}
+
+func TestAccountRepo_FetchB2BOrgEligibility(t *testing.T) {
 	t.Parallel()
 
-	sfid := batchParentSFID(7600)
-	tr := &seqQueryTransport{responses: []string{
-		soqlPageJSON("", `{"Id":"`+sfid+`",`+eligibilityFields("Company_Account", false)+`}`),
-		soqlPageJSON("", `{"Id":"`+sfid+`",`+eligibilityFields("Project_Account", false)+`}`),
-		soqlPageJSON(""),
-	}}
-	repo := NewAccountRepo(fakeSalesforce(t, tr), true)
+	company := batchParentSFID(7600)
+	project := batchParentSFID(7601)
+	deleted := batchParentSFID(7602)
 
-	for _, want := range []bool{true, false, false} {
-		got, err := repo.IsB2BOrgEligible(context.Background(), sfid)
+	t.Run("empty input makes no query", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(), nil)
 		require.NoError(t, err)
-		assert.Equal(t, want, got)
-	}
+		assert.Empty(t, got)
+		assert.Equal(t, 0, tr.queryCalls)
+	})
 
-	_, err := repo.IsB2BOrgEligible(context.Background(), "not-a-valid-sfid")
-	assert.Error(t, err)
+	t.Run("one query; deleted and invalid ids are absent", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{responses: []string{soqlPageJSON("",
+			eligibilityRecordJSON(company, "Company_Account", false),
+			eligibilityRecordJSON(project, "Project_Account", false),
+		)}}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(),
+			[]string{company, project, deleted, "not-a-valid-sfid"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]bool{company: true, project: false}, got)
+		require.Len(t, tr.queries, 1)
+		assert.Contains(t, tr.queries[0], "IsDeleted = false")
+		assert.Contains(t, tr.queries[0], "RecordType.DeveloperName")
+		assert.NotContains(t, tr.queries[0], "Id IN (SELECT AccountId FROM Asset",
+			"the read reports ineligible Accounts, so it must not filter them out")
+	})
+
+	t.Run("reads every page", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{responses: []string{
+			soqlPageJSON("/services/data/v63.0/query/01gNEXT-2000", eligibilityRecordJSON(company, "Company_Account", false)),
+			soqlPageJSON("", eligibilityRecordJSON(project, "Project_Account", true)),
+		}}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(),
+			[]string{company, project})
+		require.NoError(t, err)
+		assert.Equal(t, 2, tr.queryCalls)
+		assert.Equal(t, map[string]bool{company: true, project: true}, got)
+	})
+
+	sfids := make([]string, 201)
+	for i := range sfids {
+		sfids[i] = batchParentSFID(9000 + i)
+	}
+	first := soqlPageJSON("", eligibilityRecordJSON(sfids[0], model.RecordTypeCompanyAccount, false))
+	last := soqlPageJSON("", eligibilityRecordJSON(sfids[200], model.RecordTypeCompanyAccount, false))
+
+	t.Run("chunks of 200 are merged", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{responses: []string{first, last}}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(), sfids)
+		require.NoError(t, err)
+		assert.Equal(t, 2, tr.queryCalls)
+		assert.Equal(t, map[string]bool{sfids[0]: true, sfids[200]: true}, got)
+	})
+
+	t.Run("a failing chunk returns no partial map", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{
+			responses:     []string{first, `[{"message":"temporarily unavailable","errorCode":"SERVER_UNAVAILABLE"}]`},
+			queryStatuses: []int{200, 500},
+		}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(), sfids)
+		require.Error(t, err)
+		assert.Nil(t, got)
+	})
 }
 
 func TestAccountRepo_ChildLists_Eligibility(t *testing.T) {
@@ -620,17 +677,15 @@ func TestAccountRepo_CompanyAccountsExcluded(t *testing.T) {
 	})
 
 	t.Run("reindex eligibility check", func(t *testing.T) {
-		repo := newRepo(t,
-			soqlPageJSON("", `{"Id":"`+nonMember+`",`+eligibilityFields(company, false)+`}`),
-			soqlPageJSON("", `{"Id":"`+member+`",`+eligibilityFields(company, true)+`}`),
-		)
-		got, err := repo.IsB2BOrgEligible(context.Background(), nonMember)
+		repo := newRepo(t, soqlPageJSON("",
+			eligibilityRecordJSON(nonMember, company, false),
+			eligibilityRecordJSON(member, company, true),
+		))
+		got, err := repo.FetchB2BOrgEligibility(context.Background(), []string{nonMember, member})
 		require.NoError(t, err)
-		assert.False(t, got)
-
-		got, err = repo.IsB2BOrgEligible(context.Background(), member)
-		require.NoError(t, err)
-		assert.True(t, got)
+		assert.Equal(t, map[string]bool{nonMember: false, member: true}, got)
+		require.Len(t, tr.queries, 1)
+		assert.NotContains(t, tr.queries[0], "SELECT AccountId FROM Asset")
 	})
 
 	t.Run("website lookup", func(t *testing.T) {

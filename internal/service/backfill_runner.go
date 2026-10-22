@@ -119,9 +119,10 @@ type Runner struct {
 	// membership-group cache. Nil disables the sibling check.
 	keyContactsByMembership port.KeyContactsByMembershipReader
 
-	// b2bEligibility gates per-item b2b_org reindex: GetB2BOrg reads the
-	// sObject, which does not apply the eligibility rule. Nil is a wiring
-	// error: b2b_org items are retried rather than published unchecked.
+	// b2bEligibility gates targeted and cdc_repair b2b_org reindex, read once
+	// per page: GetB2BOrg reads the sObject, which does not apply the
+	// eligibility rule. Nil is a wiring error: b2b_org items are retried rather
+	// than published unchecked.
 	b2bEligibility port.B2BOrgEligibilityReader
 }
 
@@ -165,7 +166,7 @@ func WithQuotaGauge(g port.SalesforceQuotaGauge) RunnerOption {
 }
 
 // WithB2BOrgEligibilityReader wires the eligibility check applied to targeted
-// and cdc_repair b2b_org items.
+// and cdc_repair b2b_org items, one read per page.
 func WithB2BOrgEligibilityReader(e port.B2BOrgEligibilityReader) RunnerOption {
 	return func(r *Runner) { r.b2bEligibility = e }
 }
@@ -461,9 +462,19 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 		if req.EnrichAvatars && (r.userReader == nil || r.settingsWriter == nil) {
 			return fmt.Errorf("b2b_org_settings avatar enrichment requires a userReader and settingsWriter — pass WithUserReader/WithSettingsWriter to NewRunner")
 		}
+		if r.b2bEligibility == nil {
+			return fmt.Errorf("b2b_org_settings backfill requires a b2bEligibility reader — pass WithB2BOrgEligibilityReader to NewRunner")
+		}
 		orgUIDs, listErr := r.settingsReader.ListSettingsOrgUIDs(ctx)
 		if listErr != nil {
 			return fmt.Errorf("listing org-settings keys: %w", listErr)
+		}
+		var eligible map[string]bool
+		if !req.DryRun || req.EnrichAvatars {
+			var eligErr error
+			if eligible, eligErr = r.b2bEligibility.FetchB2BOrgEligibility(ctx, orgUIDs); eligErr != nil {
+				return fmt.Errorf("reading org eligibility for settings backfill: %w", eligErr)
+			}
 		}
 		var avatarFailures int
 		for i, uid := range orgUIDs {
@@ -475,6 +486,10 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			total++
 			// Non-enrich dry-run keeps the original "count only, no reads" behavior.
 			if req.DryRun && !req.EnrichAvatars {
+				continue
+			}
+			if !eligible[uid] {
+				log.InfoContext(ctx, "org deleted or not eligible — skipping settings backfill", "uid", uid, "not_found", true)
 				continue
 			}
 
@@ -651,12 +666,30 @@ func (r *Runner) newChildUIDsFetcher(ctx context.Context) func(uid string) ([]st
 	}
 }
 
+// eligibilityPage is one eligibility read covering every b2b_org uid of a
+// reindex page. A uid missing from eligible is deleted or unknown.
+type eligibilityPage struct {
+	eligible map[string]bool
+	err      error
+}
+
+// readEligibility reads eligibility once for the page's b2b_org or
+// b2b_org_settings uids; other types need none.
+func (r *Runner) readEligibility(ctx context.Context, sfType string, uids []string) eligibilityPage {
+	if (sfType != entityTypeB2BOrg && sfType != entityTypeB2BOrgSettings) || r.b2bEligibility == nil || len(uids) == 0 {
+		return eligibilityPage{}
+	}
+	eligible, err := r.b2bEligibility.FetchB2BOrgEligibility(ctx, uids)
+	return eligibilityPage{eligible: eligible, err: err}
+}
+
 // reindexItem reindexes a single (sfType, uid) and returns the outcome. It is
 // the shared per-item projection used by targeted reindex and cdc_repair. All
 // publish helpers are idempotent, so a repeated call is safe. A dependency
 // failure (child lookup, unresolved project UID, settings persist) is classified
 // as retry so a repair marker is retained rather than deleted.
-func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string, fetchChildUIDs func(string) ([]string, error)) reindexOutcome {
+func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string,
+	fetchChildUIDs func(string) ([]string, error), eligibility eligibilityPage) reindexOutcome {
 	switch sfType {
 	case entityTypeB2BOrg:
 		if r.b2bEligibility == nil {
@@ -664,34 +697,27 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 				"uid", uid, "publish_failed_for_backfill_repair", true)
 			return outcomeRetry
 		}
-		org, err := r.b2bReader.GetB2BOrg(ctx, uid)
-		if err != nil {
-			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+		removeOrg := func() error {
+			return publishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: uid}, indexerConstants.ActionDeleted)
 		}
-		eligible, eligErr := r.b2bEligibility.IsB2BOrgEligible(ctx, org.UID)
-		if eligErr != nil {
+		if eligibility.err != nil {
 			log.WarnContext(ctx, "failed to check b2b_org eligibility — retaining for retry",
-				"type", sfType, "uid", org.UID, "error", eligErr, "publish_failed_for_backfill_repair", true)
+				"type", sfType, "uid", uid, "error", eligibility.err, "publish_failed_for_backfill_repair", true)
 			return outcomeRetry
 		}
-		if !eligible {
+		if !eligibility.eligible[uid] {
 			// Same convergence as the CDC absent path: remove from the index,
-			// keep authorization. Full scans skip this Account, so this delete
-			// is the only convergence step: the marker is kept until the
-			// broker has it.
-			log.InfoContext(ctx, "b2b_org not eligible — removing from index",
-				"type", sfType, "uid", org.UID, "not_found", true)
-			if !req.DryRun {
-				if pubErr := publishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: org.UID}, indexerConstants.ActionDeleted); pubErr != nil {
-					return outcomeRetry
-				}
-				if flushErr := r.publisher.Flush(ctx); flushErr != nil {
-					log.WarnContext(ctx, "b2b_org index delete not confirmed — retaining for retry",
-						"type", sfType, "uid", org.UID, "error", flushErr, "publish_failed_for_backfill_repair", true)
-					return outcomeRetry
-				}
+			// keep authorization.
+			log.InfoContext(ctx, "b2b_org deleted or not eligible — removing from index",
+				"type", sfType, "uid", uid, "not_found", true)
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeOrg)
+		}
+		org, err := r.b2bReader.GetB2BOrg(ctx, uid)
+		if err != nil {
+			if outcome := logItemFetchOutcome(ctx, log, sfType, uid, err); outcome != outcomeNotFound {
+				return outcome
 			}
-			return outcomeNotFound
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeOrg)
 		}
 		// Resolve all dependencies before publishing so we never leave a partial
 		// projection (indexer without the matching parent FGA tuple).
@@ -722,9 +748,22 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		return outcomeIssued
 
 	case entityTypeProjectMembership:
+		removeMembership := func() error {
+			return publishProjectMembershipIndexer(ctx, r.publisher, &model.ProjectMembership{UID: uid}, indexerConstants.ActionDeleted)
+		}
 		pm, _, err := r.pmReader.AssembleProjectMembership(ctx, uid)
 		if err != nil {
-			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+			if outcome := logItemFetchOutcome(ctx, log, sfType, uid, err); outcome != outcomeNotFound {
+				return outcome
+			}
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeMembership)
+		}
+		if !strings.EqualFold(pm.TierFamily, membershipProductFamily) {
+			// The CDC batch query only returns Membership-product Assets, so
+			// an Asset outside that family is an absent record there too.
+			log.InfoContext(ctx, "project_membership is not a Membership product — removing from index",
+				"type", sfType, "uid", uid, "tier_family", pm.TierFamily, "not_found", true)
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeMembership)
 		}
 		if req.DryRun {
 			return outcomeIssued
@@ -771,6 +810,21 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 				"uid", uid, "publish_failed_for_backfill_repair", true)
 			return outcomeRetry
 		}
+		if r.b2bEligibility == nil {
+			log.ErrorContext(ctx, "b2b_org_settings reindex requires b2bEligibility — wiring error",
+				"uid", uid, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		if eligibility.err != nil {
+			log.WarnContext(ctx, "failed to check b2b_org eligibility — retaining for retry",
+				"type", sfType, "uid", uid, "error", eligibility.err, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		if !eligibility.eligible[uid] {
+			log.InfoContext(ctx, "org deleted or not eligible — skipping settings reindex",
+				"type", sfType, "uid", uid, "not_found", true)
+			return outcomeNotFound
+		}
 		org, orgErr := r.b2bReader.GetB2BOrg(ctx, uid)
 		if orgErr != nil {
 			return logItemFetchOutcome(ctx, log, sfType, uid, orgErr)
@@ -811,6 +865,30 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 	}
 }
 
+// membershipProductFamily is the Product2.Family of a qualifying membership,
+// the same value the CDC batch query filters on.
+const membershipProductFamily = "Membership"
+
+// removeFromIndex publishes an index delete for a record that no longer exists
+// or no longer qualifies, keeping its authorization, and confirms delivery.
+// outcomeNotFound clears a repair marker, so an unconfirmed removal returns
+// outcomeRetry: full scans skip such records, and this delete is the only
+// convergence step.
+func (r *Runner) removeFromIndex(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string, publish func() error) reindexOutcome {
+	if req.DryRun {
+		return outcomeNotFound
+	}
+	if err := publish(); err != nil {
+		return outcomeRetry
+	}
+	if err := r.publisher.Flush(ctx); err != nil {
+		log.WarnContext(ctx, "index delete not confirmed — retaining for retry",
+			"type", sfType, "uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+		return outcomeRetry
+	}
+	return outcomeNotFound
+}
+
 // logItemFetchOutcome logs a per-item fetch error and maps it to an outcome:
 // NotFound → outcomeNotFound; any other error → outcomeRetry.
 func logItemFetchOutcome(ctx context.Context, log *slog.Logger, sfType, uid string, err error) reindexOutcome {
@@ -826,7 +904,7 @@ func logItemFetchOutcome(ctx context.Context, log *slog.Logger, sfType, uid stri
 func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req BackfillRequest) {
 	// PM and KC are the prod volume drivers: when a batch reader is wired, fetch
 	// the whole page in one SOQL query instead of per-item Assemble* (~3–5 SF
-	// calls/item → ~1 batch). b2b_org stays per-item (see D2), and either type
+	// calls/item → ~1 batch). b2b_org stays per-item (its eligibility is read once per page), and either type
 	// falls back to per-item when its batch reader is unwired (e.g. mock mode).
 	switch req.Type {
 	case entityTypeProjectMembership:
@@ -842,9 +920,10 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 	}
 
 	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
+	eligibility := r.readEligibility(ctx, req.Type, req.Items)
 	var notFound, published int
 	for _, uid := range req.Items {
-		switch r.reindexItem(ctx, log, req, req.Type, uid, fetchChildUIDs) {
+		switch r.reindexItem(ctx, log, req, req.Type, uid, fetchChildUIDs, eligibility) {
 		case outcomeIssued:
 			published++
 		case outcomeNotFound:
@@ -1131,6 +1210,13 @@ func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []p
 	log.InfoContext(ctx, "repair drain started", "selected", len(markers))
 
 	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
+	markerUIDs := make([]string, 0, len(markers))
+	for _, m := range markers {
+		if m.Type == req.Type {
+			markerUIDs = append(markerUIDs, m.SFID)
+		}
+	}
+	eligibility := r.readEligibility(ctx, req.Type, markerUIDs)
 	var issued, notFound, retryRetained, stoppedEarly int
 	for i, m := range markers {
 		if r.midRunQuotaExceeded() {
@@ -1140,7 +1226,7 @@ func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []p
 			break
 		}
 
-		outcome := r.reindexItem(ctx, log, req, m.Type, m.SFID, fetchChildUIDs)
+		outcome := r.reindexItem(ctx, log, req, m.Type, m.SFID, fetchChildUIDs, eligibility)
 		if outcome == outcomeRetry {
 			// Retain the marker (fetch/dependency/partial-projection failure).
 			retryRetained++

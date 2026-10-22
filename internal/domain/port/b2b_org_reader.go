@@ -9,10 +9,15 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 )
 
-// B2BOrgEligibilityReader reports whether a Salesforce Account is a B2B
-// organization (model.IsB2BOrgEligible). A missing or deleted Account is not.
+// B2BOrgEligibilityReader reports which Salesforce Accounts are B2B
+// organizations (model.IsB2BOrgEligible), for a whole page of uids in one read.
 type B2BOrgEligibilityReader interface {
-	IsB2BOrgEligible(ctx context.Context, uid string) (bool, error)
+	// FetchB2BOrgEligibility returns uid → eligible for every non-deleted
+	// Account among uids. A uid missing from the map is deleted, unknown, or
+	// not a valid id; callers treat it as not an organization. Every page of
+	// every chunk is read, and any failed chunk fails the whole call with no
+	// partial map, so a missing uid is never the result of a short read.
+	FetchB2BOrgEligibility(ctx context.Context, uids []string) (map[string]bool, error)
 }
 
 // B2BOrgReader provides read access to B2BOrg (Salesforce Account) records.

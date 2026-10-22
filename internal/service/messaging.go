@@ -545,7 +545,9 @@ func buildB2BOrgIndexerInput(org *model.B2BOrg, action indexerConstants.MessageA
 }
 
 // PublishB2BOrgIndexer builds and publishes a MemberIndexerMessage for a B2BOrg.
-// Errors are swallowed and logged — /admin/reindex recovers missed records.
+// Errors are swallowed and logged — /admin/reindex recovers a missed upsert.
+// A full scan never revisits a record that no longer qualifies, so a removal
+// uses publishB2BOrgIndexer and confirms delivery instead.
 func PublishB2BOrgIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, action indexerConstants.MessageAction) {
 	_ = publishB2BOrgIndexer(ctx, p, org, action)
 }
@@ -731,8 +733,15 @@ func buildProjectMembershipIndexerInput(pm *model.ProjectMembership, action inde
 }
 
 // PublishProjectMembershipIndexer builds and publishes a MemberIndexerMessage for a ProjectMembership.
-// Errors are swallowed and logged — /admin/reindex recovers missed records.
+// Errors are swallowed and logged — /admin/reindex recovers a missed upsert;
+// a removal uses publishProjectMembershipIndexer and confirms delivery instead.
 func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership, action indexerConstants.MessageAction) {
+	_ = publishProjectMembershipIndexer(ctx, p, pm, action)
+}
+
+// publishProjectMembershipIndexer is PublishProjectMembershipIndexer for
+// callers that must act on a failed build or publish.
+func publishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership, action indexerConstants.MessageAction) error {
 	if action != indexerConstants.ActionDeleted && isScratchLogoURL(pm.CompanyLogoURL) {
 		safePM := *pm
 		safePM.CompanyLogoURL = ""
@@ -753,17 +762,18 @@ func PublishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher
 			"uid", pm.UID,
 			"error", err,
 			"publish_failed_for_backfill_repair", true)
-		return
+		return err
 	}
 	if pubErr := p.Indexer(ctx, constants.IndexProjectMembershipSubject, builtMsg, false); pubErr != nil {
 		slog.WarnContext(ctx, "project membership indexer publish failed",
 			"uid", pm.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)
-	} else {
-		slog.DebugContext(ctx, "project membership indexer published",
-			"uid", pm.UID, "subject", constants.IndexProjectMembershipSubject)
+		return pubErr
 	}
+	slog.DebugContext(ctx, "project membership indexer published",
+		"uid", pm.UID, "subject", constants.IndexProjectMembershipSubject)
+	return nil
 }
 
 // PublishProjectMembershipFGA builds and publishes a GenericFGAMessage for a ProjectMembership,

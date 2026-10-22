@@ -638,6 +638,7 @@ func (m *MockProjectMembershipReader) AssembleProjectMembership(_ context.Contex
 			CompanyName: "Mock Corp",
 			TierUID:     "tier-1",
 			TierName:    "Gold Corporate Membership",
+			TierFamily:  "Membership",
 			Status:      "Active",
 			StartDate:   "2025-01-01",
 			EndDate:     "2099-12-31",

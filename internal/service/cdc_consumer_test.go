@@ -145,6 +145,7 @@ type fakeB2BOrgReader struct {
 	batchErr       error
 	getCallCount   atomic.Int32
 	batchCallCount atomic.Int32
+	childCallCount atomic.Int32
 }
 
 func (r *fakeB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg, error) {
@@ -152,6 +153,7 @@ func (r *fakeB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg
 	return r.org, r.orgErr
 }
 func (r *fakeB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) ([]string, error) {
+	r.childCallCount.Add(1)
 	return r.children, nil
 }
 func (r *fakeB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
@@ -221,6 +223,7 @@ type subjectCapturingPublisher struct {
 	flushCount      int      // upserts never flush; key_contact delete/supersede and genuine-delete purges do (see flushErr)
 	flushErr        error    // returned by every Flush call when set
 	accessErr       error    // returned by every Access call when set; the call is still recorded
+	indexerErr      error    // returned by every Indexer call when set; the call is still recorded
 
 	// beforeAccess, when set, runs at the top of Access and its error is
 	// returned instead of accessErr. Use it to fail a specific message rather
@@ -233,7 +236,7 @@ func (p *subjectCapturingPublisher) Indexer(_ context.Context, subject string, m
 	defer p.mu.Unlock()
 	p.indexer = append(p.indexer, subject)
 	p.indexerMessages = append(p.indexerMessages, msg)
-	return nil
+	return p.indexerErr
 }
 func (p *subjectCapturingPublisher) Access(_ context.Context, subject string, msg any) error {
 	p.mu.Lock()
@@ -3908,12 +3911,10 @@ func TestCDCConsumer_Delete_PublishFailureDoesNotStrandBatch(t *testing.T) {
 		"the second record must still be attempted after the first publish fails")
 	assert.Len(t, pub.indexerMessages, 2, "index convergence must be unaffected")
 
-	require.Len(t, repair.Puts, 2, "each failed delete_access publish must be durably recorded for manual recovery")
-	for i, id := range []string{first, second} {
-		assert.Equal(t, constants.ReindexTypeB2BOrgDeleteAccess, repair.Puts[i].Type,
-			"the marker must use the delete-specific type, not the upsert reindex type")
-		assert.Equal(t, id, repair.Puts[i].SFID)
-	}
+	assert.Equal(t, []string{first, second}, repairPutsOfType(repair, constants.ReindexTypeB2BOrgDeleteAccess),
+		"each failed delete_access publish must be durably recorded for manual recovery, under the delete-specific type")
+	assert.Equal(t, []string{first, second}, repairPutsOfType(repair, "b2b_org"),
+		"the index delete it shared a flush with is unconfirmed too")
 }
 
 // TestCDCConsumer_AssetDelete_PublishFailureRecordsRepairMarker mirrors the
@@ -3936,13 +3937,12 @@ func TestCDCConsumer_AssetDelete_PublishFailureRecordsRepairMarker(t *testing.T)
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
 
-	require.Len(t, repair.Puts, 1)
-	assert.Equal(t, constants.ReindexTypeProjectMembershipDeleteAccess, repair.Puts[0].Type)
-	assert.Equal(t, id, repair.Puts[0].SFID)
+	assert.Equal(t, []string{id}, repairPutsOfType(repair, constants.ReindexTypeProjectMembershipDeleteAccess))
 }
 
-// flakyRepairStore fails a fixed number of leading PutPending attempts, then
-// delegates to the mock.
+// flakyRepairStore fails a fixed number of leading delete_access PutPending
+// attempts, then delegates to the mock. Index-delete markers pass straight
+// through uncounted: these tests measure the purge marker alone.
 type flakyRepairStore struct {
 	*mock.MockCDCRepairStore
 	failFirst int
@@ -3950,6 +3950,9 @@ type flakyRepairStore struct {
 }
 
 func (s *flakyRepairStore) PutPending(ctx context.Context, reindexType, sfid string) error {
+	if !strings.HasSuffix(reindexType, "_delete_access") {
+		return s.MockCDCRepairStore.PutPending(ctx, reindexType, sfid)
+	}
 	s.attempts++
 	if s.attempts <= s.failFirst {
 		return errors.New("kv: transient write failure")
@@ -3975,8 +3978,7 @@ func TestCDCConsumer_Delete_MarkerWriteRetry(t *testing.T) {
 
 		require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
 		assert.Equal(t, 3, repair.attempts)
-		require.Len(t, repair.Puts, 1)
-		assert.Equal(t, id, repair.Puts[0].SFID)
+		assert.Equal(t, []string{id}, repairPutsOfType(repair.MockCDCRepairStore, constants.ReindexTypeB2BOrgDeleteAccess))
 	})
 
 	t.Run("persistent failure uses bounded attempts per event retry", func(t *testing.T) {
@@ -3997,7 +3999,7 @@ func TestCDCConsumer_Delete_MarkerWriteRetry(t *testing.T) {
 			context.DeadlineExceeded)
 		assert.GreaterOrEqual(t, repair.attempts, 3)
 		assert.Zero(t, repair.attempts%3)
-		assert.Empty(t, repair.Puts)
+		assert.Empty(t, repairPutsOfType(repair.MockCDCRepairStore, constants.ReindexTypeB2BOrgDeleteAccess))
 	})
 }
 
@@ -4026,9 +4028,7 @@ func TestCDCConsumer_Delete_DeliveryConfirmation(t *testing.T) {
 
 				require.NoError(t, consumer.Run(context.Background(), tc.channel, &fakeReplayStore{}))
 				assert.Contains(t, pub.access, constants.FGASyncDeleteAccessSubject)
-				require.Len(t, repair.Puts, 1)
-				assert.Equal(t, tc.reindexType, repair.Puts[0].Type)
-				assert.Equal(t, id, repair.Puts[0].SFID)
+				assert.Equal(t, []string{id}, repairPutsOfType(repair, tc.reindexType))
 			})
 		}
 	})
@@ -4127,7 +4127,10 @@ func TestCDCConsumer_Delete_UnrecordedFirstPurgeRetriesInProcess(t *testing.T) {
 
 			assert.Equal(t, 4, repair.attempts,
 				"the same first event must run again after its initial marker attempts are exhausted")
-			require.Len(t, repair.Puts, 1)
+			require.Len(t, repairPutsOfType(repair.MockCDCRepairStore, map[string]string{
+				"Account": constants.ReindexTypeB2BOrgDeleteAccess,
+				"Asset":   constants.ReindexTypeProjectMembershipDeleteAccess,
+			}[tc.entity]), 1)
 			assert.Equal(t, []byte("lost"), replay.saved,
 				"the first event advances only after its failed purge is durably recorded")
 		})
@@ -4159,7 +4162,7 @@ func TestCDCConsumer_Delete_RecordedPurgeStillAdvancesReplayCursor(t *testing.T)
 
 	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", replay))
 
-	require.Len(t, repair.Puts, 1, "precondition: the recovery marker must have landed")
+	require.Len(t, repairPutsOfType(repair, constants.ReindexTypeB2BOrgDeleteAccess), 1, "precondition: the recovery marker must have landed")
 	assert.Len(t, replay.savedAll, 1,
 		"a failed purge that IS durably recorded needs no redelivery, so it must not stall the stream")
 }
@@ -5284,4 +5287,400 @@ func TestCDCConsumer_Undelete_RedeliveredRestoreIsHarmless(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 2, withWriters, "both deliveries restore, and both restore the same thing")
+}
+
+// ── Unconfirmed index removals are queued for repair ──────────────────────────
+
+func repairPutsOfType(store *mock.MockCDCRepairStore, reindexType string) []string {
+	var ids []string
+	for _, p := range store.Puts {
+		if p.Type == reindexType {
+			ids = append(ids, p.SFID)
+		}
+	}
+	return ids
+}
+
+// runRemoval drives one record through the absent path (an upsert the batch
+// reader does not return) or the genuine delete path, and returns its id.
+func runRemoval(t *testing.T, entity string, ct model.CDCChangeType, pub *subjectCapturingPublisher, repair port.CDCRepairStore) string {
+	t.Helper()
+	uid := sfid("removal-" + entity)
+	channel := "/data/AccountChangeEvent"
+	if entity == "Asset" {
+		channel = "/data/AssetChangeEvent"
+	}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: entity, ChangeType: ct, RecordIDs: []string{uid}, ReplayID: []byte("rm")},
+		}},
+		&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone")},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCAccountBatchReader(&mock.MockAccountBatchReader{}),
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{}),
+		svc.WithCDCRepairStore(repair),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, consumer.Run(ctx, channel, &fakeReplayStore{}), "a removal must never hold the stream")
+	return uid
+}
+
+func TestCDCConsumer_IndexRemoval_UnconfirmedIsQueuedForRepair(t *testing.T) {
+	entities := map[string]string{"Account": "b2b_org", "Asset": "project_membership"}
+	paths := map[string]model.CDCChangeType{"absent": model.CDCChangeUpdate, "delete": model.CDCChangeDelete}
+	failures := map[string]func(*subjectCapturingPublisher){
+		"confirmed":      func(*subjectCapturingPublisher) {},
+		"publish fails":  func(p *subjectCapturingPublisher) { p.indexerErr = assert.AnError },
+		"flush fails":    func(p *subjectCapturingPublisher) { p.flushErr = assert.AnError },
+		"purge rejected": func(p *subjectCapturingPublisher) { p.accessErr = assert.AnError },
+	}
+	for entity, reindexType := range entities {
+		for path, ct := range paths {
+			for failure, inject := range failures {
+				if failure == "purge rejected" && path == "absent" {
+					continue // the absent path sends no purge
+				}
+				t.Run(entity+"/"+path+"/"+failure, func(t *testing.T) {
+					pub := &subjectCapturingPublisher{}
+					inject(pub)
+					repair := &mock.MockCDCRepairStore{}
+					uid := runRemoval(t, entity, ct, pub, repair)
+
+					require.NotEmpty(t, pub.indexerMessages)
+					assert.Equal(t, "deleted", pub.indexerAction(0))
+					if failure == "confirmed" {
+						assert.Empty(t, repairPutsOfType(repair, reindexType), "a confirmed removal leaves no marker")
+						assert.Equal(t, 1, pub.flushCount, "one flush confirms the index delete (and the purge, on delete)")
+						return
+					}
+					assert.Equal(t, []string{uid}, repairPutsOfType(repair, reindexType),
+						"an unconfirmed index delete must be queued for the repair run")
+				})
+			}
+		}
+	}
+}
+
+// TestCDCConsumer_IndexRemoval_MarkerWriteFails_StreamContinues: when the
+// repair marker cannot be written either, the ids are logged and the stream
+// still moves on; the record's next change or a targeted reindex recovers it.
+func TestCDCConsumer_IndexRemoval_MarkerWriteFails_StreamContinues(t *testing.T) {
+	for entity, reindexType := range map[string]string{"Account": "b2b_org", "Asset": "project_membership"} {
+		t.Run(entity, func(t *testing.T) {
+			pub := &subjectCapturingPublisher{flushErr: assert.AnError}
+			repair := &mock.MockCDCRepairStore{PutErr: assert.AnError}
+			uid := runRemoval(t, entity, model.CDCChangeUpdate, pub, repair)
+			assert.Equal(t, []string{uid}, repairPutsOfType(repair, reindexType), "the marker write was attempted")
+		})
+	}
+}
+
+// ── Membership owners are re-checked on membership creation ──────────────────
+
+// recordingAccountBatch returns the seeded orgs that were requested and
+// records each call's ids.
+type recordingAccountBatch struct {
+	orgs  map[string]*model.B2BOrg
+	err   error
+	calls [][]string
+}
+
+func (r *recordingAccountBatch) FetchAccountsBySFIDs(_ context.Context, ids []string) ([]*model.B2BOrg, []string, error) {
+	r.calls = append(r.calls, slices.Clone(ids))
+	if r.err != nil {
+		return nil, nil, r.err
+	}
+	var out []*model.B2BOrg
+	for _, id := range ids {
+		if org, ok := r.orgs[id]; ok {
+			copied := *org
+			out = append(out, &copied)
+		}
+	}
+	return out, nil, nil
+}
+
+func (p *subjectCapturingPublisher) indexerCount(subject string) int {
+	n := 0
+	for _, s := range p.indexer {
+		if s == subject {
+			n++
+		}
+	}
+	return n
+}
+
+type ownerRecheckRun struct {
+	pub      *subjectCapturingPublisher
+	reader   *fakeB2BOrgReader
+	accounts *recordingAccountBatch
+	repair   *mock.MockCDCRepairStore
+}
+
+func runAssetBatchForOwners(t *testing.T, ct model.CDCChangeType, memberships []*model.ProjectMembership, accounts *recordingAccountBatch) ownerRecheckRun {
+	t.Helper()
+	run := ownerRecheckRun{
+		pub:      &subjectCapturingPublisher{},
+		reader:   &fakeB2BOrgReader{org: &model.B2BOrg{UID: sfid("stale-cache")}},
+		accounts: accounts,
+		repair:   &mock.MockCDCRepairStore{},
+	}
+	ids := make([]string, 0, len(memberships))
+	for _, pm := range memberships {
+		ids = append(ids, pm.UID)
+	}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Asset", ChangeType: ct, RecordIDs: ids, ReplayID: []byte("owners")}}},
+		run.reader, &mock.MockCacheInvalidator{}, run.pub, "",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: memberships}),
+		svc.WithCDCKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
+		svc.WithCDCAccountBatchReader(accounts),
+		svc.WithCDCRepairStore(run.repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}),
+		"the owner re-check must never fail the Asset batch")
+	return run
+}
+
+// TestCDCConsumer_AssetCreate_RechecksOwners: an Account that gains its first
+// membership can become eligible with no Account event, so a membership
+// creation sends its owners through the Account path, once per owner and
+// without the previous-record or per-owner child reads.
+func TestCDCConsumer_AssetCreate_RechecksOwners(t *testing.T) {
+	ownerA, ownerB := sfid("owner-a"), sfid("owner-b")
+	memberships := []*model.ProjectMembership{
+		{UID: sfid("pm-a1"), B2BOrgUID: ownerA, ProjectUID: "p1"},
+		{UID: sfid("pm-a2"), B2BOrgUID: ownerA, ProjectUID: "p2"},
+		{UID: sfid("pm-b1"), B2BOrgUID: ownerB, ProjectUID: "p1"},
+		{UID: sfid("pm-none"), ProjectUID: "p3"},
+	}
+	accounts := &recordingAccountBatch{orgs: map[string]*model.B2BOrg{
+		ownerA: {UID: ownerA, ParentUID: sfid("owner-parent")},
+		ownerB: {UID: ownerB},
+	}}
+
+	run := runAssetBatchForOwners(t, model.CDCChangeCreate, memberships, accounts)
+
+	require.Len(t, accounts.calls, 2, "one Account read for the owners, one for their parents")
+	assert.ElementsMatch(t, []string{ownerA, ownerB}, accounts.calls[0], "distinct, non-empty owners only")
+	assert.Equal(t, []string{sfid("owner-parent")}, accounts.calls[1])
+	assert.Zero(t, run.reader.getCallCount.Load(), "no previous-record read")
+	assert.Zero(t, run.reader.childCallCount.Load(), "no per-owner child read (no reparenting)")
+	assert.Equal(t, 2, run.pub.indexerCount(constants.IndexB2BOrgSubject), "each eligible owner is indexed")
+	assert.Empty(t, run.repair.Puts)
+}
+
+func TestCDCConsumer_AssetNonCreate_DoesNotRecheckOwners(t *testing.T) {
+	owner := sfid("owner-quiet")
+	for name, ct := range map[string]model.CDCChangeType{
+		"update":  model.CDCChangeUpdate,
+		"restore": model.CDCChangeUndelete,
+		"delete":  model.CDCChangeDelete,
+	} {
+		t.Run(name, func(t *testing.T) {
+			accounts := &recordingAccountBatch{orgs: map[string]*model.B2BOrg{owner: {UID: owner}}}
+			pm := &model.ProjectMembership{UID: sfid("pm-quiet"), B2BOrgUID: owner, ProjectUID: "p1"}
+
+			runAssetBatchForOwners(t, ct, []*model.ProjectMembership{pm}, accounts)
+
+			assert.Empty(t, accounts.calls, "only a creation can give an Account its first membership")
+		})
+	}
+}
+
+func TestCDCConsumer_AssetCreate_OwnerReadFails_QueuesOwnersForRepair(t *testing.T) {
+	ownerA, ownerB := sfid("owner-fail-a"), sfid("owner-fail-b")
+	memberships := []*model.ProjectMembership{
+		{UID: sfid("pm-fail-a"), B2BOrgUID: ownerA, ProjectUID: "p1"},
+		{UID: sfid("pm-fail-b"), B2BOrgUID: ownerB, ProjectUID: "p1"},
+	}
+
+	run := runAssetBatchForOwners(t, model.CDCChangeCreate, memberships, &recordingAccountBatch{err: assert.AnError})
+
+	assert.ElementsMatch(t, []string{ownerA, ownerB}, repairPutsOfType(run.repair, "b2b_org"))
+	assert.Equal(t, 2, run.pub.indexerCount(constants.IndexProjectMembershipSubject), "the memberships still publish")
+}
+
+// ── A parent's is_parent follows its children ────────────────────────────────
+
+// indexedB2BOrgs maps each b2b_org indexer document's uid to its is_parent.
+func indexedB2BOrgs(t *testing.T, pub *subjectCapturingPublisher) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for i, subject := range pub.indexer {
+		if subject != constants.IndexB2BOrgSubject || pub.indexerAction(i) == "deleted" {
+			continue
+		}
+		b, err := json.Marshal(pub.indexerMessages[i])
+		require.NoError(t, err)
+		var envelope struct {
+			Data struct {
+				UID string `json:"uid"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(b, &envelope))
+		_, dup := out[envelope.Data.UID]
+		require.False(t, dup, "each org is indexed once")
+		out[envelope.Data.UID] = indexerIsParent(pub.indexerMessages[i])
+	}
+	return out
+}
+
+func runAccountBatch(t *testing.T, ct model.CDCChangeType, ids []string, reader *fakeB2BOrgReader, accounts *recordingAccountBatch) *subjectCapturingPublisher {
+	t.Helper()
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: ct, RecordIDs: ids, ReplayID: []byte("parents")}}},
+		reader, &mock.MockCacheInvalidator{}, pub, "",
+		svc.WithCDCAccountBatchReader(accounts),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+	return pub
+}
+
+func TestCDCConsumer_Account_ParentRefresh(t *testing.T) {
+	child, parent := sfid("child"), sfid("parent")
+	childOrg := &model.B2BOrg{UID: child, ParentUID: parent}
+	both := map[string]*model.B2BOrg{child: childOrg, parent: {UID: parent}}
+	gone := pkgerrors.NewNotFound("gone")
+
+	tests := []struct {
+		name        string
+		ct          model.CDCChangeType
+		ids         []string
+		reader      *fakeB2BOrgReader
+		orgs        map[string]*model.B2BOrg
+		wantReads   [][]string
+		wantIndexed map[string]bool
+	}{
+		{
+			name: "created child refreshes its parent", ct: model.CDCChangeCreate, ids: []string{child},
+			reader: &fakeB2BOrgReader{orgErr: gone, childMap: map[string][]string{parent: {child}}}, orgs: both,
+			wantReads: [][]string{{child}, {parent}}, wantIndexed: map[string]bool{child: false, parent: true},
+		},
+		{
+			name: "child that stopped qualifying refreshes its parent", ct: model.CDCChangeUpdate, ids: []string{child},
+			reader: &fakeB2BOrgReader{org: childOrg}, orgs: map[string]*model.B2BOrg{parent: {UID: parent}},
+			wantReads: [][]string{{child}, {parent}}, wantIndexed: map[string]bool{parent: false},
+		},
+		{
+			name: "absent child with no previous record reads no parent", ct: model.CDCChangeUpdate, ids: []string{child},
+			reader: &fakeB2BOrgReader{orgErr: gone}, orgs: map[string]*model.B2BOrg{parent: {UID: parent}},
+			wantReads: [][]string{{child}}, wantIndexed: map[string]bool{},
+		},
+		{
+			name: "ineligible parent is not published", ct: model.CDCChangeCreate, ids: []string{child},
+			reader: &fakeB2BOrgReader{orgErr: gone}, orgs: map[string]*model.B2BOrg{child: childOrg},
+			wantReads: [][]string{{child}, {parent}}, wantIndexed: map[string]bool{child: false},
+		},
+		{
+			name: "failed child read refreshes no parent", ct: model.CDCChangeCreate, ids: []string{child},
+			reader: &fakeB2BOrgReader{orgErr: gone, batchErr: assert.AnError}, orgs: both,
+			wantReads: [][]string{{child}}, wantIndexed: map[string]bool{child: false},
+		},
+		{
+			name: "routine edit reads no parent", ct: model.CDCChangeUpdate, ids: []string{child},
+			reader: &fakeB2BOrgReader{org: childOrg, childMap: map[string][]string{parent: {child}}}, orgs: both,
+			wantReads: [][]string{{child}}, wantIndexed: map[string]bool{child: false},
+		},
+		{
+			name: "parent in the batch is published once", ct: model.CDCChangeCreate, ids: []string{child, parent},
+			reader: &fakeB2BOrgReader{orgErr: gone, childMap: map[string][]string{parent: {child}}}, orgs: both,
+			wantReads: [][]string{{child, parent}}, wantIndexed: map[string]bool{child: false, parent: true},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			accounts := &recordingAccountBatch{orgs: tc.orgs}
+			pub := runAccountBatch(t, tc.ct, tc.ids, tc.reader, accounts)
+
+			assert.Equal(t, tc.wantReads, accounts.calls)
+			assert.Equal(t, tc.wantIndexed, indexedB2BOrgs(t, pub))
+		})
+	}
+}
+
+// TestCDCConsumer_Account_ParentRefresh_IndexOnly: the refresh corrects a
+// search field only, so it must not add a grant or family-link message.
+func TestCDCConsumer_Account_ParentRefresh_IndexOnly(t *testing.T) {
+	child, parent := sfid("child-io"), sfid("parent-io")
+	childOrg := &model.B2BOrg{UID: child, ParentUID: parent}
+	run := func(orgs map[string]*model.B2BOrg) *subjectCapturingPublisher {
+		return runAccountBatch(t, model.CDCChangeCreate, []string{child},
+			&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone"), childMap: map[string][]string{parent: {child}}},
+			&recordingAccountBatch{orgs: orgs})
+	}
+
+	refreshed := run(map[string]*model.B2BOrg{child: childOrg, parent: {UID: parent}})
+	baseline := run(map[string]*model.B2BOrg{child: childOrg})
+
+	require.Contains(t, indexedB2BOrgs(t, refreshed), parent)
+	assert.Equal(t, len(baseline.access), len(refreshed.access))
+}
+
+// TestCDCConsumer_AbsentBatch_OneFlushConfirmsAll: a batch's absent removals
+// share one flush, and a failed flush queues every one of them.
+func TestCDCConsumer_AbsentBatch_OneFlushConfirmsAll(t *testing.T) {
+	ids := []string{sfid("absent-1"), sfid("absent-2"), sfid("absent-3")}
+	for name, flushErr := range map[string]error{"confirmed": nil, "flush fails": assert.AnError} {
+		t.Run(name, func(t *testing.T) {
+			pub := &subjectCapturingPublisher{flushErr: flushErr}
+			repair := &mock.MockCDCRepairStore{}
+			consumer := newTestCDCConsumer(
+				&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeUpdate, RecordIDs: ids, ReplayID: []byte("absent")}}},
+				&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone")}, &mock.MockCacheInvalidator{}, pub, "",
+				svc.WithCDCAccountBatchReader(&recordingAccountBatch{}),
+				svc.WithCDCRepairStore(repair),
+			)
+			require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+			assert.Equal(t, 3, pub.indexerCount(constants.IndexB2BOrgSubject))
+			assert.Equal(t, 1, pub.flushCount, "one flush confirms the whole batch")
+			if flushErr == nil {
+				assert.Empty(t, repair.Puts)
+				return
+			}
+			assert.Equal(t, ids, repairPutsOfType(repair, "b2b_org"))
+		})
+	}
+}
+
+// TestCDCConsumer_AssetCreate_OwnerChildReadFails_QueuesOwners: the owners did
+// not change, so a failed child read must not republish them with is_parent
+// cleared; they go to the repair run instead.
+func TestCDCConsumer_AssetCreate_OwnerChildReadFails_QueuesOwners(t *testing.T) {
+	owner := sfid("owner-childfail")
+	accounts := &recordingAccountBatch{orgs: map[string]*model.B2BOrg{owner: {UID: owner}}}
+	pm := &model.ProjectMembership{UID: sfid("pm-childfail"), B2BOrgUID: owner, ProjectUID: "p1"}
+	pub := &subjectCapturingPublisher{}
+	repair := &mock.MockCDCRepairStore{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Asset", ChangeType: model.CDCChangeCreate, RecordIDs: []string{pm.UID}, ReplayID: []byte("cf")}}},
+		&fakeB2BOrgReader{batchErr: assert.AnError}, &mock.MockCacheInvalidator{}, pub, "",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{Memberships: []*model.ProjectMembership{pm}}),
+		svc.WithCDCAccountBatchReader(accounts),
+		svc.WithCDCRepairStore(repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AssetChangeEvent", &fakeReplayStore{}))
+
+	assert.Zero(t, pub.indexerCount(constants.IndexB2BOrgSubject), "the owner is not republished")
+	assert.Equal(t, []string{owner}, repairPutsOfType(repair, "b2b_org"))
+}
+
+func TestCDCConsumer_Account_ParentRefresh_ChildReadFails_QueuesParent(t *testing.T) {
+	child, parent := sfid("child-cf"), sfid("parent-cf")
+	pub := &subjectCapturingPublisher{}
+	repair := &mock.MockCDCRepairStore{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeCreate, RecordIDs: []string{child}, ReplayID: []byte("pcf")}}},
+		&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone"), batchErr: assert.AnError}, &mock.MockCacheInvalidator{}, pub, "",
+		svc.WithCDCAccountBatchReader(&recordingAccountBatch{orgs: map[string]*model.B2BOrg{child: {UID: child, ParentUID: parent}, parent: {UID: parent}}}),
+		svc.WithCDCRepairStore(repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []string{parent}, repairPutsOfType(repair, "b2b_org"))
 }
