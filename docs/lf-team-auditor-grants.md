@@ -71,7 +71,7 @@ export LF_STAFF_TEAM_NAME=$(kubectl --context <ctx> -n lfx get deploy lfx-v2-mem
 
 The two scripts no longer have the same reach, deliberately. The grant script reads `LF_STAFF_TEAM_NAME` only, so a backfill run from a shell that still exports `LF_CONTRACTOR_TEAM_NAME` cannot re-create the withdrawn grant. It errors out if that one variable is unset.
 
-The revoke script still reads **both**, because rollback has to be able to target a team the service no longer emits — that is exactly the contractor case. Export only the team you intend to remove; whichever variable is left unset is left untouched. Exporting both deletes both: staff would lose `auditor` on every org.
+The revoke script reads every team that has held the grant — `LF_STAFF_TEAM_NAME`, `LF_CONTRACTOR_TEAM_NAME` and `GLOBAL_ORG_AUDITORS_TEAM_NAME` — because rollback has to be able to target a team the service does not emit: the contractor team it no longer emits, and `global-org-auditors`, which only the `sync-global-groups` reconciler in `lfx-v2-argocd` writes. Export only the team you intend to remove; whichever variable is left unset is left untouched. Exporting several deletes them all: exporting the staff name means staff lose `auditor` on every org.
 
 The grant and revoke scripts share their OpenFGA helpers via `scripts/lib/openfga-team-auditor.sh` (pagination, batch apply, the transport guard, argument validation). They were near-copies; sharing matters here because the revoke script is the rollback path that runs under incident pressure, and a rollback that has quietly drifted from the tested grant path is worse than no rollback. Both scripts source the library relative to their own location, so they must be run from a checkout rather than copied to a pod in isolation.
 
