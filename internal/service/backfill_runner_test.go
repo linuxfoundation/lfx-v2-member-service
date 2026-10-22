@@ -1720,3 +1720,50 @@ func TestBackfillRunner_RunRepair_Membership_QueuesOwner(t *testing.T) {
 		assert.Empty(t, store.Puts)
 	})
 }
+
+// ── b2b_org repair queues its parent for an is_parent refresh ────────────────
+
+func TestBackfillRunner_RunRepair_B2BOrg_QueuesParent(t *testing.T) {
+	const childUID, parentUID = "001000000000010AAA", "001000000000011AAA"
+	newRunner := func(store *mock.MockCDCRepairStore, pub *subjectCapturingPublisher, parent string) *svc.Runner {
+		child := &model.B2BOrg{UID: childUID, ParentUID: parent}
+		reader := &configurableB2BOrgReaderForRepair{orgs: map[string]*model.B2BOrg{childUID: child}}
+		return svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(store), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+	}
+	repairReq := svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true}
+
+	t.Run("parent queued before the marker is cleared", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{}, &subjectCapturingPublisher{}
+		newRunner(store, pub, parentUID).RunRepair(context.Background(), repairReq, repairMarkers("b2b_org", childUID))
+
+		assert.Equal(t, []string{parentUID}, repairPutsOfType(store, "b2b_org"))
+		assert.Len(t, store.Deletes, 1)
+		assert.NotEmpty(t, pub.indexerMessages)
+	})
+
+	t.Run("failed parent write keeps the marker", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{PutErr: assert.AnError}, &subjectCapturingPublisher{}
+		newRunner(store, pub, parentUID).RunRepair(context.Background(), repairReq, repairMarkers("b2b_org", childUID))
+
+		assert.Empty(t, store.Deletes, "the child marker stays until its parent is queued")
+		assert.Empty(t, pub.indexerMessages)
+	})
+
+	t.Run("org without a parent queues nothing", func(t *testing.T) {
+		store := &mock.MockCDCRepairStore{}
+		newRunner(store, &subjectCapturingPublisher{}, "").RunRepair(context.Background(), repairReq, repairMarkers("b2b_org", childUID))
+
+		assert.Empty(t, store.Puts)
+		assert.Len(t, store.Deletes, 1)
+	})
+
+	t.Run("targeted reindex queues nothing", func(t *testing.T) {
+		store := &mock.MockCDCRepairStore{}
+		require.NoError(t, newRunner(store, &subjectCapturingPublisher{}, parentUID).Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "b2b_org", Items: []string{childUID}}))
+
+		assert.Empty(t, store.Puts)
+	})
+}

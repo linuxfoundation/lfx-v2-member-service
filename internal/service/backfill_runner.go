@@ -745,6 +745,16 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		if req.DryRun {
 			return outcomeIssued
 		}
+		if req.CDCRepair && org.ParentUID != "" && r.repairStore != nil {
+			// A repaired org may be a child that just started qualifying, and its
+			// parent's is_parent is only refreshed on the CDC path; the parent's
+			// own drain recomputes it. Queued before this marker is cleared.
+			if err := r.repairStore.PutPending(ctx, entityTypeB2BOrg, org.ParentUID); err != nil {
+				log.WarnContext(ctx, "failed to queue parent for is_parent refresh — retaining for retry",
+					"uid", uid, "parent_uid", org.ParentUID, "error", err, "publish_failed_for_backfill_repair", true)
+				return outcomeRetry
+			}
+		}
 		org.IsParent = len(childUIDs) > 0
 		PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
 		PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamName, r.b2bOrgAuditorTeams)
