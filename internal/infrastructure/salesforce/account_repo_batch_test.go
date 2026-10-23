@@ -550,6 +550,17 @@ func TestAccountRepo_FetchB2BOrgEligibility(t *testing.T) {
 		assert.Equal(t, map[string]bool{sfids[0]: true, sfids[200]: true}, got)
 	})
 
+	t.Run("a returned id that cannot be normalized fails the read", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{responses: []string{soqlPageJSON("",
+			eligibilityRecordJSON(company, "Company_Account", false),
+			eligibilityRecordJSON("bad-id", "Company_Account", false),
+		)}}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(), []string{company})
+		require.Error(t, err)
+		assert.Nil(t, got)
+	})
+
 	t.Run("a failing chunk returns no partial map", func(t *testing.T) {
 		t.Parallel()
 		tr := &seqQueryTransport{

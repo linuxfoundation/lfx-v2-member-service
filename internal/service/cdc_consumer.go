@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -859,7 +860,29 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		}
 	}
 
-	orgs, convErrSFIDs, err := o.accountBatch.FetchAccountsBySFIDs(ctx, upsertIDs)
+	// Parents known from the previous records ride in the same query, so their
+	// is_parent refresh below costs no extra Salesforce call.
+	inBatch := make(map[string]struct{}, len(upsertIDs))
+	for _, id := range upsertIDs {
+		inBatch[id] = struct{}{}
+	}
+	knownParents := map[string]*model.B2BOrg{} // nil value: read, but not eligible
+	readIDs := slices.Clone(upsertIDs)
+	for _, id := range upsertIDs {
+		old := oldOrgs[id]
+		if old == nil || old.ParentUID == "" {
+			continue
+		}
+		if _, skip := inBatch[old.ParentUID]; skip {
+			continue
+		}
+		if _, dup := knownParents[old.ParentUID]; !dup {
+			knownParents[old.ParentUID] = nil
+			readIDs = append(readIDs, old.ParentUID)
+		}
+	}
+
+	fetched, convErrSFIDs, err := o.accountBatch.FetchAccountsBySFIDs(ctx, readIDs)
 	if err != nil {
 		logBatchFetchError(ctx, "Account", upsertIDs, changeType, err)
 		if ownerRecheck {
@@ -870,6 +893,14 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		}
 		return nil
 	}
+	orgs := make([]*model.B2BOrg, 0, len(fetched))
+	for _, org := range fetched {
+		if _, ok := inBatch[org.UID]; ok {
+			orgs = append(orgs, org)
+		} else {
+			knownParents[org.UID] = org
+		}
+	}
 
 	// SFIDs absent from the SOQL result are soft-deleted or no longer eligible
 	// (record type and membership rule, model.IsB2BOrgEligible) — route them to
@@ -878,7 +909,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
 	o.removeAbsentFromIndex(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
-	staleParents := parentsToRefresh(upsertIDs, orgs, returned, oldOrgs, ownerRecheck || changeType == model.CDCChangeCreate)
+	staleParents := parentsToRefresh(upsertIDs, orgs, oldOrgs)
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
 	// Include each org's ParentUID so we also have the parent's full child list for the
@@ -950,7 +981,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		}
 	}
 	if childMapErr == nil {
-		o.refreshParentIndex(ctx, staleParents, childMap)
+		o.refreshParentIndex(ctx, staleParents, childMap, knownParents)
 	}
 	if restorePublished {
 		restoreErr = errors.Join(restoreErr, o.publisher.Flush(ctx))
@@ -966,12 +997,12 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 }
 
 // parentsToRefresh returns the parents outside the batch whose is_parent may
-// have changed: the parent of a child that was created or newly qualifies
-// (childJoined), and the parent of a child that stopped qualifying, known only
-// from its previous record. Parents inside the batch are already published with
-// a fresh is_parent.
-func parentsToRefresh(upsertIDs []string, orgs []*model.B2BOrg, returned map[string]struct{},
-	oldOrgs map[string]*model.B2BOrg, childJoined bool) []string {
+// have changed: the current parent of every qualifying org (it may have just
+// been created or started qualifying, which the event does not say), and the
+// previous parent of every org, which loses the child when it stops qualifying
+// or moves. Parents inside the batch are already published with a fresh
+// is_parent.
+func parentsToRefresh(upsertIDs []string, orgs []*model.B2BOrg, oldOrgs map[string]*model.B2BOrg) []string {
 	inBatch := make(map[string]struct{}, len(upsertIDs))
 	for _, id := range upsertIDs {
 		inBatch[id] = struct{}{}
@@ -987,16 +1018,12 @@ func parentsToRefresh(upsertIDs []string, orgs []*model.B2BOrg, returned map[str
 			parents = append(parents, parentUID)
 		}
 	}
-	if childJoined {
-		for _, org := range orgs {
-			add(org.ParentUID)
-		}
+	for _, org := range orgs {
+		add(org.ParentUID)
 	}
 	for _, id := range upsertIDs {
 		if old := oldOrgs[id]; old != nil {
-			if _, present := returned[id]; !present {
-				add(old.ParentUID)
-			}
+			add(old.ParentUID)
 		}
 	}
 	return parents
@@ -1004,17 +1031,30 @@ func parentsToRefresh(upsertIDs []string, orgs []*model.B2BOrg, returned map[str
 
 // refreshParentIndex republishes only the index document of each qualifying
 // parent, with is_parent from the batch's child read. Its grants and family
-// links did not change. A failed read queues the parents for the repair run.
-func (o *CDCConsumer) refreshParentIndex(ctx context.Context, parentUIDs []string, childMap map[string][]string) {
-	if len(parentUIDs) == 0 {
-		return
+// links did not change. Parents in known were already read with the batch (a
+// nil entry did not qualify); only the rest are read here. A failed read
+// queues those parents for the repair run.
+func (o *CDCConsumer) refreshParentIndex(ctx context.Context, parentUIDs []string, childMap map[string][]string,
+	known map[string]*model.B2BOrg) {
+	parents := make([]*model.B2BOrg, 0, len(parentUIDs))
+	var unread []string
+	for _, uid := range parentUIDs {
+		parent, ok := known[uid]
+		switch {
+		case !ok:
+			unread = append(unread, uid)
+		case parent != nil:
+			parents = append(parents, parent)
+		}
 	}
-	parents, _, err := o.accountBatch.FetchAccountsBySFIDs(ctx, parentUIDs)
-	if err != nil {
-		slog.WarnContext(ctx, "cdc: parent read failed — is_parent refresh queued for the repair run",
-			"parent_count", len(parentUIDs), "error", err, "publish_failed_for_backfill_repair", true)
-		o.queueForRepairDetached(ctx, "Account", parentUIDs)
-		return
+	if len(unread) > 0 {
+		read, _, err := o.accountBatch.FetchAccountsBySFIDs(ctx, unread)
+		if err != nil {
+			slog.WarnContext(ctx, "cdc: parent read failed — is_parent refresh queued for the repair run",
+				"parent_count", len(unread), "error", err, "publish_failed_for_backfill_repair", true)
+			o.queueForRepairDetached(ctx, "Account", unread)
+		}
+		parents = append(parents, read...)
 	}
 	for _, parent := range parents {
 		parent.IsParent = len(childMap[parent.UID]) > 0

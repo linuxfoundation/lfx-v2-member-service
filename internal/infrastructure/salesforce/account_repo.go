@@ -227,6 +227,7 @@ func (r *AccountRepo) FetchB2BOrgEligibility(ctx context.Context, uids []string)
 	if len(sfids) == 0 {
 		return out, nil
 	}
+	slog.DebugContext(ctx, "fetching account eligibility from Salesforce (batch)", "count", len(sfids))
 
 	const chunkSize = 200
 	for start := 0; start < len(sfids); start += chunkSize {
@@ -242,7 +243,8 @@ func (r *AccountRepo) FetchB2BOrgEligibility(ctx context.Context, uids []string)
 		for _, rec := range records {
 			sfid, convErr := sfuuid.Normalize18(rec.ID)
 			if convErr != nil {
-				continue
+				// Dropping it would read as a deleted Account and remove a live record.
+				return nil, fmt.Errorf("normalizing returned account id %q: %w", rec.ID, convErr)
 			}
 			if uid, ok := sfidToUID[sfid]; ok {
 				out[uid] = rec.eligible(r.includeCompanyAccounts)

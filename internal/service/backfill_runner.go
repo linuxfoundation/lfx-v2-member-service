@@ -930,8 +930,9 @@ func logItemFetchOutcome(ctx context.Context, log *slog.Logger, sfType, uid stri
 func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req BackfillRequest) {
 	// PM and KC are the prod volume drivers: when a batch reader is wired, fetch
 	// the whole page in one SOQL query instead of per-item Assemble* (~3–5 SF
-	// calls/item → ~1 batch). b2b_org stays per-item (its eligibility is read once per page), and either type
-	// falls back to per-item when its batch reader is unwired (e.g. mock mode).
+	// calls/item → ~1 batch). b2b_org stays per-item except for eligibility,
+	// which is read once per page, and either type falls back to per-item when
+	// its batch reader is unwired (e.g. mock mode).
 	switch req.Type {
 	case entityTypeProjectMembership:
 		if r.membershipBatch != nil {

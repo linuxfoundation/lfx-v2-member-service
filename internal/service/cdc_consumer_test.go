@@ -5383,14 +5383,15 @@ func TestCDCConsumer_IndexRemoval_MarkerWriteFails_StreamContinues(t *testing.T)
 // recordingAccountBatch returns the seeded orgs that were requested and
 // records each call's ids.
 type recordingAccountBatch struct {
-	orgs  map[string]*model.B2BOrg
-	err   error
-	calls [][]string
+	orgs      map[string]*model.B2BOrg
+	err       error
+	errOnCall int // 1-based call that fails with err; 0 fails every call
+	calls     [][]string
 }
 
 func (r *recordingAccountBatch) FetchAccountsBySFIDs(_ context.Context, ids []string) ([]*model.B2BOrg, []string, error) {
 	r.calls = append(r.calls, slices.Clone(ids))
-	if r.err != nil {
+	if r.err != nil && (r.errOnCall == 0 || r.errOnCall == len(r.calls)) {
 		return nil, nil, r.err
 	}
 	var out []*model.B2BOrg
@@ -5542,7 +5543,7 @@ func runAccountBatch(t *testing.T, ct model.CDCChangeType, ids []string, reader 
 }
 
 func TestCDCConsumer_Account_ParentRefresh(t *testing.T) {
-	child, parent := sfid("child"), sfid("parent")
+	child, parent, oldParent := sfid("child"), sfid("parent"), sfid("oldparent")
 	childOrg := &model.B2BOrg{UID: child, ParentUID: parent}
 	both := map[string]*model.B2BOrg{child: childOrg, parent: {UID: parent}}
 	gone := pkgerrors.NewNotFound("gone")
@@ -5564,7 +5565,7 @@ func TestCDCConsumer_Account_ParentRefresh(t *testing.T) {
 		{
 			name: "child that stopped qualifying refreshes its parent", ct: model.CDCChangeUpdate, ids: []string{child},
 			reader: &fakeB2BOrgReader{org: childOrg}, orgs: map[string]*model.B2BOrg{parent: {UID: parent}},
-			wantReads: [][]string{{child}, {parent}}, wantIndexed: map[string]bool{parent: false},
+			wantReads: [][]string{{child, parent}}, wantIndexed: map[string]bool{parent: false},
 		},
 		{
 			name: "absent child with no previous record reads no parent", ct: model.CDCChangeUpdate, ids: []string{child},
@@ -5582,9 +5583,25 @@ func TestCDCConsumer_Account_ParentRefresh(t *testing.T) {
 			wantReads: [][]string{{child}}, wantIndexed: map[string]bool{child: false},
 		},
 		{
-			name: "routine edit reads no parent", ct: model.CDCChangeUpdate, ids: []string{child},
+			name: "edited child refreshes its parent in the same read", ct: model.CDCChangeUpdate, ids: []string{child},
 			reader: &fakeB2BOrgReader{org: childOrg, childMap: map[string][]string{parent: {child}}}, orgs: both,
-			wantReads: [][]string{{child}}, wantIndexed: map[string]bool{child: false},
+			wantReads: [][]string{{child, parent}}, wantIndexed: map[string]bool{child: false, parent: true},
+		},
+		{
+			name: "edited child's ineligible parent is read once and not published", ct: model.CDCChangeUpdate, ids: []string{child},
+			reader: &fakeB2BOrgReader{org: childOrg}, orgs: map[string]*model.B2BOrg{child: childOrg},
+			wantReads: [][]string{{child, parent}}, wantIndexed: map[string]bool{child: false},
+		},
+		{
+			name: "moved child refreshes its old and new parent", ct: model.CDCChangeUpdate, ids: []string{child},
+			reader:    &fakeB2BOrgReader{org: &model.B2BOrg{UID: child, ParentUID: oldParent}, childMap: map[string][]string{parent: {child}}},
+			orgs:      map[string]*model.B2BOrg{child: childOrg, parent: {UID: parent}, oldParent: {UID: oldParent}},
+			wantReads: [][]string{{child, oldParent}, {parent}}, wantIndexed: map[string]bool{child: false, parent: true, oldParent: false},
+		},
+		{
+			name: "restored child refreshes its parent", ct: model.CDCChangeUndelete, ids: []string{child},
+			reader: &fakeB2BOrgReader{childMap: map[string][]string{parent: {child}}}, orgs: both,
+			wantReads: [][]string{{child}, {parent}}, wantIndexed: map[string]bool{child: false, parent: true},
 		},
 		{
 			name: "parent in the batch is published once", ct: model.CDCChangeCreate, ids: []string{child, parent},
@@ -5619,6 +5636,28 @@ func TestCDCConsumer_Account_ParentRefresh_IndexOnly(t *testing.T) {
 
 	require.Contains(t, indexedB2BOrgs(t, refreshed), parent)
 	assert.Equal(t, len(baseline.access), len(refreshed.access))
+}
+
+// TestCDCConsumer_Account_ParentRefresh_SameRead_NotAnUpsert: a parent read
+// with the batch is only refreshed. It is neither removed as absent nor
+// published with grants like a changed org.
+func TestCDCConsumer_Account_ParentRefresh_SameRead_NotAnUpsert(t *testing.T) {
+	child, parent := sfid("child-sr"), sfid("parent-sr")
+	childOrg := &model.B2BOrg{UID: child, ParentUID: parent}
+	run := func(orgs map[string]*model.B2BOrg) *subjectCapturingPublisher {
+		return runAccountBatch(t, model.CDCChangeUpdate, []string{child},
+			&fakeB2BOrgReader{org: childOrg, childMap: map[string][]string{parent: {child}}},
+			&recordingAccountBatch{orgs: orgs})
+	}
+
+	refreshed := run(map[string]*model.B2BOrg{child: childOrg, parent: {UID: parent}})
+	baseline := run(map[string]*model.B2BOrg{child: childOrg})
+
+	assert.Equal(t, map[string]bool{child: false, parent: true}, indexedB2BOrgs(t, refreshed))
+	assert.Equal(t, len(baseline.access), len(refreshed.access))
+	for i := range baseline.indexer {
+		assert.NotEqual(t, "deleted", baseline.indexerAction(i), "an ineligible parent read with the batch is not removed")
+	}
 }
 
 // TestCDCConsumer_AbsentBatch_OneFlushConfirmsAll: a batch's absent removals
@@ -5682,6 +5721,28 @@ func TestCDCConsumer_Account_ParentRefresh_ChildReadFails_QueuesParent(t *testin
 	)
 	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
 
+	assert.Equal(t, []string{parent}, repairPutsOfType(repair, "b2b_org"))
+}
+
+func TestCDCConsumer_Account_ParentRefresh_ParentReadFails_QueuesParent(t *testing.T) {
+	child, parent := sfid("child-pf"), sfid("parent-pf")
+	accounts := &recordingAccountBatch{
+		orgs:      map[string]*model.B2BOrg{child: {UID: child, ParentUID: parent}, parent: {UID: parent}},
+		err:       assert.AnError,
+		errOnCall: 2,
+	}
+	pub := &subjectCapturingPublisher{}
+	repair := &mock.MockCDCRepairStore{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeCreate, RecordIDs: []string{child}, ReplayID: []byte("ppf")}}},
+		&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone"), childMap: map[string][]string{parent: {child}}}, &mock.MockCacheInvalidator{}, pub, "",
+		svc.WithCDCAccountBatchReader(accounts),
+		svc.WithCDCRepairStore(repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	require.Len(t, accounts.calls, 2, "the child read, then the parent-only read")
+	assert.Equal(t, map[string]bool{child: false}, indexedB2BOrgs(t, pub), "only the child is published")
 	assert.Equal(t, []string{parent}, repairPutsOfType(repair, "b2b_org"))
 }
 

@@ -1135,6 +1135,26 @@ func TestBackfillRunner_RunRepair_ProjectMembership_Removal(t *testing.T) {
 	}
 }
 
+// TestBackfillRunner_RunRepair_ProjectMembership_FamilyCaseInsensitive: the
+// Membership family matches regardless of case, so the membership is
+// republished, not removed.
+func TestBackfillRunner_RunRepair_ProjectMembership_FamilyCaseInsensitive(t *testing.T) {
+	const pmUID = "02i000000000001AAA"
+	reader := &seededPMReaderForResolver{pm: &model.ProjectMembership{UID: pmUID, ProjectUID: "p1", TierFamily: "membership"}}
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), reader, nil, nil, pub, nil, "", nil,
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+		svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"},
+		[]port.RepairMarker{{Type: "project_membership", SFID: pmUID, Revision: 2}})
+
+	require.Len(t, pub.indexerMessages, 1)
+	assert.NotEqual(t, "deleted", pub.indexerAction(0))
+	require.Len(t, repairStore.Deletes, 1)
+}
+
 func TestBackfillRunner_RunRepair_B2BOrg_ChildFetchError_RetriesAndKeepsMarker(t *testing.T) {
 	org := &model.B2BOrg{UID: "001000000000002AAA"}
 	reader := &configurableB2BOrgReaderForRepair{
