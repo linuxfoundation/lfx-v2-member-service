@@ -159,8 +159,12 @@ func (r *MockAccountBatchReader) FetchAccountsBySFIDs(_ context.Context, _ []str
 // treated as eligible.
 type MockB2BOrgEligibilityReader struct{}
 
-func (MockB2BOrgEligibilityReader) IsB2BOrgEligible(_ context.Context, _ string) (bool, error) {
-	return true, nil
+func (MockB2BOrgEligibilityReader) FetchB2BOrgEligibility(_ context.Context, uids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		out[uid] = true
+	}
+	return out, nil
 }
 
 // MockSalesforceQuotaGauge is a test double for port.SalesforceQuotaGauge.

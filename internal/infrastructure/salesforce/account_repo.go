@@ -206,18 +206,52 @@ func (r *AccountRepo) fetchAccountEligibility(ctx context.Context, sfid string) 
 	return &result.Records[0].soqlEligibility, nil
 }
 
-// IsB2BOrgEligible reports whether the Account with the given UID is a
-// non-deleted, eligible B2B organization.
-func (r *AccountRepo) IsB2BOrgEligible(ctx context.Context, uid string) (bool, error) {
-	sfid, err := sfuuid.Normalize18(uid)
-	if err != nil {
-		return false, fmt.Errorf("normalizing uid %q to sfid: %w", uid, err)
+// FetchB2BOrgEligibility returns uid → eligible for every non-deleted Account
+// among uids, in one chunked query per 200 ids. Ineligible Accounts are kept
+// with false rather than filtered in SOQL, so callers can tell "not an
+// organization" from "deleted or unknown" (absent).
+func (r *AccountRepo) FetchB2BOrgEligibility(ctx context.Context, uids []string) (map[string]bool, error) {
+	sfids := make([]string, 0, len(uids))
+	sfidToUID := make(map[string]string, len(uids))
+	for _, uid := range uids {
+		sfid, err := sfuuid.Normalize18(uid)
+		if err != nil {
+			slog.WarnContext(ctx, "eligibility read: uid could not be normalized, treating as not an organization",
+				"uid", uid, "error", err)
+			continue
+		}
+		sfids = append(sfids, sfid)
+		sfidToUID[sfid] = uid
 	}
-	e, err := r.fetchAccountEligibility(ctx, sfid)
-	if err != nil {
-		return false, err
+	out := make(map[string]bool, len(sfids))
+	if len(sfids) == 0 {
+		return out, nil
 	}
-	return e != nil && e.eligible(r.includeCompanyAccounts), nil
+	slog.DebugContext(ctx, "fetching account eligibility from Salesforce (batch)", "count", len(sfids))
+
+	const chunkSize = 200
+	for start := 0; start < len(sfids); start += chunkSize {
+		chunk := sfids[start:min(start+chunkSize, len(sfids))]
+		query := "SELECT Id, " + accountEligibilitySOQLFields +
+			" FROM Account WHERE Id IN (" + buildSOQLInClause(chunk) + ")" +
+			" AND IsDeleted = false"
+		records, _, err := QueryAllPages[soqlEligibleAccountID](ctx, r.client, query, "")
+		if err != nil {
+			return nil, fmt.Errorf("fetching eligibility of %d accounts (chunk starting at %d): %w",
+				len(chunk), start, err)
+		}
+		for _, rec := range records {
+			sfid, convErr := sfuuid.Normalize18(rec.ID)
+			if convErr != nil {
+				// Dropping it would read as a deleted Account and remove a live record.
+				return nil, fmt.Errorf("normalizing returned account id %q: %w", rec.ID, convErr)
+			}
+			if uid, ok := sfidToUID[sfid]; ok {
+				out[uid] = rec.eligible(r.includeCompanyAccounts)
+			}
+		}
+	}
+	return out, nil
 }
 
 var _ port.B2BOrgEligibilityReader = (*AccountRepo)(nil)
