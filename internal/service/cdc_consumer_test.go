@@ -5725,19 +5725,23 @@ func TestCDCConsumer_Account_ParentRefresh_ChildReadFails_QueuesParent(t *testin
 }
 
 // TestCDCConsumer_AccountUpdate_ReadFails_QueuesBatch: the stream advances past
-// a failed Account read, so the changed Accounts are queued for the repair run.
+// a failed Account read, so the changed Accounts and their previous parents are
+// queued for the repair run. Without the parent, a child that stopped
+// qualifying or moved would leave that parent's is_parent stale.
 func TestCDCConsumer_AccountUpdate_ReadFails_QueuesBatch(t *testing.T) {
 	ids := []string{sfid("update-rf-1"), sfid("update-rf-2")}
+	oldParent := sfid("update-rf-parent")
 	repair := &mock.MockCDCRepairStore{}
 	consumer := newTestCDCConsumer(
 		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeUpdate, RecordIDs: ids, ReplayID: []byte("urf")}}},
-		&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone")}, &mock.MockCacheInvalidator{}, &subjectCapturingPublisher{}, "",
+		&fakeB2BOrgReader{org: &model.B2BOrg{ParentUID: oldParent}}, &mock.MockCacheInvalidator{}, &subjectCapturingPublisher{}, "",
 		svc.WithCDCAccountBatchReader(&recordingAccountBatch{err: assert.AnError}),
 		svc.WithCDCRepairStore(repair),
 	)
 	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
 
-	assert.Equal(t, ids, repairPutsOfType(repair, "b2b_org"))
+	assert.Equal(t, append(slices.Clone(ids), oldParent), repairPutsOfType(repair, "b2b_org"),
+		"the shared previous parent is queued once")
 }
 
 func TestCDCConsumer_Account_ParentRefresh_ParentReadFails_QueuesParent(t *testing.T) {

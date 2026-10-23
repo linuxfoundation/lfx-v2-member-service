@@ -887,8 +887,9 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		logBatchFetchError(ctx, "Account", upsertIDs, changeType, err)
 		if !isRestore(changeType) {
 			// The stream advances past this event, so only a marker brings these
-			// Accounts back; a restore holds the replay cursor instead.
-			o.queueForRepairDetached(ctx, "Account", upsertIDs)
+			// Accounts and their previous parents back; a restore holds the
+			// replay cursor instead.
+			o.queueForRepairDetached(ctx, "Account", readIDs)
 		}
 		if isRestore(changeType) {
 			return errors.Join(errRestoreIncomplete, err)
