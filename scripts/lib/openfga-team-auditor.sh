@@ -183,8 +183,9 @@ fga_require_store_id() {
 # variable it knows about, so each script declares its reach explicitly. Both
 # callers no longer read the same variables. Grant reads LF_STAFF_TEAM_NAME
 # only, so a backfill cannot re-create the withdrawn contractor grant; revoke
-# reads both, because rollback must be able to target a team the service no
-# longer emits. Export only the team you intend to remove.
+# reads every team that has held the grant, because rollback must be able to
+# target a team the service does not emit. Export only the team you intend to
+# remove.
 fga_team_names() {
 	if [[ $# -eq 0 ]]; then
 		echo "ERROR: fga_team_names requires the names of the environment" >&2
