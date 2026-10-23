@@ -19,6 +19,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
 
 // BackfillIterator provides paged SOQL iterators for full and since-filtered
@@ -1005,7 +1006,45 @@ func (r *Runner) runTargetedMemberships(ctx context.Context, log *slog.Logger, r
 
 	returned := makeReturnedSet(memberships, func(pm *model.ProjectMembership) string { return pm.UID }, convErrSFIDs)
 	notFound := countAbsent(req.Items, returned)
+	if !req.DryRun {
+		r.removeAbsentMemberships(ctx, log, req.Items, returned)
+	}
 	logTargetedBatchComplete(ctx, log, req, published, notFound, len(convErrSFIDs))
+}
+
+// removeAbsentMemberships removes the index documents of requested memberships
+// the batch query did not return: the Asset is gone or is no longer a
+// Membership product. One flush confirms them all. Targeted reindex keeps no
+// repair marker, so an unconfirmed removal is logged for a rerun.
+func (r *Runner) removeAbsentMemberships(ctx context.Context, log *slog.Logger, items []string, returned map[string]struct{}) {
+	present := make(map[string]struct{}, len(returned))
+	for id := range returned {
+		if uid, err := sfuuid.Normalize18(id); err == nil {
+			present[uid] = struct{}{}
+		}
+	}
+	var removed []string
+	for _, item := range items {
+		uid, err := sfuuid.Normalize18(item)
+		if err != nil {
+			continue
+		}
+		if _, ok := present[uid]; ok {
+			continue
+		}
+		pm := &model.ProjectMembership{UID: uid}
+		if err := publishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionDeleted); err != nil {
+			continue
+		}
+		removed = append(removed, uid)
+	}
+	if len(removed) == 0 {
+		return
+	}
+	if err := r.publisher.Flush(ctx); err != nil {
+		log.WarnContext(ctx, "index delete not confirmed — rerun the targeted reindex",
+			"type", entityTypeProjectMembership, "uids", removed, "error", err, "publish_failed_for_backfill_repair", true)
+	}
 }
 
 // runTargetedKeyContacts is the batched key_contact arm of targeted reindex.

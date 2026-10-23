@@ -885,7 +885,9 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	fetched, convErrSFIDs, err := o.accountBatch.FetchAccountsBySFIDs(ctx, readIDs)
 	if err != nil {
 		logBatchFetchError(ctx, "Account", upsertIDs, changeType, err)
-		if ownerRecheck {
+		if !isRestore(changeType) {
+			// The stream advances past this event, so only a marker brings these
+			// Accounts back; a restore holds the replay cursor instead.
 			o.queueForRepairDetached(ctx, "Account", upsertIDs)
 		}
 		if isRestore(changeType) {

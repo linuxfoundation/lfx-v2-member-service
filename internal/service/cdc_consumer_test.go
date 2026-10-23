@@ -5724,6 +5724,22 @@ func TestCDCConsumer_Account_ParentRefresh_ChildReadFails_QueuesParent(t *testin
 	assert.Equal(t, []string{parent}, repairPutsOfType(repair, "b2b_org"))
 }
 
+// TestCDCConsumer_AccountUpdate_ReadFails_QueuesBatch: the stream advances past
+// a failed Account read, so the changed Accounts are queued for the repair run.
+func TestCDCConsumer_AccountUpdate_ReadFails_QueuesBatch(t *testing.T) {
+	ids := []string{sfid("update-rf-1"), sfid("update-rf-2")}
+	repair := &mock.MockCDCRepairStore{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeUpdate, RecordIDs: ids, ReplayID: []byte("urf")}}},
+		&fakeB2BOrgReader{orgErr: pkgerrors.NewNotFound("gone")}, &mock.MockCacheInvalidator{}, &subjectCapturingPublisher{}, "",
+		svc.WithCDCAccountBatchReader(&recordingAccountBatch{err: assert.AnError}),
+		svc.WithCDCRepairStore(repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, ids, repairPutsOfType(repair, "b2b_org"))
+}
+
 func TestCDCConsumer_Account_ParentRefresh_ParentReadFails_QueuesParent(t *testing.T) {
 	child, parent := sfid("child-pf"), sfid("parent-pf")
 	accounts := &recordingAccountBatch{
