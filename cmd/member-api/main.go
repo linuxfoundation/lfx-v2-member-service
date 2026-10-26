@@ -130,6 +130,7 @@ func runAPI(ctx context.Context, bind, port string, debug bool) {
 		service.JWTAuthImpl(ctx),
 		service.MemberReaderImpl(ctx),
 		service.B2BOrgReaderImpl(ctx),
+		service.B2BOrgEligibilityReaderImpl(ctx),
 		service.ProjectMembershipReaderImpl(ctx),
 		service.B2BOrgSettingsReaderImpl(ctx),
 		service.B2BOrgWriterUseCase(ctx),

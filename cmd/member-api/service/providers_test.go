@@ -3,7 +3,12 @@
 
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
+)
 
 func TestParseIncludeCompanyAccounts(t *testing.T) {
 	t.Parallel()
@@ -38,5 +43,28 @@ func TestParseIncludeCompanyAccounts(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseIncludeCompanyAccounts(%q) = %v, want %v", tt.raw, got, tt.want)
 		}
+	}
+}
+
+func TestWriteEligibilityReader(t *testing.T) {
+	t.Parallel()
+
+	built := 0
+	newReader := func() port.B2BOrgEligibilityReader {
+		built++
+		return mock.MockB2BOrgEligibilityReader{}
+	}
+
+	if got := writeEligibilityReader(false, newReader); got != nil {
+		t.Errorf("setting off: got %T, want nil so staging and prod refuse nothing", got)
+	}
+	if built != 0 {
+		t.Errorf("setting off: reader built %d times, want 0", built)
+	}
+	if got := writeEligibilityReader(true, newReader); got == nil {
+		t.Error("setting on: got nil, want the reader")
+	}
+	if built != 1 {
+		t.Errorf("setting on: reader built %d times, want 1", built)
 	}
 }

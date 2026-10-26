@@ -144,6 +144,7 @@ type svcBuilder struct {
 	auth            domain.Authenticator
 	storage         port.MemberReader
 	b2bOrgReader    port.B2BOrgReader
+	eligibility     port.B2BOrgEligibilityReader
 	pmReader        port.ProjectMembershipReader
 	umReader        port.UserMembershipReader
 	settingsR       port.B2BOrgSettingsReader
@@ -160,6 +161,15 @@ type svcOpt func(*svcBuilder)
 
 func withB2BOrgReader(r port.B2BOrgReader) svcOpt {
 	return func(b *svcBuilder) { b.b2bOrgReader = r }
+}
+func withB2BOrgEligibility(r port.B2BOrgEligibilityReader) svcOpt {
+	return func(b *svcBuilder) { b.eligibility = r }
+}
+func withWorkspaceWriterUC(w usecaseSvc.WorkspaceWriter) svcOpt {
+	return func(b *svcBuilder) { b.workspaceWriter = w }
+}
+func withSettingsWriterUC(w usecaseSvc.OrgSettingsWriter) svcOpt {
+	return func(b *svcBuilder) { b.settingsW = w }
 }
 func withB2BOrgWriterUC(w usecaseSvc.B2BOrgWriter) svcOpt {
 	return func(b *svcBuilder) { b.b2bOrgWriter = w }
@@ -214,7 +224,7 @@ func newTestSvc(opts ...svcOpt) membershipservice.Service {
 	for _, o := range opts {
 		o(b)
 	}
-	return NewMembershipService(b.auth, b.storage, b.b2bOrgReader,
+	return NewMembershipService(b.auth, b.storage, b.b2bOrgReader, b.eligibility,
 		b.pmReader, b.settingsR, b.b2bOrgWriter, b.logoUploader, b.kcWriter, b.settingsW, b.workspaceWriter, b.runner,
 		usecaseSvc.NewMemberTiers(b.storage, b.umReader, b.grantIndex))
 }
