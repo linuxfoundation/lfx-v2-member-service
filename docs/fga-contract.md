@@ -67,7 +67,7 @@ Grants and upserts do not flush, nor does the email-change revoke on the deletio
 | `child` | `["b2b_org:{child_uid}", ...]` | Updated on old/new parent when `ParentUID` changes |
 | `writer` | LFID username string (one per accepted writer, e.g. `"alice"`) | When org settings are updated with a non-nil writers field |
 | `auditor` | LFID username string (one per accepted auditor) | When org settings are updated with a non-nil auditors field |
-| `auditor` | `["team:{lfStaffTeamName}#member"]` | On every full-sync publish — create, update, CDC upsert, settings PUT, per-principal settings mutations and `/admin/reindex`. Not on reparenting/child-list messages, and not on delete. Staff only: the contractor team reference was withdrawn (LFXV2-3071 rollback), though already-written contractor tuples survive until revoked. See [lf-team-auditor-grants.md](./lf-team-auditor-grants.md) |
+| `auditor` | `["team:{lfStaffTeamName}#member", "team:{globalOrgAuditorsTeamName}#member"]` — one team reference per configured (non-empty, de-duplicated) name, staff first | On every full-sync publish — create, update, CDC upsert, settings PUT, per-principal settings mutations and `/admin/reindex`. Not on reparenting/child-list messages, and not on delete. Contractors excluded: the contractor team reference was withdrawn (LFXV2-3071 rollback), though already-written contractor tuples survive until revoked. See [lf-team-auditor-grants.md](./lf-team-auditor-grants.md) |
 
 > `parent` and `child` relations are always excluded from `update_access` via `ExcludeRelations` and managed by separate reparenting messages.
 >

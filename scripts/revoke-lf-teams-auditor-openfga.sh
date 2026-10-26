@@ -26,15 +26,18 @@
 #   Stop EVERY writer of the grant FIRST. There are two:
 #   1. member-service, on the API and the CDC consumer both. For lf-contractor
 #      this is already done in code — the chart no longer injects
-#      LF_CONTRACTOR_TEAM_NAME, so confirm both deployments run a staff-only
-#      build; there is no variable to blank. For lf-staff, set
-#      lfStaffTeamName to "" and roll out.
+#      LF_CONTRACTOR_TEAM_NAME, so confirm both deployments run a build that
+#      excludes it; there is no variable to blank. For lf-staff, set
+#      lfStaffTeamName to "" and roll out; for global-org-auditors, set
+#      globalOrgAuditorsTeamName to "" and roll out.
 #   2. the sync-global-groups reconciler (lfx-v2-argocd), which writes blanket
 #      auditor for every team in its in-code orgAuditorTeams set every 10
 #      minutes and never deletes. Confirm the running build excludes the team
 #      you are revoking — its logs should show `org auditor surplus` for that
 #      team and no `org auditor reconcile` line naming it — or set
 #      ORG_RECONCILE_ENABLED=false in that environment's overlay.
+#      It never writes global-org-auditors, so there is nothing to stop here
+#      for that team.
 #   Revoking while either writer is live is a race this script cannot win:
 #   any org written during or after the run re-acquires the tuple, and fga-sync
 #   will not reap it afterwards because `auditor` is not a `global_*` relation.
@@ -44,8 +47,10 @@
 #
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
-#   export LF_STAFF_TEAM_NAME=… and/or LF_CONTRACTOR_TEAM_NAME=…
-#     (set only the team you intend to revoke; see fga_team_names)
+#   export LF_STAFF_TEAM_NAME=…, GLOBAL_ORG_AUDITORS_TEAM_NAME=… and/or
+#     LF_CONTRACTOR_TEAM_NAME=…
+#     (set only the team you intend to revoke: every exported name is deleted;
+#     see fga_team_names)
 #
 # Usage:
 #   ./scripts/revoke-lf-teams-auditor-openfga.sh <store-id> [--dry-run] [--yes]
@@ -93,13 +98,13 @@ done
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
 #
-# Both teams — deliberately wider than the grant script, which is staff-only
-# since the rollback of lfx-self-serve#2157: revoke must be able to target a team
-# the service no longer emits (lf-contractor). Set only
-# the variable for the team you intend to remove — whichever is left unset is
-# left untouched, which is how a single team can be revoked while the other
-# keeps its grants.
-TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME LF_CONTRACTOR_TEAM_NAME)
+# All three teams — deliberately wider than the grant script, which reads staff
+# and global-org-auditors only since the rollback of lfx-self-serve#2157: revoke
+# must be able to target a team the service no longer emits (lf-contractor).
+# Exporting several names deletes all of them. Set only the variable for the
+# team you intend to remove — whichever is left unset is left untouched, which
+# is how a single team can be revoked while the others keep their grants.
+TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME GLOBAL_ORG_AUDITORS_TEAM_NAME LF_CONTRACTOR_TEAM_NAME)
 TEAMS=()
 while IFS= read -r team_name; do
 	TEAMS+=("$team_name")
@@ -166,8 +171,10 @@ else
 	echo ""
 	echo "Reminder: this only holds if BOTH writers of the grant are stopped."
 	echo "  - member-service (API and CDC consumer): for lf-contractor, confirm both run"
-	echo "    a staff-only build; for lf-staff, lfStaffTeamName must be \"\"."
-	echo "  - sync-global-groups reconciler: its build must exclude the team (logs show"
-	echo "    'org auditor surplus' for it), or ORG_RECONCILE_ENABLED=false."
+	echo "    a build that excludes it; for lf-staff, lfStaffTeamName must be \"\"; for"
+	echo "    global-org-auditors, globalOrgAuditorsTeamName must be \"\"."
+	echo "  - sync-global-groups reconciler (it never writes global-org-auditors): its"
+	echo "    build must exclude the team (logs show 'org auditor surplus' for it), or"
+	echo "    ORG_RECONCILE_ENABLED=false."
 	echo "Wait at least two reconciler runs (~20 min), then re-run with --dry-run."
 fi

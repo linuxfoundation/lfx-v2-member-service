@@ -3,7 +3,7 @@
 
 # LF Team Auditor Grants — Operator Runbook
 
-The LF staff team — named by `LF_STAFF_TEAM_NAME`, written as `team:<name>#member` throughout this document — holds the `auditor` relation on every `b2b_org`. The service asserts the grant on every full-sync publish path; the scripts in this document exist for the orgs that already existed when that behaviour shipped, and for rolling the grant back.
+Two LF teams — written as `team:<name>#member` throughout this document — hold the `auditor` relation on every `b2b_org`: the LF staff team, named by `LF_STAFF_TEAM_NAME`, and the hand-picked `global-org-auditors` team, named by `GLOBAL_ORG_AUDITORS_TEAM_NAME` (membership managed in sso-tools, not LDAP-synced). The service asserts the grant for each configured name on every full-sync publish path; the scripts in this document exist for the orgs that already existed when that behaviour shipped, and for rolling the grant back.
 
 > **Contractor rollback procedure.** A contractor team was granted the same blanket `auditor` under [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) and backfilled across existing orgs. Two writers continued adding it: member-service on every org write, and the `sync-global-groups` reconciler on every org in its census until its fixed-team build deployed. The total therefore follows each environment's org census; do not compare a revoke dry-run against a fixed historical count. Compare it with the reconciler's latest `org auditor surplus` count for that team. The service no longer emits the grant and the grant script no longer reads it, but **neither removes existing tuples** — fga-sync preserves team subjects on the non-global `auditor` relation. Any tuples remaining before the environment-specific revoke continue to confer `auditor`. The reconciler reports them as `org auditor surplus`.
 
@@ -11,7 +11,7 @@ The LF staff team — named by `LF_STAFF_TEAM_NAME`, written as `team:<name>#mem
 
 **The deploy is the cutover, not the backfill.** Every write path asserts the reference, so orgs begin acquiring the tuple as soon as the new build is running and CDC events arrive. The scripts below only sweep up orgs that never change on their own.
 
-The team name is the same in every environment, so it lives as a real value (`lfStaffTeamName`) in `charts/lfx-v2-member-service/values.yaml` rather than being overridden per environment in `lfx-v2-argocd`. It is the single authoritative copy: neither the service code nor the scripts hardcode it. The chart carries no contractor setting any more; the contractor tuples written under LFXV2-3071 are historical and removed only by the revoke script.
+The staff team name is the same in every environment, so it lives as a real value (`lfStaffTeamName`) in `charts/lfx-v2-member-service/values.yaml` rather than being overridden per environment in `lfx-v2-argocd`. It is the single authoritative copy: neither the service code nor the scripts hardcode it. `globalOrgAuditorsTeamName` works the same way (`global-org-auditors`). The chart carries no contractor setting any more; the contractor tuples written under LFXV2-3071 are historical and removed only by the revoke script.
 
 Rollout order:
 
@@ -21,7 +21,7 @@ Rollout order:
 
 Plan step 1 deliberately. Reverting the deploy or clearing the team variables afterwards stops further writes but removes nothing already written — that needs the revoke script.
 
-**Staff only.** [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) granted `lf-contractor` the same blanket `auditor` on the argument that it already held `auditor` on the tenant root project. That argument is withdrawn: lfx-self-serve#2814 Release 2 deletes the root tuple (dropped, not migrated), and contractors keep explicit per-org grants only (Manish Dixit, 2026-08-10). Adding a team back is not a one-line change: it needs the `values.yaml` key, an `LF_*_TEAM_NAME` env entry in **both** Deployment templates, the env list in `B2BOrgAuditorTeamNames`, the `fga_team_names` arguments of the grant script, the `kubectl` exports in this runbook, and the CLAUDE.md env tables — message construction alone is team-count-agnostic. The resulting grant cannot be taken back by reverting that change.
+**Contractors excluded.** [LFXV2-3071](https://linuxfoundation.atlassian.net/browse/LFXV2-3071) granted `lf-contractor` the same blanket `auditor` on the argument that it already held `auditor` on the tenant root project. That argument is withdrawn: lfx-self-serve#2814 Release 2 deletes the root tuple (dropped, not migrated), and contractors keep explicit per-org grants only (Manish Dixit, 2026-08-10). Adding a team is not a one-line change — `global-org-auditors` is the worked example: it needs the `values.yaml` key, a `*_TEAM_NAME` env entry in **both** Deployment templates, the env list in `B2BOrgAuditorTeamNames`, the `fga_team_names` arguments of the grant and revoke scripts, the `kubectl` exports in this runbook, and the CLAUDE.md env tables — message construction alone is team-count-agnostic. Existing orgs then need one run of the grant script below. The resulting grant cannot be taken back by reverting that change.
 
 See [fga-contract.md](./fga-contract.md) for the message-level contract and [LFXV2-2937](https://linuxfoundation.atlassian.net/browse/LFXV2-2937) for the change itself.
 
@@ -44,7 +44,7 @@ No write access anywhere. The `[user, team#member]` branch of `b2b_org.auditor` 
 
 ## The one-way-door property
 
-**fga-sync preserves team-subject tuples on relations whose names do not begin with `global_`.** This grant uses `auditor`, so reverting the service code stops *new* grants being written but does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` to `""` behaves the same way. `LF_CONTRACTOR_TEAM_NAME` is no longer read at all, so the service already emits no contractor grant; the existing contractor tuples still need the revoke script.
+**fga-sync preserves team-subject tuples on relations whose names do not begin with `global_`.** This grant uses `auditor`, so reverting the service code stops *new* grants being written but does not remove existing ones. Setting `LF_STAFF_TEAM_NAME` or `GLOBAL_ORG_AUDITORS_TEAM_NAME` to `""` behaves the same way. `LF_CONTRACTOR_TEAM_NAME` is no longer read at all, so the service already emits no contractor grant; the existing contractor tuples still need the revoke script.
 
 That behavior belongs to the independently deployed fga-sync, not to this repository's dependency pin. This repo's pin supplies only the message types in `pkg/types` and `pkg/constants`; nothing here links the sync engine, so the pin has no bearing on what the running service deletes. The running fga-sync must be `v0.3.1` or later to preserve team subjects; older builds can delete this grant. A release containing relation-name reconciliation reaps `global_*` team relations while continuing to protect this non-global `auditor` grant.
 
@@ -60,18 +60,20 @@ The scripts are the primary route because reindex re-fetches every org from Sale
 
 All three live in `scripts/`. The two OpenFGA scripts take the store ID as a **required first argument** — there is deliberately no default, because a default target on a script whose writes cannot be undone is a foot-gun.
 
-For the same reason they require the team name in the environment rather than defaulting it. `lfStaffTeamName` in `charts/lfx-v2-member-service/values.yaml` is the authoritative copy; a second hardcoded copy in the scripts would drift, and granting the wrong team name is exactly as unreapable as granting on the wrong store. Read it back from the deployment you are about to back-fill, rather than retyping it — that also confirms the running build is the one that emits the grant:
+For the same reason they require the team names in the environment rather than defaulting them. `lfStaffTeamName` and `globalOrgAuditorsTeamName` in `charts/lfx-v2-member-service/values.yaml` are the authoritative copies; a second hardcoded copy in the scripts would drift, and granting the wrong team name is exactly as unreapable as granting on the wrong store. Read them back from the deployment you are about to back-fill, rather than retyping them — that also confirms the running build is the one that emits the grant:
 
 ```bash
 export LF_STAFF_TEAM_NAME=$(kubectl --context <ctx> -n lfx get deploy lfx-v2-member-service \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LF_STAFF_TEAM_NAME")].value}')
+export GLOBAL_ORG_AUDITORS_TEAM_NAME=$(kubectl --context <ctx> -n lfx get deploy lfx-v2-member-service \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GLOBAL_ORG_AUDITORS_TEAM_NAME")].value}')
 # The contractor variable is no longer injected into the deployment. To revoke it,
 # export the name literally (see the revoke runbook below).
 ```
 
-The two scripts no longer have the same reach, deliberately. The grant script reads `LF_STAFF_TEAM_NAME` only, so a backfill run from a shell that still exports `LF_CONTRACTOR_TEAM_NAME` cannot re-create the withdrawn grant. It errors out if that one variable is unset.
+The two scripts no longer have the same reach, deliberately. The grant script reads `LF_STAFF_TEAM_NAME` and `GLOBAL_ORG_AUDITORS_TEAM_NAME`, so a backfill run from a shell that still exports `LF_CONTRACTOR_TEAM_NAME` cannot re-create the withdrawn grant. `fga_team_names` silently skips an unset name and errors only when every named variable is empty, so export both names the deployment carries — otherwise the backfill covers only the one you exported.
 
-The revoke script still reads **both**, because rollback has to be able to target a team the service no longer emits — that is exactly the contractor case. Export only the team you intend to remove; whichever variable is left unset is left untouched. Exporting both deletes both: staff would lose `auditor` on every org.
+The revoke script reads **all three**, because rollback has to be able to target a team the service no longer emits — that is exactly the contractor case. Export only the team you intend to remove; whichever variable is left unset is left untouched. Exporting several deletes all of them: exporting staff too would strip `auditor` from staff on every org.
 
 The grant and revoke scripts share their OpenFGA helpers via `scripts/lib/openfga-team-auditor.sh` (pagination, batch apply, the transport guard, argument validation). They were near-copies; sharing matters here because the revoke script is the rollback path that runs under incident pressure, and a rollback that has quietly drifted from the tested grant path is worse than no rollback. Both scripts source the library relative to their own location, so they must be run from a checkout rather than copied to a pod in isolation.
 
@@ -119,23 +121,23 @@ The live form prompts for the store ID before deleting, because it differs from 
 
 Deletes only tuples whose subject is exactly one of the configured teams; per-user `auditor` grants and `global_org_admin` are never touched. Batches set `"on_missing": "ignore"` inside the `deletes` object — the mirror of the grant script's problem, since the tuple list comes from a paginated read that can go stale mid-run.
 
-**Stop the emission before you revoke, not after.** For the withdrawn contractor team, that means the staff-only build is running on the API *and* the CDC consumer — there is no variable to blank. For the staff team, set `lfStaffTeamName: ""` (or revert) and roll out both first. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because `auditor` is not a `global_*` relation. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
+**Stop the emission before you revoke, not after.** For the withdrawn contractor team, that means a build that excludes it is running on the API *and* the CDC consumer — there is no variable to blank. For the staff team, set `lfStaffTeamName: ""` (or revert) and roll out both first; for `global-org-auditors`, set `globalOrgAuditorsTeamName: ""` and roll out both. Revoking against a service that is still emitting is a race the script cannot win: any org written during or after the run re-acquires the tuple, and fga-sync will not reap it later because `auditor` is not a `global_*` relation. The residue is invisible — a post-run dry-run only reports what exists at that instant, so a clean dry-run against a live emitter proves nothing.
 
 ### Rollback order
 
-1. Stop the emission for the team you are revoking, and roll out **both** deployments (API and CDC consumer). For `lf-contractor` this is already done in code — the chart key and both env entries are gone, so any build from this revision emits staff only; confirm the running pods are on it. For `lf-staff`, set `lfStaffTeamName: ""` and roll out. Do not blank a team you intend to keep: orgs written during the window would miss its tuple until re-written or backfilled.
+1. Stop the emission for the team you are revoking, and roll out **both** deployments (API and CDC consumer). For `lf-contractor` this is already done in code — the chart key and both env entries are gone, so no build from this revision emits it; confirm the running pods are on it. For `lf-staff`, set `lfStaffTeamName: ""` and roll out. For `global-org-auditors`, set `globalOrgAuditorsTeamName: ""` and roll out. Do not blank a team you intend to keep: orgs written during the window would miss its tuple until re-written or backfilled.
 2. Confirm no pod is still running the emitting config.
-3. **Stop the reconciler re-granting.** `sync-global-groups` (lfx-v2-argocd) writes blanket `auditor` for every team it considers in scope, every 10 minutes, and it never deletes. Either deploy a build whose team set excludes the team you are revoking, or set `ORG_RECONCILE_ENABLED=false` in that environment's overlay. Skipping this loses the race exactly as a live emitter does — the tuples come back within one run, and the confirming dry-run in step 6 will show it.
-4. Export the team name to revoke — the service no longer emits it, but the script still needs to know what to look for.
-5. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run.
+3. **Stop the reconciler re-granting.** `sync-global-groups` (lfx-v2-argocd) writes blanket `auditor` for every team it considers in scope, every 10 minutes, and it never deletes. Either deploy a build whose team set excludes the team you are revoking, or set `ORG_RECONCILE_ENABLED=false` in that environment's overlay. Skipping this loses the race exactly as a live emitter does — the tuples come back within one run, and the confirming dry-run in step 6 will show it. The reconciler never writes `global-org-auditors`, so skip this step for that team.
+4. Export the name of the team to revoke; the script needs it to know what to look for. For `lf-staff` and `global-org-auditors`, read it back from the deployment (as in [Scripts](#scripts)) before step 1 blanks it; for `lf-contractor`, export the name literally.
+5. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run. For a team that held the blanket grant, the first dry-run reports roughly the org census; zero means the exported name is wrong, not that the store is clean.
 6. Re-run the dry-run; expect zero. This is only meaningful once steps 1 and 3 have landed — against a live emitter *or* a reconciler still granting the team, a clean dry-run proves nothing.
 
 ## Rollout order
 
-1. Deploy to dev, confirm new orgs get the grants.
+1. Deploy to dev, confirm new orgs get the grants for every configured team.
 2. Deploy to the remaining target environments — API and CDC consumer together. During a staggered rollout the two emitters assert different team sets, which converges: team references on the non-global `auditor` relation are additive under the fga-sync guard, and the older emitter revokes nothing. From this point CDC upserts assert the grants for any org that changes.
-3. Run the export, then the grant script's dry-run (with `LF_STAFF_TEAM_NAME` exported from the deployment), then the live run.
+3. Run the export, then the grant script's dry-run (with `LF_STAFF_TEAM_NAME` and `GLOBAL_ORG_AUDITORS_TEAM_NAME` exported from the deployment), then the live run.
 4. Re-run the dry-run; expect zero.
-5. Spot-check the cascade: pick an org with no per-user auditor, confirm a member of the LF staff team can `GET` it and the `project_membership` beneath it.
+5. Spot-check the cascade: pick an org with no per-user auditor, confirm a member of each configured team can `GET` it and the `project_membership` beneath it.
 
 Step 3 comes after step 2 deliberately — that ordering is why the collision handling is required rather than optional.

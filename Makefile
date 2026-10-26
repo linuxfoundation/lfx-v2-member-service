@@ -117,9 +117,10 @@ test: test-scripts ## Run tests
 	go test -v -race -coverprofile=coverage.out ./...
 
 .PHONY: test-scripts
-test-scripts: ## Run shell operator-script tests (global org-admin migration + OpenFGA residue cleanup)
+test-scripts: ## Run shell operator-script tests (global org-admin migration + OpenFGA residue cleanup + LF team auditor reach)
 	@bash scripts/test-global-org-admin-team-migration.sh
 	@bash scripts/test-openfga-residue-cleanup.sh
+	@bash scripts/test-lf-teams-auditor-openfga.sh
 
 .PHONY: build
 build: ## Build the application for local OS
