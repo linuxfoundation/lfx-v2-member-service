@@ -210,10 +210,10 @@ fga_team_names() {
 	if [[ ${#names[@]} -eq 0 ]]; then
 		echo "ERROR: no auditor team configured. Set at least one of" >&2
 		echo "       ${varnames[*]}." >&2
-		echo "       They are deliberately not defaulted here — the authoritative value" >&2
-		echo "       is in charts/lfx-v2-member-service/values.yaml. Export it to match" >&2
-		echo "       the environment you are targeting, e.g.:" >&2
-		echo "         export ${varnames[0]}=<team-name>" >&2
+		echo "       They are deliberately not defaulted here — the authoritative values" >&2
+		echo "       are in charts/lfx-v2-member-service/values.yaml; read them back from" >&2
+		echo "       the deployment you are targeting. Export only the variable for the" >&2
+		echo "       team you intend to target (one of: ${varnames[*]})." >&2
 		exit 1
 	fi
 
