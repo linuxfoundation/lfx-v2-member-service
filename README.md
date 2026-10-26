@@ -95,6 +95,8 @@ Key-Value cache to minimise round-trips.
 | PUT | `/b2b_orgs/{uid}/settings` | Update org access-control settings (writers, auditors) |
 | GET | `/b2b_orgs/member-tiers/{username}` | Highest active membership tier per org for a user (machine-to-machine) |
 
+With `B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS=true`, writes that add or change data for an org (`PUT /b2b_orgs/{uid}`, the logo upload, the settings update, adding a settings user or changing their role, creating or renaming a workspace, and adding workspace projects) return 404 when the Salesforce Account is deleted or no longer qualifies as a B2B org (`model.IsB2BOrgEligible`). The check is one batched Salesforce read per request. With the setting off, these writes are not checked, so a Company Account without a membership stays editable until the setting is turned on. Removals (deleting a settings user, a workspace, or a workspace project) are always allowed, so access can be withdrawn after an org stops qualifying. `GET /b2b_orgs/{uid}` and the `lfx.member.b2b_org_lookup` NATS lookup still return the raw Account.
+
 ### Admin
 
 | Method | Path | Description |

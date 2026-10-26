@@ -322,6 +322,44 @@ func B2BOrgReaderImpl(ctx context.Context) port.B2BOrgReader {
 	}
 }
 
+// B2BOrgEligibilityReaderImpl initialises and returns the
+// port.B2BOrgEligibilityReader implementation selected by the
+// REPOSITORY_SOURCE environment variable.
+func B2BOrgEligibilityReaderImpl(ctx context.Context) port.B2BOrgEligibilityReader {
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	switch repoSource {
+	case "mock":
+		slog.InfoContext(ctx, "initialising mock B2B org eligibility reader")
+		return mock.MockB2BOrgEligibilityReader{}
+
+	case "salesforce":
+		return writeEligibilityReader(B2BOrgIncludeCompanyAccounts(ctx), func() port.B2BOrgEligibilityReader {
+			slog.InfoContext(ctx, "initialising Salesforce B2B org eligibility reader")
+			sfInit(ctx)
+			return salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx))
+		})
+
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+		return nil
+	}
+}
+
+// writeEligibilityReader returns a reader only while every Company Account
+// qualifies. With the setting off, a Company Account without a membership is
+// ineligible, and refusing its writes would change staging and prod before
+// the setting is turned on there. A nil reader refuses nothing.
+func writeEligibilityReader(includeCompanyAccounts bool, newReader func() port.B2BOrgEligibilityReader) port.B2BOrgEligibilityReader {
+	if !includeCompanyAccounts {
+		return nil
+	}
+	return newReader()
+}
+
 // B2BOrgWriterImpl initialises and returns the port.B2BOrgWriter implementation
 // selected by the REPOSITORY_SOURCE environment variable.
 func B2BOrgWriterImpl(ctx context.Context) port.B2BOrgWriter {

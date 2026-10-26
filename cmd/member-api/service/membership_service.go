@@ -31,6 +31,7 @@ type membershipServicesrvc struct {
 	storage                 port.MemberReader
 	auth                    domain.Authenticator
 	b2bOrgReader            port.B2BOrgReader
+	b2bOrgEligibility       port.B2BOrgEligibilityReader
 	projectMembershipReader port.ProjectMembershipReader
 	b2bOrgSettingsReader    port.B2BOrgSettingsReader
 	b2bOrgWriter            usecaseSvc.B2BOrgWriter
@@ -154,6 +155,9 @@ func (s *membershipServicesrvc) UpdateB2bOrg(ctx context.Context, p *memberships
 	if p.IfMatch != nil {
 		ifMatch = *p.IfMatch
 	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
+	}
 	org, err := s.b2bOrgWriter.Update(ctx, p.UID, input, ifMatch)
 	if err != nil {
 		return nil, wrapError(ctx, err)
@@ -183,6 +187,9 @@ func (s *membershipServicesrvc) UploadB2bOrgLogo(ctx context.Context, p *members
 
 	p.UID = normalizeSFID(p.UID)
 
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
+	}
 	org, err := s.logoUploader.UploadB2BOrgLogo(ctx, p.UID, p.ContentType, body, p.IfMatch)
 	if err != nil {
 		return nil, wrapError(ctx, err)
@@ -791,6 +798,9 @@ func (s *membershipServicesrvc) UpdateB2bOrgSettings(ctx context.Context, p *mem
 		in.Auditors = orgUsersFromPayload(p.Auditors, now)
 	}
 
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
+	}
 	updated, err := s.orgSettingsWriter.Update(ctx, in)
 	if err != nil {
 		return nil, wrapError(ctx, err)
@@ -823,6 +833,9 @@ func (s *membershipServicesrvc) AddB2bOrgSettingsUser(ctx context.Context, p *me
 	if p.Name != nil {
 		in.Name = *p.Name
 	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
+	}
 	updated, err := s.orgSettingsWriter.AddPrincipal(ctx, in)
 	if err != nil {
 		return nil, wrapError(ctx, err)
@@ -843,6 +856,9 @@ func (s *membershipServicesrvc) UpdateB2bOrgSettingsUserRole(ctx context.Context
 		Email:     p.Email,
 		InvitedAs: p.InvitedAs,
 		IfMatch:   derefStr(p.IfMatch),
+	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
 	}
 	updated, err := s.orgSettingsWriter.ChangePrincipalRole(ctx, in)
 	if err != nil {
@@ -887,6 +903,9 @@ func (s *membershipServicesrvc) CreateB2bOrgWorkspace(ctx context.Context, p *me
 		CreatedBy: principal,
 		IfMatch:   derefStr(p.IfMatch),
 	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
+	}
 	result, err := s.workspaceWriter.CreateWorkspace(ctx, in)
 	if err != nil {
 		return nil, wrapError(ctx, err)
@@ -908,6 +927,9 @@ func (s *membershipServicesrvc) UpdateB2bOrgWorkspace(ctx context.Context, p *me
 		Name:         p.Name,
 		UpdatedBy:    principal,
 		IfMatch:      derefStr(p.IfMatch),
+	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
 	}
 	result, err := s.workspaceWriter.UpdateWorkspace(ctx, in)
 	if err != nil {
@@ -946,6 +968,9 @@ func (s *membershipServicesrvc) AddB2bOrgWorkspaceProject(ctx context.Context, p
 		CreatedBy:    principal,
 		IfMatch:      derefStr(p.IfMatch),
 	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
+	}
 	result, err := s.workspaceWriter.AddProject(ctx, in)
 	if err != nil {
 		return nil, wrapError(ctx, err)
@@ -979,6 +1004,9 @@ func (s *membershipServicesrvc) BulkAddB2bOrgWorkspaceProjects(ctx context.Conte
 		Projects:     items,
 		CreatedBy:    principal,
 		IfMatch:      derefStr(p.IfMatch),
+	}
+	if err := s.requireEligibleOrg(ctx, p.UID); err != nil {
+		return nil, wrapError(ctx, err)
 	}
 	result, err := s.workspaceWriter.AddProjectsBulk(ctx, in)
 	if err != nil {
@@ -1241,6 +1269,27 @@ func orgUsersFromPayload(users []*membershipservice.OrgUser, now time.Time) []mo
 	return out
 }
 
+// requireEligibleOrg refuses a write that adds or changes data for an Account
+// that is deleted or no longer an organization: the single-record read behind
+// the writers does not apply the eligibility rule, so an edit would otherwise
+// republish a dropped organization. It sits here rather than in the writers
+// because they also serve key contact, change event, and invite flows that
+// must not pay an extra Salesforce read. Removals do not call it, so access
+// can always be withdrawn. A nil reader refuses nothing.
+func (s *membershipServicesrvc) requireEligibleOrg(ctx context.Context, uid string) error {
+	if s.b2bOrgEligibility == nil {
+		return nil
+	}
+	eligible, err := s.b2bOrgEligibility.FetchB2BOrgEligibility(ctx, []string{uid})
+	if err != nil {
+		return fmt.Errorf("checking organization eligibility: %w", err)
+	}
+	if !eligible[uid] {
+		return pkgerrors.NewNotFound("organization not found")
+	}
+	return nil
+}
+
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 // NewMembershipService returns the membership-service implementation with
@@ -1249,6 +1298,7 @@ func NewMembershipService(
 	auth domain.Authenticator,
 	storage port.MemberReader,
 	b2bOrgReader port.B2BOrgReader,
+	b2bOrgEligibility port.B2BOrgEligibilityReader,
 	projectMshipR port.ProjectMembershipReader,
 	b2bOrgSettingsReader port.B2BOrgSettingsReader,
 	b2bOrgWriter usecaseSvc.B2BOrgWriter,
@@ -1263,6 +1313,7 @@ func NewMembershipService(
 		storage:                 storage,
 		auth:                    auth,
 		b2bOrgReader:            b2bOrgReader,
+		b2bOrgEligibility:       b2bOrgEligibility,
 		projectMembershipReader: projectMshipR,
 		b2bOrgSettingsReader:    b2bOrgSettingsReader,
 		b2bOrgWriter:            b2bOrgWriter,
