@@ -123,10 +123,10 @@ Deletes only tuples whose subject is exactly one of the configured teams; per-us
 
 ### Rollback order
 
-1. Stop the emission for the team you are revoking, and roll out **both** deployments (API and CDC consumer). For `lf-contractor` this is already done in code — the chart key and both env entries are gone, so any build from this revision emits staff only; confirm the running pods are on it. For `lf-staff`, set `lfStaffTeamName: ""` and roll out. Do not blank a team you intend to keep: orgs written during the window would miss its tuple until re-written or backfilled.
+1. Stop the emission for the team you are revoking, and roll out **both** deployments (API and CDC consumer). For `lf-contractor` this is already done in code — the chart key and both env entries are gone, so any build from this revision emits staff only; confirm the running pods are on it. For `lf-staff`, set `lfStaffTeamName: ""` and roll out. Do not blank a team you intend to keep: orgs written during the window would miss its tuple until re-written or backfilled. member-service never emits `global-org-auditors`, so there is nothing to stop here for that team; go to step 3.
 2. Confirm no pod is still running the emitting config.
 3. **Stop the reconciler re-granting.** `sync-global-groups` (lfx-v2-argocd) writes blanket `auditor` for every team it considers in scope, every 10 minutes, and it never deletes. Either deploy a build whose team set excludes the team you are revoking, or set `ORG_RECONCILE_ENABLED=false` in that environment's overlay. Skipping this loses the race exactly as a live emitter does — the tuples come back within one run, and the confirming dry-run in step 6 will show it.
-4. Export the team name to revoke — the service no longer emits it, but the script still needs to know what to look for.
+4. Export the team name to revoke — the service does not or no longer emits it, but the script still needs to know what to look for.
 5. `revoke-lf-teams-auditor-openfga.sh <store-id> --dry-run`, then the live run.
 6. Re-run the dry-run; expect zero. This is only meaningful once steps 1 and 3 have landed — against a live emitter *or* a reconciler still granting the team, a clean dry-run proves nothing.
 
