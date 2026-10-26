@@ -74,7 +74,7 @@ app:
   # scripts/revoke-lf-teams-auditor-openfga.sh. Adding a team here remains a
   # one-way door. See docs/lf-team-auditor-grants.md.
   #
-  # Staff only. lfContractorTeamName was added under LFXV2-3071 and has been
+  # Contractors excluded. lfContractorTeamName was added under LFXV2-3071 and has been
   # withdrawn: that parity rested on lf-contractor holding auditor on the tenant
   # root project, and lfx-self-serve#2814 Release 2 deletes that tuple (dropped,
   # not migrated). Contractors keep explicit per-org grants only (Manish Dixit,
@@ -82,6 +82,15 @@ app:
   # `org auditor surplus` count is the live figure) are NOT removed by
   # this key — see docs/lf-team-auditor-grants.md for the revoke runbook.
   lfStaffTeamName: "lf-staff"
+  # globalOrgAuditorsTeamName is the hand-picked sso-tools team (not
+  # LDAP-synced) granted blanket auditor (read-only) access on every b2b_org
+  # alongside lfStaffTeamName. Like lfStaffTeamName it is the same in every
+  # environment, so this file is its single authoritative copy.
+  #
+  # Same one-way door as lfStaffTeamName: setting it to "" stops new grants
+  # but revokes nothing already written. Removal is
+  # scripts/revoke-lf-teams-auditor-openfga.sh.
+  globalOrgAuditorsTeamName: "global-org-auditors"
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.
   lfxSelfServeBaseURL: ""

@@ -181,10 +181,11 @@ fga_require_store_id() {
 #
 # The caller names the variables instead of this helper reading every team
 # variable it knows about, so each script declares its reach explicitly. Both
-# callers no longer read the same variables. Grant reads LF_STAFF_TEAM_NAME
-# only, so a backfill cannot re-create the withdrawn contractor grant; revoke
-# reads every team that has held the grant, because rollback must be able to
-# target a team the service does not emit. Export only the team you intend to
+# callers no longer read the same variables. Grant reads LF_STAFF_TEAM_NAME and
+# GLOBAL_ORG_AUDITORS_TEAM_NAME, so a backfill cannot re-create the withdrawn
+# contractor grant; revoke reads all three, because rollback must be able to
+# target a team the service no longer emits. An unset name is skipped silently,
+# so export every name you mean — and, for revoke, only the team you intend to
 # remove.
 fga_team_names() {
 	if [[ $# -eq 0 ]]; then

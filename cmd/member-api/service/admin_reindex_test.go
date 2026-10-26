@@ -197,11 +197,12 @@ func TestGlobalOrgAdminTeamName(t *testing.T) {
 // function holds auditor on every b2b_org, and fga-sync preserves team subjects
 // on the non-global auditor relation, so the grant cannot be taken back by
 // changing config or reverting code. Only a name given explicitly may get
-// through: the chart supplies the staff name (values.yaml is the single copy), and an
-// absent, blank or whitespace-only variable must grant nothing rather than fall
-// back to a hardcoded name that could drift from the chart. Staff only since
-// the LFXV2-3071 rollback: LF_CONTRACTOR_TEAM_NAME is no longer read, so a
-// chart or shell still setting it must grant nothing.
+// through: the chart supplies both names (values.yaml is the single copy); an absent,
+// blank or whitespace-only variable must grant nothing rather than fall back
+// to a hardcoded name that could drift from the chart. Both names are read,
+// staff first, and the same name in both yields one entry. Since the
+// LFXV2-3071 rollback LF_CONTRACTOR_TEAM_NAME is no longer read, so a chart or
+// shell still setting it must grant nothing.
 func TestB2BOrgAuditorTeamNames(t *testing.T) {
 	tests := []struct {
 		name string
@@ -250,13 +251,35 @@ func TestB2BOrgAuditorTeamNames(t *testing.T) {
 			env:  map[string]string{"LF_CONTRACTOR_TEAM_NAME": "contractor-team"},
 			want: []string{},
 		},
+		{
+			name: "global-org-auditors alone is granted",
+			env:  map[string]string{"GLOBAL_ORG_AUDITORS_TEAM_NAME": "global-org-auditors"},
+			want: []string{"global-org-auditors"},
+		},
+		{
+			name: "staff and global-org-auditors are both granted, staff first",
+			env: map[string]string{
+				"LF_STAFF_TEAM_NAME":            "staff-team",
+				"GLOBAL_ORG_AUDITORS_TEAM_NAME": "global-org-auditors",
+			},
+			want: []string{"staff-team", "global-org-auditors"},
+		},
+		{
+			// OpenFGA rejects a repeated tuple within one write request.
+			name: "the same name in both variables yields one entry",
+			env: map[string]string{
+				"LF_STAFF_TEAM_NAME":            "same-team",
+				"GLOBAL_ORG_AUDITORS_TEAM_NAME": " same-team ",
+			},
+			want: []string{"same-team"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Setenv first so the original value is restored on cleanup, then
 			// unset, so the "unset" case does not read the developer's shell.
-			for _, k := range []string{"LF_STAFF_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"} {
+			for _, k := range []string{"LF_STAFF_TEAM_NAME", "GLOBAL_ORG_AUDITORS_TEAM_NAME", "LF_CONTRACTOR_TEAM_NAME"} {
 				t.Setenv(k, "")
 				require.NoError(t, os.Unsetenv(k))
 			}
