@@ -256,6 +256,46 @@ func (r *AccountRepo) FetchB2BOrgEligibility(ctx context.Context, uids []string)
 
 var _ port.B2BOrgEligibilityReader = (*AccountRepo)(nil)
 
+// FetchDeletedAccountParents returns caller id → parent UID for every Account
+// among sfids that is in the recycle bin and had a parent, in one chunked
+// queryAll per 200 ids. Accounts purged from the recycle bin are not returned.
+func (r *AccountRepo) FetchDeletedAccountParents(ctx context.Context, sfids []string) (map[string]string, error) {
+	normalized, sfidToCaller := normalizeParentUIDs(ctx, sfids)
+	out := make(map[string]string, len(normalized))
+	if len(normalized) == 0 {
+		return out, nil
+	}
+	slog.DebugContext(ctx, "fetching parents of deleted accounts from Salesforce (batch)", "count", len(normalized))
+
+	const chunkSize = 200
+	for start := 0; start < len(normalized); start += chunkSize {
+		chunk := normalized[start:min(start+chunkSize, len(normalized))]
+		query := "SELECT Id, ParentId FROM Account WHERE Id IN (" + buildSOQLInClause(chunk) + ")" +
+			" AND IsDeleted = true AND ParentId != null"
+		records, err := QueryDeletedAndLivePages[soqlParentChild](ctx, r.client, query)
+		if err != nil {
+			return nil, fmt.Errorf("fetching parents of %d deleted accounts (chunk starting at %d): %w",
+				len(chunk), start, err)
+		}
+		for _, rec := range records {
+			sfid, convErr := sfuuid.Normalize18(rec.ID)
+			if convErr != nil {
+				continue
+			}
+			parentUID, convErr := sfuuid.Normalize18(rec.ParentID)
+			if convErr != nil {
+				slog.WarnContext(ctx, "parent SFID of deleted account could not be normalized, skipping",
+					"sfid", rec.ID, "parent_sfid", rec.ParentID, "error", convErr)
+				continue
+			}
+			if caller, ok := sfidToCaller[sfid]; ok {
+				out[caller] = parentUID
+			}
+		}
+	}
+	return out, nil
+}
+
 // soqlParentChild is a minimal projection for the batched child-list query.
 // No aggregate alias — uses the same plain json.Unmarshal path as soqlAccountID.
 type soqlParentChild struct {

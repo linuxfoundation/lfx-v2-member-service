@@ -5387,6 +5387,24 @@ type recordingAccountBatch struct {
 	err       error
 	errOnCall int // 1-based call that fails with err; 0 fails every call
 	calls     [][]string
+
+	deletedParents map[string]string
+	deletedErr     error
+	deletedCalls   [][]string
+}
+
+func (r *recordingAccountBatch) FetchDeletedAccountParents(_ context.Context, ids []string) (map[string]string, error) {
+	r.deletedCalls = append(r.deletedCalls, slices.Clone(ids))
+	if r.deletedErr != nil {
+		return nil, r.deletedErr
+	}
+	out := map[string]string{}
+	for _, id := range ids {
+		if parent, ok := r.deletedParents[id]; ok {
+			out[id] = parent
+		}
+	}
+	return out, nil
 }
 
 func (r *recordingAccountBatch) FetchAccountsBySFIDs(_ context.Context, ids []string) ([]*model.B2BOrg, []string, error) {
@@ -5660,6 +5678,109 @@ func TestCDCConsumer_Account_ParentRefresh_SameRead_NotAnUpsert(t *testing.T) {
 	}
 }
 
+func TestCDCConsumer_Account_Delete_RefreshesParent(t *testing.T) {
+	child, parent, sibling := sfid("del-child"), sfid("del-parent"), sfid("del-sibling")
+	parentOrgs := map[string]*model.B2BOrg{parent: {UID: parent}}
+	childOf := map[string]string{child: parent}
+
+	tests := []struct {
+		name        string
+		ids         []string
+		reader      *fakeB2BOrgReader
+		accounts    *recordingAccountBatch
+		wantReads   [][]string
+		wantIndexed map[string]bool
+	}{
+		{
+			name: "last child deleted clears the parent's is_parent", ids: []string{child},
+			reader:    &fakeB2BOrgReader{},
+			accounts:  &recordingAccountBatch{orgs: parentOrgs, deletedParents: childOf},
+			wantReads: [][]string{{parent}}, wantIndexed: map[string]bool{parent: false},
+		},
+		{
+			name: "parent with another child keeps is_parent", ids: []string{child},
+			reader:    &fakeB2BOrgReader{childMap: map[string][]string{parent: {sibling}}},
+			accounts:  &recordingAccountBatch{orgs: parentOrgs, deletedParents: childOf},
+			wantReads: [][]string{{parent}}, wantIndexed: map[string]bool{parent: true},
+		},
+		{
+			name: "deleted root org reads no parent", ids: []string{child},
+			reader:      &fakeB2BOrgReader{},
+			accounts:    &recordingAccountBatch{orgs: parentOrgs},
+			wantIndexed: map[string]bool{},
+		},
+		{
+			name: "parent deleted in the same event is not refreshed", ids: []string{child, parent},
+			reader:      &fakeB2BOrgReader{},
+			accounts:    &recordingAccountBatch{orgs: parentOrgs, deletedParents: childOf},
+			wantIndexed: map[string]bool{},
+		},
+		{
+			name: "ineligible parent is not published", ids: []string{child},
+			reader:    &fakeB2BOrgReader{},
+			accounts:  &recordingAccountBatch{deletedParents: childOf},
+			wantReads: [][]string{{parent}}, wantIndexed: map[string]bool{},
+		},
+		{
+			name: "failed recycle-bin read refreshes no parent", ids: []string{child},
+			reader:      &fakeB2BOrgReader{},
+			accounts:    &recordingAccountBatch{orgs: parentOrgs, deletedParents: childOf, deletedErr: assert.AnError},
+			wantIndexed: map[string]bool{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := runAccountBatch(t, model.CDCChangeDelete, tc.ids, tc.reader, tc.accounts)
+
+			assert.Equal(t, [][]string{tc.ids}, tc.accounts.deletedCalls, "one recycle-bin read per event")
+			assert.Equal(t, tc.wantReads, tc.accounts.calls)
+			assert.Equal(t, tc.wantIndexed, indexedB2BOrgs(t, pub))
+			assert.Equal(t, len(tc.ids), pub.indexerCount(constants.IndexB2BOrgSubject)-len(tc.wantIndexed),
+				"every deleted Account is still removed from the index")
+		})
+	}
+}
+
+// TestCDCConsumer_Account_Delete_ParentChildReadFails_QueuesParent: without
+// the child list the parent's is_parent is unknown, so the repair run
+// republishes it rather than leaving it stale.
+func TestCDCConsumer_Account_Delete_ParentChildReadFails_QueuesParent(t *testing.T) {
+	child, parent := sfid("del-child-cf"), sfid("del-parent-cf")
+	pub := &subjectCapturingPublisher{}
+	repair := &mock.MockCDCRepairStore{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{child}, ReplayID: []byte("del-cf")}}},
+		&fakeB2BOrgReader{batchErr: assert.AnError}, &mock.MockCacheInvalidator{}, pub, "",
+		svc.WithCDCAccountBatchReader(&recordingAccountBatch{
+			orgs: map[string]*model.B2BOrg{parent: {UID: parent}}, deletedParents: map[string]string{child: parent},
+		}),
+		svc.WithCDCRepairStore(repair),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []string{parent}, repairPutsOfType(repair, "b2b_org"))
+	assert.Empty(t, indexedB2BOrgs(t, pub), "no parent is published with a guessed is_parent")
+}
+
+// TestCDCConsumer_Account_Delete_QuotaExceeded_SkipsParentRead: the delete
+// itself bypasses the quota guard, but the extra parent reads do not.
+func TestCDCConsumer_Account_Delete_QuotaExceeded_SkipsParentRead(t *testing.T) {
+	child, parent := sfid("del-child-q"), sfid("del-parent-q")
+	accounts := &recordingAccountBatch{orgs: map[string]*model.B2BOrg{parent: {UID: parent}}, deletedParents: map[string]string{child: parent}}
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{{Entity: "Account", ChangeType: model.CDCChangeDelete, RecordIDs: []string{child}, ReplayID: []byte("del-q")}}},
+		&fakeB2BOrgReader{}, &mock.MockCacheInvalidator{}, pub, "",
+		svc.WithCDCAccountBatchReader(accounts),
+		svc.WithCDCQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 100, Limit: 100}),
+	)
+	require.NoError(t, consumer.Run(context.Background(), "/data/AccountChangeEvent", &fakeReplayStore{}))
+
+	assert.Empty(t, accounts.deletedCalls)
+	assert.Empty(t, accounts.calls)
+	assert.Equal(t, 1, pub.indexerCount(constants.IndexB2BOrgSubject), "the delete is still published")
+}
+
 // TestCDCConsumer_AbsentBatch_OneFlushConfirmsAll: a batch's absent removals
 // share one flush, and a failed flush queues every one of them.
 func TestCDCConsumer_AbsentBatch_OneFlushConfirmsAll(t *testing.T) {
@@ -5788,6 +5909,10 @@ type timingOutAccountBatch struct{ done <-chan struct{} }
 func (b *timingOutAccountBatch) FetchAccountsBySFIDs(ctx context.Context, _ []string) ([]*model.B2BOrg, []string, error) {
 	b.done = ctx.Done()
 	return nil, nil, context.DeadlineExceeded
+}
+
+func (b *timingOutAccountBatch) FetchDeletedAccountParents(context.Context, []string) (map[string]string, error) {
+	return nil, nil
 }
 
 func TestCDCConsumer_AssetCreate_OwnerReadTimesOut_StillQueuesOwner(t *testing.T) {
