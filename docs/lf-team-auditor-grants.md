@@ -63,10 +63,12 @@ All three live in `scripts/`. The two OpenFGA scripts take the store ID as a **r
 For the same reason they require the team names in the environment rather than defaulting them. `lfStaffTeamName` and `globalOrgAuditorsTeamName` in `charts/lfx-v2-member-service/values.yaml` are the authoritative copies; a second hardcoded copy in the scripts would drift, and granting the wrong team name is exactly as unreapable as granting on the wrong store. Read them back from the deployment you are about to back-fill, rather than retyping them — that also confirms the running build is the one that emits the grant:
 
 ```bash
-export LF_STAFF_TEAM_NAME=$(kubectl --context <ctx> -n lfx get deploy lfx-v2-member-service \
+# The Deployment lives in the member-service namespace (OpenFGA and OpenSearch are in lfx).
+export LF_STAFF_TEAM_NAME=$(kubectl --context <ctx> -n member-service get deploy lfx-v2-member-service \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LF_STAFF_TEAM_NAME")].value}')
-export GLOBAL_ORG_AUDITORS_TEAM_NAME=$(kubectl --context <ctx> -n lfx get deploy lfx-v2-member-service \
+export GLOBAL_ORG_AUDITORS_TEAM_NAME=$(kubectl --context <ctx> -n member-service get deploy lfx-v2-member-service \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GLOBAL_ORG_AUDITORS_TEAM_NAME")].value}')
+echo "staff=[$LF_STAFF_TEAM_NAME] global-org-auditors=[$GLOBAL_ORG_AUDITORS_TEAM_NAME]"  # both non-empty
 # The contractor variable is no longer injected into the deployment. To revoke it,
 # export the name literally (see the revoke runbook below).
 ```
