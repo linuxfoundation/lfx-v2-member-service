@@ -21,4 +21,11 @@ type AccountBatchReader interface {
 	// present in the SOQL result but could not be converted to domain objects;
 	// callers must NOT treat these as absent.
 	FetchAccountsBySFIDs(ctx context.Context, sfids []string) ([]*model.B2BOrg, []string, error)
+
+	// FetchDeletedAccountParents returns sfids entry → parent UID for every
+	// Account among sfids that is deleted (in the Salesforce recycle bin) and
+	// had a parent. A delete event carries only the record id, and a deleted
+	// Account no longer matches FetchAccountsBySFIDs, so this is the only way
+	// to learn which parent lost a child.
+	FetchDeletedAccountParents(ctx context.Context, sfids []string) (map[string]string, error)
 }

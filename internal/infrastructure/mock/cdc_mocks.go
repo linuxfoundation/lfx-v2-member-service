@@ -145,13 +145,18 @@ func (r *MockKeyContactsByMembershipReader) FetchKeyContactsByAssetSFIDs(
 // Set ConvErrSFIDs to simulate SFIDs that were present in the SOQL result but
 // could not be converted (exercises the seenButFailed safety property).
 type MockAccountBatchReader struct {
-	Orgs         []*model.B2BOrg
-	ConvErrSFIDs []string
-	Err          error
+	Orgs           []*model.B2BOrg
+	ConvErrSFIDs   []string
+	Err            error
+	DeletedParents map[string]string
 }
 
 func (r *MockAccountBatchReader) FetchAccountsBySFIDs(_ context.Context, _ []string) ([]*model.B2BOrg, []string, error) {
 	return r.Orgs, r.ConvErrSFIDs, r.Err
+}
+
+func (r *MockAccountBatchReader) FetchDeletedAccountParents(_ context.Context, _ []string) (map[string]string, error) {
+	return r.DeletedParents, nil
 }
 
 // MockB2BOrgEligibilityReader is a port.B2BOrgEligibilityReader for mock mode.

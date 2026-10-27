@@ -810,10 +810,66 @@ func (o *CDCConsumer) handleAccount(ctx context.Context, event model.CDCEvent) e
 	// not suppress unrelated work carried in the same event.
 	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Account", event)
 	err := o.dispatchEntity(ctx, "Account", event, deleteIDs, o.handleAccountDelete)
+	if len(deleteIDs) > 0 {
+		o.refreshParentsOfDeleted(ctx, deleteIDs)
+	}
 	if len(upsertIDs) > 0 {
 		err = errors.Join(err, o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType, false))
 	}
 	return err
+}
+
+// refreshParentsOfDeleted republishes is_parent for the parents of deleted
+// Accounts. A delete event carries only the record id and the deleted record
+// no longer reads through the live query, so the parent comes from the
+// recycle bin. Parents deleted in the same event are skipped. A failure here
+// leaves the parent's is_parent stale until a reindex; it never fails the
+// delete itself.
+func (o *CDCConsumer) refreshParentsOfDeleted(ctx context.Context, deleteIDs []string) {
+	if o.accountBatch == nil {
+		return
+	}
+	if exceeded, _ := o.quotaGuardExceeded(ctx, "Account"); exceeded {
+		slog.WarnContext(ctx, "cdc: parent refresh for deleted accounts skipped by Salesforce quota guard",
+			"record_count", len(deleteIDs), "publish_failed_for_backfill_repair", true)
+		return
+	}
+	parentOf, err := o.accountBatch.FetchDeletedAccountParents(ctx, deleteIDs)
+	if err != nil {
+		slog.WarnContext(ctx, "cdc: parent read for deleted accounts failed — is_parent left stale",
+			"record_count", len(deleteIDs), "error", err, "publish_failed_for_backfill_repair", true)
+		return
+	}
+	deleted := make(map[string]struct{}, len(deleteIDs))
+	for _, id := range deleteIDs {
+		deleted[id] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var parents []string
+	for _, id := range deleteIDs {
+		parentUID, ok := parentOf[id]
+		if !ok {
+			continue
+		}
+		if _, skip := deleted[parentUID]; skip {
+			continue
+		}
+		if _, dup := seen[parentUID]; !dup {
+			seen[parentUID] = struct{}{}
+			parents = append(parents, parentUID)
+		}
+	}
+	if len(parents) == 0 {
+		return
+	}
+	childMap, err := o.b2bOrgReader.FetchChildUIDsByParentUIDs(ctx, parents)
+	if err != nil {
+		slog.WarnContext(ctx, "cdc: child read for parents of deleted accounts failed — queued for the repair run",
+			"parent_count", len(parents), "error", err, "publish_failed_for_backfill_repair", true)
+		o.queueForRepairDetached(ctx, "Account", parents)
+		return
+	}
+	o.refreshParentIndex(ctx, parents, childMap, nil)
 }
 
 // handleAccountUpsertBatch publishes the qualifying Accounts among upsertIDs

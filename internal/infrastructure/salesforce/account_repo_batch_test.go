@@ -32,6 +32,7 @@ type seqQueryTransport struct {
 	pos           int
 	queryCalls    int
 	queries       []string // decoded q parameter of each initial /query call
+	paths         []string // URL path of every query call
 }
 
 func (t *seqQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -42,6 +43,7 @@ func (t *seqQueryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	// All other calls are SOQL /query requests.
 	t.queryCalls++
+	t.paths = append(t.paths, req.URL.Path)
 	if q := req.URL.Query().Get("q"); q != "" {
 		t.queries = append(t.queries, q)
 	}
@@ -568,6 +570,52 @@ func TestAccountRepo_FetchB2BOrgEligibility(t *testing.T) {
 			queryStatuses: []int{200, 500},
 		}
 		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchB2BOrgEligibility(context.Background(), sfids)
+		require.Error(t, err)
+		assert.Nil(t, got)
+	})
+}
+
+func TestAccountRepo_FetchDeletedAccountParents(t *testing.T) {
+	t.Parallel()
+
+	child := batchParentSFID(7700)
+	parent := batchParentSFID(7701)
+	root := batchParentSFID(7702)
+	deletedChild := func(id, parentID string) string {
+		return fmt.Sprintf(`{"Id":%q,"ParentId":%q}`, id, parentID)
+	}
+
+	t.Run("empty input makes no query", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchDeletedAccountParents(context.Background(), nil)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+		assert.Equal(t, 0, tr.queryCalls)
+	})
+
+	t.Run("reads the recycle bin, keyed by the caller's id", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{responses: []string{soqlPageJSON("", deletedChild(child, parent))}}
+		child15 := child[:15]
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchDeletedAccountParents(context.Background(),
+			[]string{child15, root, "not-a-valid-sfid"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{child15: parent}, got)
+		require.Len(t, tr.paths, 1)
+		assert.True(t, strings.HasSuffix(tr.paths[0], "/queryAll"), "live /query omits deleted records: %s", tr.paths[0])
+		require.Len(t, tr.queries, 1)
+		assert.Contains(t, tr.queries[0], "IsDeleted = true")
+		assert.Contains(t, tr.queries[0], "ParentId != null")
+	})
+
+	t.Run("a failing query returns an error", func(t *testing.T) {
+		t.Parallel()
+		tr := &seqQueryTransport{
+			responses:     []string{`[{"message":"temporarily unavailable","errorCode":"SERVER_UNAVAILABLE"}]`},
+			queryStatuses: []int{500},
+		}
+		got, err := NewAccountRepo(fakeSalesforce(t, tr), true).FetchDeletedAccountParents(context.Background(), []string{child})
 		require.Error(t, err)
 		assert.Nil(t, got)
 	})

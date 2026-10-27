@@ -143,6 +143,12 @@ type PageResult[T any] struct {
 // The SF batch size is always sfQueryBatchSize. Logical page slicing (the
 // client-facing page size) is handled by the caller after records are returned.
 func QueryPage[T any](ctx context.Context, client *sf.Salesforce, query string, pageToken string) (PageResult[T], error) {
+	return queryPage[T](client, "/query", query, pageToken)
+}
+
+// queryPage is QueryPage against endpoint: "/query", or "/queryAll", which also
+// returns records in the recycle bin.
+func queryPage[T any](client *sf.Salesforce, endpoint, query, pageToken string) (PageResult[T], error) {
 	apiVer := client.GetAPIVersion()
 
 	// Build the URI relative to the versioned base path that sf.DoRequest
@@ -151,8 +157,7 @@ func QueryPage[T any](ctx context.Context, client *sf.Salesforce, query string, 
 	// so uri must start with "/" and must NOT include the version prefix.
 	var uri string
 	if pageToken == "" {
-		// Initial query: use the /query?q=... endpoint.
-		uri = "/query?q=" + url.QueryEscape(query)
+		uri = endpoint + "?q=" + url.QueryEscape(query)
 	} else {
 		// Continuation page: the token is the raw nextRecordsUrl returned by
 		// Salesforce, which already includes the full versioned path like
@@ -225,6 +230,17 @@ func QueryPage[T any](ctx context.Context, client *sf.Salesforce, query string, 
 // locator immediately after it is received, so the locator expiry window
 // (typically 15 minutes) is never a concern for cached pages.
 func QueryAllPages[T any](ctx context.Context, client *sf.Salesforce, query string, locator string) ([]T, int, error) {
+	return queryPages[T](ctx, client, "/query", query, locator)
+}
+
+// QueryDeletedAndLivePages is QueryAllPages against the queryAll endpoint, so
+// records in the recycle bin (IsDeleted = true) are returned as well.
+func QueryDeletedAndLivePages[T any](ctx context.Context, client *sf.Salesforce, query string) ([]T, error) {
+	records, _, err := queryPages[T](ctx, client, "/queryAll", query, "")
+	return records, err
+}
+
+func queryPages[T any](ctx context.Context, client *sf.Salesforce, endpoint, query, locator string) ([]T, int, error) {
 	var all []T
 	totalSize := 0
 	token := locator
@@ -233,7 +249,7 @@ func QueryAllPages[T any](ctx context.Context, client *sf.Salesforce, query stri
 		if err := ctx.Err(); err != nil {
 			return nil, 0, fmt.Errorf("QueryAllPages aborted by context: %w", err)
 		}
-		result, err := QueryPage[T](ctx, client, query, token)
+		result, err := queryPage[T](client, endpoint, query, token)
 		if err != nil {
 			return nil, 0, fmt.Errorf("fetching page (token=%q): %w", token, err)
 		}
