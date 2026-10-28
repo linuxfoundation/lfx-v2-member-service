@@ -81,9 +81,9 @@ func (r *ReplayStore) Save(ctx context.Context, channel string, replayID []byte)
 
 // Reset deletes the committed cursor for channel and returns the time it was
 // last saved, read from the KV entry. After a delete, Get reports
-// ErrKeyNotFound, so Load returns nil and the next stream starts at LATEST.
-// The delete is conditional on the revision read here, so a Save that lands
-// in between fails the delete instead of being erased.
+// ErrKeyNotFound, so Load returns nil. The delete is conditional on the
+// revision read here, so a Save that lands in between fails the delete
+// instead of being erased, and is reported as ErrReplayCursorChanged.
 func (r *ReplayStore) Reset(ctx context.Context, channel string, rejected []byte) (time.Time, error) {
 	key := replayKey(channel)
 	entry, err := r.kv.Get(ctx, key)
@@ -99,6 +99,10 @@ func (r *ReplayStore) Reset(ctx context.Context, channel string, rejected []byte
 
 	lastSavedAt := entry.Created()
 	if err := r.kv.Delete(ctx, key, jetstream.LastRevision(entry.Revision())); err != nil {
+		var apiErr *jetstream.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence {
+			return time.Time{}, port.ErrReplayCursorChanged
+		}
 		return lastSavedAt, fmt.Errorf("pubsub: delete replay cursor for %q: %w", channel, err)
 	}
 	return lastSavedAt, nil

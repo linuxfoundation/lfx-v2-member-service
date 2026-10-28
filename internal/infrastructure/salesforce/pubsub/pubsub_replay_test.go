@@ -73,6 +73,20 @@ func TestReplayStore_Reset_NewerCursorIsNotDeleted(t *testing.T) {
 	assert.Empty(t, kv.deleted)
 }
 
+func TestReplayStore_Reset_RevisionConflictMeansCursorChanged(t *testing.T) {
+	kv := &fakeKV{
+		entry: fakeKVEntry{value: []byte("old"), created: time.Now(), revision: 7},
+		deleteErr: &jetstream.APIError{
+			Code:      400,
+			ErrorCode: jetstream.JSErrCodeStreamWrongLastSequence,
+		},
+	}
+
+	_, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
+
+	require.ErrorIs(t, err, port.ErrReplayCursorChanged)
+}
+
 func TestReplayStore_Reset_MissingCursorIsNotAnError(t *testing.T) {
 	kv := &fakeKV{getErr: jetstream.ErrKeyNotFound}
 

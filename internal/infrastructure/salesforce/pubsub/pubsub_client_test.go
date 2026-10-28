@@ -234,7 +234,7 @@ func replayIDError() error {
 	return status.Error(codes.InvalidArgument, "The Replay ID validation failed. Ensure that the Replay ID is valid.")
 }
 
-func TestSubscribe_ExpiredCursor_ResetsAndReconnectsAtLatest(t *testing.T) {
+func TestSubscribe_ExpiredCursor_ResetsAndReplaysFromEarliest(t *testing.T) {
 	logs := captureLogs(t)
 	savedAt := time.Date(2026, 7, 22, 20, 58, 29, 0, time.UTC)
 	expired := &fakeStream{
@@ -253,7 +253,7 @@ func TestSubscribe_ExpiredCursor_ResetsAndReconnectsAtLatest(t *testing.T) {
 	opened := stub.openedStreams()
 	first, second := opened[0].sentRequests(), opened[1].sentRequests()
 	assert.Equal(t, pbproto.ReplayPreset_CUSTOM, first[0].GetReplayPreset())
-	assert.Equal(t, pbproto.ReplayPreset_LATEST, second[0].GetReplayPreset())
+	assert.Equal(t, pbproto.ReplayPreset_EARLIEST, second[0].GetReplayPreset())
 	assert.Empty(t, second[0].GetReplayId())
 
 	expiredLogs := cursorExpiredLogs(t, logs)
@@ -273,6 +273,58 @@ func cursorExpiredLogs(t *testing.T, buf *bytes.Buffer) []map[string]any {
 		}
 	}
 	return recs
+}
+
+func TestSubscribe_ExpiredCursor_KeepsEarliestUntilACursorIsSaved(t *testing.T) {
+	expired := &fakeStream{
+		script:  []recvResult{{err: replayIDError()}},
+		trailer: metadata.Pairs("error-code", replayIDCorruptedErrorCode),
+	}
+	droppedDuringReplay := &fakeStream{script: []recvResult{{err: status.Error(codes.Unavailable, "down")}}}
+	stub := &fakePubSub{streams: []*fakeStream{expired, droppedDuringReplay}}
+	store := &memReplayStore{cursor: []byte("old")}
+	client := newTestClient(stub, time.Millisecond)
+
+	runUntil(t, client, store, []byte("old"), func() bool {
+		return len(stub.openedStreams()) >= 3
+	})
+
+	opened := stub.openedStreams()
+	assert.Equal(t, pbproto.ReplayPreset_EARLIEST, opened[1].sentRequests()[0].GetReplayPreset())
+	assert.Equal(t, pbproto.ReplayPreset_EARLIEST, opened[2].sentRequests()[0].GetReplayPreset(),
+		"a stream that drops before any save must not fall back to LATEST")
+}
+
+func TestSubscribe_ExpiredCursor_SavedCursorEndsEarliestReplay(t *testing.T) {
+	expired := &fakeStream{
+		script:  []recvResult{{err: replayIDError()}},
+		trailer: metadata.Pairs("error-code", replayIDCorruptedErrorCode),
+	}
+	replay := &fakeStream{script: []recvResult{{err: status.Error(codes.Unavailable, "down")}}}
+	stub := &fakePubSub{streams: []*fakeStream{expired, replay}}
+	store := &memReplayStore{cursor: []byte("old")}
+
+	runUntil(t, newTestClient(stub, 50*time.Millisecond), store, []byte("old"), func() bool {
+		if len(stub.openedStreams()) == 2 && len(replay.sentRequests()) > 0 {
+			_ = store.Save(context.Background(), testChannel, []byte("replayed"))
+		}
+		return len(stub.openedStreams()) >= 3
+	})
+
+	third := stub.openedStreams()[2].sentRequests()
+	assert.Equal(t, pbproto.ReplayPreset_CUSTOM, third[0].GetReplayPreset())
+	assert.Equal(t, []byte("replayed"), third[0].GetReplayId())
+}
+
+func TestSubscribe_FirstRunWithoutCursorStartsAtLatest(t *testing.T) {
+	stream := &fakeStream{}
+	stub := &fakePubSub{streams: []*fakeStream{stream}}
+
+	runUntil(t, newTestClient(stub, time.Millisecond), &memReplayStore{}, nil, func() bool {
+		return len(stream.sentRequests()) >= 1
+	})
+
+	assert.Equal(t, pbproto.ReplayPreset_LATEST, stream.sentRequests()[0].GetReplayPreset())
 }
 
 func TestSubscribe_ExpiredCursor_UnknownSaveTimeRecommendsFullReindex(t *testing.T) {

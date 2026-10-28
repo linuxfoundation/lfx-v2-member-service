@@ -38,7 +38,7 @@ type ReplayStore interface {
 	Save(ctx context.Context, channel string, replayID []byte) error
 
 	// Reset deletes the committed cursor for channel so the next Load returns
-	// nil (LATEST), and returns when that cursor was last saved. Used when
+	// nil, and returns when that cursor was last saved. Used when
 	// Salesforce rejects the cursor as outside its retention window. It deletes
 	// only if the stored cursor is still rejected; when the consumer has saved
 	// a newer one since, it returns ErrReplayCursorChanged and deletes nothing.

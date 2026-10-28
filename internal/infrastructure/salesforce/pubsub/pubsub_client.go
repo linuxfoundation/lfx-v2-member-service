@@ -124,7 +124,9 @@ func (c *Client) Close() error {
 // channel but the consumer had not yet committed it before the disconnect, it
 // is re-delivered rather than silently skipped.
 //
-// replayID nil means start at LATEST (skip historical events).
+// replayID nil means start at LATEST (skip historical events). After an
+// expired cursor is reset, streams start at EARLIEST instead until a cursor
+// is saved again, so the events Salesforce still retains are replayed.
 func (c *Client) Subscribe(ctx context.Context, channel string, replayID []byte, replayStore port.ReplayStore) (<-chan model.CDCEvent, error) {
 	out := make(chan model.CDCEvent, defaultBatchSize)
 
@@ -132,6 +134,7 @@ func (c *Client) Subscribe(ctx context.Context, channel string, replayID []byte,
 		defer close(out)
 		first := true
 		failures := 0
+		replayEarliest := false
 		for {
 			// On first attempt use the caller-supplied cursor (which was loaded
 			// from the store by CDCConsumer.Run before calling Subscribe).
@@ -153,12 +156,19 @@ func (c *Client) Subscribe(ctx context.Context, channel string, replayID []byte,
 				}
 			}
 
-			received, streamErr := c.runStream(ctx, channel, current, out)
+			received, streamErr := c.runStream(ctx, channel, current, replayEarliest, out)
 			if streamErr == nil || ctx.Err() != nil {
 				return
 			}
-			if errors.Is(streamErr, errReplayCursorExpired) && c.resetExpiredCursor(ctx, channel, current, streamErr, replayStore) {
-				continue
+			if errors.Is(streamErr, errReplayCursorExpired) {
+				switch c.resetExpiredCursor(ctx, channel, current, streamErr, replayStore) {
+				case cursorReset:
+					replayEarliest = true
+					continue
+				case cursorChanged:
+					continue
+				case resetFailed:
+				}
 			}
 			if received {
 				failures = 0
@@ -177,24 +187,30 @@ func (c *Client) Subscribe(ctx context.Context, channel string, replayID []byte,
 	return out, nil
 }
 
+type resetOutcome int
+
+const (
+	resetFailed resetOutcome = iota
+	cursorReset
+	cursorChanged
+)
+
 // resetExpiredCursor clears a cursor Salesforce rejected so the next attempt
-// starts at LATEST. Events after the rejected cursor are already gone from
-// Salesforce, so they are skipped; the ERROR tells the operator which window
-// to reindex. Returns true when the caller should reconnect now: after a
-// reset, or when the consumer saved a newer cursor that is worth trying.
-// Returns false when the cursor could not be cleared, and the caller backs
-// off and retries.
-func (c *Client) resetExpiredCursor(ctx context.Context, channel string, rejected []byte, streamErr error, replayStore port.ReplayStore) bool {
+// replays from EARLIEST. Events older than the retention window are already
+// gone, so they are skipped; the ERROR tells the operator which window to
+// reindex. cursorChanged means the consumer saved a newer cursor that is
+// worth trying first; resetFailed means the caller backs off and retries.
+func (c *Client) resetExpiredCursor(ctx context.Context, channel string, rejected []byte, streamErr error, replayStore port.ReplayStore) resetOutcome {
 	lastSavedAt, err := replayStore.Reset(ctx, channel, rejected)
 	if errors.Is(err, port.ErrReplayCursorChanged) {
 		slog.WarnContext(ctx, "pubsub: replay cursor rejected but a newer one was saved, reconnecting with it",
 			"channel", channel, "error", streamErr)
-		return true
+		return cursorChanged
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "pubsub: failed to clear expired replay cursor, retrying",
 			"channel", channel, "error", err)
-		return false
+		return resetFailed
 	}
 
 	savedAt, reindexSince := "unknown", "full"
@@ -202,8 +218,8 @@ func (c *Client) resetExpiredCursor(ctx context.Context, channel string, rejecte
 		savedAt = lastSavedAt.UTC().Format(time.RFC3339)
 		reindexSince = lastSavedAt.Add(-reindexLookback).UTC().Format(time.RFC3339)
 	}
-	slog.ErrorContext(ctx, "pubsub: replay cursor expired, restarting at LATEST; "+
-		"events after the cursor were skipped, run POST /admin/reindex with since=reindex_since "+
+	slog.ErrorContext(ctx, "pubsub: replay cursor expired, replaying from EARLIEST; "+
+		"events past Salesforce retention were skipped, run POST /admin/reindex with since=reindex_since "+
 		"(a full reindex when reindex_since is full; neither removes records deleted in that window, "+
 		"see docs/cdc-consumer.md)",
 		"channel", channel,
@@ -212,7 +228,7 @@ func (c *Client) resetExpiredCursor(ctx context.Context, channel string, rejecte
 		"reindex_since", reindexSince,
 		"cdc_replay_cursor_expired", true,
 	)
-	return true
+	return cursorReset
 }
 
 func logReconnect(ctx context.Context, channel string, streamErr error, failures int, delay time.Duration) {
@@ -242,6 +258,7 @@ func (c *Client) runStream(
 	ctx context.Context,
 	channel string,
 	replayID []byte,
+	earliest bool,
 	out chan<- model.CDCEvent,
 ) (bool, error) {
 	accessToken, instanceURL, orgID := c.tokenFn()
@@ -264,10 +281,13 @@ func (c *Client) runStream(
 		TopicName:    channel,
 		NumRequested: c.batchSize,
 	}
-	if len(replayID) > 0 {
+	switch {
+	case len(replayID) > 0:
 		req.ReplayPreset = pbproto.ReplayPreset_CUSTOM
 		req.ReplayId = replayID
-	} else {
+	case earliest:
+		req.ReplayPreset = pbproto.ReplayPreset_EARLIEST
+	default:
 		req.ReplayPreset = pbproto.ReplayPreset_LATEST
 	}
 
