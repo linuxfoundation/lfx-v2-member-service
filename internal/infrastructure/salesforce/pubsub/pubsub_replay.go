@@ -25,6 +25,12 @@ const (
 	replayKeyPrefix = "pubsub-replay."
 )
 
+// replayFromEarliest is stored in place of a cursor Salesforce rejected. It
+// survives restarts, so streams keep requesting EARLIEST until the first Save
+// of a real cursor overwrites it. Salesforce replay IDs are binary, so this
+// text value cannot collide with one.
+var replayFromEarliest = []byte("lfx:replay-from-earliest")
+
 // Ensure ReplayStore satisfies port.ReplayStore at compile time.
 var _ port.ReplayStore = (*ReplayStore)(nil)
 
@@ -79,18 +85,19 @@ func (r *ReplayStore) Save(ctx context.Context, channel string, replayID []byte)
 	return nil
 }
 
-// Reset deletes the committed cursor for channel and returns the time it was
-// last saved, read from the KV entry. After a delete, Get reports
-// ErrKeyNotFound, so Load returns nil. The delete is conditional on the
-// revision read here, so a Save that lands in between fails the delete
-// instead of being erased, and is reported as ErrReplayCursorChanged.
+// Reset replaces the committed cursor for channel with replayFromEarliest and
+// returns the time the cursor was last saved, read from the KV entry. The
+// write is conditional on the revision read here (or on the key being absent),
+// so a Save that lands in between wins and is reported as
+// ErrReplayCursorChanged.
 func (r *ReplayStore) Reset(ctx context.Context, channel string, rejected []byte) (time.Time, error) {
 	key := replayKey(channel)
 	entry, err := r.kv.Get(ctx, key)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		_, err = r.kv.Create(ctx, key, replayFromEarliest)
+		return time.Time{}, markReplayError(channel, err)
+	}
 	if err != nil {
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return time.Time{}, nil
-		}
 		return time.Time{}, fmt.Errorf("pubsub: read replay cursor for %q: %w", channel, err)
 	}
 	if !bytes.Equal(entry.Value(), rejected) {
@@ -98,14 +105,21 @@ func (r *ReplayStore) Reset(ctx context.Context, channel string, rejected []byte
 	}
 
 	lastSavedAt := entry.Created()
-	if err := r.kv.Delete(ctx, key, jetstream.LastRevision(entry.Revision())); err != nil {
-		var apiErr *jetstream.APIError
-		if errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence {
-			return time.Time{}, port.ErrReplayCursorChanged
-		}
-		return lastSavedAt, fmt.Errorf("pubsub: delete replay cursor for %q: %w", channel, err)
+	if _, err := r.kv.Update(ctx, key, replayFromEarliest, entry.Revision()); err != nil {
+		return lastSavedAt, markReplayError(channel, err)
 	}
 	return lastSavedAt, nil
+}
+
+func markReplayError(channel string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *jetstream.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence {
+		return port.ErrReplayCursorChanged
+	}
+	return fmt.Errorf("pubsub: mark replay cursor for %q: %w", channel, err)
 }
 
 // replayKey returns the NATS KV key for the given channel name.

@@ -27,13 +27,19 @@ func (e fakeKVEntry) Value() []byte      { return e.value }
 func (e fakeKVEntry) Created() time.Time { return e.created }
 func (e fakeKVEntry) Revision() uint64   { return e.revision }
 
+type kvWrite struct {
+	op       string
+	key      string
+	value    []byte
+	revision uint64
+}
+
 type fakeKV struct {
 	jetstream.KeyValue
-	entry      jetstream.KeyValueEntry
-	getErr     error
-	deleteErr  error
-	deleted    []string
-	deleteOpts int
+	entry    jetstream.KeyValueEntry
+	getErr   error
+	writeErr error
+	writes   []kvWrite
 }
 
 func (f *fakeKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, error) {
@@ -43,16 +49,27 @@ func (f *fakeKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, erro
 	return f.entry, nil
 }
 
-func (f *fakeKV) Delete(_ context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
-	if f.deleteErr != nil {
-		return f.deleteErr
+func (f *fakeKV) Update(_ context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
 	}
-	f.deleted = append(f.deleted, key)
-	f.deleteOpts = len(opts)
-	return nil
+	f.writes = append(f.writes, kvWrite{op: "update", key: key, value: value, revision: revision})
+	return revision + 1, nil
 }
 
-func TestReplayStore_Reset_DeletesCursorAndReturnsLastSavedAt(t *testing.T) {
+func (f *fakeKV) Create(_ context.Context, key string, value []byte, _ ...jetstream.KVCreateOpt) (uint64, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	f.writes = append(f.writes, kvWrite{op: "create", key: key, value: value})
+	return 1, nil
+}
+
+func wrongLastSequence() error {
+	return &jetstream.APIError{Code: 400, ErrorCode: jetstream.JSErrCodeStreamWrongLastSequence}
+}
+
+func TestReplayStore_Reset_MarksCursorAtTheRevisionRead(t *testing.T) {
 	savedAt := time.Date(2026, 7, 22, 20, 58, 29, 0, time.UTC)
 	kv := &fakeKV{entry: fakeKVEntry{value: []byte("old"), created: savedAt, revision: 7}}
 
@@ -60,26 +77,24 @@ func TestReplayStore_Reset_DeletesCursorAndReturnsLastSavedAt(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, savedAt, got)
-	assert.Equal(t, []string{"pubsub-replay._data_ChangeEvents"}, kv.deleted)
-	assert.Equal(t, 1, kv.deleteOpts, "delete must be conditional on the revision read")
+	assert.Equal(t, []kvWrite{{
+		op: "update", key: "pubsub-replay._data_ChangeEvents", value: replayFromEarliest, revision: 7,
+	}}, kv.writes)
 }
 
-func TestReplayStore_Reset_NewerCursorIsNotDeleted(t *testing.T) {
+func TestReplayStore_Reset_NewerCursorIsNotReplaced(t *testing.T) {
 	kv := &fakeKV{entry: fakeKVEntry{value: []byte("newer"), created: time.Now()}}
 
 	_, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
 
 	require.ErrorIs(t, err, port.ErrReplayCursorChanged)
-	assert.Empty(t, kv.deleted)
+	assert.Empty(t, kv.writes)
 }
 
 func TestReplayStore_Reset_RevisionConflictMeansCursorChanged(t *testing.T) {
 	kv := &fakeKV{
-		entry: fakeKVEntry{value: []byte("old"), created: time.Now(), revision: 7},
-		deleteErr: &jetstream.APIError{
-			Code:      400,
-			ErrorCode: jetstream.JSErrCodeStreamWrongLastSequence,
-		},
+		entry:    fakeKVEntry{value: []byte("old"), created: time.Now(), revision: 7},
+		writeErr: wrongLastSequence(),
 	}
 
 	_, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
@@ -87,14 +102,24 @@ func TestReplayStore_Reset_RevisionConflictMeansCursorChanged(t *testing.T) {
 	require.ErrorIs(t, err, port.ErrReplayCursorChanged)
 }
 
-func TestReplayStore_Reset_MissingCursorIsNotAnError(t *testing.T) {
+func TestReplayStore_Reset_MissingCursorIsMarked(t *testing.T) {
 	kv := &fakeKV{getErr: jetstream.ErrKeyNotFound}
 
 	got, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
 
 	require.NoError(t, err)
 	assert.True(t, got.IsZero())
-	assert.Empty(t, kv.deleted)
+	assert.Equal(t, []kvWrite{{
+		op: "create", key: "pubsub-replay._data_ChangeEvents", value: replayFromEarliest,
+	}}, kv.writes)
+}
+
+func TestReplayStore_Reset_MissingCursorSavedMeanwhileMeansCursorChanged(t *testing.T) {
+	kv := &fakeKV{getErr: jetstream.ErrKeyNotFound, writeErr: wrongLastSequence()}
+
+	_, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
+
+	require.ErrorIs(t, err, port.ErrReplayCursorChanged)
 }
 
 func TestReplayStore_Reset_ReadFailureReturnsError(t *testing.T) {
@@ -103,16 +128,18 @@ func TestReplayStore_Reset_ReadFailureReturnsError(t *testing.T) {
 	_, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
 
 	require.Error(t, err)
-	assert.Empty(t, kv.deleted)
+	assert.NotErrorIs(t, err, port.ErrReplayCursorChanged)
+	assert.Empty(t, kv.writes)
 }
 
-func TestReplayStore_Reset_DeleteFailureReturnsError(t *testing.T) {
+func TestReplayStore_Reset_WriteFailureReturnsError(t *testing.T) {
 	kv := &fakeKV{
-		entry:     fakeKVEntry{value: []byte("old"), created: time.Now()},
-		deleteErr: errors.New("wrong last sequence"),
+		entry:    fakeKVEntry{value: []byte("old"), created: time.Now()},
+		writeErr: errors.New("nats down"),
 	}
 
 	_, err := NewReplayStore(kv).Reset(context.Background(), "/data/ChangeEvents", []byte("old"))
 
 	require.Error(t, err)
+	assert.NotErrorIs(t, err, port.ErrReplayCursorChanged)
 }

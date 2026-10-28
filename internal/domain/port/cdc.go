@@ -37,15 +37,16 @@ type ReplayStore interface {
 	// each event is fully processed (commit-after-process semantics).
 	Save(ctx context.Context, channel string, replayID []byte) error
 
-	// Reset deletes the committed cursor for channel so the next Load returns
-	// nil, and returns when that cursor was last saved. Used when
-	// Salesforce rejects the cursor as outside its retention window. It deletes
-	// only if the stored cursor is still rejected; when the consumer has saved
-	// a newer one since, it returns ErrReplayCursorChanged and deletes nothing.
-	// A missing cursor returns the zero time and a nil error.
+	// Reset replaces the committed cursor for channel with a durable marker
+	// that makes the next streams, even after a restart, replay every event
+	// Salesforce still retains, and returns when the cursor was last saved.
+	// Used when Salesforce rejects the cursor as outside its retention window.
+	// It writes only if the stored cursor is still the rejected one; when the
+	// consumer has saved a newer one since, it returns ErrReplayCursorChanged
+	// and writes nothing. A missing cursor returns the zero time.
 	Reset(ctx context.Context, channel string, rejected []byte) (lastSavedAt time.Time, err error)
 }
 
 // ErrReplayCursorChanged reports that the stored cursor no longer matches the
-// one Salesforce rejected, so it may still be valid and must not be deleted.
+// one Salesforce rejected, so it may still be valid and must not be replaced.
 var ErrReplayCursorChanged = errors.New("replay cursor changed since it was rejected")

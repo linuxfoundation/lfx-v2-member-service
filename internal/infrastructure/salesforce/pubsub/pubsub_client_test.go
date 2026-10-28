@@ -137,7 +137,7 @@ func (m *memReplayStore) Reset(_ context.Context, _ string, rejected []byte) (ti
 	if !bytes.Equal(m.cursor, rejected) {
 		return time.Time{}, port.ErrReplayCursorChanged
 	}
-	m.cursor = nil
+	m.cursor = replayFromEarliest
 	return m.lastSavedAt, nil
 }
 
@@ -293,6 +293,29 @@ func TestSubscribe_ExpiredCursor_KeepsEarliestUntilACursorIsSaved(t *testing.T) 
 	assert.Equal(t, pbproto.ReplayPreset_EARLIEST, opened[1].sentRequests()[0].GetReplayPreset())
 	assert.Equal(t, pbproto.ReplayPreset_EARLIEST, opened[2].sentRequests()[0].GetReplayPreset(),
 		"a stream that drops before any save must not fall back to LATEST")
+}
+
+func TestSubscribe_ExpiredCursor_EarliestSurvivesARestartBeforeTheFirstSave(t *testing.T) {
+	expired := &fakeStream{
+		script:  []recvResult{{err: replayIDError()}},
+		trailer: metadata.Pairs("error-code", replayIDCorruptedErrorCode),
+	}
+	before := &fakePubSub{streams: []*fakeStream{expired}}
+	store := &memReplayStore{cursor: []byte("old")}
+	runUntil(t, newTestClient(before, time.Hour), store, []byte("old"), func() bool {
+		return len(before.openedStreams()) >= 2
+	})
+
+	// A new process loads the cursor the way CDCConsumer.Run does.
+	loaded, err := store.Load(context.Background(), testChannel)
+	require.NoError(t, err)
+	after := &fakePubSub{}
+	runUntil(t, newTestClient(after, time.Hour), store, loaded, func() bool {
+		opened := after.openedStreams()
+		return len(opened) == 1 && len(opened[0].sentRequests()) >= 1
+	})
+
+	assert.Equal(t, pbproto.ReplayPreset_EARLIEST, after.openedStreams()[0].sentRequests()[0].GetReplayPreset())
 }
 
 func TestSubscribe_ExpiredCursor_SavedCursorEndsEarliestReplay(t *testing.T) {
