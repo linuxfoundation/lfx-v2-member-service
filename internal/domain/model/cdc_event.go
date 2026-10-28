@@ -42,4 +42,9 @@ type CDCEvent struct {
 	// ReplayID is the opaque per-event replay cursor. Persisted (commit-after-
 	// process) so a restart resumes from the last fully-handled event.
 	ReplayID []byte
+
+	// CursorOnly marks a keepalive that carries only an advanced replay cursor
+	// and no change. The consumer saves ReplayID without processing it, which
+	// keeps a quiet channel's cursor inside Salesforce's 72-hour retention.
+	CursorOnly bool
 }

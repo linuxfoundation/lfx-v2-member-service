@@ -90,6 +90,10 @@ func (r *fakeReplayStore) Save(_ context.Context, _ string, id []byte) error {
 	r.savedAll = append(r.savedAll, id)
 	return nil
 }
+func (r *fakeReplayStore) Reset(_ context.Context, _ string) (time.Time, error) {
+	r.saved = nil
+	return time.Time{}, nil
+}
 
 func requireAuthorizationRetry(
 	t *testing.T,
@@ -1930,6 +1934,29 @@ func TestCDCConsumer_MultipleEvents_ReplayAdvancesPerEvent(t *testing.T) {
 	assert.Equal(t, []byte("seq-1"), replay.savedAll[0])
 	assert.Equal(t, []byte("seq-2"), replay.savedAll[1])
 	assert.Equal(t, []byte("seq-3"), replay.savedAll[2])
+}
+
+func TestCDCConsumer_CursorOnly_SavedWithoutProcessing(t *testing.T) {
+	// Entity and RecordIDs are set so that, if the item were processed, the
+	// absent Asset would route to an index delete and show up in pub.indexer.
+	pub := &subjectCapturingPublisher{}
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Asset", ChangeType: model.CDCChangeUpdate, RecordIDs: []string{sfid("pm-ka")}, ReplayID: []byte("ka-1"), CursorOnly: true},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCMembershipBatchReader(&mock.MockMembershipBatchReader{}),
+	)
+
+	replay := &fakeReplayStore{}
+	require.NoError(t, consumer.Run(context.Background(), "/data/ChangeEvents", replay))
+
+	assert.Empty(t, pub.indexer, "cursor-only item must not be processed")
+	assert.Empty(t, pub.access, "cursor-only item must not be processed")
+	assert.Equal(t, [][]byte{[]byte("ka-1")}, replay.savedAll, "cursor-only item must be saved")
 }
 
 // ── CDCChangeType fallthrough tests ──────────────────────────────────────────

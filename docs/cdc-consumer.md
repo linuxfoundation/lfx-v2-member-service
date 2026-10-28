@@ -80,7 +80,7 @@ CDCConsumer.Run  (internal/service/cdc_consumer.go)
 Key ports (`internal/domain/port/cdc.go`):
 
 - **`CDCSubscriber`** — `Subscribe(ctx, channel, replayID, replayStore) (<-chan model.CDCEvent, error)`. Implemented by `pubsub.Client`.
-- **`ReplayStore`** — `Load` / `Save` the opaque replay cursor. Implemented by `pubsub.ReplayStore` over the `pubsub-state` NATS KV bucket.
+- **`ReplayStore`** — `Load` / `Save` the opaque replay cursor, and `Reset` it (delete, returning when it was last saved) when Salesforce rejects it. Implemented by `pubsub.ReplayStore` over the `pubsub-state` NATS KV bucket.
 
 The consumer's dependencies are injected through `CDCConsumerOption` functions (`WithCDC*`). The batch readers (`MembershipBatchReader`, `KeyContactBatchReader`, `AccountBatchReader`) are **uncached SOQL repos** (`salesforce.NewMembershipRepo` / `NewKeyContactRepo` / `NewAccountRepo`) — one batched `IN`-clause query per event instead of a per-record sObject fan-out. They sit below the `MemberReader` stale-while-revalidate layer and call the Salesforce query API directly, so the published record always reflects the CDC change.
 
@@ -96,6 +96,7 @@ The consumer's dependencies are injected through `CDCConsumerOption` functions (
 | `RecordIDs` | **Every** record ID in the event — batch DML emits multiple IDs per event; the consumer processes all of them. |
 | `ChangeType` | The `ChangeEventHeader.changeType`. |
 | `ReplayID` | Opaque per-event replay cursor, persisted commit-after-process. |
+| `CursorOnly` | Set on a keepalive item that carries only an advanced `ReplayID` and no change; `Run` saves the cursor without processing. |
 
 Change types (`model.CDCChangeType`):
 
@@ -119,6 +120,9 @@ Delivery is **at-least-once** with **commit-after-process** semantics:
 2. Each event is fully handled, then the cursor is `Save`d. Ordinary handler errors still advance so a repairable failure does not block the stream; incomplete delete/restore authorization changes hold the cursor because `/admin/reindex` cannot rebuild those relations.
 3. The `Save` runs on a fresh `context.Background()` (5 s timeout) so a graceful shutdown that cancels the main context still commits the final cursor.
 4. On gRPC stream reconnect, the adapter **reloads** the cursor from the store (not the last in-flight delivery), so an event delivered but not yet committed is re-delivered rather than skipped.
+5. When no events are available, Salesforce sends an empty keepalive within 270 s carrying `latest_replay_id`. The adapter forwards it through the same channel as a `CursorOnly` item, so it is saved only after every earlier event is processed. This keeps a quiet channel's cursor inside Salesforce's 72-hour retention window.
+6. If Salesforce rejects the cursor (gRPC `InvalidArgument` with trailer `error-code` = `sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted`, typically a cursor older than 72 hours after a long outage), the adapter `Reset`s it and reconnects immediately at `LATEST`. Events between the last save and the reset are skipped; see `cdc_replay_cursor_expired=true` under [Failure Modes & Log Signals](#failure-modes--log-signals).
+7. Reconnects log at WARN. After 12 consecutive reconnects that receive no response (about a minute), they log at ERROR with `cdc_stream_down=true` until a stream delivers any response.
 
 **Consequence:** handlers must be idempotent. The indexer and fga-sync messages are all idempotent upserts, so re-delivery is safe.
 
@@ -387,6 +391,8 @@ The consumer continues after ordinary repairable failures and uses `/admin/reind
 | `fga_revoke_failed_dangling_tuple=true` on a `key_contact` DELETE without `manual_recovery_required=true` | The delete could not address or deliver its FGA revoke — a dangling grant. | **Not** repairable via reindex; needs a targeted FGA sync / manual re-send of the remove message. |
 | `manual_recovery_required=true` / `key_contact pending revoke requires reference-aware manual recovery` | A failed superseded revoke remains durable in `key-contact-grants`; replay cannot safely remove the shared tuple without checking current contacts. | Do **not** blindly re-send the remove; follow [Pending key-contact revoke recovery](#pending-key-contact-revoke-recovery). |
 | `cdc: GAP event received` | Salesforce could not deliver granular events. | Handled as upsert; cross-check `/admin/reindex` if needed. |
+| `cdc_replay_cursor_expired=true` (`pubsub: replay cursor expired, restarting at LATEST`) | Salesforce rejected the stored cursor; it was cleared and the stream restarted at `LATEST`. Events after `last_saved_at` were skipped. | `POST /admin/reindex` per type with `since` = the logged `last_saved_at` refreshes records changed in the gap; for `key_contact` it misses Contact/Asset field changes, which need a full `key_contact` reindex. A full or `since` run skips a record deleted in the gap, so it never removes that record's document; only a targeted `items` run naming it removes a `b2b_org` or `project_membership` document. Its FGA grants stay either way; revoke them through [Delete_access failure marker](#delete_access-failure-marker). |
+| `cdc_stream_down=true` (`pubsub: stream has not recovered, reconnecting`) | 12 or more consecutive reconnects received nothing from Salesforce; CDC is not processing. The adapter keeps retrying. | Check the logged `error` (credentials, Salesforce availability, network). Once the stream recovers, the cursor resumes from the last save; if the outage passed 72 hours, expect `cdc_replay_cursor_expired=true` next. |
 | `cdc: skipping record with non-normalizable SFID` | A malformed record ID was dropped. | Investigate the source event; reindex if the record is legitimate. |
 | `cdc: <reader> not wired` | A batch reader dependency is missing (misconfiguration). | Fix wiring; `/admin/reindex` to repair the gap. |
 | `cdc: Salesforce API quota threshold reached — skipping upsert fetch; use /admin/reindex to repair` | Usage ≥ `CDC_QUOTA_SKIP_THRESHOLD` even after an active refresh attempt; the batch's records were queued to `cdc-repair`. | `POST /admin/reindex {"type":"<type>","cdc_repair":true}` once quota headroom returns — see [CDC Quota-Repair Drain](./backfill-reindex.md#cdc-quota-repair-drain). |

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -75,6 +76,26 @@ func (r *ReplayStore) Save(ctx context.Context, channel string, replayID []byte)
 		return fmt.Errorf("pubsub: save replay cursor for %q: %w", channel, err)
 	}
 	return nil
+}
+
+// Reset deletes the committed cursor for channel and returns the time it was
+// last saved, read from the KV entry. After a delete, Get reports
+// ErrKeyNotFound, so Load returns nil and the next stream starts at LATEST.
+func (r *ReplayStore) Reset(ctx context.Context, channel string) (time.Time, error) {
+	key := replayKey(channel)
+	entry, err := r.kv.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, fmt.Errorf("pubsub: read replay cursor for %q: %w", channel, err)
+	}
+
+	lastSavedAt := entry.Created()
+	if err := r.kv.Delete(ctx, key); err != nil {
+		return lastSavedAt, fmt.Errorf("pubsub: delete replay cursor for %q: %w", channel, err)
+	}
+	return lastSavedAt, nil
 }
 
 // replayKey returns the NATS KV key for the given channel name.

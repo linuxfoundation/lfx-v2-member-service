@@ -5,6 +5,7 @@ package port
 
 import (
 	"context"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 )
@@ -34,4 +35,10 @@ type ReplayStore interface {
 	// Save persists replayID as the committed cursor for channel. Called after
 	// each event is fully processed (commit-after-process semantics).
 	Save(ctx context.Context, channel string, replayID []byte) error
+
+	// Reset deletes the committed cursor for channel so the next Load returns
+	// nil (LATEST), and returns when that cursor was last saved. Used when
+	// Salesforce rejects the cursor as outside its retention window. A missing
+	// cursor returns the zero time and a nil error.
+	Reset(ctx context.Context, channel string) (lastSavedAt time.Time, err error)
 }
