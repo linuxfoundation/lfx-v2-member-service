@@ -4,6 +4,7 @@
 package pubsub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -81,7 +82,9 @@ func (r *ReplayStore) Save(ctx context.Context, channel string, replayID []byte)
 // Reset deletes the committed cursor for channel and returns the time it was
 // last saved, read from the KV entry. After a delete, Get reports
 // ErrKeyNotFound, so Load returns nil and the next stream starts at LATEST.
-func (r *ReplayStore) Reset(ctx context.Context, channel string) (time.Time, error) {
+// The delete is conditional on the revision read here, so a Save that lands
+// in between fails the delete instead of being erased.
+func (r *ReplayStore) Reset(ctx context.Context, channel string, rejected []byte) (time.Time, error) {
 	key := replayKey(channel)
 	entry, err := r.kv.Get(ctx, key)
 	if err != nil {
@@ -90,9 +93,12 @@ func (r *ReplayStore) Reset(ctx context.Context, channel string) (time.Time, err
 		}
 		return time.Time{}, fmt.Errorf("pubsub: read replay cursor for %q: %w", channel, err)
 	}
+	if !bytes.Equal(entry.Value(), rejected) {
+		return time.Time{}, port.ErrReplayCursorChanged
+	}
 
 	lastSavedAt := entry.Created()
-	if err := r.kv.Delete(ctx, key); err != nil {
+	if err := r.kv.Delete(ctx, key, jetstream.LastRevision(entry.Revision())); err != nil {
 		return lastSavedAt, fmt.Errorf("pubsub: delete replay cursor for %q: %w", channel, err)
 	}
 	return lastSavedAt, nil

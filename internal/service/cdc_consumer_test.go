@@ -90,7 +90,7 @@ func (r *fakeReplayStore) Save(_ context.Context, _ string, id []byte) error {
 	r.savedAll = append(r.savedAll, id)
 	return nil
 }
-func (r *fakeReplayStore) Reset(_ context.Context, _ string) (time.Time, error) {
+func (r *fakeReplayStore) Reset(_ context.Context, _ string, _ []byte) (time.Time, error) {
 	r.saved = nil
 	return time.Time{}, nil
 }

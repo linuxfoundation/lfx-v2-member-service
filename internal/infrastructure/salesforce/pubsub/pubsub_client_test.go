@@ -106,6 +106,9 @@ type memReplayStore struct {
 	lastSavedAt time.Time
 	resetErr    error
 	resets      int
+	// saveDuringReset simulates the consumer saving a newer cursor between
+	// the reconnect's Load and the Reset.
+	saveDuringReset []byte
 }
 
 func (m *memReplayStore) Load(_ context.Context, _ string) ([]byte, error) {
@@ -121,12 +124,18 @@ func (m *memReplayStore) Save(_ context.Context, _ string, id []byte) error {
 	return nil
 }
 
-func (m *memReplayStore) Reset(_ context.Context, _ string) (time.Time, error) {
+func (m *memReplayStore) Reset(_ context.Context, _ string, rejected []byte) (time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resets++
 	if m.resetErr != nil {
 		return time.Time{}, m.resetErr
+	}
+	if m.saveDuringReset != nil {
+		m.cursor, m.saveDuringReset = m.saveDuringReset, nil
+	}
+	if !bytes.Equal(m.cursor, rejected) {
+		return time.Time{}, port.ErrReplayCursorChanged
 	}
 	m.cursor = nil
 	return m.lastSavedAt, nil
@@ -247,15 +256,63 @@ func TestSubscribe_ExpiredCursor_ResetsAndReconnectsAtLatest(t *testing.T) {
 	assert.Equal(t, pbproto.ReplayPreset_LATEST, second[0].GetReplayPreset())
 	assert.Empty(t, second[0].GetReplayId())
 
-	var expiredLogs []map[string]any
-	for _, rec := range logRecords(t, logs) {
-		if rec["cdc_replay_cursor_expired"] == true {
-			expiredLogs = append(expiredLogs, rec)
-		}
-	}
+	expiredLogs := cursorExpiredLogs(t, logs)
 	require.Len(t, expiredLogs, 1)
 	assert.Equal(t, "ERROR", expiredLogs[0]["level"])
 	assert.Equal(t, "2026-07-22T20:58:29Z", expiredLogs[0]["last_saved_at"])
+	assert.Equal(t, "2026-07-19T19:58:29Z", expiredLogs[0]["reindex_since"])
+	assert.Contains(t, expiredLogs[0]["error"], "Replay ID validation failed")
+}
+
+func cursorExpiredLogs(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for _, rec := range logRecords(t, buf) {
+		if rec["cdc_replay_cursor_expired"] == true {
+			recs = append(recs, rec)
+		}
+	}
+	return recs
+}
+
+func TestSubscribe_ExpiredCursor_UnknownSaveTimeRecommendsFullReindex(t *testing.T) {
+	logs := captureLogs(t)
+	expired := &fakeStream{
+		script:  []recvResult{{err: replayIDError()}},
+		trailer: metadata.Pairs("error-code", replayIDCorruptedErrorCode),
+	}
+	stub := &fakePubSub{streams: []*fakeStream{expired}}
+	store := &memReplayStore{cursor: []byte("old")}
+
+	runUntil(t, newTestClient(stub, time.Hour), store, []byte("old"), func() bool {
+		return len(stub.openedStreams()) >= 2
+	})
+
+	expiredLogs := cursorExpiredLogs(t, logs)
+	require.Len(t, expiredLogs, 1)
+	assert.Equal(t, "unknown", expiredLogs[0]["last_saved_at"])
+	assert.Equal(t, "full", expiredLogs[0]["reindex_since"])
+}
+
+func TestSubscribe_ExpiredCursor_NewerSavedCursorIsKept(t *testing.T) {
+	logs := captureLogs(t)
+	expired := &fakeStream{
+		script:  []recvResult{{err: replayIDError()}},
+		trailer: metadata.Pairs("error-code", replayIDCorruptedErrorCode),
+	}
+	stub := &fakePubSub{streams: []*fakeStream{expired}}
+	store := &memReplayStore{cursor: []byte("old"), saveDuringReset: []byte("newer")}
+
+	// An hour-long delay proves the retry with the newer cursor is immediate.
+	runUntil(t, newTestClient(stub, time.Hour), store, []byte("old"), func() bool {
+		return len(stub.openedStreams()) >= 2
+	})
+
+	retry := stub.openedStreams()[1].sentRequests()
+	assert.Equal(t, pbproto.ReplayPreset_CUSTOM, retry[0].GetReplayPreset())
+	assert.Equal(t, []byte("newer"), retry[0].GetReplayId())
+	assert.Equal(t, []byte("newer"), store.cursor)
+	assert.Empty(t, cursorExpiredLogs(t, logs))
 }
 
 func TestSubscribe_OtherErrors_KeepCursorAndRetry(t *testing.T) {

@@ -43,6 +43,13 @@ const (
 	// response (about a minute at reconnectDelay) after which reconnect logs
 	// escalate from WARN to ERROR so a persistent outage is not silent.
 	streamDownThreshold = 12
+
+	// reindexLookback is subtracted from last_saved_at to get a safe reindex
+	// since. Salesforce delivers an event at most 72 hours after its change,
+	// and the cursor is saved after delivery; the extra hour covers the wait
+	// in the event buffer. An event held longer, by an authorization retry,
+	// needs an earlier since (see docs/cdc-consumer.md).
+	reindexLookback = 73 * time.Hour
 )
 
 var errReplayCursorExpired = errors.New("pubsub: replay cursor expired or invalid")
@@ -150,7 +157,7 @@ func (c *Client) Subscribe(ctx context.Context, channel string, replayID []byte,
 			if streamErr == nil || ctx.Err() != nil {
 				return
 			}
-			if errors.Is(streamErr, errReplayCursorExpired) && c.resetExpiredCursor(ctx, channel, replayStore) {
+			if errors.Is(streamErr, errReplayCursorExpired) && c.resetExpiredCursor(ctx, channel, current, streamErr, replayStore) {
 				continue
 			}
 			if received {
@@ -171,22 +178,38 @@ func (c *Client) Subscribe(ctx context.Context, channel string, replayID []byte,
 }
 
 // resetExpiredCursor clears a cursor Salesforce rejected so the next attempt
-// starts at LATEST. Events between the last save and now are already gone from
+// starts at LATEST. Events after the rejected cursor are already gone from
 // Salesforce, so they are skipped; the ERROR tells the operator which window
-// to reindex. Returns false when the cursor could not be cleared, and the
-// caller backs off and retries with the same cursor.
-func (c *Client) resetExpiredCursor(ctx context.Context, channel string, replayStore port.ReplayStore) bool {
-	lastSavedAt, err := replayStore.Reset(ctx, channel)
+// to reindex. Returns true when the caller should reconnect now: after a
+// reset, or when the consumer saved a newer cursor that is worth trying.
+// Returns false when the cursor could not be cleared, and the caller backs
+// off and retries.
+func (c *Client) resetExpiredCursor(ctx context.Context, channel string, rejected []byte, streamErr error, replayStore port.ReplayStore) bool {
+	lastSavedAt, err := replayStore.Reset(ctx, channel, rejected)
+	if errors.Is(err, port.ErrReplayCursorChanged) {
+		slog.WarnContext(ctx, "pubsub: replay cursor rejected but a newer one was saved, reconnecting with it",
+			"channel", channel, "error", streamErr)
+		return true
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "pubsub: failed to clear expired replay cursor, retrying",
 			"channel", channel, "error", err)
 		return false
 	}
+
+	savedAt, reindexSince := "unknown", "full"
+	if !lastSavedAt.IsZero() {
+		savedAt = lastSavedAt.UTC().Format(time.RFC3339)
+		reindexSince = lastSavedAt.Add(-reindexLookback).UTC().Format(time.RFC3339)
+	}
 	slog.ErrorContext(ctx, "pubsub: replay cursor expired, restarting at LATEST; "+
-		"events after last_saved_at were skipped, run POST /admin/reindex with since=last_saved_at "+
-		"(that does not remove records deleted in that window; see docs/cdc-consumer.md)",
+		"events after the cursor were skipped, run POST /admin/reindex with since=reindex_since "+
+		"(a full reindex when reindex_since is full; neither removes records deleted in that window, "+
+		"see docs/cdc-consumer.md)",
 		"channel", channel,
-		"last_saved_at", lastSavedAt.UTC().Format(time.RFC3339),
+		"error", streamErr,
+		"last_saved_at", savedAt,
+		"reindex_since", reindexSince,
 		"cdc_replay_cursor_expired", true,
 	)
 	return true

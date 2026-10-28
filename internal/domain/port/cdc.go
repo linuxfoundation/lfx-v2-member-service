@@ -5,6 +5,7 @@ package port
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
@@ -38,7 +39,13 @@ type ReplayStore interface {
 
 	// Reset deletes the committed cursor for channel so the next Load returns
 	// nil (LATEST), and returns when that cursor was last saved. Used when
-	// Salesforce rejects the cursor as outside its retention window. A missing
-	// cursor returns the zero time and a nil error.
-	Reset(ctx context.Context, channel string) (lastSavedAt time.Time, err error)
+	// Salesforce rejects the cursor as outside its retention window. It deletes
+	// only if the stored cursor is still rejected; when the consumer has saved
+	// a newer one since, it returns ErrReplayCursorChanged and deletes nothing.
+	// A missing cursor returns the zero time and a nil error.
+	Reset(ctx context.Context, channel string, rejected []byte) (lastSavedAt time.Time, err error)
 }
+
+// ErrReplayCursorChanged reports that the stored cursor no longer matches the
+// one Salesforce rejected, so it may still be valid and must not be deleted.
+var ErrReplayCursorChanged = errors.New("replay cursor changed since it was rejected")
