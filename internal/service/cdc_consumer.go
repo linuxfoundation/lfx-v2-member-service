@@ -250,8 +250,10 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 	}
 
 	for event := range eventCh {
-		if err := o.processWithAuthorizationRetry(ctx, channel, event); err != nil {
-			return err
+		if !event.CursorOnly {
+			if err := o.processWithAuthorizationRetry(ctx, channel, event); err != nil {
+				return err
+			}
 		}
 
 		// Use a short-lived background context for the Save so that a
