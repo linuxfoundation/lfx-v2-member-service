@@ -96,6 +96,11 @@ service (authoritative source: `charts/lfx-v2-member-service/templates/ruleset.y
   `team:{memberTiersCallerTeamName}` (machine callers only;
   `.Values.app.memberTiersCallerTeamName` defaults to `member_tiers_caller`,
   empty falls back to `globalOrgAdminTeamName`).
+- `GET /project_memberships` (list, `project_uid` query param — not a path
+  capture): `auditor_guard` on `project:{project_uid}` (PCC-1610) — not the
+  bare `auditor` relation, since `project_membership.auditor` itself resolves
+  through `auditor_guard from project` and checking plain `auditor` would
+  exclude `global_writer`/`global_auditor` team grants.
 - `GET /project_memberships/{uid}`: `auditor` on `project_membership:{uid}`.
 - `GET/POST/PUT/DELETE /project_memberships/{membership_uid}/key_contacts[/{uid}]`:
   reads require `auditor`, mutations `writer`, on

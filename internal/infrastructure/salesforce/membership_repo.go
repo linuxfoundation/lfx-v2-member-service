@@ -141,7 +141,7 @@ func (r *MembershipRepo) FetchMembershipBySFID(ctx context.Context, assetSFID st
 		return nil, nil
 	}
 
-	return convertSOQLToProjectMembership(assets[0])
+	return convertSOQLToProjectMembership(ctx, assets[0])
 }
 
 // membershipsByIDsSOQL fetches multiple Asset records by a set of Salesforce
@@ -192,7 +192,7 @@ func (r *MembershipRepo) FetchMembershipsBySFIDs(ctx context.Context, sfids []st
 			return nil, nil, fmt.Errorf("batch fetching memberships (chunk %d-%d): %w", start, end, err)
 		}
 		for _, asset := range assets {
-			pm, convErr := convertSOQLToProjectMembership(asset)
+			pm, convErr := convertSOQLToProjectMembership(ctx, asset)
 			if convErr != nil {
 				slog.WarnContext(ctx, "skipping membership with conversion error in batch",
 					"sfid", asset.ID, "error", convErr)
@@ -224,7 +224,7 @@ func (r *MembershipRepo) FetchMembershipsByAccountSFID(ctx context.Context, acco
 
 	memberships := make([]*model.ProjectMembership, 0, len(assets))
 	for _, asset := range assets {
-		m, err := convertSOQLToProjectMembership(asset)
+		m, err := convertSOQLToProjectMembership(ctx, asset)
 		if err != nil {
 			slog.WarnContext(ctx, "skipping membership with invalid SFID",
 				"sfid", asset.ID,
@@ -298,7 +298,7 @@ func (r *MembershipRepo) FetchMembershipsByProjectSFID(ctx context.Context, proj
 
 	memberships := make([]*model.ProjectMembership, 0, len(assets))
 	for _, asset := range assets {
-		m, err := convertSOQLToProjectMembership(asset)
+		m, err := convertSOQLToProjectMembership(ctx, asset)
 		if err != nil {
 			slog.WarnContext(ctx, "skipping membership with invalid SFID",
 				"sfid", asset.ID,
@@ -317,23 +317,31 @@ func (r *MembershipRepo) FetchMembershipsByProjectSFID(ctx context.Context, proj
 // (for the NATS KV cache), keeping them separate so the cache layer can store
 // the batch and slice it consistently on subsequent reads.
 // FirstBatchResult is the return value of FetchFirstMembershipBatch. It carries
-// the first sfQueryBatchSize records, the Salesforce locator for the remainder
+// the first SFQueryBatchSize records, the Salesforce locator for the remainder
 // (if any), and the total result set size reported by Salesforce.
 type FirstBatchResult struct {
-	// Records is the full first SF batch (up to sfQueryBatchSize records).
+	// Records is the full first SF batch (up to SFQueryBatchSize records).
 	Records []*model.ProjectMembership
 
 	// SFLocator is the raw Salesforce nextRecordsUrl for the records beyond
 	// the first batch. Empty when the first batch contains all results (i.e.
-	// the result set is ≤ sfQueryBatchSize records).
+	// the result set is ≤ SFQueryBatchSize records).
 	SFLocator string
 
 	// TotalSize is the total record count reported by Salesforce.
 	TotalSize int
+
+	// SkippedCount is the number of records in this batch that were dropped
+	// by convertSOQLToProjectMembership due to a malformed Asset SFID. The
+	// single-batch caller (fetchAndCacheAllBatches) subtracts this from
+	// TotalSize before caching it, since TotalSize == len(Records) +
+	// SkippedCount always holds when SFLocator is empty (the whole result
+	// set fit in this one batch).
+	SkippedCount int
 }
 
 // FetchFirstMembershipBatch issues a single SOQL query for the first
-// sfQueryBatchSize membership records for the given project and filters,
+// SFQueryBatchSize membership records for the given project and filters,
 // returning the full batch and the Salesforce locator for any remaining
 // records. The caller is responsible for following the locator in a background
 // goroutine via QueryAllPages if SFLocator is non-empty.
@@ -351,29 +359,32 @@ func (r *MembershipRepo) FetchFirstMembershipBatch(ctx context.Context, projectS
 	}
 
 	records := make([]*model.ProjectMembership, 0, len(sfResult.Records))
+	skipped := 0
 	for _, asset := range sfResult.Records {
-		m, convErr := convertSOQLToProjectMembership(asset)
+		m, convErr := convertSOQLToProjectMembership(ctx, asset)
 		if convErr != nil {
 			slog.WarnContext(ctx, "skipping membership with invalid SFID",
 				"sfid", asset.ID,
 				"error", convErr,
 			)
+			skipped++
 			continue
 		}
 		records = append(records, m)
 	}
 
 	return FirstBatchResult{
-		Records:   records,
-		SFLocator: sfResult.NextPageToken,
-		TotalSize: sfResult.TotalSize,
+		Records:      records,
+		SFLocator:    sfResult.NextPageToken,
+		TotalSize:    sfResult.TotalSize,
+		SkippedCount: skipped,
 	}, nil
 }
 
 // convertSOQLToProjectMembership converts a Salesforce Asset SOQL result to the
 // domain ProjectMembership model. Account (company) and Product2 (tier) fields
 // are denormalized directly onto the struct — no sub-objects are used.
-func convertSOQLToProjectMembership(asset soqlAsset) (*model.ProjectMembership, error) {
+func convertSOQLToProjectMembership(ctx context.Context, asset soqlAsset) (*model.ProjectMembership, error) {
 	membershipUID, err := sfuuid.Normalize18(asset.ID)
 	if err != nil {
 		return nil, fmt.Errorf("normalizing asset SFID %q: %w", asset.ID, err)
@@ -407,10 +418,22 @@ func convertSOQLToProjectMembership(asset soqlAsset) (*model.ProjectMembership, 
 	m.AccountSFID = asset.AccountID
 
 	// B2BOrgUID is the 18-char SFID of the Salesforce Account.Id.
-	// Populated here so callers can link this membership to the B2BOrg entity.
-	// Errors are silently ignored because B2BOrgUID is a convenience field.
+	// Populated here so callers can link this membership to the B2BOrg entity,
+	// and ListProjectMemberships' b2b_org_uid filter matches against it
+	// (PCC-1610). Unlike the tier UID fallback in buildMembershipsByProjectSOQL
+	// (which only feeds a SOQL predicate), B2BOrgUID is interpolated into FGA
+	// object IDs and indexer parent refs in internal/service/messaging.go — so
+	// on normalization failure it is left empty (skipping those refs) rather
+	// than falling back to the raw value, to avoid publishing a non-canonical
+	// id into the access-control/indexing pipelines. Only warn.
 	if asset.AccountID != "" {
-		if orgUID, orgErr := sfuuid.Normalize18(asset.AccountID); orgErr == nil {
+		orgUID, orgErr := sfuuid.Normalize18(asset.AccountID)
+		if orgErr != nil {
+			slog.WarnContext(ctx, "failed to normalize account SFID to B2BOrgUID; leaving unset",
+				"account_id", asset.AccountID,
+				"error", orgErr,
+			)
+		} else {
 			m.B2BOrgUID = orgUID
 		}
 	}
@@ -461,7 +484,10 @@ func convertSOQLToProjectMembership(asset soqlAsset) (*model.ProjectMembership, 
 // page of converted records. Conversion errors are logged and skipped.
 func (r *MembershipRepo) IterProjectMemberships(ctx context.Context, since, until *time.Time, fn func([]*model.ProjectMembership) error) error {
 	query := membershipSOQL + lastModifiedWindowClause(since, until)
-	return IterPages(ctx, r.client, query, convertSOQLToProjectMembership, fn)
+	converter := func(asset soqlAsset) (*model.ProjectMembership, error) {
+		return convertSOQLToProjectMembership(ctx, asset)
+	}
+	return IterPages(ctx, r.client, query, converter, fn)
 }
 
 // resolvePurchaseDate mirrors the PostgreSQL COALESCE(PurchaseDate, InstallDate,

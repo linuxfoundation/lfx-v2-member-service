@@ -52,6 +52,24 @@ write-back is likewise revision-conditional
 (`PutKeyContactsForMembershipAtRevision`): a Conflict means the entry changed
 since the read, and the read-through cache logs and skips the write.
 
+`MembershipBatchCacheEntry.TotalSize` is the query-wide Salesforce total,
+written identically on every batch in a sequence — except the single-batch
+path (`fetchAndCacheAllBatches` when `SFLocator == ""`), where it is reduced
+by the malformed-SFID skip count so it equals `len(Records)` exactly. The
+`results_truncated` cold-cache heuristic in `membership_service.go` depends
+on that exact equality to avoid false-positiving on a complete single-batch
+result. The consumer-facing `PageCursor` (`internal/infrastructure/salesforce`)
+also carries a `FilterFingerprint` — a hash over the batch-key params
+(project SFID, sort order, `tier_uid`, `CompanyNameSearch`) plus the cursor's
+own `BatchIndex`/`NextBatchIterator` — so a `page_token` resent under changed
+or omitted filters, or with a tampered index/iterator, is rejected rather than
+silently served against the wrong batch. A continuation cursor
+(`BatchIndex > 0` or `BatchOffset > 0`) whose batch has expired or been
+evicted is likewise rejected (400, "page_token expired") rather than silently
+rebased to batch 0 — only a fresh first cursor (`BatchIndex == 0`,
+`BatchOffset == 0`) transparently re-fetches from Salesforce on a cache
+miss/expiry.
+
 ### `member-service-cache` bucket
 
 This bucket stores raw Salesforce sObject REST API responses with HTTP

@@ -74,6 +74,9 @@ Key-Value cache to minimise round-trips.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/project_memberships/{uid}` | Get a project membership |
+| GET | `/project_memberships` | List active project memberships for a project, optionally filtered by `tier_uid` / `b2b_org_uid`, with `page_token` cursor pagination |
+
+> `page_token` encodes only the batch/offset position of the original query, not its filters; `tier_uid` must be re-supplied on every request — including ones carrying a `page_token` — because it participates in the underlying Salesforce batch cache key. The cursor embeds a `FilterFingerprint` hash of those key parameters, so a mismatched pairing (a resent `page_token` with a changed or omitted `tier_uid`) is rejected with 400 rather than silently served against the new filter. `b2b_org_uid` cannot be combined with `page_token` — see `CLAUDE.md`'s "Internal filtering" note and the `ListProjectMemberships` doc comment for the full pagination/`results_truncated` semantics.
 
 ### Key contacts (nested under project_membership)
 

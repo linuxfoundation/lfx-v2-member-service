@@ -125,7 +125,7 @@ func TestContract_ProjectMembership(t *testing.T) {
 		LastModifiedDate: "2025-03-20T00:00:00.000+0000",
 	}
 
-	fromSOQL, err := convertSOQLToProjectMembership(soqlRec)
+	fromSOQL, err := convertSOQLToProjectMembership(t.Context(), soqlRec)
 	require.NoError(t, err)
 
 	fromSObject, err := sobjectAssetToModel(&sobjectRec, uid)

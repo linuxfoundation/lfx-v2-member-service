@@ -32,8 +32,8 @@ paths:
                         schema:
                             $ref: '#/components/schemas/AdminReindexPayload'
                         example:
-                            cdc_repair: true
-                            dry_run: true
+                            cdc_repair: false
+                            dry_run: false
                             items:
                                 - uid: 001B000000IqhSLIAZ
                                 - uid: 001B000000IqhSLIAZ
@@ -773,12 +773,6 @@ paths:
                                   invited_as: writer
                                   name: Alice Smith
                                   username: alice
-                                - avatar: https://avatars.githubusercontent.com/u/12345
-                                  email: alice@example.com
-                                  invite_status: accepted
-                                  invited_as: writer
-                                  name: Alice Smith
-                                  username: alice
             responses:
                 "200":
                     description: OK response.
@@ -1376,6 +1370,13 @@ paths:
                                       project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -1601,6 +1602,13 @@ paths:
                                       project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -1725,6 +1733,13 @@ paths:
                                 created_by: alice
                                 name: My Workspace
                                 projects:
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                     - created_at: "2026-01-01T00:00:00Z"
                                       created_by: alice
                                       project_name: Kubernetes
@@ -1892,6 +1907,13 @@ paths:
                                       project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                                       updated_at: "2026-01-01T00:00:00Z"
                                       updated_by: alice
+                                    - created_at: "2026-01-01T00:00:00Z"
+                                      created_by: alice
+                                      project_name: Kubernetes
+                                      project_slug: kubernetes
+                                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                      updated_at: "2026-01-01T00:00:00Z"
+                                      updated_by: alice
                                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 updated_at: "2026-06-01T12:00:00Z"
                                 updated_by: alice
@@ -2022,6 +2044,8 @@ paths:
                                       project_slug: ""
                                     - error: project_slug is required
                                       project_slug: ""
+                                    - error: project_slug is required
+                                      project_slug: ""
                                 succeeded:
                                     - kubernetes
                                 workspace:
@@ -2029,6 +2053,13 @@ paths:
                                     created_by: alice
                                     name: My Workspace
                                     projects:
+                                        - created_at: "2026-01-01T00:00:00Z"
+                                          created_by: alice
+                                          project_name: Kubernetes
+                                          project_slug: kubernetes
+                                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                                          updated_at: "2026-01-01T00:00:00Z"
+                                          updated_by: alice
                                         - created_at: "2026-01-01T00:00:00Z"
                                           created_by: alice
                                           project_name: Kubernetes
@@ -2165,7 +2196,29 @@ paths:
                                       tier: gold
                                       tier_name: Gold Corporate Membership
                                       tier_uid: 01t2M000009ABCdIAM
+                                    - b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_name: Example Corp
+                                      end_date: "2025-12-31"
+                                      membership_uid: 02i2M000009ABCdIAM
+                                      project_slug: lf-main
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      start_date: "2025-02-01"
+                                      status: Active
+                                      tier: gold
+                                      tier_name: Gold Corporate Membership
+                                      tier_uid: 01t2M000009ABCdIAM
                             example:
+                                - b2b_org_uid: 001B000000IqhSLIAZ
+                                  company_name: Example Corp
+                                  end_date: "2025-12-31"
+                                  membership_uid: 02i2M000009ABCdIAM
+                                  project_slug: lf-main
+                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                  start_date: "2025-02-01"
+                                  status: Active
+                                  tier: gold
+                                  tier_name: Gold Corporate Membership
+                                  tier_uid: 01t2M000009ABCdIAM
                                 - b2b_org_uid: 001B000000IqhSLIAZ
                                   company_name: Example Corp
                                   end_date: "2025-12-31"
@@ -2196,6 +2249,161 @@ paths:
                                 $ref: '#/components/schemas/Error'
                 "500":
                     description: 'InternalServerError: Internal server error'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "503":
+                    description: 'ServiceUnavailable: Service unavailable'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+            security:
+                - jwt_header_Authorization: []
+    /project_memberships:
+        get:
+            tags:
+                - membership-service
+            summary: list-project-memberships membership-service
+            description: 'List active project memberships scoped by project_uid, optionally narrowed to a single b2b_org_uid (PCC-1610). Requires the auditor_guard relation on project:{project_uid} (project auditors, writers, owners, or global auditor/writer teams — see ARCHITECTURE.md). There is no b2b_org-side access path to this endpoint: an org''s own writers/auditors must be project-scoped (or hold a global team grant) to list that org''s memberships in a project.'
+            operationId: membership-service#list-project-memberships
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: Version of the API
+                    example: "1"
+                    enum:
+                        - "1"
+                  example: "1"
+                - name: project_uid
+                  in: query
+                  description: V2 project UUID to scope the membership list to
+                  allowEmptyValue: true
+                  required: true
+                  schema:
+                    type: string
+                    description: V2 project UUID to scope the membership list to
+                    example: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                    format: uuid
+                  example: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                - name: b2b_org_uid
+                  in: query
+                  description: 'Optional B2B organization (Account) UID to further narrow the list to a single org''s membership in this project. Must be a valid Salesforce ID (returns a validation error otherwise). Applied as an in-memory post-filter over a bounded walk of upstream pages: the response never carries a next_page_token when this is set, and cannot be combined with an inbound page_token (returns a validation error). Check the results_truncated response field rather than inferring completeness from total_size: it is set when the walk stops before exhausting results, because the internal page cap was hit, the upstream page cursor repeated verbatim mid-walk (a defensive guard against a pathological upstream response; a cache-eviction-triggered restart mints a fresh cursor and is instead caught by UID deduplication), or — on the walk''s FIRST page only — total_size exceeded the returned record count with no next_page_token, the signature of a cold-cache read racing a background batch-link sweep. Note total_size itself changes meaning when this filter is set: it is not a query-wide total (there is none, since the upstream query is never filtered by this field) but simply the count of records returned so far — equal to len(project_memberships) and, since this path never paginates, the final count unless results_truncated is true.'
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: 'Optional B2B organization (Account) UID to further narrow the list to a single org''s membership in this project. Must be a valid Salesforce ID (returns a validation error otherwise). Applied as an in-memory post-filter over a bounded walk of upstream pages: the response never carries a next_page_token when this is set, and cannot be combined with an inbound page_token (returns a validation error). Check the results_truncated response field rather than inferring completeness from total_size: it is set when the walk stops before exhausting results, because the internal page cap was hit, the upstream page cursor repeated verbatim mid-walk (a defensive guard against a pathological upstream response; a cache-eviction-triggered restart mints a fresh cursor and is instead caught by UID deduplication), or — on the walk''s FIRST page only — total_size exceeded the returned record count with no next_page_token, the signature of a cold-cache read racing a background batch-link sweep. Note total_size itself changes meaning when this filter is set: it is not a query-wide total (there is none, since the upstream query is never filtered by this field) but simply the count of records returned so far — equal to len(project_memberships) and, since this path never paginates, the final count unless results_truncated is true.'
+                    example: 001B000000IqhSLIAZ
+                  example: 001B000000IqhSLIAZ
+                - name: tier_uid
+                  in: query
+                  description: 'Optional membership tier UID to filter by. Must be a valid Salesforce ID (returns a validation error otherwise). Must be re-supplied identically on every request, including requests carrying a page_token: it participates in the underlying Salesforce batch cache key, so a page_token minted under a different (or omitted) tier_uid is rejected with a validation error rather than silently resuming against the new filter.'
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: 'Optional membership tier UID to filter by. Must be a valid Salesforce ID (returns a validation error otherwise). Must be re-supplied identically on every request, including requests carrying a page_token: it participates in the underlying Salesforce batch cache key, so a page_token minted under a different (or omitted) tier_uid is rejected with a validation error rather than silently resuming against the new filter.'
+                    example: 01t2M000009ABCdIAM
+                  example: 01t2M000009ABCdIAM
+                - name: page_token
+                  in: query
+                  description: Opaque cursor from a previous response's next_page_token encoding only the pagination position (batch/offset) of the original query, not its filters. If the underlying cache entry it points to has since expired or been evicted, the request is rejected with a validation error (rather than silently restarting from page 1) — restart pagination with an empty page_token.
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: Opaque cursor from a previous response's next_page_token encoding only the pagination position (batch/offset) of the original query, not its filters. If the underlying cache entry it points to has since expired or been evicted, the request is rejected with a validation error (rather than silently restarting from page 1) — restart pagination with an empty page_token.
+                    example: ""
+                  example: ""
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ListProjectMembershipsResult'
+                            example:
+                                next_page_token: ""
+                                project_memberships:
+                                    - agreement_date: "2025-01-01T00:00:00Z"
+                                      annual_full_price: 50000
+                                      auto_renew: true
+                                      b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_domain: https://example.com
+                                      company_logo_url: https://example.com/logo.png
+                                      company_name: Example Corp
+                                      created_at: "2025-01-01T00:00:00Z"
+                                      end_date: "2025-12-31T23:59:59Z"
+                                      payment_frequency: Annual
+                                      payment_terms: Net 30
+                                      price: 50000
+                                      project_sfid: a0941000002wBz9AAE
+                                      project_slug: kubernetes
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      purchase_date: "2025-01-15T00:00:00Z"
+                                      renewal_type: Annual
+                                      start_date: "2025-02-01T00:00:00Z"
+                                      status: Active
+                                      tier: Gold
+                                      tier_family: Membership
+                                      tier_name: Gold Corporate Membership
+                                      tier_product_type: Corporate
+                                      tier_uid: 01t2M000009ABCdIAM
+                                      uid: 02i2M000009ABCdIAM
+                                      updated_at: "2025-06-01T12:00:00Z"
+                                      year: "2025"
+                                    - agreement_date: "2025-01-01T00:00:00Z"
+                                      annual_full_price: 50000
+                                      auto_renew: true
+                                      b2b_org_uid: 001B000000IqhSLIAZ
+                                      company_domain: https://example.com
+                                      company_logo_url: https://example.com/logo.png
+                                      company_name: Example Corp
+                                      created_at: "2025-01-01T00:00:00Z"
+                                      end_date: "2025-12-31T23:59:59Z"
+                                      payment_frequency: Annual
+                                      payment_terms: Net 30
+                                      price: 50000
+                                      project_sfid: a0941000002wBz9AAE
+                                      project_slug: kubernetes
+                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                                      purchase_date: "2025-01-15T00:00:00Z"
+                                      renewal_type: Annual
+                                      start_date: "2025-02-01T00:00:00Z"
+                                      status: Active
+                                      tier: Gold
+                                      tier_family: Membership
+                                      tier_name: Gold Corporate Membership
+                                      tier_product_type: Corporate
+                                      tier_uid: 01t2M000009ABCdIAM
+                                      uid: 02i2M000009ABCdIAM
+                                      updated_at: "2025-06-01T12:00:00Z"
+                                      year: "2025"
+                                results_truncated: false
+                                total_size: 100
+                "400":
+                    description: 'BadRequest: Bad request'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "404":
+                    description: 'NotFound: Resource not found'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "500":
+                    description: 'InternalServerError: Internal server error'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "501":
+                    description: 'NotImplemented: Endpoint not implemented'
                     content:
                         application/vnd.goa.error:
                             schema:
@@ -2892,7 +3100,7 @@ components:
             description: Request payload for triggering a reindex operation
             example:
                 cdc_repair: false
-                dry_run: true
+                dry_run: false
                 items:
                     - uid: 001B000000IqhSLIAZ
                     - uid: 001B000000IqhSLIAZ
@@ -2955,7 +3163,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Natus et eos quisquam dolor.
+                        example: Vitae quia minima earum praesentium saepe ut.
                     description: Additional domains; each item is a bare host with the same normalization as primary_domain
                     example:
                         - example.org
@@ -3062,6 +3270,12 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                 created_at:
                     type: string
                     description: Settings record creation timestamp
@@ -3078,6 +3292,18 @@ components:
                         $ref: '#/components/schemas/OrgUser'
                     description: Org administrators (writer relation in FGA). Full-replace on PUT.
                     example:
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                         - avatar: https://avatars.githubusercontent.com/u/12345
                           email: alice@example.com
                           invite_status: accepted
@@ -3108,12 +3334,6 @@ components:
                 created_at: "2025-01-01T00:00:00Z"
                 updated_at: "2025-06-01T12:00:00Z"
                 writers:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -3180,12 +3400,6 @@ components:
             description: 'Request body for replacing the writers and/or auditors list on a b2b_org. Full-replace: nil = keep existing; [] = remove all.'
             example:
                 auditors:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -3273,7 +3487,7 @@ components:
                 fault:
                     type: boolean
                     description: Is the error a server-side fault?
-                    example: true
+                    example: false
                 id:
                     type: string
                     description: ID is a unique identifier for this particular occurrence of the problem.
@@ -3300,7 +3514,7 @@ components:
                 id: 123abc
                 message: parameter 'p' must be an integer
                 name: bad_request
-                temporary: false
+                temporary: true
                 timeout: true
             required:
                 - name
@@ -3351,7 +3565,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user). Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: true
+                    example: false
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -3413,7 +3627,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: false
+                    example: true
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -3431,7 +3645,7 @@ components:
                 email: john.doe@example.com
                 primary_contact: false
                 role: Technical Contact
-                send_invite: false
+                send_invite: true
                 status: Active
                 title: CTO
         ListMetadata:
@@ -3443,13 +3657,152 @@ components:
                     example: ""
                 total_size:
                     type: integer
-                    description: Total number of records matching the query. Set on the first page; may be 0 on continuation pages.
+                    description: 'Total number of records matching the query. On an unfiltered (or tier_uid-only) listing this is the query-wide total, repeated identically on every page, not just the first. On a b2b_org_uid-filtered listing (see that parameter''s description, where exposed) there is no query-wide total available: total_size instead equals the number of records returned so far, which is also the full and final result since that path never paginates.'
                     example: 100
                     format: int64
             description: Pagination metadata for list responses
             example:
                 next_page_token: ""
                 total_size: 100
+        ListProjectMembershipsResult:
+            type: object
+            properties:
+                next_page_token:
+                    type: string
+                    description: Opaque cursor for the next page. Pass this value as the page_token query parameter to retrieve the next page. Empty or absent when this is the last page.
+                    example: ""
+                project_memberships:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ProjectMembershipResponse'
+                    description: Memberships matching the query
+                    example:
+                        - agreement_date: "2025-01-01T00:00:00Z"
+                          annual_full_price: 50000
+                          auto_renew: true
+                          b2b_org_uid: 001B000000IqhSLIAZ
+                          company_domain: https://example.com
+                          company_logo_url: https://example.com/logo.png
+                          company_name: Example Corp
+                          created_at: "2025-01-01T00:00:00Z"
+                          end_date: "2025-12-31T23:59:59Z"
+                          payment_frequency: Annual
+                          payment_terms: Net 30
+                          price: 50000
+                          project_sfid: a0941000002wBz9AAE
+                          project_slug: kubernetes
+                          project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                          purchase_date: "2025-01-15T00:00:00Z"
+                          renewal_type: Annual
+                          start_date: "2025-02-01T00:00:00Z"
+                          status: Active
+                          tier: Gold
+                          tier_family: Membership
+                          tier_name: Gold Corporate Membership
+                          tier_product_type: Corporate
+                          tier_uid: 01t2M000009ABCdIAM
+                          uid: 02i2M000009ABCdIAM
+                          updated_at: "2025-06-01T12:00:00Z"
+                          year: "2025"
+                        - agreement_date: "2025-01-01T00:00:00Z"
+                          annual_full_price: 50000
+                          auto_renew: true
+                          b2b_org_uid: 001B000000IqhSLIAZ
+                          company_domain: https://example.com
+                          company_logo_url: https://example.com/logo.png
+                          company_name: Example Corp
+                          created_at: "2025-01-01T00:00:00Z"
+                          end_date: "2025-12-31T23:59:59Z"
+                          payment_frequency: Annual
+                          payment_terms: Net 30
+                          price: 50000
+                          project_sfid: a0941000002wBz9AAE
+                          project_slug: kubernetes
+                          project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                          purchase_date: "2025-01-15T00:00:00Z"
+                          renewal_type: Annual
+                          start_date: "2025-02-01T00:00:00Z"
+                          status: Active
+                          tier: Gold
+                          tier_family: Membership
+                          tier_name: Gold Corporate Membership
+                          tier_product_type: Corporate
+                          tier_uid: 01t2M000009ABCdIAM
+                          uid: 02i2M000009ABCdIAM
+                          updated_at: "2025-06-01T12:00:00Z"
+                          year: "2025"
+                results_truncated:
+                    type: boolean
+                    description: 'True when the result is known to be incomplete: either a b2b_org_uid-filtered walk stopped before exhausting the upstream page sequence (the internal page cap was hit, or the upstream page cursor repeated mid-walk), or a FIRST page (no inbound page_token, on either the unfiltered/tier_uid-only path or the b2b_org_uid-filtered path) whose total_size exceeds its returned record count with no next_page_token (a cold-cache read racing the background batch-link sweep). On the unfiltered/tier_uid-only path the per-page size (200) is deliberately smaller than the underlying Salesforce batch size (1000), so this case is effectively unreachable there whenever Salesforce honors the requested batch size (the normal case): an ordinary first page then always mints an intra-batch next_page_token without depending on the background sweep at all. Salesforce''s batch size is advisory, though: a short first batch (200 or fewer records returned, i.e. at most the unfiltered path''s per-page size) can still legitimately trip this case, and when it does, results_truncated correctly reports a true lower bound, not a false negative. Separately, the rarer residual race can instead surface on a LATER continuation page (which carries a page_token and so is not signalled by this field at all); that case is a documented, deferred trade-off (see ListProjectMemberships in membership_service.go) -- a real gap, not a false alarm. Not set on a later page of an ordinary multi-page result, where total_size legitimately exceeds that page''s own record count. When true, project_memberships and total_size are a partial lower bound, not the complete result.'
+                    example: false
+                total_size:
+                    type: integer
+                    description: 'Total number of records matching the query. On an unfiltered (or tier_uid-only) listing this is the query-wide total, repeated identically on every page, not just the first. On a b2b_org_uid-filtered listing (see that parameter''s description, where exposed) there is no query-wide total available: total_size instead equals the number of records returned so far, which is also the full and final result since that path never paginates.'
+                    example: 100
+                    format: int64
+            description: A paginated list of project memberships
+            example:
+                next_page_token: ""
+                project_memberships:
+                    - agreement_date: "2025-01-01T00:00:00Z"
+                      annual_full_price: 50000
+                      auto_renew: true
+                      b2b_org_uid: 001B000000IqhSLIAZ
+                      company_domain: https://example.com
+                      company_logo_url: https://example.com/logo.png
+                      company_name: Example Corp
+                      created_at: "2025-01-01T00:00:00Z"
+                      end_date: "2025-12-31T23:59:59Z"
+                      payment_frequency: Annual
+                      payment_terms: Net 30
+                      price: 50000
+                      project_sfid: a0941000002wBz9AAE
+                      project_slug: kubernetes
+                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                      purchase_date: "2025-01-15T00:00:00Z"
+                      renewal_type: Annual
+                      start_date: "2025-02-01T00:00:00Z"
+                      status: Active
+                      tier: Gold
+                      tier_family: Membership
+                      tier_name: Gold Corporate Membership
+                      tier_product_type: Corporate
+                      tier_uid: 01t2M000009ABCdIAM
+                      uid: 02i2M000009ABCdIAM
+                      updated_at: "2025-06-01T12:00:00Z"
+                      year: "2025"
+                    - agreement_date: "2025-01-01T00:00:00Z"
+                      annual_full_price: 50000
+                      auto_renew: true
+                      b2b_org_uid: 001B000000IqhSLIAZ
+                      company_domain: https://example.com
+                      company_logo_url: https://example.com/logo.png
+                      company_name: Example Corp
+                      created_at: "2025-01-01T00:00:00Z"
+                      end_date: "2025-12-31T23:59:59Z"
+                      payment_frequency: Annual
+                      payment_terms: Net 30
+                      price: 50000
+                      project_sfid: a0941000002wBz9AAE
+                      project_slug: kubernetes
+                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
+                      purchase_date: "2025-01-15T00:00:00Z"
+                      renewal_type: Annual
+                      start_date: "2025-02-01T00:00:00Z"
+                      status: Active
+                      tier: Gold
+                      tier_family: Membership
+                      tier_name: Gold Corporate Membership
+                      tier_product_type: Corporate
+                      tier_uid: 01t2M000009ABCdIAM
+                      uid: 02i2M000009ABCdIAM
+                      updated_at: "2025-06-01T12:00:00Z"
+                      year: "2025"
+                results_truncated: false
+                total_size: 100
+            required:
+                - project_memberships
+                - results_truncated
         MemberOrgTierResponse:
             type: object
             properties:
@@ -3995,6 +4348,18 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
             example:
                 auditors:
                     - avatar: https://avatars.githubusercontent.com/u/12345
@@ -4016,12 +4381,6 @@ components:
                       name: Alice Smith
                       username: alice
                 writers:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
                     - avatar: https://avatars.githubusercontent.com/u/12345
                       email: alice@example.com
                       invite_status: accepted
@@ -4074,7 +4433,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: false
+                    example: true
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -4091,7 +4450,7 @@ components:
                 email: john.doe@example.com
                 primary_contact: false
                 role: Technical Contact
-                send_invite: false
+                send_invite: true
                 status: Active
                 title: CTO
         WorkspaceBulkAddItemError:
@@ -4131,8 +4490,6 @@ components:
                           project_slug: ""
                         - error: project_slug is required
                           project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
                 last_modified:
                     type: string
                     description: Last-Modified header value (HTTP date format)
@@ -4141,7 +4498,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Magnam nobis nisi qui et.
+                        example: Sit dicta vero voluptatibus quis eveniet tempora.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -4155,10 +4512,6 @@ components:
                       project_slug: ""
                     - error: project_slug is required
                       project_slug: ""
-                    - error: project_slug is required
-                      project_slug: ""
-                    - error: project_slug is required
-                      project_slug: ""
                 last_modified: Wed, 21 Oct 2025 07:28:00 GMT
                 succeeded:
                     - kubernetes
@@ -4167,6 +4520,20 @@ components:
                     created_by: alice
                     name: My Workspace
                     projects:
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes
@@ -4203,11 +4570,13 @@ components:
                           project_slug: ""
                         - error: project_slug is required
                           project_slug: ""
+                        - error: project_slug is required
+                          project_slug: ""
                 succeeded:
                     type: array
                     items:
                         type: string
-                        example: Culpa perferendis fugit voluptas possimus fugiat.
+                        example: Harum quisquam consequatur.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -4219,10 +4588,6 @@ components:
                       project_slug: ""
                     - error: project_slug is required
                       project_slug: ""
-                    - error: project_slug is required
-                      project_slug: ""
-                    - error: project_slug is required
-                      project_slug: ""
                 succeeded:
                     - kubernetes
                 workspace:
@@ -4230,6 +4595,13 @@ components:
                     created_by: alice
                     name: My Workspace
                     projects:
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes
@@ -4369,15 +4741,13 @@ components:
                     example:
                         - project_name: Kubernetes
                           project_slug: kubernetes
-                        - project_name: Kubernetes
-                          project_slug: kubernetes
-                        - project_name: Kubernetes
-                          project_slug: kubernetes
                     minItems: 1
                     maxItems: 100
             description: Request body for adding multiple projects to a workspace in one operation
             example:
                 projects:
+                    - project_name: Kubernetes
+                      project_slug: kubernetes
                     - project_name: Kubernetes
                       project_slug: kubernetes
             required:
@@ -4404,6 +4774,13 @@ components:
                         $ref: '#/components/schemas/WorkspaceProjectResponse'
                     description: Project associations in this workspace
                     example:
+                        - created_at: "2026-01-01T00:00:00Z"
+                          created_by: alice
+                          project_name: Kubernetes
+                          project_slug: kubernetes
+                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                          updated_at: "2026-01-01T00:00:00Z"
+                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes

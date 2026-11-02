@@ -98,6 +98,14 @@ the graduation plan, see `ARCHITECTURE.md` at the repo root.
   exist on a method before its handler can return that status; if a new
   endpoint needs a status not yet declared, update the Goa design and
   `wrapError` in the same change.
+- `pkg/errors`'s `base` type implements `Unwrap()`, and `wrapError` plus every
+  exported `Is*` predicate (`IsNotFound`, `IsConflict`, `IsValidation`,
+  `IsPreconditionFailed`, ...) resolve through `pkgerrors.FindDomainError`,
+  which walks the error chain outermost-first and returns the first domain
+  error type it finds — not a bare `errors.As` against a single target type.
+  New code must not reintroduce a direct `errors.As` check against a domain
+  error type; use `FindDomainError` (or the `Is*` helpers) so wrapping order
+  stays irrelevant to classification.
 - Wrap upstream errors so `errors.Is` and `errors.Unwrap` still work.
 - Translate at the Goa or transport boundary. Do not return raw Salesforce
   HTTP errors, raw NATS errors, or upstream provider payloads to clients.
@@ -115,16 +123,78 @@ the graduation plan, see `ARCHITECTURE.md` at the repo root.
 
 ## Pagination
 
-The current resource-rooted HTTP surface has no list endpoints; pagination
-lives on the internal membership read path (`ListMembershipsForProject` and
-the SOQL batch cache) and in the design's `ListMetadata` type. If a list
-endpoint is (re)added:
+`GET /project_memberships` (PCC-1610) is the one list endpoint on the
+resource-rooted HTTP surface today. Pagination lives on the internal
+membership read path (`ListMembershipsForProject` and the SOQL batch cache);
+the HTTP layer only forwards an opaque cursor:
 
-- HTTP query params are Goa camelCase: `pageSize` plus opaque `pageToken`.
-  Responses expose `metadata.next_page_token`.
-- Normalize `pageSize` to supported Salesforce batch/page sizes.
-- Return `metadata.next_page_token` only when another page exists.
-- Treat `pageToken` as opaque and service-owned. Clients must not parse it.
+- HTTP query params are snake_case, matching the rest of this surface:
+  `tier_uid`, `b2b_org_uid`, `page_token`. There is no `page_size` param —
+  page size is an internal SOQL batch concern, not client-controlled.
+- `page_token` only encodes the batch/offset position of the original query,
+  not its filters: `tier_uid` must be re-supplied on every request (including
+  ones carrying a `page_token`), since it participates in the Salesforce
+  batch cache key. The cursor embeds a `FilterFingerprint` hash of those key
+  parameters, so resupplying a different or missing `tier_uid` alongside an
+  existing `page_token` is rejected with 400 rather than silently served
+  against the new filter.
+- The response returns `total_size` / `next_page_token` as top-level result
+  fields (not nested under a `metadata` object). Return `next_page_token`
+  only when another page exists.
+- `b2b_org_uid` has no SOQL predicate; it is applied as an in-memory
+  post-filter in `cmd/member-api/service/membership_service.go` that walks a
+  bounded number of upstream pages and never returns a `next_page_token` for
+  the filtered result — see the `ListProjectMemberships` doc comment there.
+  Combining `b2b_org_uid` with an inbound `page_token` is rejected (400):
+  the `b2b_org_uid` walk always starts its own page sequence from scratch, so
+  resuming it from a token minted by a different (unfiltered or
+  differently-filtered) request would silently splice two sequences
+  together. The response's `results_truncated` field signals either of two
+  cases: the `b2b_org_uid`-filtered walk stopped early (page cap hit, or the
+  upstream cursor repeated mid-walk), or — on a FIRST page (no inbound
+  `page_token`), on **either** the unfiltered or the `b2b_org_uid`-filtered
+  path — a cold-cache read whose `total_size` exceeds its returned record
+  count with no `next_page_token`, the signature of a read racing the
+  background batch-link sweep in `member_reader.go`. On the unfiltered/
+  `tier_uid`-only path the handler deliberately requests a logical page size
+  (200) smaller than the underlying Salesforce batch size (1000), so this
+  first-page check is effectively **unreachable** on that path whenever
+  Salesforce honors the requested batch size (the normal case): an ordinary
+  first page of a multi-batch result always mints an intra-batch
+  `next_page_token` without depending on the sweep at all. Salesforce's
+  batch size is advisory, though — a short first batch (200 or fewer
+  records returned) can still trip this check during the unfinished-sweep
+  window, and when it does `results_truncated` is correctly reporting a
+  true lower bound, not a false negative. Separately, the residual
+  batch-boundary race on this path can instead surface on a *later*
+  continuation page (once the internal offset reaches a full batch) — but
+  that page carries a non-empty `page_token`, so it is **not** signalled by
+  `results_truncated` at all; that case (and only that case) is a
+  documented, deferred trade-off (see
+  the `pageSize` comment in `ListProjectMemberships`,
+  `cmd/member-api/service/membership_service.go`), not a bug: closing it
+  fully would require threading a "chain incomplete" indicator through
+  `model.MembershipPage` that a later page could also observe, not just
+  inferring it from page-token presence. The `b2b_org_uid`-filtered walk
+  still requests full 1000-record batches (it re-reads the same cached
+  batch on every internal iteration), so its own first-page race window is
+  unchanged and is caught by this check. That second check is gated to the
+  first page on purpose: on a later page of an ordinary multi-page result,
+  `total_size` legitimately exceeds that page's own record count. Check
+  `results_truncated` instead of inferring completeness from `total_size`.
+- `MemberReader.ListMembershipsForProject` rejects (400, "page_token
+  expired") a continuation cursor (`BatchIndex > 0` or `BatchOffset > 0`)
+  whose batch has expired or been evicted, instead of silently rebasing it to
+  batch 0 — applies uniformly across the unfiltered, `tier_uid`-only, and
+  `b2b_org_uid`-filtered paths. A fresh first request (`BatchIndex == 0`,
+  `BatchOffset == 0`) still transparently re-fetches from Salesforce on a
+  miss/expiry.
+- Treat `page_token` as opaque and service-owned. Clients must not parse it.
+  The cursor carries a `FilterFingerprint` hash over the batch-key params
+  (`tier_uid`, `sort_order`, `company_name_search`) plus `BatchIndex` and
+  `NextBatchIterator`, so a `page_token` resent under changed or omitted
+  filters — or with a tampered index/iterator — is rejected with 400 instead
+  of silently resolving against the new cache key or an unrelated batch.
 
 ## NATS and KV
 
@@ -159,8 +229,10 @@ endpoint is (re)added:
     `/b2b_orgs/{uid}/settings` and the per-principal settings-user endpoints
     POST `/b2b_orgs/{uid}/settings/users` and PUT/DELETE
     `/b2b_orgs/{uid}/settings/users/{email}`.
-  - `project_membership`: GET `/project_memberships/{uid}` only (membership
-    lifecycle is owned by Salesforce, not this HTTP API).
+  - `project_membership`: GET `/project_memberships/{uid}`, plus GET
+    `/project_memberships` (project-scoped list, `auditor_guard` on
+    `project:{project_uid}` — PCC-1610). No write endpoints — membership
+    lifecycle is owned by Salesforce, not this HTTP API.
   - `key_contact`: GET/POST/PUT/DELETE nested under
     `/project_memberships/{membership_uid}/key_contacts[/{uid}]`.
   - `POST /admin/reindex` triggers an indexer/FGA backfill.
@@ -171,12 +243,22 @@ endpoint is (re)added:
   Salesforce, and `pkg/sfuuid`, never inside Goa generated code.
 - Mutating endpoints implement optimistic concurrency. PUT/DELETE accept an
   `If-Match` header carrying the LFX ETag from a prior GET; a stale ETag
-  returns `412 Precondition Failed`. GET responses carry an `ETag` (a hash of
-  the serialised domain object) and `Last-Modified`, and accept
-  `If-None-Match`/`If-Modified-Since`. Mirror the established
-  `UpdateKeyContact` guard when adding a new mutating handler; settings PUT
-  uses an `org-settings` KV revision for compare-and-set and can return `409
-  Conflict`.
+  returns `412 Precondition Failed`. GET responses for a **single resource**
+  carry an `ETag` (a hash of the serialised domain object) and
+  `Last-Modified`, and accept `If-None-Match`/`If-Modified-Since`. Mirror the
+  established `UpdateKeyContact` guard when adding a new mutating handler;
+  settings PUT uses an `org-settings` KV revision for compare-and-set and can
+  return `409 Conflict`.
+- **Exemption:** `GET /project_memberships` (`list-project-memberships`,
+  PCC-1610) deliberately does not implement `ETag`/`Last-Modified`/
+  `If-None-Match`. It is this repo's only list-shaped GET: the response is a
+  paginated, optionally in-memory-filtered (`b2b_org_uid`) walk over upstream
+  Salesforce batches with no single serialised object to hash and no natural
+  "last modified" instant — unlike every single-resource GET, which hashes
+  one domain object. Revisit if a future list endpoint needs cache
+  revalidation; don't add a synthetic ETag (e.g. hashing the page body) to
+  this one without a real caller need, since it would invalidate on every
+  upstream batch-cache eviction and provide no actual freshness guarantee.
 - For the full add-endpoint recipe (design, regen, handler, tests,
   Heimdall ruleset), use the local `member-add-endpoint` skill.
 

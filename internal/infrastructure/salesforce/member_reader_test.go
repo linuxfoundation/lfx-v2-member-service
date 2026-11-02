@@ -4,7 +4,10 @@
 package salesforce
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -173,4 +176,122 @@ func TestFetchMembershipFromSalesforce_ConflictOnWriteBack_IsNonFatal(t *testing
 	result, err := cache.GetMembership(ctx, uid)
 	require.NoError(t, err)
 	assert.Equal(t, "p-existing", result.Value.ProjectUID, "the cache must not be overwritten by the losing write-back")
+}
+
+// gzipRecords builds the RecordsGZ payload a MembershipBatchCacheEntry would
+// hold, mirroring nats.encodeBatchRecords (unexported, so duplicated here).
+func gzipRecords(t *testing.T, records []*model.ProjectMembership) []byte {
+	t.Helper()
+	raw, err := json.Marshal(records)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, err = gw.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, gw.Close())
+	return buf.Bytes()
+}
+
+func membershipsFixture(n int) []*model.ProjectMembership {
+	out := make([]*model.ProjectMembership, n)
+	for i := range out {
+		out[i] = &model.ProjectMembership{UID: "asset-sfid"}
+	}
+	return out
+}
+
+// TestSliceCachedBatch_CursorFingerprintRoundTrip verifies the contract that
+// ListMembershipsForProject's page_token validation depends on: a cursor
+// minted by sliceCachedBatch for a given batchParams must pass the exact
+// fingerprint check performed on the next request for that same batchParams
+// — "cursor.FilterFingerprint != FingerprintCursor(batchParams,
+// cursor.BatchIndex, cursor.NextBatchIterator)" in member_reader.go — across
+// all three cursor shapes it can mint: an intra-batch continuation, a
+// batch-transition, and the no-more-pages (nil) case. This is the round-trip
+// coverage flagged as missing by the round-7 general-reviewer: the fix is
+// here as a pure-function test since sliceCachedBatch takes a plain
+// *nats.MembershipBatchCacheEntry and has no cache/repo dependency to mock.
+func TestSliceCachedBatch_CursorFingerprintRoundTrip(t *testing.T) {
+	batchParams := []string{"project-sfid", "created_desc", "tier-sfid"}
+
+	t.Run("intra-batch continuation cursor passes the next request's fingerprint check", func(t *testing.T) {
+		entry := &nats.MembershipBatchCacheEntry{
+			RecordsGZ: gzipRecords(t, membershipsFixture(25)),
+			TotalSize: 25,
+		}
+		cursor := PageCursor{BatchIndex: 0, NextBatchIterator: ""}
+
+		// pageSize must be a member of ValidPageSizes: DecodeCursor rejects
+		// any other value (see soql_pager.go), and every real call site
+		// already normalizes pageSize before reaching sliceCachedBatch.
+		page, err := sliceCachedBatch(entry, "project-uid", cursor, 10, 0, batchParams)
+		require.NoError(t, err)
+		require.NotEmpty(t, page.NextPageToken)
+
+		next, err := DecodeCursor(page.NextPageToken)
+		require.NoError(t, err)
+		assert.Equal(t, 0, next.BatchIndex)
+		assert.Equal(t, 10, next.BatchOffset)
+
+		// Exactly the check ListMembershipsForProject performs on the next call.
+		got := FingerprintCursor(batchParams, next.BatchIndex, next.NextBatchIterator)
+		assert.Equal(t, next.FilterFingerprint, got, "minted cursor must pass its own fingerprint check on replay")
+	})
+
+	t.Run("batch-transition cursor passes the next request's fingerprint check", func(t *testing.T) {
+		entry := &nats.MembershipBatchCacheEntry{
+			RecordsGZ:         gzipRecords(t, membershipsFixture(10)),
+			NextBatchIterator: "nextiter",
+			TotalSize:         15,
+		}
+		cursor := PageCursor{BatchIndex: 0, NextBatchIterator: ""}
+
+		// pageSize == len(records): exhausts batch 0 exactly, so the cursor
+		// must point at batch 1 (not an intra-batch offset). Must be a member
+		// of ValidPageSizes (see soql_pager.go's DecodeCursor).
+		page, err := sliceCachedBatch(entry, "project-uid", cursor, 10, 0, batchParams)
+		require.NoError(t, err)
+		require.NotEmpty(t, page.NextPageToken)
+
+		next, err := DecodeCursor(page.NextPageToken)
+		require.NoError(t, err)
+		assert.Equal(t, 1, next.BatchIndex)
+		assert.Equal(t, 0, next.BatchOffset)
+		assert.Equal(t, "nextiter", next.NextBatchIterator)
+
+		got := FingerprintCursor(batchParams, next.BatchIndex, next.NextBatchIterator)
+		assert.Equal(t, next.FilterFingerprint, got, "batch-transition cursor must pass its own fingerprint check on replay")
+	})
+
+	t.Run("last page across all batches mints no cursor", func(t *testing.T) {
+		entry := &nats.MembershipBatchCacheEntry{
+			RecordsGZ: gzipRecords(t, membershipsFixture(2)),
+			TotalSize: 2,
+		}
+		cursor := PageCursor{BatchIndex: 0, NextBatchIterator: ""}
+
+		page, err := sliceCachedBatch(entry, "project-uid", cursor, 10, 0, batchParams)
+		require.NoError(t, err)
+		assert.Empty(t, page.NextPageToken)
+	})
+
+	t.Run("a token minted under different batch-key params fails the fingerprint check", func(t *testing.T) {
+		entry := &nats.MembershipBatchCacheEntry{
+			RecordsGZ: gzipRecords(t, membershipsFixture(25)),
+			TotalSize: 25,
+		}
+		cursor := PageCursor{BatchIndex: 0, NextBatchIterator: ""}
+
+		page, err := sliceCachedBatch(entry, "project-uid", cursor, 10, 0, batchParams)
+		require.NoError(t, err)
+		minted, err := DecodeCursor(page.NextPageToken)
+		require.NoError(t, err)
+
+		// Simulates the same page_token resent with a changed tier_uid: the
+		// recomputed batchParams differ (different tier SFID segment), so the
+		// fingerprint recomputed by ListMembershipsForProject must disagree.
+		changedBatchParams := []string{"project-sfid", "created_desc", "a-different-tier-sfid"}
+		got := FingerprintCursor(changedBatchParams, minted.BatchIndex, minted.NextBatchIterator)
+		assert.NotEqual(t, minted.FilterFingerprint, got, "a token minted under one tier_uid must not validate against another")
+	})
 }

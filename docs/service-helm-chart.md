@@ -11,8 +11,8 @@ ExternalSecret, IRSA role, region, and chart pins live in `lfx-v2-argocd`.
 - **Service type**: Salesforce-backed membership API with local NATS KV
   caches that also publishes indexer and FGA-sync messages on the write path.
 - **HTTPRoute paths** (`templates/httproute.yaml`): `/b2b_orgs` (Exact),
-  `/b2b_orgs/`, `/project_memberships/`, `/key_contacts` (Exact),
-  `/key_contacts/`, `/admin/`, `/_memberships/`.
+  `/b2b_orgs/`, `/project_memberships` (Exact), `/project_memberships/`,
+  `/key_contacts` (Exact), `/key_contacts/`, `/admin/`, `/_memberships/`.
   `/debug/vars`, `/livez`, and `/readyz` are mounted by the binary but are
   not exposed by this HTTPRoute.
 - **NATS KV buckets**: `membership-cache`, `member-service-cache`,
@@ -26,10 +26,13 @@ ExternalSecret, IRSA role, region, and chart pins live in `lfx-v2-argocd`.
   `consumer.pubsubEndpoint`; `SF_ORG_ID` must be set or the consumer
   fails fast at startup.
 - **Heimdall auth** (`templates/ruleset.yaml`): per-object `auditor`/`writer`
-  checks on `b2b_org:{uid}` and `project_membership:{membership_uid}`. Three
-  machine-caller routes are team-gated instead: `POST /b2b_orgs` and
-  `POST /admin/reindex` check `member` on
-  `team:{{ .Values.app.globalOrgAdminTeamName }}` (defaults to
+  checks on `b2b_org:{uid}` and `project_membership:{membership_uid}`, and
+  `auditor_guard` on `project:{project_uid}` (read from a query param, not a
+  path capture — `GET /project_memberships`, PCC-1610; `auditor_guard`, not
+  the bare `auditor` relation, since `project_membership.auditor` itself
+  resolves through `auditor_guard from project`). Three machine-caller routes
+  are team-gated instead: `POST /b2b_orgs` and `POST /admin/reindex` check
+  `member` on `team:{{ .Values.app.globalOrgAdminTeamName }}` (defaults to
   `global_org_admin`, consistent across environments), and
   `GET /b2b_orgs/member-tiers/{username}` checks `member` on
   `team:{{ .Values.app.memberTiersCallerTeamName }}` (defaults to

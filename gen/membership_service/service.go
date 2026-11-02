@@ -61,6 +61,13 @@ type Service interface {
 	// so the leading entry is the user's top tier. Unknown users yield an empty
 	// list, not 404.
 	GetMemberTiers(context.Context, *GetMemberTiersPayload) (res []*MemberOrgTierResponse, err error)
+	// List active project memberships scoped by project_uid, optionally narrowed
+	// to a single b2b_org_uid (PCC-1610). Requires the auditor_guard relation on
+	// project:{project_uid} (project auditors, writers, owners, or global
+	// auditor/writer teams — see ARCHITECTURE.md). There is no b2b_org-side access
+	// path to this endpoint: an org's own writers/auditors must be project-scoped
+	// (or hold a global team grant) to list that org's memberships in a project.
+	ListProjectMemberships(context.Context, *ListProjectMembershipsPayload) (res *ListProjectMembershipsResult, err error)
 	// Get a specific key contact by UID
 	GetKeyContact(context.Context, *GetKeyContactPayload) (res *GetKeyContactResult, err error)
 	// Create a new key contact
@@ -122,7 +129,7 @@ const ServiceName = "membership-service"
 // MethodNames lists the service method names as defined in the design. These
 // are the same values that are set in the endpoint request contexts under the
 // MethodKey key.
-var MethodNames = [25]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-member-tiers", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
+var MethodNames = [26]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-member-tiers", "list-project-memberships", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
 
 // AddB2bOrgSettingsUserPayload is the payload type of the membership-service
 // service add-b2b-org-settings-user method.
@@ -575,6 +582,92 @@ type GetProjectMembershipResult struct {
 	Etag *string
 	// Last-Modified header value (HTTP date format)
 	LastModified *string
+}
+
+// ListProjectMembershipsPayload is the payload type of the membership-service
+// service list-project-memberships method.
+type ListProjectMembershipsPayload struct {
+	// JWT token issued by Heimdall
+	BearerToken *string
+	// Version of the API
+	Version *string
+	// V2 project UUID to scope the membership list to
+	ProjectUID string
+	// Optional B2B organization (Account) UID to further narrow the list to a
+	// single org's membership in this project. Must be a valid Salesforce ID
+	// (returns a validation error otherwise). Applied as an in-memory post-filter
+	// over a bounded walk of upstream pages: the response never carries a
+	// next_page_token when this is set, and cannot be combined with an inbound
+	// page_token (returns a validation error). Check the results_truncated
+	// response field rather than inferring completeness from total_size: it is set
+	// when the walk stops before exhausting results, because the internal page cap
+	// was hit, the upstream page cursor repeated verbatim mid-walk (a defensive
+	// guard against a pathological upstream response; a cache-eviction-triggered
+	// restart mints a fresh cursor and is instead caught by UID deduplication), or
+	// — on the walk's FIRST page only — total_size exceeded the returned record
+	// count with no next_page_token, the signature of a cold-cache read racing a
+	// background batch-link sweep. Note total_size itself changes meaning when
+	// this filter is set: it is not a query-wide total (there is none, since the
+	// upstream query is never filtered by this field) but simply the count of
+	// records returned so far — equal to len(project_memberships) and, since this
+	// path never paginates, the final count unless results_truncated is true.
+	B2bOrgUID *string
+	// Optional membership tier UID to filter by. Must be a valid Salesforce ID
+	// (returns a validation error otherwise). Must be re-supplied identically on
+	// every request, including requests carrying a page_token: it participates in
+	// the underlying Salesforce batch cache key, so a page_token minted under a
+	// different (or omitted) tier_uid is rejected with a validation error rather
+	// than silently resuming against the new filter.
+	TierUID *string
+	// Opaque cursor from a previous response's next_page_token encoding only the
+	// pagination position (batch/offset) of the original query, not its filters.
+	// If the underlying cache entry it points to has since expired or been
+	// evicted, the request is rejected with a validation error (rather than
+	// silently restarting from page 1) — restart pagination with an empty
+	// page_token.
+	PageToken *string
+}
+
+// ListProjectMembershipsResult is the result type of the membership-service
+// service list-project-memberships method.
+type ListProjectMembershipsResult struct {
+	// Memberships matching the query
+	ProjectMemberships []*ProjectMembershipResponse
+	// True when the result is known to be incomplete: either a
+	// b2b_org_uid-filtered walk stopped before exhausting the upstream page
+	// sequence (the internal page cap was hit, or the upstream page cursor
+	// repeated mid-walk), or a FIRST page (no inbound page_token, on either the
+	// unfiltered/tier_uid-only path or the b2b_org_uid-filtered path) whose
+	// total_size exceeds its returned record count with no next_page_token (a
+	// cold-cache read racing the background batch-link sweep). On the
+	// unfiltered/tier_uid-only path the per-page size (200) is deliberately
+	// smaller than the underlying Salesforce batch size (1000), so this case is
+	// effectively unreachable there whenever Salesforce honors the requested batch
+	// size (the normal case): an ordinary first page then always mints an
+	// intra-batch next_page_token without depending on the background sweep at
+	// all. Salesforce's batch size is advisory, though: a short first batch (200
+	// or fewer records returned, i.e. at most the unfiltered path's per-page size)
+	// can still legitimately trip this case, and when it does, results_truncated
+	// correctly reports a true lower bound, not a false negative. Separately, the
+	// rarer residual race can instead surface on a LATER continuation page (which
+	// carries a page_token and so is not signalled by this field at all); that
+	// case is a documented, deferred trade-off (see ListProjectMemberships in
+	// membership_service.go) -- a real gap, not a false alarm. Not set on a later
+	// page of an ordinary multi-page result, where total_size legitimately exceeds
+	// that page's own record count. When true, project_memberships and total_size
+	// are a partial lower bound, not the complete result.
+	ResultsTruncated bool
+	// Total number of records matching the query. On an unfiltered (or
+	// tier_uid-only) listing this is the query-wide total, repeated identically on
+	// every page, not just the first. On a b2b_org_uid-filtered listing (see that
+	// parameter's description, where exposed) there is no query-wide total
+	// available: total_size instead equals the number of records returned so far,
+	// which is also the full and final result since that path never paginates.
+	TotalSize *int
+	// Opaque cursor for the next page. Pass this value as the page_token query
+	// parameter to retrieve the next page. Empty or absent when this is the last
+	// page.
+	NextPageToken *string
 }
 
 // Highest active membership tier held by one B2B organization the user is a

@@ -225,11 +225,12 @@ func (s *Storage) PutProjectUID(ctx context.Context, slug, uid string) error {
 // non-empty. The term is always lowercased before inclusion so that "Google"
 // and "google" map to the same cache entry.
 //
-// The iterator is an 8-character alphanumeric random string generated at write
-// time and embedded in the preceding batch's cache entry. This forms a singly-
-// linked list: to find batch N+1 you must first read batch N. Consumers cannot
-// speculatively fetch batch N+1 in parallel with batch N, which prevents
-// torn-read coherence issues during background refreshes.
+// The iterator is an 8-character base64url token (`[A-Za-z0-9_-]`, see
+// newBatchIterator in member_reader.go) generated at write time and embedded
+// in the preceding batch's cache entry. This forms a singly-linked list: to
+// find batch N+1 you must first read batch N. Consumers cannot speculatively
+// fetch batch N+1 in parallel with batch N, which prevents torn-read
+// coherence issues during background refreshes.
 //
 // NATS KV keys must not contain spaces or certain special characters; all
 // variable segments are URL-safe base64-encoded. Dots separate segments.
@@ -242,8 +243,10 @@ func MembershipBatchCacheKey(templateRef string, params []string, batchIndex int
 	if batchIndex == 0 {
 		parts = append(parts, "0")
 	} else {
-		// iterator is already a short alphanumeric string; no encoding needed,
-		// but we base64-encode for consistency and to guarantee NATS key safety.
+		// iterator is already an 8-character base64url token (see
+		// newBatchIterator in member_reader.go), so no encoding is strictly
+		// required, but we base64-encode it anyway for consistency with the
+		// other segments and to guarantee NATS key safety.
 		parts = append(parts, base64.RawURLEncoding.EncodeToString([]byte(iterator)))
 	}
 	return keyPrefixSOQLPage + strings.Join(parts, ".")
@@ -257,14 +260,22 @@ type MembershipBatchCacheEntry struct {
 	// RecordsGZ is the gzip-compressed JSON encoding of
 	// []*model.ProjectMembership for this batch.
 	RecordsGZ []byte `json:"records_gz"`
-	// NextBatchIterator is an 8-character random alphanumeric token that forms
-	// the key segment for the next batch's cache entry. Empty when this is the
+	// NextBatchIterator is an 8-character base64url token (see
+	// newBatchIterator in member_reader.go) that forms the key segment for the
+	// next batch's cache entry. Empty when this is the
 	// last batch (no more SF pages). The background goroutine writes the next
 	// batch first, then writes this entry with the iterator populated, so
 	// consumers can never observe a dangling iterator.
 	NextBatchIterator string `json:"next_batch_iterator,omitempty"`
-	// TotalSize is the Salesforce-reported total record count. Populated on
-	// batch 0 only; zero on subsequent batches.
+	// TotalSize is the Salesforce-reported query-wide total record count,
+	// with one exception: fetchAndCacheAllBatches' single-batch path (no
+	// second Salesforce page exists) subtracts the number of records dropped
+	// by convertSOQLToProjectMembership for a malformed Asset SFID, so that
+	// this value matches len(Records) exactly — the results_truncated
+	// heuristic in membership_service.go depends on that exact equality to
+	// avoid a false positive on a complete-but-imperfect single-batch result.
+	// The multi-batch path (sweepRemaining, and batch 0 when a second page
+	// exists) writes the unadjusted query-wide total to every batch.
 	TotalSize int `json:"total_size,omitempty"`
 }
 
@@ -321,8 +332,10 @@ func (s *Storage) GetMembershipBatch(ctx context.Context, key string) (CacheResu
 // PutMembershipBatch writes a MembershipBatchCacheEntry to the KV bucket under
 // the given key, wrapped in a CachedValue envelope. records are
 // gzip-compressed before storage; nextBatchIterator is the token needed to look
-// up the subsequent batch (empty for the last batch); totalSize should be set
-// only for batch 0.
+// up the subsequent batch (empty for the last batch); totalSize is the
+// Salesforce-reported query-wide total, written identically to every batch
+// except the single-batch path, which adjusts it down by the malformed-SFID
+// skip count — see MembershipBatchCacheEntry.TotalSize.
 func (s *Storage) PutMembershipBatch(ctx context.Context, key string, records []*model.ProjectMembership, nextBatchIterator string, totalSize int) error {
 	if key == "" {
 		return errs.NewValidation("key cannot be empty")
@@ -339,6 +352,33 @@ func (s *Storage) PutMembershipBatch(ctx context.Context, key string, records []
 		TotalSize:         totalSize,
 	}
 	return putCached(ctx, s, key, entry)
+}
+
+// DeleteMembershipBatch removes a cached SOQL membership batch entry by key.
+// Used to invalidate an unlinked batch 0 (NextBatchIterator == "" but a second
+// Salesforce page actually exists) when the background sweep that would link
+// it fails partway through, so the next read re-triggers a full fetch instead
+// of serving a permanently-truncated batch 0 for the rest of its TTL. Returns
+// nil if the key does not exist (a missing entry is already invalidated).
+func (s *Storage) DeleteMembershipBatch(ctx context.Context, key string) error {
+	if key == "" {
+		return errs.NewValidation("key cannot be empty")
+	}
+
+	kv, ok := s.client.kvStore[constants.KVBucketNameCache]
+	if !ok {
+		return errs.NewUnexpected(fmt.Sprintf("KV bucket %q not initialized", constants.KVBucketNameCache))
+	}
+
+	if err := kv.Delete(ctx, key); err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil
+		}
+		return errs.NewUnexpected(
+			fmt.Sprintf("failed to delete key %q from bucket %q", key, constants.KVBucketNameCache), err)
+	}
+
+	return nil
 }
 
 // ─── Readiness ───────────────────────────────────────────────────────────────

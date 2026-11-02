@@ -67,6 +67,7 @@ The service exposes resource-rooted endpoints. The authoritative surface is the 
 | DELETE | `/b2b_orgs/{uid}/settings/users/{email}` | Remove a settings user | `writer` on `b2b_org:{uid}` |
 | GET | `/b2b_orgs/member-tiers/{username}` | Highest active tier per org for a user (machine callers) | `member` on `team:{memberTiersCallerTeamName}` (default `member_tiers_caller`; empty falls back to `globalOrgAdminTeamName`) |
 | GET | `/project_memberships/{uid}` | Get a membership | `auditor` on `project_membership:{uid}` |
+| GET | `/project_memberships` | List memberships for a project | `auditor_guard` on `project:{project_uid}` |
 | GET | `/project_memberships/{m_uid}/key_contacts/{uid}` | Get a key contact | `auditor` on `project_membership:{m_uid}` |
 | POST | `/project_memberships/{m_uid}/key_contacts` | Create a key contact | `writer` on `project_membership:{m_uid}` |
 | PUT | `/project_memberships/{m_uid}/key_contacts/{uid}` | Update a key contact | `writer` on `project_membership:{m_uid}` |
@@ -221,9 +222,11 @@ flowchart TD
   and cannot easily support incremental pagination in a live-serving context.
   They shall be used exclusively by the triggerable reindex job, which may be
   invoked by an operator or by a startup flag.
-- **No collection endpoints on this service.** The service does not implement list or search
-  endpoints. All collection access is via the Query Service. The service's API surface is:
-  single-object GET (served from sObject cache), write mutations, and a backfill trigger.
+- **One project-scoped collection endpoint; no other collection endpoints.** `GET
+  /project_memberships` (PCC-1610) is the one exception — a project-scoped membership list
+  used by project auditors/writers, not a general-purpose search surface. All other collection
+  access is via the Query Service. The service's API surface is otherwise: single-object GET
+  (served from sObject cache), write mutations, and a backfill trigger.
 - **No backward-compatible project-scoped paths.** The old
   `/projects/{uid}/memberships/...` and `/projects/{uid}/memberships/{uid}/key_contacts/...`
   endpoints are removed. Consumers must migrate to the root paths and/or the Query Service.
@@ -335,7 +338,7 @@ type project_membership
     define b2b_org: [b2b_org]
     define project: [project]
     define writer: writer from b2b_org
-    define auditor: writer or auditor from b2b_org or auditor from project
+    define auditor: writer or auditor from b2b_org or auditor_guard from project
     define key_contact: [user]
 ```
 
@@ -346,8 +349,15 @@ drift. Note that `key_contact` currently grants nothing: the only relations that
 - **`b2b_org`**: reference to the owning org. Set at creation, never changed.
 - **`project`**: reference to the project this membership belongs to. Set at creation, never
   changed.
-- **`auditor`**: inherits `auditor` from the `b2b_org` (org auditors, owners, global org admins)
-  **or** from the `project` (project auditors, writers, owners).
+- **`writer`**: inherits `writer` from the `b2b_org`. This service exposes no API write path for
+  `project_membership` itself (all mutations originate in Salesforce), but `writer` is still
+  needed here because key-contact mutations are authorized against the parent
+  `project_membership`.
+- **`auditor`**: `writer` **or** inherits `auditor` from the `b2b_org` (org auditors, owners,
+  global org admins) **or** `auditor_guard` from the `project` (project auditors, writers, owners,
+  plus `global_writer`/`global_auditor` team grants).
+- **`key_contact`**: direct user assignment; a key contact additionally becomes `auditor` on the
+  parent `b2b_org` (see below).
 
 **FGA Sync payload (on create/update):**
 
@@ -529,8 +539,9 @@ set should be introduced following the platform's split-attribute pattern.
 
 ## Target API Layout
 
-The service exposes only **single-object reads, write mutations, and a backfill trigger**. All
-list and search operations are delegated to the Query Service (OpenSearch). There are no
+The service exposes **single-object reads, write mutations, a backfill trigger, and one
+project-scoped collection endpoint** (`GET /project_memberships`, PCC-1610). All other list and
+search operations are delegated to the Query Service (OpenSearch). There are no
 backward-compatible aliases for the old project-scoped paths.
 
 ### `b2b_org`
@@ -553,6 +564,7 @@ backward-compatible aliases for the old project-scoped paths.
 | Method | Path | Description | FGA check |
 |--------|------|-------------|-----------|
 | GET | `/project_memberships/{uid}` | Get a membership (sObject cache) | `auditor` on `project_membership:{uid}` |
+| GET | `/project_memberships` | List active memberships for a project, optionally filtered by `tier_uid` / `b2b_org_uid` (PCC-1610) | `auditor_guard` on `project:{project_uid}` (query param; `auditor_guard`, not the bare `auditor` relation above, because this check must also admit `global_writer`/`global_auditor` team grants — `project_membership.auditor` already resolves through `auditor_guard from project`) |
 
 > **Note:** Membership lifecycle operations (creation, cancellation, auto-renewal changes, etc.)
 > are managed by the LF Sales team directly in Salesforce. This service exposes no write
@@ -613,9 +625,18 @@ type project_membership
   relations
     define b2b_org: [b2b_org]
     define project: [project]
-    # No writer relation: membership lifecycle is managed in Salesforce by the
-    # Sales team. Mutations reach this service only via PubSub CDC or backfill.
-    define auditor: auditor from b2b_org or auditor from project
+    # writer is inherited from b2b_org only — membership lifecycle itself is
+    # managed in Salesforce by the Sales team, and mutations reach this
+    # service only via PubSub CDC or backfill, never an API write path. The
+    # relation still exists because key-contact mutations
+    # (POST/PUT/DELETE .../key_contacts/...) are authorized against the
+    # parent project_membership's writer.
+    define writer: writer from b2b_org
+    # auditor_guard (not the bare project auditor relation) so that the
+    # project-scoped GET /project_memberships list endpoint also admits
+    # global_writer/global_auditor team grants.
+    define auditor: writer or auditor from b2b_org or auditor_guard from project
+    define key_contact: [user]
 
 type key_contact
   relations

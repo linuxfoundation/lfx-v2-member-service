@@ -23,6 +23,9 @@ spec:
         type: PathPrefix
         value: /b2b_orgs/
     - path:
+        type: Exact
+        value: /project_memberships
+    - path:
         type: PathPrefix
         value: /project_memberships/
     - path:

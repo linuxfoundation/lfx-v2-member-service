@@ -63,13 +63,15 @@ type MembershipFilters struct {
 	SortOrder SortOrder
 
 	// PageToken is an opaque cursor returned in a previous MembershipPage
-	// response. When non-empty it is decoded to a Salesforce nextRecordsUrl
-	// and used to fetch the next page of results directly from Salesforce
-	// (bypassing the initial query). The token is only valid for 15 minutes
-	// per the Salesforce Query Locator TTL.
-	//
-	// When PageToken is non-empty, TierUID and SortOrder are ignored — the
-	// locator already encodes the full query context.
+	// response. It encodes a batch index and iterator into the NATS KV batch
+	// cache maintained by the Salesforce reader (see soql_pager.go), along
+	// with a FingerprintCursor digest of the other filter fields in effect
+	// when the cursor was minted. When non-empty, TierUID, SortOrder, and
+	// CompanyNameSearch must be resent identically to the request that
+	// produced the token — a mismatch against the embedded fingerprint is
+	// rejected with a 400 rather than silently ignored, since resuming a
+	// cached page sequence under different filters would return results that
+	// don't match the caller's stated query.
 	PageToken string
 }
 

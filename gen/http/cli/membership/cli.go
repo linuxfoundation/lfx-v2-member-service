@@ -24,7 +24,7 @@ import (
 //	command (subcommand1|subcommand2|...)
 func UsageCommands() []string {
 	return []string{
-		"membership-service (get-b2b-org|create-b2b-org|update-b2b-org|upload-b2b-org-logo|get-b2b-org-settings|update-b2b-org-settings|add-b2b-org-settings-user|update-b2b-org-settings-user-role|delete-b2b-org-settings-user|get-project-membership|get-member-tiers|get-key-contact|create-key-contact|update-key-contact|delete-key-contact|admin-reindex|readyz|livez|debug-vars|create-b2b-org-workspace|update-b2b-org-workspace|delete-b2b-org-workspace|add-b2b-org-workspace-project|bulk-add-b2b-org-workspace-projects|remove-b2b-org-workspace-project)",
+		"membership-service (get-b2b-org|create-b2b-org|update-b2b-org|upload-b2b-org-logo|get-b2b-org-settings|update-b2b-org-settings|add-b2b-org-settings-user|update-b2b-org-settings-user-role|delete-b2b-org-settings-user|get-project-membership|get-member-tiers|list-project-memberships|get-key-contact|create-key-contact|update-key-contact|delete-key-contact|admin-reindex|readyz|livez|debug-vars|create-b2b-org-workspace|update-b2b-org-workspace|delete-b2b-org-workspace|add-b2b-org-workspace-project|bulk-add-b2b-org-workspace-projects|remove-b2b-org-workspace-project)",
 	}
 }
 
@@ -118,6 +118,14 @@ func ParseEndpoint(
 		membershipServiceGetMemberTiersUsernameFlag    = membershipServiceGetMemberTiersFlags.String("username", "REQUIRED", "LFID username to look up")
 		membershipServiceGetMemberTiersVersionFlag     = membershipServiceGetMemberTiersFlags.String("version", "", "")
 		membershipServiceGetMemberTiersBearerTokenFlag = membershipServiceGetMemberTiersFlags.String("bearer-token", "", "")
+
+		membershipServiceListProjectMembershipsFlags           = flag.NewFlagSet("list-project-memberships", flag.ExitOnError)
+		membershipServiceListProjectMembershipsVersionFlag     = membershipServiceListProjectMembershipsFlags.String("version", "", "")
+		membershipServiceListProjectMembershipsProjectUIDFlag  = membershipServiceListProjectMembershipsFlags.String("project-uid", "REQUIRED", "")
+		membershipServiceListProjectMembershipsB2bOrgUIDFlag   = membershipServiceListProjectMembershipsFlags.String("b2b-org-uid", "", "")
+		membershipServiceListProjectMembershipsTierUIDFlag     = membershipServiceListProjectMembershipsFlags.String("tier-uid", "", "")
+		membershipServiceListProjectMembershipsPageTokenFlag   = membershipServiceListProjectMembershipsFlags.String("page-token", "", "")
+		membershipServiceListProjectMembershipsBearerTokenFlag = membershipServiceListProjectMembershipsFlags.String("bearer-token", "", "")
 
 		membershipServiceGetKeyContactFlags               = flag.NewFlagSet("get-key-contact", flag.ExitOnError)
 		membershipServiceGetKeyContactMembershipUIDFlag   = membershipServiceGetKeyContactFlags.String("membership-uid", "REQUIRED", "Parent membership UID")
@@ -217,6 +225,7 @@ func ParseEndpoint(
 	membershipServiceDeleteB2bOrgSettingsUserFlags.Usage = membershipServiceDeleteB2bOrgSettingsUserUsage
 	membershipServiceGetProjectMembershipFlags.Usage = membershipServiceGetProjectMembershipUsage
 	membershipServiceGetMemberTiersFlags.Usage = membershipServiceGetMemberTiersUsage
+	membershipServiceListProjectMembershipsFlags.Usage = membershipServiceListProjectMembershipsUsage
 	membershipServiceGetKeyContactFlags.Usage = membershipServiceGetKeyContactUsage
 	membershipServiceCreateKeyContactFlags.Usage = membershipServiceCreateKeyContactUsage
 	membershipServiceUpdateKeyContactFlags.Usage = membershipServiceUpdateKeyContactUsage
@@ -298,6 +307,9 @@ func ParseEndpoint(
 
 			case "get-member-tiers":
 				epf = membershipServiceGetMemberTiersFlags
+
+			case "list-project-memberships":
+				epf = membershipServiceListProjectMembershipsFlags
 
 			case "get-key-contact":
 				epf = membershipServiceGetKeyContactFlags
@@ -402,6 +414,9 @@ func ParseEndpoint(
 			case "get-member-tiers":
 				endpoint = c.GetMemberTiers()
 				data, err = membershipservicec.BuildGetMemberTiersPayload(*membershipServiceGetMemberTiersUsernameFlag, *membershipServiceGetMemberTiersVersionFlag, *membershipServiceGetMemberTiersBearerTokenFlag)
+			case "list-project-memberships":
+				endpoint = c.ListProjectMemberships()
+				data, err = membershipservicec.BuildListProjectMembershipsPayload(*membershipServiceListProjectMembershipsVersionFlag, *membershipServiceListProjectMembershipsProjectUIDFlag, *membershipServiceListProjectMembershipsB2bOrgUIDFlag, *membershipServiceListProjectMembershipsTierUIDFlag, *membershipServiceListProjectMembershipsPageTokenFlag, *membershipServiceListProjectMembershipsBearerTokenFlag)
 			case "get-key-contact":
 				endpoint = c.GetKeyContact()
 				data, err = membershipservicec.BuildGetKeyContactPayload(*membershipServiceGetKeyContactMembershipUIDFlag, *membershipServiceGetKeyContactUIDFlag, *membershipServiceGetKeyContactVersionFlag, *membershipServiceGetKeyContactBearerTokenFlag, *membershipServiceGetKeyContactIfNoneMatchFlag, *membershipServiceGetKeyContactIfModifiedSinceFlag)
@@ -468,6 +483,7 @@ func membershipServiceUsage() {
 	fmt.Fprintln(os.Stderr, `    delete-b2b-org-settings-user: Remove a single principal's access (revoke an accepted grant or cancel a pending invite) from a B2B organization. Per-principal merge: all other members are untouched.`)
 	fmt.Fprintln(os.Stderr, `    get-project-membership: Get a specific project membership by UID`)
 	fmt.Fprintln(os.Stderr, `    get-member-tiers: List the highest active membership tier per B2B organization for the organizations the given user is a key contact of, ordered highest tier first so the leading entry is the user's top tier. Unknown users yield an empty list, not 404.`)
+	fmt.Fprintln(os.Stderr, `    list-project-memberships: List active project memberships scoped by project_uid, optionally narrowed to a single b2b_org_uid (PCC-1610). Requires the auditor_guard relation on project:{project_uid} (project auditors, writers, owners, or global auditor/writer teams — see ARCHITECTURE.md). There is no b2b_org-side access path to this endpoint: an org's own writers/auditors must be project-scoped (or hold a global team grant) to list that org's memberships in a project.`)
 	fmt.Fprintln(os.Stderr, `    get-key-contact: Get a specific key contact by UID`)
 	fmt.Fprintln(os.Stderr, `    create-key-contact: Create a new key contact`)
 	fmt.Fprintln(os.Stderr, `    update-key-contact: Update a key contact`)
@@ -633,7 +649,7 @@ func membershipServiceUpdateB2bOrgSettingsUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-b2b-org-settings --body '{\n      \"auditors\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ],\n      \"writers\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ]\n   }' --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service update-b2b-org-settings --body '{\n      \"auditors\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ],\n      \"writers\": [\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         },\n         {\n            \"avatar\": \"https://avatars.githubusercontent.com/u/12345\",\n            \"email\": \"alice@example.com\",\n            \"invite_status\": \"accepted\",\n            \"invited_as\": \"writer\",\n            \"name\": \"Alice Smith\",\n            \"username\": \"alice\"\n         }\n      ]\n   }' --uid \"001B000000IqhSLIAZ\" --version \"1\" --bearer-token \"eyJhbGci...\" --if-match \"123\"")
 }
 
 func membershipServiceAddB2bOrgSettingsUserUsage() {
@@ -764,6 +780,34 @@ func membershipServiceGetMemberTiersUsage() {
 	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service get-member-tiers --username \"jdoe\" --version \"1\" --bearer-token \"eyJhbGci...\"")
 }
 
+func membershipServiceListProjectMembershipsUsage() {
+	// Header with flags
+	fmt.Fprintf(os.Stderr, "%s [flags] membership-service list-project-memberships", os.Args[0])
+	fmt.Fprint(os.Stderr, " -version STRING")
+	fmt.Fprint(os.Stderr, " -project-uid STRING")
+	fmt.Fprint(os.Stderr, " -b2b-org-uid STRING")
+	fmt.Fprint(os.Stderr, " -tier-uid STRING")
+	fmt.Fprint(os.Stderr, " -page-token STRING")
+	fmt.Fprint(os.Stderr, " -bearer-token STRING")
+	fmt.Fprintln(os.Stderr)
+
+	// Description
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, `List active project memberships scoped by project_uid, optionally narrowed to a single b2b_org_uid (PCC-1610). Requires the auditor_guard relation on project:{project_uid} (project auditors, writers, owners, or global auditor/writer teams — see ARCHITECTURE.md). There is no b2b_org-side access path to this endpoint: an org's own writers/auditors must be project-scoped (or hold a global team grant) to list that org's memberships in a project.`)
+
+	// Flags list
+	fmt.Fprintln(os.Stderr, `    -version STRING: `)
+	fmt.Fprintln(os.Stderr, `    -project-uid STRING: `)
+	fmt.Fprintln(os.Stderr, `    -b2b-org-uid STRING: `)
+	fmt.Fprintln(os.Stderr, `    -tier-uid STRING: `)
+	fmt.Fprintln(os.Stderr, `    -page-token STRING: `)
+	fmt.Fprintln(os.Stderr, `    -bearer-token STRING: `)
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Example:")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service list-project-memberships --version \"1\" --project-uid \"a27394a3-7a6c-4d0f-9e0f-692d8753924f\" --b2b-org-uid \"001B000000IqhSLIAZ\" --tier-uid \"01t2M000009ABCdIAM\" --page-token \"\" --bearer-token \"eyJhbGci...\"")
+}
+
 func membershipServiceGetKeyContactUsage() {
 	// Header with flags
 	fmt.Fprintf(os.Stderr, "%s [flags] membership-service get-key-contact", os.Args[0])
@@ -889,7 +933,7 @@ func membershipServiceAdminReindexUsage() {
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service admin-reindex --body '{\n      \"cdc_repair\": true,\n      \"dry_run\": true,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\",\n      \"until\": \"2026-06-20T00:00:00Z\"\n   }' --version \"1\" --bearer-token \"eyJhbGci...\"")
+	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "membership-service admin-reindex --body '{\n      \"cdc_repair\": false,\n      \"dry_run\": false,\n      \"items\": [\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         },\n         {\n            \"uid\": \"001B000000IqhSLIAZ\"\n         }\n      ],\n      \"since\": \"2026-05-20T00:00:00Z\",\n      \"type\": \"b2b_org\",\n      \"until\": \"2026-06-20T00:00:00Z\"\n   }' --version \"1\" --bearer-token \"eyJhbGci...\"")
 }
 
 func membershipServiceReadyzUsage() {
