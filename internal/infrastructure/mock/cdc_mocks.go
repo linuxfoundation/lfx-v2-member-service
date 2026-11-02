@@ -24,7 +24,44 @@ var (
 	_ port.SalesforceQuotaGauge          = (*MockSalesforceQuotaGauge)(nil)
 	_ port.CDCRepairStore                = (*MockCDCRepairStore)(nil)
 	_ port.KeyContactGrantIndex          = (*MockKeyContactGrantIndex)(nil)
+	_ port.MemberReader                  = (*MockControllableMemberReader)(nil)
 )
+
+// MockControllableMemberReader is a test double for port.MemberReader that
+// returns caller-supplied values for GetMembership and GetKeyContact.
+// All other MemberReader methods are no-ops that return empty results.
+//
+// Use when a test needs to inject a specific record or a specific error for a
+// single-record lookup, without pre-seeding the full MockMembershipRepository.
+type MockControllableMemberReader struct {
+	Membership *model.ProjectMembership
+	Contact    *model.KeyContact
+	MemberErr  error
+	ContactErr error
+}
+
+func (r *MockControllableMemberReader) GetMembership(_ context.Context, _ string) (*model.ProjectMembership, error) {
+	return r.Membership, r.MemberErr
+}
+func (r *MockControllableMemberReader) GetKeyContact(_ context.Context, _ string) (*model.KeyContact, error) {
+	return r.Contact, r.ContactErr
+}
+func (r *MockControllableMemberReader) ListTiersForProject(_ context.Context, _ string) ([]*model.MembershipTier, error) {
+	return nil, nil
+}
+func (r *MockControllableMemberReader) GetTier(_ context.Context, _ string) (*model.MembershipTier, error) {
+	return nil, nil
+}
+func (r *MockControllableMemberReader) ListMembershipsForProject(_ context.Context, _ string, _ model.MembershipFilters, _ int) (model.MembershipPage, error) {
+	return model.MembershipPage{}, nil
+}
+func (r *MockControllableMemberReader) ListKeyContactsForMembership(_ context.Context, _ string) ([]*model.KeyContact, error) {
+	return nil, nil
+}
+func (r *MockControllableMemberReader) ListKeyContactsForOrg(_ context.Context, _ string) ([]*model.KeyContact, error) {
+	return nil, nil
+}
+func (r *MockControllableMemberReader) IsReady(_ context.Context) error { return nil }
 
 // MockCacheInvalidator is a test double for port.CacheInvalidator that counts
 // calls per entity type and optionally returns a configured error.

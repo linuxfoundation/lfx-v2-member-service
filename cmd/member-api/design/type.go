@@ -245,12 +245,41 @@ var ProjectKeyContactResponse = dsl.Type("project-key-contact-response", func() 
 // ListMetadata is the DSL type for list pagination metadata.
 var ListMetadata = dsl.Type("list-metadata", func() {
 	dsl.Description("Pagination metadata for list responses")
-	dsl.Attribute("total_size", dsl.Int, "Total number of records matching the query. Set on the first page; may be 0 on continuation pages.", func() {
+	dsl.Attribute("total_size", dsl.Int, "Total number of records matching the query. On an unfiltered (or tier_uid-only) listing this is the query-wide total, repeated identically on every page, not just the first. On a b2b_org_uid-filtered listing (see that parameter's description, where exposed) there is no query-wide total available: total_size instead equals the number of records returned so far, which is also the full and final result since that path never paginates.", func() {
 		dsl.Example(100)
 	})
 	dsl.Attribute("next_page_token", dsl.String, "Opaque cursor for the next page. Pass this value as the page_token query parameter to retrieve the next page. Empty or absent when this is the last page.", func() {
 		dsl.Example("")
 	})
+})
+
+// ListProjectMembershipsResult is the DSL type for a paginated list of project
+// memberships (PCC-1610).
+var ListProjectMembershipsResult = dsl.Type("list-project-memberships-result", func() {
+	dsl.Description("A paginated list of project memberships")
+	dsl.Attribute("project_memberships", dsl.ArrayOf(ProjectMembershipResponse), "Memberships matching the query")
+	dsl.Attribute("results_truncated", dsl.Boolean, "True when the result is known to be incomplete: either "+
+		"a b2b_org_uid-filtered walk stopped before exhausting the upstream page sequence (the internal page "+
+		"cap was hit, or the upstream page cursor repeated mid-walk), or a FIRST page (no inbound page_token, "+
+		"on either the unfiltered/tier_uid-only path or the b2b_org_uid-filtered path) whose total_size "+
+		"exceeds its returned record count with no next_page_token (a cold-cache read racing the background "+
+		"batch-link sweep). On the unfiltered/tier_uid-only path the per-page size (200) is deliberately "+
+		"smaller than the underlying Salesforce batch size (1000), so this case is effectively unreachable "+
+		"there whenever Salesforce honors the requested batch size (the normal case): an ordinary first page "+
+		"then always mints an intra-batch next_page_token without depending on the background sweep at all. "+
+		"Salesforce's batch size is advisory, though: a short first batch (200 or fewer records returned, "+
+		"i.e. at most the unfiltered path's per-page size) can still legitimately trip this case, and when "+
+		"it does, results_truncated correctly reports a true lower bound, not a false negative. Separately, "+
+		"the rarer residual race can instead surface on a LATER continuation page (which carries a "+
+		"page_token and so is not signalled by this field at all); that case is a documented, deferred "+
+		"trade-off (see ListProjectMemberships in membership_service.go) -- a real gap, not a false "+
+		"alarm. Not set on a later page of "+
+		"an ordinary multi-page result, where total_size legitimately exceeds that page's own record count. "+
+		"When true, project_memberships and total_size are a partial lower bound, not the complete result.", func() {
+		dsl.Example(false)
+	})
+	dsl.Extend(ListMetadata)
+	dsl.Required("project_memberships", "results_truncated")
 })
 
 // ── Payload attribute helpers ─────────────────────────────────────────────────

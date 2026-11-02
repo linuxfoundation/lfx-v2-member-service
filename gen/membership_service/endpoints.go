@@ -29,6 +29,7 @@ type Endpoints struct {
 	DeleteB2bOrgSettingsUser       goa.Endpoint
 	GetProjectMembership           goa.Endpoint
 	GetMemberTiers                 goa.Endpoint
+	ListProjectMemberships         goa.Endpoint
 	GetKeyContact                  goa.Endpoint
 	CreateKeyContact               goa.Endpoint
 	UpdateKeyContact               goa.Endpoint
@@ -71,6 +72,7 @@ func NewEndpoints(s Service) *Endpoints {
 		DeleteB2bOrgSettingsUser:       NewDeleteB2bOrgSettingsUserEndpoint(s, a.JWTAuth),
 		GetProjectMembership:           NewGetProjectMembershipEndpoint(s, a.JWTAuth),
 		GetMemberTiers:                 NewGetMemberTiersEndpoint(s, a.JWTAuth),
+		ListProjectMemberships:         NewListProjectMembershipsEndpoint(s, a.JWTAuth),
 		GetKeyContact:                  NewGetKeyContactEndpoint(s, a.JWTAuth),
 		CreateKeyContact:               NewCreateKeyContactEndpoint(s, a.JWTAuth),
 		UpdateKeyContact:               NewUpdateKeyContactEndpoint(s, a.JWTAuth),
@@ -102,6 +104,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 	e.DeleteB2bOrgSettingsUser = m(e.DeleteB2bOrgSettingsUser)
 	e.GetProjectMembership = m(e.GetProjectMembership)
 	e.GetMemberTiers = m(e.GetMemberTiers)
+	e.ListProjectMemberships = m(e.ListProjectMemberships)
 	e.GetKeyContact = m(e.GetKeyContact)
 	e.CreateKeyContact = m(e.CreateKeyContact)
 	e.UpdateKeyContact = m(e.UpdateKeyContact)
@@ -369,6 +372,29 @@ func NewGetMemberTiersEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.En
 			return nil, err
 		}
 		return s.GetMemberTiers(ctx, p)
+	}
+}
+
+// NewListProjectMembershipsEndpoint returns an endpoint function that calls
+// the method "list-project-memberships" of service "membership-service".
+func NewListProjectMembershipsEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		p := req.(*ListProjectMembershipsPayload)
+		var err error
+		sc := security.JWTScheme{
+			Name:           "jwt",
+			Scopes:         []string{},
+			RequiredScopes: []string{},
+		}
+		var token string
+		if p.BearerToken != nil {
+			token = *p.BearerToken
+		}
+		ctx, err = authJWTFn(ctx, token, &sc)
+		if err != nil {
+			return nil, err
+		}
+		return s.ListProjectMemberships(ctx, p)
 	}
 }
 

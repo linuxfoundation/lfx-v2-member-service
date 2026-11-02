@@ -140,3 +140,26 @@ func TestNewNotImplemented(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPreconditionFailed(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "plain error", err: errors.New("boom"), want: false},
+		{name: "bare PreconditionFailed", err: NewPreconditionFailed("stale If-Match"), want: true},
+		{
+			name: "PreconditionFailed nested underneath an outer Unexpected is NOT reported as PreconditionFailed",
+			err:  NewUnexpected("failed to revoke access", NewPreconditionFailed("stale If-Match")),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsPreconditionFailed(tt.err))
+		})
+	}
+}

@@ -404,6 +404,48 @@ spec:
             values:
               aud: {{ .Values.app.audience }}
 
+    - id: "rule:lfx:lfx-v2-member-service:project_memberships:list"
+      allow_encoded_slashes: 'off'
+      match:
+        methods:
+          - GET
+        routes:
+          - path: /project_memberships
+      execute:
+        - authenticator: oidc
+        - authenticator: anonymous_authenticator
+        {{- if .Values.app.use_oidc_contextualizer }}
+        - contextualizer: oidc_contextualizer
+        {{- end }}
+        {{- if .Values.openfga.enabled }}
+        - authorizer: openfga_check
+          config:
+            values:
+              relation: auditor_guard
+              # .Request.URL.Query is Heimdall's url.Values (map[string][]string), not a
+              # scalar map like .Request.URL.Captures — field access alone renders Go's
+              # slice syntax (e.g. "project:[a27394a3-...]"), matching no tuple. index
+              # selects the first value so the object interpolates as a plain string.
+              # project_uid is dsl.Required, so Goa would normally 400 a request missing
+              # it — but this template executes before that validation runs, and
+              # `index` on the nil slice from an absent key is a template execution
+              # error (not an empty string), which Heimdall surfaces as a 5xx instead of
+              # letting the request reach Goa's 400. `with` guards that: an absent or
+              # empty value skips the index entirely and the object interpolates as
+              # "project:", matching no tuple (denies, fails closed) instead of crashing.
+              object: "project:{{ "{{- with .Request.URL.Query.project_uid }}{{ index . 0 }}{{ end -}}" }}"
+        {{- else }}
+        {{/*
+          When OpenFGA is disabled, allow all requests.
+          (Only meant for *local development* because OpenFGA should be enabled when deployed.)
+        */}}
+        - authorizer: allow_all
+        {{- end }}
+        - finalizer: create_jwt
+          config:
+            values:
+              aud: {{ .Values.app.audience }}
+
     - id: "rule:lfx:lfx-v2-member-service:key_contacts:get"
       allow_encoded_slashes: 'off'
       match:

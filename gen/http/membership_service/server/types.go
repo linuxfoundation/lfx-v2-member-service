@@ -242,6 +242,48 @@ type GetProjectMembershipResponseBody ProjectMembershipResponseResponseBody
 // "get-member-tiers" endpoint HTTP response body.
 type GetMemberTiersResponseBody []*MemberOrgTierResponseResponse
 
+// ListProjectMembershipsResponseBody is the type of the "membership-service"
+// service "list-project-memberships" endpoint HTTP response body.
+type ListProjectMembershipsResponseBody struct {
+	// Memberships matching the query
+	ProjectMemberships []*ProjectMembershipResponseResponseBody `form:"project_memberships" json:"project_memberships" xml:"project_memberships"`
+	// True when the result is known to be incomplete: either a
+	// b2b_org_uid-filtered walk stopped before exhausting the upstream page
+	// sequence (the internal page cap was hit, or the upstream page cursor
+	// repeated mid-walk), or a FIRST page (no inbound page_token, on either the
+	// unfiltered/tier_uid-only path or the b2b_org_uid-filtered path) whose
+	// total_size exceeds its returned record count with no next_page_token (a
+	// cold-cache read racing the background batch-link sweep). On the
+	// unfiltered/tier_uid-only path the per-page size (200) is deliberately
+	// smaller than the underlying Salesforce batch size (1000), so this case is
+	// effectively unreachable there whenever Salesforce honors the requested batch
+	// size (the normal case): an ordinary first page then always mints an
+	// intra-batch next_page_token without depending on the background sweep at
+	// all. Salesforce's batch size is advisory, though: a short first batch (200
+	// or fewer records returned, i.e. at most the unfiltered path's per-page size)
+	// can still legitimately trip this case, and when it does, results_truncated
+	// correctly reports a true lower bound, not a false negative. Separately, the
+	// rarer residual race can instead surface on a LATER continuation page (which
+	// carries a page_token and so is not signalled by this field at all); that
+	// case is a documented, deferred trade-off (see ListProjectMemberships in
+	// membership_service.go) -- a real gap, not a false alarm. Not set on a later
+	// page of an ordinary multi-page result, where total_size legitimately exceeds
+	// that page's own record count. When true, project_memberships and total_size
+	// are a partial lower bound, not the complete result.
+	ResultsTruncated bool `form:"results_truncated" json:"results_truncated" xml:"results_truncated"`
+	// Total number of records matching the query. On an unfiltered (or
+	// tier_uid-only) listing this is the query-wide total, repeated identically on
+	// every page, not just the first. On a b2b_org_uid-filtered listing (see that
+	// parameter's description, where exposed) there is no query-wide total
+	// available: total_size instead equals the number of records returned so far,
+	// which is also the full and final result since that path never paginates.
+	TotalSize *int `form:"total_size,omitempty" json:"total_size,omitempty" xml:"total_size,omitempty"`
+	// Opaque cursor for the next page. Pass this value as the page_token query
+	// parameter to retrieve the next page. Empty or absent when this is the last
+	// page.
+	NextPageToken *string `form:"next_page_token,omitempty" json:"next_page_token,omitempty" xml:"next_page_token,omitempty"`
+}
+
 // GetKeyContactResponseBody is the type of the "membership-service" service
 // "get-key-contact" endpoint HTTP response body.
 type GetKeyContactResponseBody ProjectKeyContactResponseResponseBody
@@ -1455,6 +1497,101 @@ type GetMemberTiersInternalServerErrorResponseBody struct {
 // "membership-service" service "get-member-tiers" endpoint HTTP response body
 // for the "ServiceUnavailable" error.
 type GetMemberTiersServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// ListProjectMembershipsNotImplementedResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "NotImplemented" error.
+type ListProjectMembershipsNotImplementedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// ListProjectMembershipsNotFoundResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "NotFound" error.
+type ListProjectMembershipsNotFoundResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// ListProjectMembershipsBadRequestResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "BadRequest" error.
+type ListProjectMembershipsBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// ListProjectMembershipsInternalServerErrorResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "InternalServerError" error.
+type ListProjectMembershipsInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// ListProjectMembershipsServiceUnavailableResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "ServiceUnavailable" error.
+type ListProjectMembershipsServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name string `form:"name" json:"name" xml:"name"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -3380,6 +3517,30 @@ func NewGetMemberTiersResponseBody(res []*membershipservice.MemberOrgTierRespons
 	return body
 }
 
+// NewListProjectMembershipsResponseBody builds the HTTP response body from the
+// result of the "list-project-memberships" endpoint of the
+// "membership-service" service.
+func NewListProjectMembershipsResponseBody(res *membershipservice.ListProjectMembershipsResult) *ListProjectMembershipsResponseBody {
+	body := &ListProjectMembershipsResponseBody{
+		ResultsTruncated: res.ResultsTruncated,
+		TotalSize:        res.TotalSize,
+		NextPageToken:    res.NextPageToken,
+	}
+	if res.ProjectMemberships != nil {
+		body.ProjectMemberships = make([]*ProjectMembershipResponseResponseBody, len(res.ProjectMemberships))
+		for i, val := range res.ProjectMemberships {
+			if val == nil {
+				body.ProjectMemberships[i] = nil
+				continue
+			}
+			body.ProjectMemberships[i] = marshalMembershipserviceProjectMembershipResponseToProjectMembershipResponseResponseBody(val)
+		}
+	} else {
+		body.ProjectMemberships = []*ProjectMembershipResponseResponseBody{}
+	}
+	return body
+}
+
 // NewGetKeyContactResponseBody builds the HTTP response body from the result
 // of the "get-key-contact" endpoint of the "membership-service" service.
 func NewGetKeyContactResponseBody(res *membershipservice.GetKeyContactResult) *GetKeyContactResponseBody {
@@ -4520,6 +4681,81 @@ func NewGetMemberTiersInternalServerErrorResponseBody(res *goa.ServiceError) *Ge
 // "membership-service" service.
 func NewGetMemberTiersServiceUnavailableResponseBody(res *goa.ServiceError) *GetMemberTiersServiceUnavailableResponseBody {
 	body := &GetMemberTiersServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewListProjectMembershipsNotImplementedResponseBody builds the HTTP response
+// body from the result of the "list-project-memberships" endpoint of the
+// "membership-service" service.
+func NewListProjectMembershipsNotImplementedResponseBody(res *goa.ServiceError) *ListProjectMembershipsNotImplementedResponseBody {
+	body := &ListProjectMembershipsNotImplementedResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewListProjectMembershipsNotFoundResponseBody builds the HTTP response body
+// from the result of the "list-project-memberships" endpoint of the
+// "membership-service" service.
+func NewListProjectMembershipsNotFoundResponseBody(res *goa.ServiceError) *ListProjectMembershipsNotFoundResponseBody {
+	body := &ListProjectMembershipsNotFoundResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewListProjectMembershipsBadRequestResponseBody builds the HTTP response
+// body from the result of the "list-project-memberships" endpoint of the
+// "membership-service" service.
+func NewListProjectMembershipsBadRequestResponseBody(res *goa.ServiceError) *ListProjectMembershipsBadRequestResponseBody {
+	body := &ListProjectMembershipsBadRequestResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewListProjectMembershipsInternalServerErrorResponseBody builds the HTTP
+// response body from the result of the "list-project-memberships" endpoint of
+// the "membership-service" service.
+func NewListProjectMembershipsInternalServerErrorResponseBody(res *goa.ServiceError) *ListProjectMembershipsInternalServerErrorResponseBody {
+	body := &ListProjectMembershipsInternalServerErrorResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewListProjectMembershipsServiceUnavailableResponseBody builds the HTTP
+// response body from the result of the "list-project-memberships" endpoint of
+// the "membership-service" service.
+func NewListProjectMembershipsServiceUnavailableResponseBody(res *goa.ServiceError) *ListProjectMembershipsServiceUnavailableResponseBody {
+	body := &ListProjectMembershipsServiceUnavailableResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,
@@ -5716,6 +5952,20 @@ func NewGetMemberTiersPayload(username string, version *string, bearerToken *str
 	v := &membershipservice.GetMemberTiersPayload{}
 	v.Username = username
 	v.Version = version
+	v.BearerToken = bearerToken
+
+	return v
+}
+
+// NewListProjectMembershipsPayload builds a membership-service service
+// list-project-memberships endpoint payload.
+func NewListProjectMembershipsPayload(version *string, projectUID string, b2bOrgUID *string, tierUID *string, pageToken *string, bearerToken *string) *membershipservice.ListProjectMembershipsPayload {
+	v := &membershipservice.ListProjectMembershipsPayload{}
+	v.Version = version
+	v.ProjectUID = projectUID
+	v.B2bOrgUID = b2bOrgUID
+	v.TierUID = tierUID
+	v.PageToken = pageToken
 	v.BearerToken = bearerToken
 
 	return v

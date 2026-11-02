@@ -18,6 +18,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/salesforce"
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
@@ -159,6 +160,9 @@ type svcBuilder struct {
 
 type svcOpt func(*svcBuilder)
 
+func withStorage(r port.MemberReader) svcOpt {
+	return func(b *svcBuilder) { b.storage = r }
+}
 func withB2BOrgReader(r port.B2BOrgReader) svcOpt {
 	return func(b *svcBuilder) { b.b2bOrgReader = r }
 }
@@ -179,9 +183,6 @@ func withLogoUploaderUC(u usecaseSvc.LogoUploader) svcOpt {
 }
 func withKeyContactWriterUC(w usecaseSvc.KeyContactWriter) svcOpt {
 	return func(b *svcBuilder) { b.kcWriter = w }
-}
-func withStorage(r port.MemberReader) svcOpt {
-	return func(b *svcBuilder) { b.storage = r }
 }
 func withPMReader(r port.ProjectMembershipReader) svcOpt {
 	return func(b *svcBuilder) { b.pmReader = r }
@@ -982,6 +983,677 @@ func TestMemberOrgTierToResponse(t *testing.T) {
 		require.NotNil(t, resp.EndDate)
 		assert.Equal(t, "2099-12-31", *resp.EndDate)
 	})
+}
+
+// ─── ListProjectMemberships handler tests ─────────────────────────────────────
+
+// stubMemberReaderListErr wraps MockControllableMemberReader to inject an
+// error from ListMembershipsForProject specifically.
+type stubMemberReaderListErr struct {
+	*mock.MockControllableMemberReader
+	err error
+}
+
+func (s *stubMemberReaderListErr) ListMembershipsForProject(_ context.Context, _ string, _ model.MembershipFilters, _ int) (model.MembershipPage, error) {
+	return model.MembershipPage{}, s.err
+}
+
+// stubListPage wraps MockControllableMemberReader to return a caller-supplied
+// MembershipPage from ListMembershipsForProject, capturing the filters it was
+// invoked with so tests can assert request-side pass-through.
+type stubListPage struct {
+	*mock.MockControllableMemberReader
+	page             model.MembershipPage
+	receivedFilter   model.MembershipFilters
+	receivedPageSize int
+}
+
+func (s *stubListPage) ListMembershipsForProject(_ context.Context, _ string, filters model.MembershipFilters, pageSize int) (model.MembershipPage, error) {
+	s.receivedFilter = filters
+	s.receivedPageSize = pageSize
+	return s.page, nil
+}
+
+// stubMultiPage wraps MockControllableMemberReader to return a scripted
+// sequence of MembershipPage values from successive ListMembershipsForProject
+// calls (sticking on the last page once exhausted), so tests can exercise the
+// b2b_org_uid multi-page walk in ListProjectMemberships.
+type stubMultiPage struct {
+	*mock.MockControllableMemberReader
+	pages []model.MembershipPage
+	calls int // index into pages, sticks at len(pages)-1 once exhausted
+	// totalCalls counts every invocation, including repeats of the last
+	// page once calls has stuck — calls alone cannot distinguish "walked
+	// once" from "walked repeatedly and stopped advancing".
+	totalCalls int
+}
+
+func (s *stubMultiPage) ListMembershipsForProject(_ context.Context, _ string, _ model.MembershipFilters, _ int) (model.MembershipPage, error) {
+	s.totalCalls++
+	page := s.pages[s.calls]
+	if s.calls < len(s.pages)-1 {
+		s.calls++
+	}
+	return page, nil
+}
+
+// stubUnboundedPages always reports a fresh membership and a new, never-repeating
+// NextPageToken — simulating upstream results that genuinely never exhaust, as
+// opposed to stubMultiPage's scripted scenario where a token repeats verbatim.
+type stubUnboundedPages struct {
+	*mock.MockControllableMemberReader
+	orgUID string
+	calls  int
+}
+
+func (s *stubUnboundedPages) ListMembershipsForProject(_ context.Context, _ string, _ model.MembershipFilters, _ int) (model.MembershipPage, error) {
+	s.calls++
+	return model.MembershipPage{
+		Memberships:   []*model.ProjectMembership{{UID: fmt.Sprintf("m-looping-%d", s.calls), ProjectUID: "project-uid-1", B2BOrgUID: s.orgUID}},
+		NextPageToken: fmt.Sprintf("always-more-%d", s.calls),
+	}, nil
+}
+
+// stubExpiringCursor returns the given first page, then a page_token expired
+// validation error on every subsequent call — simulating MemberReader's own
+// internal continuation cursor landing on a batch the cache evicted mid-walk
+// (see member_reader.go's "cached page sequence is no longer available"
+// guard), which is the genuinely-reachable failure mode on this path (as
+// opposed to stubMultiPage's scripted verbatim-repeat scenario above).
+type stubExpiringCursor struct {
+	*mock.MockControllableMemberReader
+	firstPage  model.MembershipPage
+	calls      int
+	totalCalls int
+}
+
+func (s *stubExpiringCursor) ListMembershipsForProject(_ context.Context, _ string, _ model.MembershipFilters, _ int) (model.MembershipPage, error) {
+	s.totalCalls++
+	s.calls++
+	if s.calls == 1 {
+		return s.firstPage, nil
+	}
+	return model.MembershipPage{}, pkgerrors.NewValidation(
+		"page_token expired", fmt.Errorf("cached page sequence is no longer available; restart pagination without a page_token"))
+}
+
+func stringPtr(s string) *string { return &s }
+
+// TestLogicalPageSizeInvariants pins the invariants the pageSize comment in
+// ListProjectMemberships documents but cannot enforce at compile time:
+// fullBatchLogicalPageSize must equal salesforce.SFQueryBatchSize exactly
+// (not merely be *a* valid page size — ValidPageSizes membership alone would
+// not catch, say, fullBatchLogicalPageSize=500 or SFQueryBatchSize changing
+// to 2000 while this constant stayed at 1000) and defaultLogicalPageSize
+// must be a valid page size that divides evenly into it, so the unfiltered
+// path's intra-batch cursor math in sliceCachedBatch never leaves a
+// remainder. The ValidPageSizes membership check on fullBatchLogicalPageSize
+// guards the other drift direction: salesforce.NormalizePageSize (called by
+// MemberReader.ListMembershipsForProject) silently caps any requested size
+// above 1000, so if SFQueryBatchSize ever moved off the accepted menu the
+// equality check alone would force fullBatchLogicalPageSize to follow it to
+// a value NormalizePageSize then quietly clamps, breaking the "consume one
+// whole cached batch per iteration" invariant without either constant
+// looking wrong in isolation.
+// If any of these drift, this test fails instead of silently breaking
+// pagination.
+func TestLogicalPageSizeInvariants(t *testing.T) {
+	assert.Equal(t, salesforce.SFQueryBatchSize, fullBatchLogicalPageSize,
+		"fullBatchLogicalPageSize must equal salesforce.SFQueryBatchSize exactly")
+	assert.True(t, salesforce.ValidPageSizes[fullBatchLogicalPageSize],
+		"fullBatchLogicalPageSize (%d) must be a Salesforce-accepted page size", fullBatchLogicalPageSize)
+	assert.True(t, salesforce.ValidPageSizes[defaultLogicalPageSize],
+		"defaultLogicalPageSize (%d) must be a Salesforce-accepted page size", defaultLogicalPageSize)
+	assert.Equal(t, 0, fullBatchLogicalPageSize%defaultLogicalPageSize,
+		"fullBatchLogicalPageSize (%d) must divide evenly by defaultLogicalPageSize (%d)",
+		fullBatchLogicalPageSize, defaultLogicalPageSize)
+}
+
+func TestListProjectMemberships(t *testing.T) {
+	// newService returns both the service under test and the stub it was
+	// built with (nil when the case doesn't need one), so check closures
+	// read case-local state rather than a variable shared across subtests —
+	// safe even if a future edit adds t.Parallel() to the loop below.
+	tests := []struct {
+		name        string
+		newService  func() (membershipservice.Service, any)
+		payload     *membershipservice.ListProjectMembershipsPayload
+		ctx         func() context.Context // nil defaults to context.Background()
+		wantErrName string
+		wantErrIs   error // checked via errors.Is when the error isn't a *goa.ServiceError
+		check       func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any)
+	}{
+		{
+			name:       "project_uid only returns the default mock membership",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload:    &membershipservice.ListProjectMembershipsPayload{ProjectUID: "project-uid-1"},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				require.Len(t, result.ProjectMemberships, 1)
+				assert.Equal(t, "11111111-1111-1111-1111-111111111111", *result.ProjectMemberships[0].UID)
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 1, *result.TotalSize)
+				assert.False(t, result.ResultsTruncated, "total_size matches the returned count, so no truncation")
+			},
+		},
+		{
+			name:       "unknown project_uid returns an empty list from the mock",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload:    &membershipservice.ListProjectMembershipsPayload{ProjectUID: "nonexistent-project-uid"},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				assert.Empty(t, result.ProjectMemberships)
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 0, *result.TotalSize)
+			},
+		},
+		{
+			name: "tier_uid match passes the normalized SFID through to the reader",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships: []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1"}},
+						TotalSize:   1,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				TierUID:    stringPtr("01t000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any) {
+				require.Len(t, result.ProjectMemberships, 1)
+				reader, ok := stub.(*stubListPage)
+				require.True(t, ok)
+				assert.Equal(t, "01t000000000001AAA", reader.receivedFilter.TierUID)
+			},
+		},
+		{
+			name: "tier_uid no match returns an empty list from the reader",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page:                         model.MembershipPage{},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				TierUID:    stringPtr("01t000000000999AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any) {
+				assert.Empty(t, result.ProjectMemberships)
+				reader, ok := stub.(*stubListPage)
+				require.True(t, ok)
+				assert.Equal(t, "01t000000000999AAA", reader.receivedFilter.TierUID)
+			},
+		},
+		{
+			// Regression test for the cold-cache first-read truncation bug:
+			// the unfiltered/tier_uid-only path must request a logical page
+			// size (200) smaller than the underlying Salesforce batch size
+			// (1000), so sliceCachedBatch can mint an intra-batch cursor
+			// without depending on the background batch-link sweep.
+			name: "unfiltered path requests a 200 page size, not the full Salesforce batch size",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships: []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1"}},
+						TotalSize:   1,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{ProjectUID: "project-uid-1"},
+			check: func(t *testing.T, _ *membershipservice.ListProjectMembershipsResult, stub any) {
+				reader, ok := stub.(*stubListPage)
+				require.True(t, ok)
+				assert.Equal(t, 200, reader.receivedPageSize,
+					"unfiltered path must request less than the 1000-record Salesforce batch size "+
+						"so a first page can mint an intra-batch cursor without the background sweep")
+			},
+		},
+		{
+			// b2b_org_uid is not client-page-size-controlled: the walk
+			// re-reads the same cached batch on every internal iteration, so
+			// it requests the full batch size to minimize iterations within
+			// the maxB2BOrgFilterPages cap.
+			name: "b2b_org_uid path requests the full 1000 Salesforce batch size",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships: []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+						TotalSize:   1,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, _ *membershipservice.ListProjectMembershipsResult, stub any) {
+				reader, ok := stub.(*stubListPage)
+				require.True(t, ok)
+				assert.Equal(t, 1000, reader.receivedPageSize)
+			},
+		},
+		{
+			name:       "b2b_org_uid no match drops the non-matching sample membership",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"), // sample membership has no B2BOrgUID set
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				assert.Empty(t, result.ProjectMemberships)
+			},
+		},
+		{
+			name: "b2b_org_uid match filters to the matching membership",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships: []*model.ProjectMembership{
+							{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID, CompanyName: "Acme"},
+							{UID: "m-2", ProjectUID: "project-uid-1", B2BOrgUID: "001000000000002AAA", CompanyName: "Other"},
+						},
+						TotalSize: 2,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				require.Len(t, result.ProjectMemberships, 1)
+				assert.Equal(t, "m-1", *result.ProjectMemberships[0].UID)
+				// TotalSize reflects the filtered result, not the unfiltered page size.
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 1, *result.TotalSize)
+				assert.False(t, result.ResultsTruncated)
+			},
+		},
+		{
+			name: "b2b_org_uid match spread over multiple pages accumulates and reports no next_page_token",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubMultiPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					pages: []model.MembershipPage{
+						{
+							Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+							NextPageToken: "cursor-page-2",
+						},
+						{
+							Memberships:   []*model.ProjectMembership{{UID: "m-2", ProjectUID: "project-uid-1", B2BOrgUID: "001000000000002AAA"}},
+							NextPageToken: "cursor-page-3",
+						},
+						{
+							Memberships:   []*model.ProjectMembership{{UID: "m-3", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+							NextPageToken: "",
+						},
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any) {
+				require.Len(t, result.ProjectMemberships, 2)
+				assert.Equal(t, "m-1", *result.ProjectMemberships[0].UID)
+				assert.Equal(t, "m-3", *result.ProjectMemberships[1].UID)
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 2, *result.TotalSize)
+				reader, ok := stub.(*stubMultiPage)
+				require.True(t, ok)
+				assert.Equal(t, 3, reader.totalCalls, "should have walked all 3 scripted pages")
+				assert.Nil(t, result.NextPageToken, "the b2b_org_uid-filtered path never leaks a continuation token")
+				assert.False(t, result.ResultsTruncated, "the walk exhausted all upstream pages normally")
+			},
+		},
+		{
+			name: "b2b_org_uid match that never exhausts stops at the page cap",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubUnboundedPages{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					orgUID:                       orgUID,
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				require.Len(t, result.ProjectMemberships, maxB2BOrgFilterPages)
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, maxB2BOrgFilterPages, *result.TotalSize)
+				assert.Nil(t, result.NextPageToken)
+				assert.True(t, result.ResultsTruncated, "the walk hit the page cap before exhausting results")
+			},
+		},
+		{
+			name: "b2b_org_uid match where the upstream cursor repeats verbatim mid-walk",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubMultiPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					pages: []model.MembershipPage{
+						{
+							Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+							NextPageToken: "cursor-page-2",
+						},
+						{
+							// Simulates a pathological/overlapping upstream response
+							// that repeats the exact same page token and record
+							// rather than advancing — not an evicted-cache reset,
+							// which now surfaces as a page_token expired validation
+							// error (see the dedicated test case below) rather than
+							// a silent restart.
+							Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+							NextPageToken: "cursor-page-2",
+						},
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any) {
+				require.Len(t, result.ProjectMemberships, 1, "the repeated record must be deduped, not appended again")
+				assert.Equal(t, "m-1", *result.ProjectMemberships[0].UID)
+				reader, ok := stub.(*stubMultiPage)
+				require.True(t, ok)
+				assert.Equal(t, 2, reader.totalCalls, "should stop walking as soon as the repeated token is detected")
+				assert.Nil(t, result.NextPageToken)
+				assert.True(t, result.ResultsTruncated, "the upstream cursor repeated mid-walk")
+			},
+		},
+		{
+			name: "b2b_org_uid walk degrades gracefully when the internal continuation cursor expires mid-walk",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubExpiringCursor{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					firstPage: model.MembershipPage{
+						Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+						NextPageToken: "cursor-page-2",
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any) {
+				require.Len(t, result.ProjectMemberships, 1, "the page fetched before the cursor expired is kept")
+				assert.Equal(t, "m-1", *result.ProjectMemberships[0].UID)
+				reader, ok := stub.(*stubExpiringCursor)
+				require.True(t, ok)
+				assert.Equal(t, 2, reader.totalCalls, "stops after the expired-cursor error on the second call rather than erroring the whole request")
+				assert.Nil(t, result.NextPageToken)
+				assert.True(t, result.ResultsTruncated, "the internal continuation cursor expired before the walk reached the true end")
+			},
+		},
+		{
+			name: "b2b_org_uid walk ending on a cold-cache first page with no next_page_token reports results_truncated",
+			newService: func() (membershipservice.Service, any) {
+				orgUID := "001000000000001AAA"
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1", B2BOrgUID: orgUID}},
+						NextPageToken: "",
+						// Signature of the same race the unfiltered path
+						// guards against: more records exist upstream (per
+						// TotalSize) than this first page returned, with no
+						// cursor to resume from.
+						TotalSize: 5,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				require.Len(t, result.ProjectMemberships, 1)
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 1, *result.TotalSize, "total_size reflects only what was actually matched/returned, not the race's upstream total")
+				assert.Nil(t, result.NextPageToken)
+				assert.True(t, result.ResultsTruncated,
+					"a cold-cache first page ending the b2b_org_uid walk with total_size exceeding the returned "+
+						"record count is the same background-sweep race signature the unfiltered path detects")
+			},
+		},
+		{
+			name:       "deadline exceeded maps to ServiceUnavailable",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload:    &membershipservice.ListProjectMembershipsPayload{ProjectUID: "project-uid-1"},
+			ctx: func() context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantErrName: "ServiceUnavailable",
+		},
+		{
+			// A client disconnect mid-walk is routine, not a service failure,
+			// but it must still be a declared/encoded error (not a raw error
+			// value), so it maps to the same ServiceUnavailable name as
+			// DeadlineExceeded while remaining distinguishable via
+			// errors.Is(err, context.Canceled).
+			name:       "cancelled context maps to ServiceUnavailable and unwraps to context.Canceled",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload:    &membershipservice.ListProjectMembershipsPayload{ProjectUID: "project-uid-1"},
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			wantErrName: "ServiceUnavailable",
+			wantErrIs:   context.Canceled,
+		},
+		{
+			name:       "invalid b2b_org_uid returns BadRequest",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("not-a-valid-sfid"),
+			},
+			wantErrName: "BadRequest",
+		},
+		{
+			name:       "invalid tier_uid returns BadRequest",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				TierUID:    stringPtr("not-a-valid-sfid"),
+			},
+			wantErrName: "BadRequest",
+		},
+		{
+			name:       "page_token combined with b2b_org_uid returns BadRequest",
+			newService: func() (membershipservice.Service, any) { return newTestSvc(), nil },
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				B2bOrgUID:  stringPtr("001000000000001AAA"),
+				PageToken:  stringPtr("some-cursor"),
+			},
+			wantErrName: "BadRequest",
+		},
+		{
+			name: "resolver NotFound maps to NotFound",
+			newService: func() (membershipservice.Service, any) {
+				// Mirrors member_reader.go's actual wrapping of a resolver
+				// error: fmt.Errorf("...%w", err) around the domain error,
+				// not a bare pkgerrors.NotFound. wrapError must use
+				// errors.As to see through this wrapping.
+				notFound := pkgerrors.NewNotFound("project not found", fmt.Errorf("resolver error"))
+				reader := &stubMemberReaderListErr{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					err:                          fmt.Errorf("resolving project SFID for UID %s: %w", "nonexistent-project-uid", notFound),
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, nil
+			},
+			payload:     &membershipservice.ListProjectMembershipsPayload{ProjectUID: "nonexistent-project-uid"},
+			wantErrName: "NotFound",
+		},
+		{
+			name: "page_token passes through to MembershipFilters and next_page_token is surfaced",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1"}},
+						NextPageToken: "opaque-cursor-abc",
+						TotalSize:     1,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				PageToken:  stringPtr("prior-cursor-xyz"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, stub any) {
+				reader, ok := stub.(*stubListPage)
+				require.True(t, ok)
+				assert.Equal(t, "prior-cursor-xyz", reader.receivedFilter.PageToken,
+					"inbound page_token should pass through to MembershipFilters")
+				require.NotNil(t, result.NextPageToken)
+				assert.Equal(t, "opaque-cursor-abc", *result.NextPageToken)
+				assert.False(t, result.ResultsTruncated, "total_size matches the returned count, so no truncation")
+			},
+		},
+		{
+			name: "cold-cache first page with total_size exceeding the returned count and no next_page_token reports results_truncated",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1"}},
+						NextPageToken: "",
+						TotalSize:     5,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{ProjectUID: "project-uid-1"},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 5, *result.TotalSize)
+				assert.Nil(t, result.NextPageToken)
+				assert.True(t, result.ResultsTruncated,
+					"total_size exceeding the returned record count with no next_page_token on a first "+
+						"page is the signature of a cold-cache read racing the background batch-link sweep")
+			},
+		},
+		{
+			name: "last page of an ordinary multi-page result does not report results_truncated",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubListPage{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					page: model.MembershipPage{
+						Memberships:   []*model.ProjectMembership{{UID: "m-1", ProjectUID: "project-uid-1"}},
+						NextPageToken: "",
+						TotalSize:     5,
+					},
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, reader
+			},
+			payload: &membershipservice.ListProjectMembershipsPayload{
+				ProjectUID: "project-uid-1",
+				// An inbound page_token means this page is a continuation, not a
+				// cold-cache first page, so total_size (the query-wide total)
+				// legitimately exceeding this page's own record count is not
+				// truncation — it's the normal shape of a final page.
+				PageToken: stringPtr("prior-cursor-xyz"),
+			},
+			check: func(t *testing.T, result *membershipservice.ListProjectMembershipsResult, _ any) {
+				require.NotNil(t, result.TotalSize)
+				assert.Equal(t, 5, *result.TotalSize)
+				assert.False(t, result.ResultsTruncated,
+					"a later page's total_size exceeding its own record count is expected, not truncation")
+			},
+		},
+		{
+			name: "reader error maps to InternalServerError",
+			newService: func() (membershipservice.Service, any) {
+				reader := &stubMemberReaderListErr{
+					MockControllableMemberReader: &mock.MockControllableMemberReader{},
+					err:                          pkgerrors.NewUnexpected("reader failed", fmt.Errorf("salesforce error")),
+				}
+				svc := newTestSvc(withStorage(reader))
+				return svc, nil
+			},
+			payload:     &membershipservice.ListProjectMembershipsPayload{ProjectUID: "project-uid-1"},
+			wantErrName: "InternalServerError",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, stub := tt.newService()
+			ctx := context.Background()
+			if tt.ctx != nil {
+				ctx = tt.ctx()
+			}
+			result, err := svc.ListProjectMemberships(ctx, tt.payload)
+
+			if tt.wantErrName != "" {
+				require.Error(t, err)
+				var serviceErr *goa.ServiceError
+				require.True(t, errors.As(err, &serviceErr), "expected *goa.ServiceError, got %T: %v", err, err)
+				assert.Equal(t, tt.wantErrName, serviceErr.Name)
+				if tt.wantErrIs != nil {
+					assert.True(t, errors.Is(err, tt.wantErrIs), "expected error matching %v, got %T: %v", tt.wantErrIs, err, err)
+				}
+				return
+			}
+
+			if tt.wantErrIs != nil {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, tt.wantErrIs), "expected error matching %v, got %T: %v", tt.wantErrIs, err, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			if tt.check != nil {
+				tt.check(t, result, stub)
+			}
+		})
+	}
 }
 
 // ─── GetKeyContact handler tests ──────────────────────────────────────────────

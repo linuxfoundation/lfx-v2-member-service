@@ -148,9 +148,10 @@ salesforce.MemberReader (implements port.MemberReader)
 
 ### Project membership
 
-| Method | Path                         | Description              | OpenFGA Check                           |
-|--------|------------------------------|--------------------------|-----------------------------------------|
-| GET    | `/project_memberships/{uid}` | Get a project membership | `auditor` on `project_membership:{uid}` |
+| Method | Path                         | Description                                                                                      | OpenFGA Check                              |
+|--------|------------------------------|----------------------------------------------------------------------------------------------------|---------------------------------------------|
+| GET    | `/project_memberships`       | List active project memberships for a project, optionally filtered by `tier_uid`/`b2b_org_uid`   | `auditor_guard` on `project:{project_uid}` |
+| GET    | `/project_memberships/{uid}` | Get a project membership                                                                          | `auditor` on `project_membership:{uid}`    |
 
 ### Key contact endpoints (nested under project_membership)
 
@@ -215,7 +216,7 @@ Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or 
 
 > **Optimistic concurrency:** mutations (`PUT /b2b_orgs/{uid}`, `PUT /b2b_orgs/{uid}/settings`, the per-principal `POST`/`PUT`/`DELETE` settings-user endpoints, and `PUT`/`DELETE` key contacts) take an `If-Match` header carrying the current resource version (`POST` key-contact creates do not). A stale value returns `412 Precondition Failed`.
 
-> **Internal filtering:** SOQL-level membership filtering (`MembershipFilters` in `internal/domain/model/list_params.go`, e.g. tier UID / product) is applied internally on the Salesforce read path. It is not exposed as an HTTP `filter` query parameter on the current resource-rooted surface.
+> **Internal filtering:** SOQL-level membership filtering (`MembershipFilters` in `internal/domain/model/list_params.go`, e.g. tier UID / product) is applied internally on the Salesforce read path. `GET /project_memberships` exposes `tier_uid`, `b2b_org_uid`, and `page_token` as query parameters. `tier_uid` is validated (`sfuuid.Normalize18`) and pushed into the SOQL filter, and must be re-supplied on every request — including requests carrying a `page_token` — because it participates in the underlying Salesforce batch cache key (`page_token` itself only encodes the batch/offset position of the original query, not its filters). The cursor embeds a `FilterFingerprint` hash of those batch-key parameters together with the cursor's own `BatchIndex`/`NextBatchIterator` (`FingerprintCursor`), so resending a `page_token` with a changed or omitted `tier_uid` is rejected with 400 rather than silently served against the new filter, and so is a token whose `BatchIndex`/`NextBatchIterator` was tampered with after decoding. `b2b_org_uid` is likewise validated via `sfuuid.Normalize18` (400 on failure) but has no SOQL predicate and is applied as an in-memory post-filter — the handler walks subsequent pages (bounded by `maxB2BOrgFilterPages = 25`), dedupes accumulated memberships by UID, and never returns a `next_page_token` for the `b2b_org_uid`-filtered result, since resuming an in-memory filter would require resending identical filters; combining `b2b_org_uid` with an inbound `page_token` is rejected outright (400) since it would silently resume a different request's page sequence. `total_size` is exact once the walk exhausts the upstream pages. The response's `results_truncated` field is `true` in three cases: the `b2b_org_uid`-filtered walk hits the page cap before exhausting results, the upstream page cursor repeats verbatim mid-walk on that same filtered walk (a defensive guard against a pathological upstream response — the common cache-eviction-triggered restart mints a fresh random iterator rather than repeating a prior one, so it is instead caught by UID deduplication, not this check), or — on a FIRST page (no inbound `page_token`), on **either** the unfiltered/`tier_uid`-only path or the `b2b_org_uid`-filtered path — `total_size` exceeds that page's own returned record count with no `next_page_token`, which is the observable signature of a read racing `member_reader.go`'s background batch-link sweep (`fetchAndCacheAllBatches` writes batch 0 synchronously with an empty cursor before the sweep that would correct it completes). On the unfiltered/`tier_uid`-only path the handler deliberately requests a logical page size (200) smaller than the underlying Salesforce batch size (1000, see `membership_service.go`), so this first-page check is effectively **unreachable** on that path whenever Salesforce honors the requested batch size (the normal case): an ordinary first page of a multi-batch result always mints an intra-batch `next_page_token` without depending on the sweep at all. Salesforce's batch size is advisory, though — a short first batch (200 or fewer records returned) can still trip this check during the unfinished-sweep window, and when it does `results_truncated` is correctly reporting a true lower bound, not a false negative. Separately, the residual batch-boundary race on this path can instead surface on a *later* continuation page (once the internal offset reaches a full batch) — but that page carries a non-empty `page_token`, so it is **not** signalled by `results_truncated` at all; that case (and only that case) is a documented, deferred trade-off (see the `pageSize` comment in `ListProjectMemberships`), not a bug: closing it fully would require threading a "chain incomplete" indicator through `model.MembershipPage` that a later page could also observe, not just inferring it from page-token presence. The `b2b_org_uid`-filtered walk still requests full 1000-record batches (it re-reads the same cached batch on every internal iteration), so its own first-page race window is unchanged and is caught by this check. On that third check, `total_size` is exact (adjusted for any records dropped on a malformed SFID) whenever the result fits in a single Salesforce batch, so it never false-positives on a complete-but-imperfect single-batch result. That third check is deliberately scoped to the first page: on a *later* page of an ordinary multi-page result, `total_size` (the query-wide total) legitimately exceeds that page's own record count, and flagging that as truncation would make the field fire on nearly every paginated response. All three cases also log a warning. Callers should check `results_truncated` rather than inferring completeness from `total_size`. `MemberReader.ListMembershipsForProject` rejects (400, "page_token expired") rather than silently rebasing a continuation cursor (`BatchIndex > 0` or `BatchOffset > 0`) whose batch has since expired or been evicted from cache — this applies uniformly to the unfiltered, `tier_uid`-only, and `b2b_org_uid`-filtered paths alike, since all three resolve through the same cache-miss/expired fallthrough; a fresh first request (`BatchIndex == 0`, `BatchOffset == 0`) still transparently re-fetches from Salesforce. Other `MembershipFilters` fields (e.g. `CompanyNameSearch`) are not yet exposed over HTTP.
 
 ## Development Workflow
 
@@ -495,12 +496,20 @@ type b2b_org
                     or auditor from child
                     or key_contact from membership
 
+# Abridged: `project` is owned by lfx-v2-helm and carries many more relations
+# (global_writer, global_auditor, viewer, etc.) not relevant to this service.
+# Only the two relations project_membership composes are shown here.
+type project
+  relations
+    define writer_guard: writer or global_writer
+    define auditor_guard: auditor or global_writer or global_auditor
+
 type project_membership
   relations
     define b2b_org: [b2b_org]
     define project: [project]
     define writer: writer from b2b_org
-    define auditor: writer or auditor from b2b_org or auditor from project
+    define auditor: writer or auditor from b2b_org or auditor_guard from project
     define key_contact: [user]
 ```
 
@@ -519,6 +528,7 @@ Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/template
 - **PUT `/b2b_orgs/:uid/settings`** — `writer` on `b2b_org:{uid}`
 - **POST `/b2b_orgs/:uid/settings/users` and PUT/DELETE `/b2b_orgs/:uid/settings/users/:email`** — `writer` on `b2b_org:{uid}`
 - **GET `/b2b_orgs/member-tiers/:username`**: `member` on `team:{memberTiersCallerTeamName}` (machine callers; default `member_tiers_caller`, empty falls back to `globalOrgAdminTeamName`)
+- **GET `/project_memberships`** — `auditor_guard` on `project:{project_uid}` (query param, not a path capture — `auditor_guard`, not the bare `auditor` relation, because `project_membership.auditor` itself resolves through `auditor_guard from project`; checking plain `auditor` here would exclude `global_writer`/`global_auditor` team grants that can already read a single membership via `GET /project_memberships/:uid`)
 - **GET `/project_memberships/:uid`** — `auditor` on `project_membership:{uid}`
 - **GET `/project_memberships/:membership_uid/key_contacts/:uid`** — `auditor` on `project_membership:{membership_uid}`
 - **POST/PUT/DELETE `/project_memberships/:membership_uid/key_contacts...`** — `writer` on `project_membership:{membership_uid}` (POST also runs `json_content_type`)
@@ -658,8 +668,28 @@ The `JWTAuth` method is called automatically by Goa for all endpoints with `dsl.
 
 ### Error Handling
 
-Domain errors are mapped to HTTP status codes in `cmd/member-api/service/error.go`:
+Domain errors (`pkg/errors`) are mapped to HTTP status codes in `cmd/member-api/service/error.go`'s `wrapError`:
 
-- `ErrNotFound` → 404
-- `ErrInternal` → 500
-- `ErrServiceUnavailable` → 503
+- `Validation` → 400
+- `NotFound` → 404
+- `Conflict` → 409
+- `PreconditionFailed` → 412
+- `NotImplemented` → 501
+- `ServiceUnavailable` → 503
+- `Unexpected`, or anything else → 500
+
+`wrapError` and every exported `Is*` predicate (`IsNotFound`, `IsConflict`,
+`IsValidation`, `IsPreconditionFailed`, ...) resolve through
+`pkgerrors.FindDomainError`, which walks the error chain outermost-first — not
+a bare `errors.As` against one target type. `base` implements `Unwrap()`, so
+`errors.Is`/`errors.Unwrap` still work through a wrapped domain error. New
+code must not reintroduce a direct `errors.As` check against a domain error
+type.
+
+## Resources
+
+- [Goa Framework Docs](https://goa.design/docs/)
+- [NATS JetStream Docs](https://docs.nats.io/jetstream)
+- [OpenFGA Docs](https://openfga.dev/docs)
+- [Clean Architecture](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html)
+- [go-salesforce library](https://github.com/k-capehart/go-salesforce)

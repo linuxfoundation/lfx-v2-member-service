@@ -87,11 +87,7 @@ func NewPreconditionFailed(message string, err ...error) PreconditionFailed {
 	}
 }
 
-// IsPreconditionFailed reports whether err is a PreconditionFailed error.
+// IsPreconditionFailed reports whether err's outermost domain error is PreconditionFailed.
 func IsPreconditionFailed(err error) bool {
-	if err == nil {
-		return false
-	}
-	var pf PreconditionFailed
-	return errors.As(err, &pf)
+	return isOutermost[PreconditionFailed](err)
 }

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"expvar"
 	"fmt"
 	"io"
@@ -296,6 +297,333 @@ func memberOrgTierToResponse(m *model.ProjectMembership) *membershipservice.Memb
 		resp.EndDate = &m.EndDate
 	}
 	return resp
+}
+
+// maxB2BOrgFilterPages bounds the number of pages ListProjectMemberships will
+// walk when narrowing by b2b_org_uid, so a project with an unexpectedly large
+// membership list cannot turn one HTTP request into an unbounded SOQL scan.
+const maxB2BOrgFilterPages = 25
+
+// fullBatchLogicalPageSize must equal salesforce.SFQueryBatchSize exactly:
+// the b2b_org_uid walk relies on it to consume one whole cached Salesforce
+// batch per internal iteration. TestLogicalPageSizeInvariants
+// (membership_service_test.go) asserts this equality directly.
+const fullBatchLogicalPageSize = 1000
+
+// defaultLogicalPageSize must be a member of salesforce.ValidPageSizes and
+// divide evenly into fullBatchLogicalPageSize: see the pageSize comment in
+// ListProjectMemberships for why it is smaller than a full batch.
+const defaultLogicalPageSize = 200
+
+// ListProjectMemberships lists active project memberships for a project,
+// optionally narrowed to a single b2b_org_uid or tier_uid (PCC-1610).
+// tier_uid is validated via sfuuid.Normalize18, matching b2b_org_uid, so a
+// malformed value fails with a 400 rather than silently returning an empty
+// page. An inbound page_token cannot be combined with b2b_org_uid: the
+// b2b_org_uid walk starts its own internal page sequence from scratch, so
+// resuming it from a token minted by a different (unfiltered or
+// differently-filtered) listing would silently splice two sequences
+// together and report a partial count as a total.
+//
+// b2b_org_uid is applied as an in-memory post-filter on pages returned by
+// ListMembershipsForProject rather than pushed into the SOQL WHERE clause,
+// since MembershipFilters has no per-org predicate today. Accumulated
+// memberships are deduped by UID as a defensive guard against a
+// pathological or overlapping upstream page response re-returning a record
+// already seen; it is not load-bearing for cache eviction, since an evicted
+// internal continuation cursor now surfaces as a page_token expired
+// validation error (handled below as a graceful stop), not a silent
+// restart. The handler walks subsequent pages (bounded by
+// maxB2BOrgFilterPages) and never returns a next_page_token for the
+// b2b_org_uid-filtered result: resuming an in-memory filter from a later
+// request would require resending identical filters, and the underlying
+// batch cache key already demands an exact match, so a continuation token
+// would be unreliable at best. results_truncated is set (and a warning is
+// logged) in three cases: the walk hits maxB2BOrgFilterPages before the
+// upstream page sequence is exhausted, the upstream page cursor repeats
+// verbatim mid-walk before that cap is reached (a defensive guard against a
+// pathological upstream response), or the internal continuation cursor
+// expires mid-walk because the upstream batch cache evicted it (see
+// ListMembershipsForProject's page_token expired handling below). Callers
+// should check that field rather than inferring completeness from
+// total_size, which is a partial lower bound whenever results_truncated is
+// true.
+//
+// On BOTH the unfiltered and the b2b_org_uid-filtered path, results_truncated
+// is also set on a FIRST page (no inbound page_token, and on the filtered
+// path pageCount == 0) when total_size exceeds the number of returned
+// records but no next_page_token came back — the signature of a cold-cache
+// read racing the background batch-link sweep in member_reader.go's
+// fetchAndCacheAllBatches, which can leave the first page's cursor
+// temporarily empty even though more Salesforce pages exist. This is
+// deliberately scoped to the first page: on a LATER page of an ordinary
+// multi-page result, total_size (the query-wide total) legitimately exceeds
+// that page's own record count, and that is not truncation.
+//
+// Accepted trade-off (not a pending TODO): the walk/dedupe/truncation logic
+// below lives in this handler rather than behind a port.MemberReader method
+// or a dedicated use-case type. It was kept here deliberately rather than
+// pushed into internal/service's memberReaderOrchestrator, which is
+// documented as a thin delegate-and-log wrapper with no business logic of
+// its own — moving this walk there verbatim would violate that contract.
+// The proper fix is a new port.MemberReader method (e.g. an org-filtered
+// list) implemented in internal/infrastructure/salesforce, which is a larger
+// surface change — touching the port interface, every implementation
+// (salesforce + mock), and the orchestrator — than a single endpoint's
+// b2b_org_uid post-filter justifies for a first caller. This has been
+// weighed against that full refactor and kept as-is for PCC-1610; revisit
+// if a second caller needs the same org-filtered walk.
+//
+// A narrower alternative was also considered and deferred: pushing
+// b2b_org_uid into the SOQL WHERE clause as a new MembershipFilters field
+// (mirroring TierUID/CompanyNameSearch in buildMembershipsByProjectSOQL),
+// which would make the filtered result genuinely paginable and total_size a
+// real query-wide total on this path too, eliminating maxB2BOrgFilterPages,
+// the dedupe map, and the cursor-repeat guard entirely. That is still a
+// three-file change (model.MembershipFilters, buildMembershipsByProjectSOQL,
+// and membershipBatchKeyParams's cache-key composition) with no test
+// coverage of its own yet, so it is deferred alongside the port-method
+// refactor above rather than folded into this change — revisit both
+// together. Until then, total_size on this path is exact only when
+// results_truncated is false; when true it is a partial lower bound, as
+// documented above and on the results_truncated field itself.
+func (s *membershipServicesrvc) ListProjectMemberships(ctx context.Context, p *membershipservice.ListProjectMembershipsPayload) (*membershipservice.ListProjectMembershipsResult, error) {
+	filters := model.MembershipFilters{}
+	if p.TierUID != nil && *p.TierUID != "" {
+		normalized, err := sfuuid.Normalize18(*p.TierUID)
+		if err != nil {
+			return nil, wrapError(ctx, pkgerrors.NewValidation("invalid tier_uid", err))
+		}
+		filters.TierUID = normalized
+	}
+	if p.PageToken != nil {
+		filters.PageToken = *p.PageToken
+	}
+
+	var orgUID string
+	if p.B2bOrgUID != nil && *p.B2bOrgUID != "" {
+		normalized, err := sfuuid.Normalize18(*p.B2bOrgUID)
+		if err != nil {
+			return nil, wrapError(ctx, pkgerrors.NewValidation("invalid b2b_org_uid", err))
+		}
+		orgUID = normalized
+	}
+
+	// The b2b_org_uid walk never returns a next_page_token and starts its own
+	// internal page sequence from scratch; combining it with an inbound
+	// page_token from a different (unfiltered or differently-filtered)
+	// listing would silently resume mid-sequence and report a partial count
+	// as if it were a total. Reject the combination rather than guess.
+	if orgUID != "" && filters.PageToken != "" {
+		return nil, wrapError(ctx, pkgerrors.NewValidation(
+			"page_token cannot be combined with b2b_org_uid; the b2b_org_uid-filtered result is never paginated"))
+	}
+
+	var memberships []*model.ProjectMembership
+	var totalSize int
+	var nextPageToken string
+	var resultsTruncated bool
+	seenMembershipUIDs := map[string]struct{}{}
+	seenPageTokens := map[string]struct{}{filters.PageToken: {}}
+
+	for pageCount := 0; ; pageCount++ {
+		// Checked on every iteration, including the first: a request whose
+		// context is already deadline-exceeded or cancelled before the
+		// (possibly slow) Salesforce fetch even starts should fail fast with
+		// a clear ServiceUnavailable rather than let the downstream call
+		// surface the same cancellation as some other, less legible error.
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return nil, wrapError(ctx, pkgerrors.NewServiceUnavailable("deadline exceeded while walking membership pages", err))
+			}
+			// context.Canceled means the client disconnected mid-walk; this is
+			// a normal occurrence, not a service failure, so log at Debug
+			// ourselves and construct the ServiceUnavailable response
+			// directly rather than going through wrapError, which would log
+			// it again at Error. errors.Is(returnedErr, context.Canceled)
+			// still succeeds: pkgerrors.base.Unwrap() exposes the wrapped
+			// cause, and goa.ServiceError.Unwrap() exposes that in turn.
+			slog.DebugContext(ctx, "list_project_memberships: client cancelled mid-walk", "project_uid", p.ProjectUID)
+			return nil, membershipservice.MakeServiceUnavailable(pkgerrors.NewServiceUnavailable("client cancelled while walking membership pages", err))
+		}
+
+		// pageSize is intentionally path-dependent, not a single constant:
+		//
+		//   - b2b_org_uid walk (orgUID != ""): request the largest valid
+		//     logical page (1000, which divides salesforce.SFQueryBatchSize evenly).
+		//     page_size is not client-controlled on this path, so there is no
+		//     contract depending on the smaller default, and this walk
+		//     re-reads/re-decompresses the same cached 1000-record batch on
+		//     every iteration — a logical page of 200 would mean 5 reads per
+		//     batch and the maxB2BOrgFilterPages cap covering only 5000
+		//     records scanned instead of 25000.
+		//   - unfiltered / tier_uid-only (orgUID == ""): 1000 equals
+		//     salesforce.SFQueryBatchSize exactly, which means a cold-cache FIRST read
+		//     of any project with more than 1000 memberships deterministically
+		//     hits the batch-0/batch-1 link race documented above on EVERY
+		//     such request, not just rarely: sliceCachedBatch has no non-empty
+		//     NextBatchIterator to mint a cursor from (the background sweep
+		//     hasn't linked batch 1 yet) and nextOffset == len(records), so
+		//     there is no intra-batch cursor either. A smaller logical page
+		//     (200) leaves an intra-batch cursor surviving the unlinked-batch-0
+		//     window — up to 5 pages of grace before a client would ever hit
+		//     the race. The requested Sforce-Query-Options batch size is
+		//     advisory, not guaranteed: if Salesforce ever returns a first
+		//     batch of 200 records or fewer, sliceCachedBatch again has no
+		//     intra-batch cursor to mint, and the results_truncated check
+		//     below fires on that first page. This is not a bug — the field
+		//     correctly reports a true lower bound — but it means a short
+		//     first batch surfaces the race even on this path, despite the
+		//     race being "effectively unreachable" there in the normal case.
+		//
+		// This narrows the race to a page where it is no longer detectable:
+		// once a continuation request lands exactly on a still-unlinked batch
+		// boundary (BatchOffset reaching fullBatchLogicalPageSize), sliceCachedBatch
+		// mints no next_page_token (same as a genuine last page) and the
+		// results_truncated check below is gated to filters.PageToken == "" (the
+		// client's first request), so it does not fire on that later page either.
+		// Closing this fully would mean sliceCachedBatch reporting "chain
+		// incomplete" on any page, not just inferring it from page-token
+		// presence/absence — a model.MembershipPage field threaded through both
+		// the unfiltered and b2b_org_uid walk call sites. Deferred: the window is
+		// narrow (requires several rapid successive requests landing inside the
+		// sweep's completion window) and, like invalidateBatch0's residual race
+		// above, typically self-heals once the sweep finishes and the client
+		// retries.
+		pageSize := defaultLogicalPageSize
+		if orgUID != "" {
+			pageSize = fullBatchLogicalPageSize
+		}
+		page, err := s.storage.ListMembershipsForProject(ctx, p.ProjectUID, filters, pageSize)
+		if err != nil {
+			// A page_token expired validation error on an internal continuation
+			// (pageCount > 0) means MemberReader's own minted cursor — never the
+			// caller's, who never supplied a page_token on this path — landed on
+			// a batch the cache evicted mid-walk (see member_reader.go's
+			// "cached page sequence is no longer available" guard). Propagating
+			// that as a fatal 400 would tell the caller to retry without a
+			// page_token it never sent. Degrade gracefully like the other
+			// incompleteness cases on this path instead: stop the walk and
+			// report the partial result as truncated. A first-request
+			// (pageCount == 0) validation error is still the caller's problem
+			// (e.g. an invalid filter) and propagates normally.
+			if orgUID != "" && pageCount > 0 && pkgerrors.IsValidation(err) {
+				slog.WarnContext(ctx, "list_project_memberships: internal continuation cursor expired mid-walk; stopping to report a partial result",
+					"project_uid", p.ProjectUID, "b2b_org_uid", orgUID, "error", err)
+				resultsTruncated = true
+				break
+			}
+			return nil, wrapError(ctx, err)
+		}
+
+		if orgUID == "" {
+			memberships = page.Memberships
+			totalSize = page.TotalSize
+			nextPageToken = page.NextPageToken
+			// A cold-cache FIRST page (no inbound page_token — a cache miss
+			// can only happen here, never on a continuation request against
+			// an already-populated cache) can race the background sweep that
+			// links batch 0 to batch 1 (see member_reader.go's
+			// fetchAndCacheAllBatches): the synchronous caller can read back
+			// an empty NextBatchIterator before that sweep finishes, even
+			// though more Salesforce pages genuinely exist. total_size
+			// disagreeing with the returned record count, combined with no
+			// next_page_token, is the signature of that race. This is exact,
+			// not a heuristic: when the result fits in a single Salesforce
+			// batch (no race is possible — there is no second batch to
+			// link), fetchAndCacheAllBatches caches total_size already
+			// adjusted for any records FetchFirstMembershipBatch dropped on
+			// a malformed SFID, so total_size equals len(memberships)
+			// exactly and this never fires on a merely-imperfect-but-complete
+			// result. Gate on filters.PageToken == "" so this doesn't also
+			// fire on the LAST page of an ordinary multi-page result, where
+			// total_size (the query-wide total) legitimately exceeds this
+			// page's own record count. A client that needs the remaining
+			// records can retry once the sweep has had time to finish and
+			// populate the cursor.
+			if filters.PageToken == "" && nextPageToken == "" && totalSize > len(memberships) {
+				slog.WarnContext(ctx, "list_project_memberships: total_size exceeds returned records with no next_page_token; reporting results_truncated",
+					"project_uid", p.ProjectUID, "total_size", totalSize, "returned", len(memberships))
+				resultsTruncated = true
+			}
+			break
+		}
+
+		// b2b_org_uid is applied as an in-memory post-filter because there is
+		// no per-org SOQL predicate wired into MembershipFilters today.
+		// Dedupe by UID (not just by page cursor) as a defensive guard
+		// against a pathological or overlapping upstream response
+		// re-appending and re-counting a page already seen; an evicted
+		// internal continuation cursor is handled separately above as a
+		// page_token expired validation error, not a silent restart.
+		for _, m := range page.Memberships {
+			if m.B2BOrgUID != orgUID {
+				continue
+			}
+			if _, dup := seenMembershipUIDs[m.UID]; dup {
+				continue
+			}
+			seenMembershipUIDs[m.UID] = struct{}{}
+			memberships = append(memberships, m)
+		}
+		totalSize = len(memberships)
+
+		if page.NextPageToken == "" {
+			// Same cold-cache / background-sweep race the unfiltered path
+			// guards against above: a FIRST page (pageCount == 0) can read
+			// back batch 0 with an empty NextBatchIterator before the
+			// background sweep links batch 1, even though page.TotalSize
+			// (the query-wide total) says more records exist. On later
+			// iterations page.TotalSize legitimately exceeds that page's own
+			// record count, so this is gated to the first page only.
+			if pageCount == 0 && page.TotalSize > len(page.Memberships) {
+				slog.WarnContext(ctx, "list_project_memberships: b2b_org_uid walk ended on a cold-cache first page; result is a partial lower bound",
+					"project_uid", p.ProjectUID, "b2b_org_uid", orgUID,
+					"total_size", page.TotalSize, "returned", len(page.Memberships))
+				resultsTruncated = true
+			}
+			break
+		}
+		// Defensive guard against a literal cursor repeat (e.g. a pathological
+		// or buggy upstream response), which would otherwise loop until the
+		// page cap. This does NOT catch the typical cache-eviction-triggered
+		// restart: newBatchIterator mints a fresh random iterator on every
+		// restart, so an evicted-and-restarted sequence never replays a
+		// previously-seen token verbatim — that case is instead caught by the
+		// UID dedupe above (re-returned records are simply skipped) combined
+		// with the page cap below. total_size is already a partial lower
+		// bound at this point since the walk didn't reach the true end of the
+		// sequence.
+		if _, dup := seenPageTokens[page.NextPageToken]; dup {
+			slog.WarnContext(ctx, "list_project_memberships: upstream page cursor repeated mid-walk; stopping to avoid an infinite walk",
+				"project_uid", p.ProjectUID, "b2b_org_uid", orgUID)
+			resultsTruncated = true
+			break
+		}
+		seenPageTokens[page.NextPageToken] = struct{}{}
+		if pageCount+1 >= maxB2BOrgFilterPages {
+			slog.WarnContext(ctx, "list_project_memberships: b2b_org_uid filter hit the page cap before exhausting results; total_size is a partial lower bound",
+				"project_uid", p.ProjectUID, "b2b_org_uid", orgUID, "max_pages", maxB2BOrgFilterPages)
+			resultsTruncated = true
+			break
+		}
+		filters.PageToken = page.NextPageToken
+	}
+
+	responses := make([]*membershipservice.ProjectMembershipResponse, 0, len(memberships))
+	for _, m := range memberships {
+		responses = append(responses, projectMembershipToResponse(m))
+	}
+
+	result := &membershipservice.ListProjectMembershipsResult{
+		ProjectMemberships: responses,
+		TotalSize:          &totalSize,
+		ResultsTruncated:   resultsTruncated,
+	}
+	if nextPageToken != "" {
+		result.NextPageToken = &nextPageToken
+	}
+	return result, nil
 }
 
 // ── Key Contacts ─────────────────────────────────────────────────────────────

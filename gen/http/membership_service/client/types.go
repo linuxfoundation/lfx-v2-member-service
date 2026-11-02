@@ -238,6 +238,48 @@ type DeleteB2bOrgSettingsUserResponseBody B2bOrgSettingsResponseResponseBody
 // service "get-project-membership" endpoint HTTP response body.
 type GetProjectMembershipResponseBody ProjectMembershipResponseResponseBody
 
+// ListProjectMembershipsResponseBody is the type of the "membership-service"
+// service "list-project-memberships" endpoint HTTP response body.
+type ListProjectMembershipsResponseBody struct {
+	// Memberships matching the query
+	ProjectMemberships []*ProjectMembershipResponseResponseBody `form:"project_memberships,omitempty" json:"project_memberships,omitempty" xml:"project_memberships,omitempty"`
+	// True when the result is known to be incomplete: either a
+	// b2b_org_uid-filtered walk stopped before exhausting the upstream page
+	// sequence (the internal page cap was hit, or the upstream page cursor
+	// repeated mid-walk), or a FIRST page (no inbound page_token, on either the
+	// unfiltered/tier_uid-only path or the b2b_org_uid-filtered path) whose
+	// total_size exceeds its returned record count with no next_page_token (a
+	// cold-cache read racing the background batch-link sweep). On the
+	// unfiltered/tier_uid-only path the per-page size (200) is deliberately
+	// smaller than the underlying Salesforce batch size (1000), so this case is
+	// effectively unreachable there whenever Salesforce honors the requested batch
+	// size (the normal case): an ordinary first page then always mints an
+	// intra-batch next_page_token without depending on the background sweep at
+	// all. Salesforce's batch size is advisory, though: a short first batch (200
+	// or fewer records returned, i.e. at most the unfiltered path's per-page size)
+	// can still legitimately trip this case, and when it does, results_truncated
+	// correctly reports a true lower bound, not a false negative. Separately, the
+	// rarer residual race can instead surface on a LATER continuation page (which
+	// carries a page_token and so is not signalled by this field at all); that
+	// case is a documented, deferred trade-off (see ListProjectMemberships in
+	// membership_service.go) -- a real gap, not a false alarm. Not set on a later
+	// page of an ordinary multi-page result, where total_size legitimately exceeds
+	// that page's own record count. When true, project_memberships and total_size
+	// are a partial lower bound, not the complete result.
+	ResultsTruncated *bool `form:"results_truncated,omitempty" json:"results_truncated,omitempty" xml:"results_truncated,omitempty"`
+	// Total number of records matching the query. On an unfiltered (or
+	// tier_uid-only) listing this is the query-wide total, repeated identically on
+	// every page, not just the first. On a b2b_org_uid-filtered listing (see that
+	// parameter's description, where exposed) there is no query-wide total
+	// available: total_size instead equals the number of records returned so far,
+	// which is also the full and final result since that path never paginates.
+	TotalSize *int `form:"total_size,omitempty" json:"total_size,omitempty" xml:"total_size,omitempty"`
+	// Opaque cursor for the next page. Pass this value as the page_token query
+	// parameter to retrieve the next page. Empty or absent when this is the last
+	// page.
+	NextPageToken *string `form:"next_page_token,omitempty" json:"next_page_token,omitempty" xml:"next_page_token,omitempty"`
+}
+
 // GetKeyContactResponseBody is the type of the "membership-service" service
 // "get-key-contact" endpoint HTTP response body.
 type GetKeyContactResponseBody ProjectKeyContactResponseResponseBody
@@ -1451,6 +1493,101 @@ type GetMemberTiersInternalServerErrorResponseBody struct {
 // "membership-service" service "get-member-tiers" endpoint HTTP response body
 // for the "ServiceUnavailable" error.
 type GetMemberTiersServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
+// ListProjectMembershipsNotImplementedResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "NotImplemented" error.
+type ListProjectMembershipsNotImplementedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
+// ListProjectMembershipsNotFoundResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "NotFound" error.
+type ListProjectMembershipsNotFoundResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
+// ListProjectMembershipsBadRequestResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "BadRequest" error.
+type ListProjectMembershipsBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
+// ListProjectMembershipsInternalServerErrorResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "InternalServerError" error.
+type ListProjectMembershipsInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID *string `form:"id,omitempty" json:"id,omitempty" xml:"id,omitempty"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message *string `form:"message,omitempty" json:"message,omitempty" xml:"message,omitempty"`
+	// Is the error temporary?
+	Temporary *bool `form:"temporary,omitempty" json:"temporary,omitempty" xml:"temporary,omitempty"`
+	// Is the error a timeout?
+	Timeout *bool `form:"timeout,omitempty" json:"timeout,omitempty" xml:"timeout,omitempty"`
+	// Is the error a server-side fault?
+	Fault *bool `form:"fault,omitempty" json:"fault,omitempty" xml:"fault,omitempty"`
+}
+
+// ListProjectMembershipsServiceUnavailableResponseBody is the type of the
+// "membership-service" service "list-project-memberships" endpoint HTTP
+// response body for the "ServiceUnavailable" error.
+type ListProjectMembershipsServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -4571,6 +4708,101 @@ func NewGetMemberTiersServiceUnavailable(body *GetMemberTiersServiceUnavailableR
 	return v
 }
 
+// NewListProjectMembershipsResultOK builds a "membership-service" service
+// "list-project-memberships" endpoint result from a HTTP "OK" response.
+func NewListProjectMembershipsResultOK(body *ListProjectMembershipsResponseBody) *membershipservice.ListProjectMembershipsResult {
+	v := &membershipservice.ListProjectMembershipsResult{
+		ResultsTruncated: *body.ResultsTruncated,
+		TotalSize:        body.TotalSize,
+		NextPageToken:    body.NextPageToken,
+	}
+	v.ProjectMemberships = make([]*membershipservice.ProjectMembershipResponse, len(body.ProjectMemberships))
+	for i, val := range body.ProjectMemberships {
+		if val == nil {
+			v.ProjectMemberships[i] = nil
+			continue
+		}
+		v.ProjectMemberships[i] = unmarshalProjectMembershipResponseResponseBodyToMembershipserviceProjectMembershipResponse(val)
+	}
+
+	return v
+}
+
+// NewListProjectMembershipsNotImplemented builds a membership-service service
+// list-project-memberships endpoint NotImplemented error.
+func NewListProjectMembershipsNotImplemented(body *ListProjectMembershipsNotImplementedResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
+// NewListProjectMembershipsNotFound builds a membership-service service
+// list-project-memberships endpoint NotFound error.
+func NewListProjectMembershipsNotFound(body *ListProjectMembershipsNotFoundResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
+// NewListProjectMembershipsBadRequest builds a membership-service service
+// list-project-memberships endpoint BadRequest error.
+func NewListProjectMembershipsBadRequest(body *ListProjectMembershipsBadRequestResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
+// NewListProjectMembershipsInternalServerError builds a membership-service
+// service list-project-memberships endpoint InternalServerError error.
+func NewListProjectMembershipsInternalServerError(body *ListProjectMembershipsInternalServerErrorResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
+// NewListProjectMembershipsServiceUnavailable builds a membership-service
+// service list-project-memberships endpoint ServiceUnavailable error.
+func NewListProjectMembershipsServiceUnavailable(body *ListProjectMembershipsServiceUnavailableResponseBody) *goa.ServiceError {
+	v := &goa.ServiceError{
+		Name:      *body.Name,
+		ID:        *body.ID,
+		Message:   *body.Message,
+		Temporary: *body.Temporary,
+		Timeout:   *body.Timeout,
+		Fault:     *body.Fault,
+	}
+
+	return v
+}
+
 // NewGetKeyContactResultOK builds a "membership-service" service
 // "get-key-contact" endpoint result from a HTTP "OK" response.
 func NewGetKeyContactResultOK(body *GetKeyContactResponseBody, etag *string, lastModified *string) *membershipservice.GetKeyContactResult {
@@ -6053,6 +6285,25 @@ func ValidateGetProjectMembershipResponseBody(body *GetProjectMembershipResponse
 	}
 	if body.UpdatedAt != nil {
 		err = goa.MergeErrors(err, goa.ValidateFormat("body.updated_at", *body.UpdatedAt, goa.FormatDateTime))
+	}
+	return
+}
+
+// ValidateListProjectMembershipsResponseBody runs the validations defined on
+// List-Project-MembershipsResponseBody
+func ValidateListProjectMembershipsResponseBody(body *ListProjectMembershipsResponseBody) (err error) {
+	if body.ProjectMemberships == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("project_memberships", "body"))
+	}
+	if body.ResultsTruncated == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("results_truncated", "body"))
+	}
+	for _, e := range body.ProjectMemberships {
+		if e != nil {
+			if err2 := ValidateProjectMembershipResponseResponseBody(e); err2 != nil {
+				err = goa.MergeErrors(err, err2)
+			}
+		}
 	}
 	return
 }
@@ -7738,6 +7989,128 @@ func ValidateGetMemberTiersInternalServerErrorResponseBody(body *GetMemberTiersI
 // ValidateGetMemberTiersServiceUnavailableResponseBody runs the validations
 // defined on get-member-tiers_ServiceUnavailable_response_body
 func ValidateGetMemberTiersServiceUnavailableResponseBody(body *GetMemberTiersServiceUnavailableResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateListProjectMembershipsNotImplementedResponseBody runs the
+// validations defined on list-project-memberships_NotImplemented_response_body
+func ValidateListProjectMembershipsNotImplementedResponseBody(body *ListProjectMembershipsNotImplementedResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateListProjectMembershipsNotFoundResponseBody runs the validations
+// defined on list-project-memberships_NotFound_response_body
+func ValidateListProjectMembershipsNotFoundResponseBody(body *ListProjectMembershipsNotFoundResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateListProjectMembershipsBadRequestResponseBody runs the validations
+// defined on list-project-memberships_BadRequest_response_body
+func ValidateListProjectMembershipsBadRequestResponseBody(body *ListProjectMembershipsBadRequestResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateListProjectMembershipsInternalServerErrorResponseBody runs the
+// validations defined on
+// list-project-memberships_InternalServerError_response_body
+func ValidateListProjectMembershipsInternalServerErrorResponseBody(body *ListProjectMembershipsInternalServerErrorResponseBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.ID == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("id", "body"))
+	}
+	if body.Message == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("message", "body"))
+	}
+	if body.Temporary == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("temporary", "body"))
+	}
+	if body.Timeout == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("timeout", "body"))
+	}
+	if body.Fault == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("fault", "body"))
+	}
+	return
+}
+
+// ValidateListProjectMembershipsServiceUnavailableResponseBody runs the
+// validations defined on
+// list-project-memberships_ServiceUnavailable_response_body
+func ValidateListProjectMembershipsServiceUnavailableResponseBody(body *ListProjectMembershipsServiceUnavailableResponseBody) (err error) {
 	if body.Name == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
 	}

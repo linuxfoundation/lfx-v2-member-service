@@ -217,8 +217,12 @@ func (r *MemberReader) fetchTierFromSalesforce(ctx context.Context, tierUID stri
 //     It is always lowercased so "Google" and "google" share the same cache entry.
 //
 // The consumer-facing PageCursor encodes (BatchIndex, BatchOffset, PageSize,
-// NextBatchIterator) so that the next request can locate its batch directly
-// without holding any live Salesforce locator.
+// NextBatchIterator, FilterFingerprint) so that the next request can locate
+// its batch directly without holding any live Salesforce locator. A non-empty
+// inbound PageToken whose FilterFingerprint disagrees with the fingerprint
+// recomputed from the current request's batch-key params (TierUID, SortOrder,
+// CompanyNameSearch) plus BatchIndex/NextBatchIterator is rejected as a
+// validation error rather than falling through to the cache-miss path.
 func (r *MemberReader) ListMembershipsForProject(ctx context.Context, projectUID string, filters model.MembershipFilters, pageSize int) (model.MembershipPage, error) {
 	sfid, err := r.resolver.SFIDFromUID(ctx, projectUID)
 	if err != nil {
@@ -228,7 +232,7 @@ func (r *MemberReader) ListMembershipsForProject(ctx context.Context, projectUID
 	// Decode the inbound cursor. An empty PageToken means first page of batch 0.
 	cursor, err := DecodeCursor(filters.PageToken)
 	if err != nil {
-		return model.MembershipPage{}, fmt.Errorf("invalid page token: %w", err)
+		return model.MembershipPage{}, errs.NewValidation("invalid page token", err)
 	}
 	// Honour the page size agreed when the sequence was started.
 	if cursor.PageSize > 0 {
@@ -237,6 +241,16 @@ func (r *MemberReader) ListMembershipsForProject(ctx context.Context, projectUID
 	pageSize = NormalizePageSize(pageSize)
 
 	batchParams := r.membershipBatchKeyParams(sfid, filters)
+
+	// A non-empty page_token was minted against a specific set of filters
+	// (embedded in batchParams, e.g. tier_uid); resending it with different
+	// or missing filters would miss the original batch cache entry and the
+	// miss path below would silently serve page 1 of the NEW filter as if it
+	// were a normal continuation. Reject the mismatch instead of guessing.
+	if filters.PageToken != "" && cursor.FilterFingerprint != FingerprintCursor(batchParams, cursor.BatchIndex, cursor.NextBatchIterator) {
+		return model.MembershipPage{}, errs.NewValidation("invalid page token", fmt.Errorf("page_token filters do not match the request"))
+	}
+
 	batchKey := nats.MembershipBatchCacheKey(soqlMembershipsTemplateRef, batchParams, cursor.BatchIndex, cursor.NextBatchIterator)
 
 	// ── Cache read ───────────────────────────────────────────────────────────
@@ -275,12 +289,25 @@ func (r *MemberReader) ListMembershipsForProject(ctx context.Context, projectUID
 		// CacheStatusExpired and CacheStatusMiss fall through to Salesforce.
 	}
 
+	// A cache miss/expiry is only safe to silently resolve by restarting from
+	// batch 0 when the inbound cursor was already asking for batch 0, offset 0
+	// (a genuine first page). CacheStatusExpired is time-based and can occur
+	// mid-pagination on a continuation cursor too — rebasing that case to page 1
+	// would return a different page than the one requested while looking like a
+	// normal 200 response, with no signal that the sequence was restarted.
+	// Make the caller restart explicitly instead of masking it.
+	if cursor.BatchIndex > 0 || cursor.BatchOffset > 0 {
+		return model.MembershipPage{}, errs.NewValidation(
+			"page_token expired",
+			fmt.Errorf("cached page sequence is no longer available; restart pagination without a page_token"))
+	}
+
 	// ── Cache miss / expired: fetch batch 0 from Salesforce ──────────────────
 	//
-	// We always re-fetch from batch 0 on a miss, regardless of which batch the
-	// cursor points to. This ensures coherence: a new linked chain is written
-	// tail-first by fetchAndCacheAllBatches, and the updated batch 0 entry is
-	// returned to the caller.
+	// We always re-fetch from batch 0 on a miss. The check above guarantees the
+	// inbound cursor was already batch 0/offset 0, so this is coherent: a new
+	// linked chain is written tail-first by fetchAndCacheAllBatches, and the
+	// updated batch 0 entry is returned to the caller.
 	if err := r.fetchAndCacheAllBatches(ctx, projectUID, sfid, filters, batchParams); err != nil {
 		return model.MembershipPage{}, err
 	}
@@ -325,9 +352,15 @@ func (r *MemberReader) fetchAndCacheAllBatches(
 	}
 
 	if firstBatch.SFLocator == "" {
-		// Single batch: write directly and we are done.
+		// Single batch: write directly and we are done. TotalSize is
+		// adjusted down by SkippedCount so it exactly matches len(Records) —
+		// Salesforce's reported total includes records this batch dropped
+		// for a malformed SFID, which would otherwise look identical to a
+		// genuine multi-batch sweep race to the results_truncated heuristic
+		// in membership_service.go.
 		key0 := nats.MembershipBatchCacheKey(soqlMembershipsTemplateRef, batchParams, 0, "")
-		return r.cache.PutMembershipBatch(ctx, key0, firstBatch.Records, "", firstBatch.TotalSize)
+		adjustedTotal := firstBatch.TotalSize - firstBatch.SkippedCount
+		return r.cache.PutMembershipBatch(ctx, key0, firstBatch.Records, "", adjustedTotal)
 	}
 
 	// More batches exist: start the background sweep. The sweep writes all
@@ -335,38 +368,110 @@ func (r *MemberReader) fetchAndCacheAllBatches(
 	// for batch 1 so the chain is fully linked before batch 0 is readable.
 	batch0Records := firstBatch.Records
 	locator := firstBatch.SFLocator
-	totalSize := firstBatch.TotalSize
+	// totalSize starts adjusted for whatever firstBatch itself dropped; the
+	// sweep below further adjusts it for any records it drops while
+	// following the remaining locators, so the final cached total always
+	// matches the sum of records actually written across every batch, never
+	// Salesforce's raw reported total.
+	totalSize := firstBatch.TotalSize - firstBatch.SkippedCount
 
-	writeBatch0 := func(bgCtx context.Context, nextIter string) error {
-		key0 := nats.MembershipBatchCacheKey(soqlMembershipsTemplateRef, batchParams, 0, "")
-		return r.cache.PutMembershipBatch(bgCtx, key0, batch0Records, nextIter, totalSize)
+	key0 := nats.MembershipBatchCacheKey(soqlMembershipsTemplateRef, batchParams, 0, "")
+
+	writeBatch0 := func(bgCtx context.Context, nextIter string, adjustedTotal int) error {
+		return r.cache.PutMembershipBatch(bgCtx, key0, batch0Records, nextIter, adjustedTotal)
+	}
+
+	// invalidateBatch0 deletes the unlinked batch 0 entry written below when
+	// the sweep that would link it to batch 1 fails partway through. Without
+	// this, batch 0 would stay cached as Fresh/Stale with an empty
+	// NextBatchIterator for its full TTL, so every subsequent request would
+	// hit the cache and return the same permanently-truncated first batch
+	// instead of ever retrying the sweep.
+	//
+	// Two concurrent cold reads for the same project can both reach this
+	// point: sweep A succeeds and links batch 0 -> batch 1, then sweep B
+	// (which started from its own stale/expired read before A finished) fails
+	// and calls invalidateBatch0. An unconditional delete would remove the
+	// entry A just correctly linked, forcing an unnecessary re-fetch and
+	// re-sweep. Re-read the entry first and only delete it if it is still the
+	// unlinked one this sweep wrote (empty NextBatchIterator) — if another
+	// sweep already linked it, or already deleted and replaced it, leave it
+	// alone. This narrows but does not fully close the race (the check and
+	// the delete are not atomic); there is no CAS-delete helper in this
+	// codebase to close it completely, and the residual window is small.
+	//
+	// A failed re-read (NATS blip, bgCtx deadline) must not short-circuit to
+	// "do nothing": that would leave this exact poisoned, permanently-truncated
+	// entry cached for its full TTL — the very failure this function exists to
+	// clean up — on the unverified assumption that some other sweep is handling
+	// it. Fall through to the unconditional delete instead; the cost of a false
+	// positive (deleting a just-linked entry, forcing an unnecessary re-fetch)
+	// is far smaller than the cost of leaving a truncated entry live.
+	//
+	// No dedicated unit test covers this closure's branches directly: cache
+	// is a concrete *nats.Storage (not an interface) with no embedded-NATS/
+	// JetStream test harness anywhere in this repo (internal/infrastructure/
+	// nats/*_test.go only covers pure functions), so exercising the
+	// miss/linked/unlinked/error branches here would require building that
+	// harness from scratch. This is the same pre-existing structural
+	// trade-off every other r.cache.* call site in this file already lives
+	// with; MemberReader's own tests instead assert the externally
+	// observable behavior (fetchAndCacheAllBatches, sliceCachedBatch) rather
+	// than mocking the cache.
+	invalidateBatch0 := func(bgCtx context.Context) {
+		result, getErr := r.cache.GetMembershipBatch(bgCtx, key0)
+		if getErr == nil && (result.Status == nats.CacheStatusMiss || result.Value == nil || result.Value.NextBatchIterator != "") {
+			// Already deleted, or already linked by a concurrent sweep —
+			// nothing for this failure to clean up.
+			return
+		}
+		if getErr != nil {
+			slog.WarnContext(bgCtx, "failed to re-read batch 0 before invalidating after sweep failure; deleting anyway",
+				"cache_key", key0, "error", getErr,
+			)
+		}
+		if delErr := r.cache.DeleteMembershipBatch(bgCtx, key0); delErr != nil {
+			slog.WarnContext(bgCtx, "failed to invalidate unlinked batch 0 after sweep failure",
+				"cache_key", key0, "error", delErr,
+			)
+		}
 	}
 
 	// sweepRemaining follows all locators starting from the given one,
 	// writes each batch tail-first (N+1 before N), and finally calls
-	// writeBatch0 with the iterator linking batch 0 → batch 1.
+	// writeBatch0 with the iterator linking batch 0 → batch 1. On any failure
+	// it invalidates batch 0 instead of leaving it unlinked for its full TTL.
 	sweepRemaining := func(bgCtx context.Context) error {
 		remaining, _, fetchErr := QueryAllPages[soqlAsset](bgCtx, r.memberships.client, "", locator)
 		if fetchErr != nil {
+			invalidateBatch0(bgCtx)
 			return fmt.Errorf("sweeping remaining membership batches for project %s: %w", projectUID, fetchErr)
 		}
 
-		// Convert all remaining records.
+		// Convert all remaining records, tracking how many are dropped for a
+		// malformed SFID so the cached total (adjustedTotal below) is reduced
+		// to match — otherwise a multi-batch result with any skipped sweep
+		// record would advertise a total_size a client can never actually
+		// reach by paginating to completion, with no results_truncated signal
+		// (that check is gated to the first page).
 		converted := make([]*model.ProjectMembership, 0, len(remaining))
+		skippedInSweep := 0
 		for _, asset := range remaining {
-			m, convErr := convertSOQLToProjectMembership(asset)
+			m, convErr := convertSOQLToProjectMembership(bgCtx, asset)
 			if convErr != nil {
 				slog.WarnContext(bgCtx, "skipping membership with invalid SFID during sweep",
 					"sfid", asset.ID, "error", convErr,
 				)
+				skippedInSweep++
 				continue
 			}
 			m.ProjectUID = projectUID
 			converted = append(converted, m)
 		}
+		adjustedTotal := totalSize - skippedInSweep
 
-		// Split into sfQueryBatchSize chunks and write tail-first.
-		chunks := splitIntoBatches(converted, sfQueryBatchSize)
+		// Split into SFQueryBatchSize chunks and write tail-first.
+		chunks := splitIntoBatches(converted, SFQueryBatchSize)
 		iterators := make([]string, len(chunks))
 		for i := range iterators {
 			iterators[i] = newBatchIterator()
@@ -379,26 +484,33 @@ func (r *MemberReader) fetchAndCacheAllBatches(
 			// Batch index in the overall sequence is i+1 (batch 0 is the first
 			// SF fetch; these are batches 1..N).
 			key := nats.MembershipBatchCacheKey(soqlMembershipsTemplateRef, batchParams, i+1, iterators[i])
-			if putErr := r.cache.PutMembershipBatch(bgCtx, key, chunks[i], nextIter, 0); putErr != nil {
+			if putErr := r.cache.PutMembershipBatch(bgCtx, key, chunks[i], nextIter, adjustedTotal); putErr != nil {
 				slog.WarnContext(bgCtx, "failed to write membership batch to cache",
 					"batch_index", i+1, "cache_key", key, "error", putErr,
 				)
-				// Do not propagate: partial cache coverage is acceptable; the
-				// miss path will re-sweep from batch 0.
+				// Batch 0 must not be left unlinked: invalidate it so the next
+				// read re-triggers a full fetch instead of serving a
+				// permanently-truncated first batch for the rest of its TTL.
+				invalidateBatch0(bgCtx)
 				return nil
 			}
 			nextIter = iterators[i]
 		}
 
-		// Now write batch 0 with the iterator linking it to batch 1.
-		return writeBatch0(bgCtx, nextIter)
+		// Now write batch 0 with the iterator linking it to batch 1. If this
+		// write itself fails, invalidate rather than leave the prior unlinked
+		// entry in place.
+		if err := writeBatch0(bgCtx, nextIter, adjustedTotal); err != nil {
+			invalidateBatch0(bgCtx)
+			return err
+		}
+		return nil
 	}
 
 	// Write batch 0 without a next-iterator first so it is immediately
 	// readable (logical pages within batch 0 can be served right away).
 	// The sweep will overwrite it with the correct iterator once batch 1
 	// is written.
-	key0 := nats.MembershipBatchCacheKey(soqlMembershipsTemplateRef, batchParams, 0, "")
 	if putErr := r.cache.PutMembershipBatch(ctx, key0, batch0Records, "", totalSize); putErr != nil {
 		return fmt.Errorf("writing batch 0 for project %s: %w", projectUID, putErr)
 	}
@@ -479,6 +591,7 @@ func sliceCachedBatch(
 			BatchOffset:       nextOffset,
 			PageSize:          pageSize,
 			NextBatchIterator: cursor.NextBatchIterator,
+			FilterFingerprint: FingerprintCursor(batchParams, batchIndex, cursor.NextBatchIterator),
 		}
 	} else if entry.NextBatchIterator != "" {
 		// Exhausted this batch and a next batch exists. Embed the iterator so
@@ -488,6 +601,7 @@ func sliceCachedBatch(
 			BatchOffset:       0,
 			PageSize:          pageSize,
 			NextBatchIterator: entry.NextBatchIterator,
+			FilterFingerprint: FingerprintCursor(batchParams, batchIndex+1, entry.NextBatchIterator),
 		}
 	}
 	// nil nextCursor means this is the last page across all batches.

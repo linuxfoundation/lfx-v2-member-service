@@ -581,6 +581,85 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
+	dsl.Method("list-project-memberships", func() {
+		dsl.Description("List active project memberships scoped by project_uid, optionally narrowed to a " +
+			"single b2b_org_uid (PCC-1610). Requires the auditor_guard relation on project:{project_uid} " +
+			"(project auditors, writers, owners, or global auditor/writer teams — see ARCHITECTURE.md). " +
+			"There is no b2b_org-side access path to this endpoint: an org's own writers/auditors must " +
+			"be project-scoped (or hold a global team grant) to list that org's memberships in a project.")
+
+		dsl.Security(JWTAuth)
+
+		dsl.Payload(func() {
+			BearerTokenAttribute()
+			VersionAttribute()
+			dsl.Attribute("project_uid", dsl.String, "V2 project UUID to scope the membership list to", func() {
+				dsl.Format(dsl.FormatUUID)
+				dsl.Example("a27394a3-7a6c-4d0f-9e0f-692d8753924f")
+			})
+			dsl.Attribute("b2b_org_uid", dsl.String, "Optional B2B organization (Account) UID to further narrow "+
+				"the list to a single org's membership in this project. Must be a valid Salesforce ID "+
+				"(returns a validation error otherwise). Applied as an in-memory post-filter over "+
+				"a bounded walk of upstream pages: the response never carries a next_page_token when this is set, "+
+				"and cannot be combined with an inbound page_token (returns a validation error). Check the "+
+				"results_truncated response field rather than inferring completeness from total_size: it is set "+
+				"when the walk stops before exhausting results, because the internal page cap was hit, the "+
+				"upstream page cursor repeated verbatim mid-walk (a defensive guard against a pathological "+
+				"upstream response; a cache-eviction-triggered restart mints a fresh cursor and is instead "+
+				"caught by UID deduplication), or — on the walk's FIRST page only — total_size exceeded the "+
+				"returned record count with no next_page_token, the signature of a cold-cache read racing a "+
+				"background batch-link sweep. Note total_size itself changes meaning when this filter is set: "+
+				"it is not a query-wide total (there is none, since the upstream query is never filtered by "+
+				"this field) but simply the count of records returned so far — equal to "+
+				"len(project_memberships) and, since this path never paginates, the final count unless "+
+				"results_truncated is true.", func() {
+				dsl.Example("001B000000IqhSLIAZ")
+			})
+			dsl.Attribute("tier_uid", dsl.String, "Optional membership tier UID to filter by. "+
+				"Must be a valid Salesforce ID (returns a validation error otherwise). "+
+				"Must be re-supplied identically on every request, including requests carrying a "+
+				"page_token: it participates in the underlying Salesforce batch cache key, so a "+
+				"page_token minted under a different (or omitted) tier_uid is rejected with a "+
+				"validation error rather than silently resuming against the new filter.", func() {
+				dsl.Example("01t2M000009ABCdIAM")
+			})
+			dsl.Attribute("page_token", dsl.String, "Opaque cursor from a previous response's next_page_token "+
+				"encoding only the pagination position (batch/offset) of the original query, not its filters. "+
+				"If the underlying cache entry it points to has since expired or been evicted, the request is "+
+				"rejected with a validation error (rather than silently restarting from page 1) — restart "+
+				"pagination with an empty page_token.", func() {
+				dsl.Example("")
+			})
+			dsl.Required("project_uid")
+		})
+
+		dsl.Result(func() {
+			dsl.Extend(ListProjectMembershipsResult)
+		})
+
+		dsl.Error("NotImplemented", dsl.ErrorResult, "Endpoint not implemented")
+		dsl.Error("NotFound", dsl.ErrorResult, "Resource not found")
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request")
+		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
+		dsl.Error("ServiceUnavailable", dsl.ErrorResult, "Service unavailable", func() { dsl.Temporary() })
+
+		dsl.HTTP(func() {
+			dsl.GET("/project_memberships")
+			dsl.Header("bearer_token:Authorization")
+			dsl.Param("version:v")
+			dsl.Param("project_uid")
+			dsl.Param("b2b_org_uid")
+			dsl.Param("tier_uid")
+			dsl.Param("page_token")
+			dsl.Response(dsl.StatusOK)
+			dsl.Response("NotImplemented", dsl.StatusNotImplemented)
+			dsl.Response("NotFound", dsl.StatusNotFound)
+			dsl.Response("BadRequest", dsl.StatusBadRequest)
+			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
+			dsl.Response("ServiceUnavailable", dsl.StatusServiceUnavailable)
+		})
+	})
+
 	// ── Key Contacts (Project_Role__c) ───────────────────────────────────────
 
 	dsl.Method("get-key-contact", func() {

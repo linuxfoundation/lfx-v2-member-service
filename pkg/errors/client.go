@@ -25,13 +25,9 @@ func NewValidation(message string, err ...error) Validation {
 	}
 }
 
-// IsValidation reports whether err is a Validation error.
+// IsValidation reports whether err's outermost domain error is Validation.
 func IsValidation(err error) bool {
-	if err == nil {
-		return false
-	}
-	var v Validation
-	return errors.As(err, &v)
+	return isOutermost[Validation](err)
 }
 
 // NotFound represents a not found error in the application.
@@ -54,13 +50,9 @@ func NewNotFound(message string, err ...error) NotFound {
 	}
 }
 
-// IsNotFound reports whether err is a NotFound error.
+// IsNotFound reports whether err's outermost domain error is NotFound.
 func IsNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var notFound NotFound
-	return errors.As(err, &notFound)
+	return isOutermost[NotFound](err)
 }
 
 // Conflict represents a conflict error in the application.
@@ -83,13 +75,9 @@ func NewConflict(message string, err ...error) Conflict {
 	}
 }
 
-// IsConflict reports whether err is a Conflict error.
+// IsConflict reports whether err's outermost domain error is Conflict.
 func IsConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	var conflict Conflict
-	return errors.As(err, &conflict)
+	return isOutermost[Conflict](err)
 }
 
 // UnprocessableEntity represents a well-formed request for a resource that

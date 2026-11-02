@@ -28,6 +28,7 @@ type Client struct {
 	DeleteB2bOrgSettingsUserEndpoint       goa.Endpoint
 	GetProjectMembershipEndpoint           goa.Endpoint
 	GetMemberTiersEndpoint                 goa.Endpoint
+	ListProjectMembershipsEndpoint         goa.Endpoint
 	GetKeyContactEndpoint                  goa.Endpoint
 	CreateKeyContactEndpoint               goa.Endpoint
 	UpdateKeyContactEndpoint               goa.Endpoint
@@ -46,7 +47,7 @@ type Client struct {
 
 // NewClient initializes a "membership-service" service client given the
 // endpoints.
-func NewClient(getB2bOrg, createB2bOrg, updateB2bOrg, uploadB2bOrgLogo, getB2bOrgSettings, updateB2bOrgSettings, addB2bOrgSettingsUser, updateB2bOrgSettingsUserRole, deleteB2bOrgSettingsUser, getProjectMembership, getMemberTiers, getKeyContact, createKeyContact, updateKeyContact, deleteKeyContact, adminReindex, readyz, livez, debugVars, createB2bOrgWorkspace, updateB2bOrgWorkspace, deleteB2bOrgWorkspace, addB2bOrgWorkspaceProject, bulkAddB2bOrgWorkspaceProjects, removeB2bOrgWorkspaceProject goa.Endpoint) *Client {
+func NewClient(getB2bOrg, createB2bOrg, updateB2bOrg, uploadB2bOrgLogo, getB2bOrgSettings, updateB2bOrgSettings, addB2bOrgSettingsUser, updateB2bOrgSettingsUserRole, deleteB2bOrgSettingsUser, getProjectMembership, getMemberTiers, listProjectMemberships, getKeyContact, createKeyContact, updateKeyContact, deleteKeyContact, adminReindex, readyz, livez, debugVars, createB2bOrgWorkspace, updateB2bOrgWorkspace, deleteB2bOrgWorkspace, addB2bOrgWorkspaceProject, bulkAddB2bOrgWorkspaceProjects, removeB2bOrgWorkspaceProject goa.Endpoint) *Client {
 	return &Client{
 		GetB2bOrgEndpoint:                      getB2bOrg,
 		CreateB2bOrgEndpoint:                   createB2bOrg,
@@ -59,6 +60,7 @@ func NewClient(getB2bOrg, createB2bOrg, updateB2bOrg, uploadB2bOrgLogo, getB2bOr
 		DeleteB2bOrgSettingsUserEndpoint:       deleteB2bOrgSettingsUser,
 		GetProjectMembershipEndpoint:           getProjectMembership,
 		GetMemberTiersEndpoint:                 getMemberTiers,
+		ListProjectMembershipsEndpoint:         listProjectMemberships,
 		GetKeyContactEndpoint:                  getKeyContact,
 		CreateKeyContactEndpoint:               createKeyContact,
 		UpdateKeyContactEndpoint:               updateKeyContact,
@@ -279,6 +281,24 @@ func (c *Client) GetMemberTiers(ctx context.Context, p *GetMemberTiersPayload) (
 		return
 	}
 	return ires.([]*MemberOrgTierResponse), nil
+}
+
+// ListProjectMemberships calls the "list-project-memberships" endpoint of the
+// "membership-service" service.
+// ListProjectMemberships may return the following errors:
+//   - "NotImplemented" (type *goa.ServiceError): Endpoint not implemented
+//   - "NotFound" (type *goa.ServiceError): Resource not found
+//   - "BadRequest" (type *goa.ServiceError): Bad request
+//   - "InternalServerError" (type *goa.ServiceError): Internal server error
+//   - "ServiceUnavailable" (type *goa.ServiceError): Service unavailable
+//   - error: internal error
+func (c *Client) ListProjectMemberships(ctx context.Context, p *ListProjectMembershipsPayload) (res *ListProjectMembershipsResult, err error) {
+	var ires any
+	ires, err = c.ListProjectMembershipsEndpoint(ctx, p)
+	if err != nil {
+		return
+	}
+	return ires.(*ListProjectMembershipsResult), nil
 }
 
 // GetKeyContact calls the "get-key-contact" endpoint of the
