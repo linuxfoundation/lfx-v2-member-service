@@ -5,6 +5,8 @@ package nats
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,4 +196,92 @@ func TestMembershipUIDFromTuple(t *testing.T) {
 			assert.Equal(t, c.wantUID, uid)
 		})
 	}
+}
+
+func TestAccessCheckRPC_ParentsListingChild_TransportFailureIsServiceUnavailable(t *testing.T) {
+	rpc := NewAccessCheckRPC(nil, time.Second)
+
+	parents, err := rpc.ParentsListingChild(context.Background(), "org-child")
+
+	require.Error(t, err)
+	assert.Nil(t, parents, "a transport failure must not read as \"no parents\"")
+	var unavailable pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &unavailable)
+}
+
+// TestParseChildLinkResponse pins that only a complete, well-formed reply
+// yields parents: callers withdraw every listed parent that Salesforce does not
+// confirm, so a partial list must never pass for a complete one.
+func TestParseChildLinkResponse(t *testing.T) {
+	failsClosed := func(t *testing.T, err error) {
+		require.Error(t, err)
+		var unavailable pkgerrors.ServiceUnavailable
+		assert.ErrorAs(t, err, &unavailable)
+	}
+	ok := func(t *testing.T, err error) { require.NoError(t, err) }
+
+	tests := []struct {
+		name        string
+		body        string
+		wantParents []string
+		wantErr     func(t *testing.T, err error)
+	}{
+		{
+			name: "child tuples yield their parents",
+			body: `{"results":[
+				"b2b_org:org-a#child@b2b_org:org-child",
+				"b2b_org:org-b#child@b2b_org:org-child"
+			]}`,
+			wantParents: []string{"org-a", "org-b"},
+			wantErr:     ok,
+		},
+		{
+			name: "the child's own children's parent tuples and other users are skipped",
+			body: `{"results":[
+				"b2b_org:org-a#child@b2b_org:org-child",
+				"b2b_org:org-grandchild#parent@b2b_org:org-child",
+				"b2b_org:org-c#child@b2b_org:org-other",
+				"project:proj-1#child@b2b_org:org-child",
+				"b2b_org:#child@b2b_org:org-child"
+			]}`,
+			wantParents: []string{"org-a"},
+			wantErr:     ok,
+		},
+		{
+			name: "duplicate parents are removed",
+			body: `{"results":[
+				"b2b_org:org-a#child@b2b_org:org-child",
+				"b2b_org:org-a#child@b2b_org:org-child"
+			]}`,
+			wantParents: []string{"org-a"},
+			wantErr:     ok,
+		},
+		{
+			name:        "empty results mean no parents",
+			body:        `{"results":[]}`,
+			wantParents: []string{},
+			wantErr:     ok,
+		},
+		{name: "empty body", body: ``, wantErr: failsClosed},
+		{name: "malformed JSON", body: `not json`, wantErr: failsClosed},
+		{name: "error envelope", body: `{"results":["b2b_org:org-a#child@b2b_org:org-child"],"error":"boom"}`, wantErr: failsClosed},
+		{name: "results absent", body: `{}`, wantErr: failsClosed},
+		{name: "result cap exceeded", body: overCapReadTuplesBody(), wantErr: failsClosed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parents, err := parseChildLinkResponse("org-child", []byte(tt.body))
+			tt.wantErr(t, err)
+			assert.Equal(t, tt.wantParents, parents)
+		})
+	}
+}
+
+func overCapReadTuplesBody() string {
+	tuples := make([]string, maxReadTuplesResults+1)
+	for i := range tuples {
+		tuples[i] = fmt.Sprintf("%q", fmt.Sprintf("b2b_org:org-%d#child@b2b_org:org-child", i))
+	}
+	return `{"results":[` + strings.Join(tuples, ",") + `]}`
 }

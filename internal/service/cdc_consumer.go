@@ -94,6 +94,10 @@ type CDCConsumer struct {
 	// storage supplies ListKeyContactsForOrg for org-dashboard reconciliation
 	// when an Inactive contact's provisioning is skipped. Nil disables the scan.
 	storage port.MemberReader
+	// childLinks finds orgs the access model still lists a changed Account
+	// under, so a move the previous-record diff missed is withdrawn. Nil
+	// disables the read.
+	childLinks port.B2BOrgChildLinkReader
 
 	// refreshMu guards lastRefreshAttemptAt so failed/attempted refreshes are
 	// throttled to at most once per staleness window even under concurrent calls.
@@ -103,6 +107,12 @@ type CDCConsumer struct {
 
 // CDCConsumerOption configures a CDCConsumer.
 type CDCConsumerOption func(*CDCConsumer)
+
+// WithCDCChildLinkReader wires the access-model read of a changed Account's
+// listed parents.
+func WithCDCChildLinkReader(c port.B2BOrgChildLinkReader) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.childLinks = c }
+}
 
 func WithCDCSubscriber(s port.CDCSubscriber) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.subscriber = s }
@@ -898,7 +908,8 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 
 	// Capture old record state BEFORE cache eviction for reparenting diff.
 	// If the cache is cold, GetB2BOrg returns the post-change record — in that
-	// case oldOrg == new org and no reparenting messages are emitted (safe).
+	// case oldOrg == new org and no reparenting messages are emitted here; the
+	// old parent is found by staleChildLinks instead.
 	oldOrgs := make(map[string]*model.B2BOrg, len(upsertIDs))
 	if !isRestore(changeType) && !ownerRecheck {
 		for _, id := range upsertIDs {
@@ -971,10 +982,15 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
 	o.removeAbsentFromIndex(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
 	staleParents := parentsToRefresh(upsertIDs, orgs, oldOrgs)
+	var staleLinks map[string][]string
+	if !ownerRecheck {
+		staleLinks = o.staleChildLinks(ctx, orgs, oldOrgs)
+	}
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
 	// Include each org's ParentUID so we also have the parent's full child list for the
-	// hierarchy tuple emitted below.
+	// hierarchy tuple emitted below, and every stale-link parent so its list is rebuilt
+	// from the same read.
 	uidSet := make(map[string]struct{}, len(orgs)+len(staleParents))
 	for _, org := range orgs {
 		uidSet[org.UID] = struct{}{}
@@ -984,6 +1000,11 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	}
 	for _, parentUID := range staleParents {
 		uidSet[parentUID] = struct{}{}
+	}
+	for _, parents := range staleLinks {
+		for _, parentUID := range parents {
+			uidSet[parentUID] = struct{}{}
+		}
 	}
 	uids := make([]string, 0, len(uidSet))
 	for uid := range uidSet {
@@ -1041,6 +1062,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 			PublishB2BOrgParentFGA(ctx, o.publisher, org, childMap[org.ParentUID])
 		}
 	}
+	o.withdrawStaleChildLinks(ctx, orgs, staleLinks, childMap, childMapErr)
 	if childMapErr == nil {
 		o.refreshParentIndex(ctx, staleParents, childMap, knownParents)
 	}
@@ -1055,6 +1077,74 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		return errors.Join(errRestoreIncomplete, restoreErr)
 	}
 	return nil
+}
+
+// staleChildLinks asks the access model which orgs list each org as a child
+// and returns, per org, those that are neither its current parent nor the
+// previous parent publishB2BOrgUpsertEvents already rebuilds. A missing cached
+// copy hides a move from the previous-record diff, so this read is what finds
+// the old parent then. Reads stop at the first failure so an fga-sync outage
+// costs one timeout per batch, and the unchecked orgs are queued for the
+// repair run, which repeats the check.
+func (o *CDCConsumer) staleChildLinks(ctx context.Context, orgs []*model.B2BOrg, oldOrgs map[string]*model.B2BOrg) map[string][]string {
+	if o.childLinks == nil {
+		return nil
+	}
+	stale := map[string][]string{}
+	for i, org := range orgs {
+		parents, err := o.childLinks.ParentsListingChild(ctx, org.UID)
+		if err != nil {
+			unchecked := make([]string, 0, len(orgs)-i)
+			for _, rest := range orgs[i:] {
+				unchecked = append(unchecked, rest.UID)
+			}
+			slog.WarnContext(ctx, "cdc: child-link read failed — stale parent links left for the repair run",
+				"unchecked_count", len(unchecked), "error", err, "publish_failed_for_backfill_repair", true)
+			o.queueForRepairDetached(ctx, "Account", unchecked)
+			return stale
+		}
+		previous := ""
+		if old := oldOrgs[org.UID]; old != nil {
+			previous = old.ParentUID
+		}
+		for _, parentUID := range parents {
+			if parentUID != org.ParentUID && parentUID != previous {
+				stale[org.UID] = append(stale[org.UID], parentUID)
+			}
+		}
+	}
+	return stale
+}
+
+// withdrawStaleChildLinks replaces each stale parent's child list with its
+// Salesforce children from the batch read, and clears a parentless org's own
+// parent tuple. Without a complete read nothing is sent, and the org is queued
+// for the repair run instead; a failed publish is queued the same way.
+func (o *CDCConsumer) withdrawStaleChildLinks(ctx context.Context, orgs []*model.B2BOrg, staleLinks, childMap map[string][]string, childMapErr error) {
+	var retry []string
+	for _, org := range orgs {
+		parents := staleLinks[org.UID]
+		if len(parents) == 0 {
+			continue
+		}
+		if childMapErr != nil {
+			retry = append(retry, org.UID)
+			continue
+		}
+		var pubErrs []error
+		for _, parentUID := range parents {
+			pubErrs = append(pubErrs, publishB2BOrgChildList(ctx, o.publisher, parentUID, childMap[parentUID]))
+		}
+		if org.ParentUID == "" {
+			pubErrs = append(pubErrs, publishB2BOrgParentClear(ctx, o.publisher, org.UID))
+		}
+		if errors.Join(pubErrs...) != nil {
+			retry = append(retry, org.UID)
+		}
+	}
+	if len(retry) > 0 {
+		o.queueForRepairDetached(ctx, "Account", retry)
+	}
 }
 
 // parentsToRefresh returns the parents outside the batch whose is_parent may

@@ -28,6 +28,9 @@ const (
 	membershipObjectType = "project_membership"
 	keyContactRelation   = "key_contact"
 	userTuplePrefix      = "user:"
+
+	b2bOrgObjectType    = "b2b_org"
+	b2bOrgChildRelation = "child"
 )
 
 // maxReadTuplesResults caps the raw tuple count accepted from a fga-sync
@@ -60,9 +63,30 @@ func NewAccessCheckRPC(conn *nats.Conn, timeout time.Duration) *AccessCheckRPC {
 // records themselves. An unknown user yields an empty slice; any RPC or
 // decode failure is a ServiceUnavailable so callers fail closed.
 func (r *AccessCheckRPC) MembershipUIDsForUser(ctx context.Context, username string) ([]string, error) {
+	data, err := r.readTuples(ctx, userTuplePrefix+username, membershipObjectType)
+	if err != nil {
+		return nil, err
+	}
+	return parseReadTuplesResponse(username, data)
+}
+
+// ParentsListingChild implements port.B2BOrgChildLinkReader by reading the
+// b2b_org tuples whose user is the child org itself via the fga-sync
+// read_tuples RPC. fga-sync pages through every result, so a successful reply
+// is complete; anything inconclusive is ServiceUnavailable.
+func (r *AccessCheckRPC) ParentsListingChild(ctx context.Context, childUID string) ([]string, error) {
+	data, err := r.readTuples(ctx, b2bOrgObjectType+":"+childUID, b2bOrgObjectType)
+	if err != nil {
+		return nil, err
+	}
+	return parseChildLinkResponse(childUID, data)
+}
+
+// readTuples sends one read_tuples request and returns the raw reply body.
+func (r *AccessCheckRPC) readTuples(ctx context.Context, user, objectType string) ([]byte, error) {
 	payload, err := json.Marshal(fgatypes.ReadTuplesRequest{
-		User:       userTuplePrefix + username,
-		ObjectType: membershipObjectType,
+		User:       user,
+		ObjectType: objectType,
 	})
 	if err != nil {
 		return nil, errs.NewUnexpected("marshalling read_tuples request", err)
@@ -88,11 +112,10 @@ func (r *AccessCheckRPC) MembershipUIDsForUser(ctx context.Context, username str
 	if err != nil {
 		return nil, errs.NewServiceUnavailable("fga-sync read_tuples RPC failed", err)
 	}
-	var data []byte
-	if reply != nil {
-		data = reply.Data
+	if reply == nil {
+		return nil, nil
 	}
-	return parseReadTuplesResponse(username, data)
+	return reply.Data, nil
 }
 
 // parseReadTuplesResponse parses the fga-sync read_tuples reply body. The
@@ -100,6 +123,46 @@ func (r *AccessCheckRPC) MembershipUIDsForUser(ctx context.Context, username str
 // inconclusive reply (absent/empty body, malformed JSON, or an error reported
 // by fga-sync, even one accompanied by partial results) is ServiceUnavailable.
 func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
+	results, err := readTuplesResults(data)
+	if err != nil {
+		return nil, err
+	}
+	uids := make([]string, 0, len(results))
+	for _, tuple := range results {
+		if uid, ok := membershipUIDFromTuple(tuple, username); ok {
+			uids = append(uids, uid)
+		}
+	}
+	return uids, nil
+}
+
+// parseChildLinkResponse returns the deduplicated UIDs of the b2b_orgs that
+// list childUID as a child. Other tuples in the reply, such as the parent
+// tuples the child's own children hold on it, are skipped.
+func parseChildLinkResponse(childUID string, data []byte) ([]string, error) {
+	results, err := readTuplesResults(data)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	parents := make([]string, 0, len(results))
+	for _, tuple := range results {
+		parent, ok := parentUIDFromChildTuple(tuple, childUID)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[parent]; dup {
+			continue
+		}
+		seen[parent] = struct{}{}
+		parents = append(parents, parent)
+	}
+	return parents, nil
+}
+
+// readTuplesResults validates a read_tuples reply envelope and returns its
+// tuple strings. A capped reply may be missing tuples, so it is an error.
+func readTuplesResults(data []byte) ([]string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, errs.NewServiceUnavailable("empty reply from fga-sync read_tuples RPC")
 	}
@@ -121,14 +184,24 @@ func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
 	if len(resp.Results) > maxReadTuplesResults {
 		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reply exceeded result cap")
 	}
+	return resp.Results, nil
+}
 
-	uids := make([]string, 0, len(resp.Results))
-	for _, tuple := range resp.Results {
-		if uid, ok := membershipUIDFromTuple(tuple, username); ok {
-			uids = append(uids, uid)
-		}
+// parentUIDFromChildTuple returns P for a tuple "b2b_org:P#child@b2b_org:<childUID>".
+func parentUIDFromChildTuple(tuple, childUID string) (string, bool) {
+	objectRelation, user, ok := strings.Cut(tuple, "@")
+	if !ok || user != b2bOrgObjectType+":"+childUID {
+		return "", false
 	}
-	return uids, nil
+	object, relation, ok := strings.Cut(objectRelation, "#")
+	if !ok || relation != b2bOrgChildRelation {
+		return "", false
+	}
+	uid, ok := strings.CutPrefix(object, b2bOrgObjectType+":")
+	if !ok || uid == "" {
+		return "", false
+	}
+	return uid, true
 }
 
 // membershipUIDFromTuple parses a canonical object#relation@user tuple string

@@ -11,6 +11,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/url"
 	"os"
@@ -482,6 +483,42 @@ func BuildChildListMessage(parentUID string, children []string) fgatypes.Generic
 	}
 }
 
+// publishB2BOrgChildList replaces a parent org's child tuples with children
+// and returns the publish error.
+func publishB2BOrgChildList(ctx context.Context, p port.MemberPublisher, parentUID string, children []string) error {
+	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, BuildChildListMessage(parentUID, children)); pubErr != nil {
+		slog.WarnContext(ctx, "b2b org child list FGA publish failed",
+			"parent_uid", parentUID,
+			"error", pubErr,
+			"publish_failed_for_backfill_repair", true)
+		return pubErr
+	}
+	return nil
+}
+
+// publishB2BOrgParentClear removes a parentless org's own parent tuple. Only
+// a parent change sends this otherwise, and a move whose previous record was
+// not seen is not one.
+func publishB2BOrgParentClear(ctx context.Context, p port.MemberPublisher, orgUID string) error {
+	msg := fgatypes.GenericFGAMessage{
+		ObjectType: "b2b_org",
+		Operation:  "update_access",
+		Data: fgatypes.GenericAccessData{
+			UID:              orgUID,
+			References:       map[string][]string{},
+			ExcludeRelations: b2bOrgNonParentRelations,
+		},
+	}
+	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
+		slog.WarnContext(ctx, "b2b org parent clear FGA publish failed",
+			"uid", orgUID,
+			"error", pubErr,
+			"publish_failed_for_backfill_repair", true)
+		return pubErr
+	}
+	return nil
+}
+
 // PublishB2BOrgTeamGrantsFGA emits the team-subject FGA tuples for a B2BOrg —
 // the global_org_admin grant and the blanket auditor team grants.
 // Safe to call during backfill — idempotent (fga-sync diffs before writing).
@@ -491,9 +528,15 @@ func BuildChildListMessage(parentUID string, children []string) fgatypes.Generic
 // UID alone: gating on that UID would let a blank value silently swallow the
 // auditor grants on exactly the path an operator would use to repair them.
 func PublishB2BOrgTeamGrantsFGA(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, globalOrgAdminTeamName string, auditorTeams []string) {
+	_ = publishB2BOrgTeamGrantsFGA(ctx, p, org, globalOrgAdminTeamName, auditorTeams)
+}
+
+// publishB2BOrgTeamGrantsFGA is PublishB2BOrgTeamGrantsFGA for callers that
+// must act on a failed publish. Nothing to publish is not an error.
+func publishB2BOrgTeamGrantsFGA(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, globalOrgAdminTeamName string, auditorTeams []string) error {
 	globalOrgAdminTeamName = strings.TrimSpace(globalOrgAdminTeamName)
 	if globalOrgAdminTeamName == "" && len(teamMemberRefs(auditorTeams...)) == 0 {
-		return
+		return nil
 	}
 	msg := BuildB2BOrgFGAMessage(org, B2BOrgFGARefs{
 		GlobalOrgAdminTeamName: globalOrgAdminTeamName,
@@ -504,19 +547,28 @@ func PublishB2BOrgTeamGrantsFGA(ctx context.Context, p port.MemberPublisher, org
 			"uid", org.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)
+		return pubErr
 	}
+	return nil
 }
 
 // PublishB2BOrgParentFGA emits FGA parent/child hierarchy tuples for a B2BOrg
 // that has a ParentUID. Safe to call during backfill — idempotent.
 // parentChildren is the full current child-UID list for the parent org.
 func PublishB2BOrgParentFGA(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, parentChildren []string) {
+	_ = publishB2BOrgParentFGA(ctx, p, org, parentChildren)
+}
+
+// publishB2BOrgParentFGA is PublishB2BOrgParentFGA for callers that must act
+// on a failed publish. Every message is attempted; the errors are joined.
+func publishB2BOrgParentFGA(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, parentChildren []string) error {
 	if org.ParentUID == "" {
-		return
+		return nil
 	}
 	// Synthesise an empty-parent "current" so BuildB2BOrgReparentingMessages emits
 	// the new parent tuple without attempting to clean up a prior parent reference.
 	current := &model.B2BOrg{UID: org.UID}
+	var errs []error
 	for _, msg := range BuildB2BOrgReparentingMessages(current, org, nil, parentChildren) {
 		if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 			slog.WarnContext(ctx, "b2b org parent FGA publish failed",
@@ -524,8 +576,10 @@ func PublishB2BOrgParentFGA(ctx context.Context, p port.MemberPublisher, org *mo
 				"parent_uid", org.ParentUID,
 				"error", pubErr,
 				"publish_failed_for_backfill_repair", true)
+			errs = append(errs, pubErr)
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // buildIndexerInput is the shared logic for the b2b_org, project_membership, and key_contact
@@ -706,6 +760,12 @@ func buildB2BOrgSettingsIndexerView(settings *model.B2BOrgSettings) b2bOrgSettin
 // PublishB2BOrgSettingsIndexer builds and publishes a MemberIndexerMessage for B2BOrgSettings.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishB2BOrgSettingsIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, settings *model.B2BOrgSettings, action indexerConstants.MessageAction) {
+	_ = publishB2BOrgSettingsIndexer(ctx, p, org, settings, action)
+}
+
+// publishB2BOrgSettingsIndexer is PublishB2BOrgSettingsIndexer for callers
+// that must act on a failed build or publish.
+func publishB2BOrgSettingsIndexer(ctx context.Context, p port.MemberPublisher, org *model.B2BOrg, settings *model.B2BOrgSettings, action indexerConstants.MessageAction) error {
 	indexMsg := &model.MemberIndexerMessage{
 		Action:         action,
 		Tags:           settings.Tags(),
@@ -717,14 +777,16 @@ func PublishB2BOrgSettingsIndexer(ctx context.Context, p port.MemberPublisher, o
 			"uid", org.UID,
 			"error", err,
 			"publish_failed_for_backfill_repair", true)
-		return
+		return err
 	}
 	if pubErr := p.Indexer(ctx, constants.IndexB2BOrgSettingsSubject, builtMsg, false); pubErr != nil {
 		slog.WarnContext(ctx, "b2b org settings indexer publish failed",
 			"uid", org.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)
+		return pubErr
 	}
+	return nil
 }
 
 // buildProjectMembershipIndexerInput returns the indexer message data for a project_membership.
@@ -780,32 +842,29 @@ func publishProjectMembershipIndexer(ctx context.Context, p port.MemberPublisher
 // writing the structural b2b_org and project reference tuples that enable the auditor cascade.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishProjectMembershipFGA(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership) {
-	msg := BuildProjectMembershipFGAMessage(pm)
-	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
-		slog.WarnContext(ctx, "project membership fga publish failed",
-			"uid", pm.UID,
-			"error", pubErr,
-			"publish_failed_for_backfill_repair", true)
-	} else {
-		slog.DebugContext(ctx, "project membership FGA published",
-			"uid", pm.UID, "subject", constants.FGASyncUpdateAccessSubject)
-	}
+	_ = publishProjectMembershipAccess(ctx, p, pm, BuildProjectMembershipFGAMessage(pm))
 }
 
 // PublishProjectMembershipFGAPreservingMissingRefs emits a project_membership
 // update_access message that excludes missing b2b_org/project relations so
 // transiently unresolved parents are preserved.
 func PublishProjectMembershipFGAPreservingMissingRefs(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership) {
-	msg := BuildProjectMembershipFGAMessagePreserveMissingRefs(pm)
+	_ = publishProjectMembershipAccess(ctx, p, pm, BuildProjectMembershipFGAMessagePreserveMissingRefs(pm))
+}
+
+// publishProjectMembershipAccess publishes one project_membership FGA message
+// and returns the publish error for callers that must act on it.
+func publishProjectMembershipAccess(ctx context.Context, p port.MemberPublisher, pm *model.ProjectMembership, msg fgatypes.GenericFGAMessage) error {
 	if pubErr := p.Access(ctx, constants.FGASyncUpdateAccessSubject, msg); pubErr != nil {
 		slog.WarnContext(ctx, "project membership fga publish failed",
 			"uid", pm.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)
-	} else {
-		slog.DebugContext(ctx, "project membership FGA published",
-			"uid", pm.UID, "subject", constants.FGASyncUpdateAccessSubject)
+		return pubErr
 	}
+	slog.DebugContext(ctx, "project membership FGA published",
+		"uid", pm.UID, "subject", constants.FGASyncUpdateAccessSubject)
+	return nil
 }
 
 // buildKeyContactIndexerInput returns the indexer message data for a key_contact.
@@ -816,6 +875,12 @@ func buildKeyContactIndexerInput(kc *model.KeyContact, action indexerConstants.M
 // PublishKeyContactIndexer builds and publishes a MemberIndexerMessage for a KeyContact.
 // Errors are swallowed and logged — /admin/reindex recovers missed records.
 func PublishKeyContactIndexer(ctx context.Context, p port.MemberPublisher, kc *model.KeyContact, action indexerConstants.MessageAction) {
+	_ = publishKeyContactIndexer(ctx, p, kc, action)
+}
+
+// publishKeyContactIndexer is PublishKeyContactIndexer for callers that must
+// act on a failed build or publish.
+func publishKeyContactIndexer(ctx context.Context, p port.MemberPublisher, kc *model.KeyContact, action indexerConstants.MessageAction) error {
 	if action != indexerConstants.ActionDeleted && isScratchLogoURL(kc.CompanyLogoURL) {
 		safeKC := *kc
 		safeKC.CompanyLogoURL = ""
@@ -836,17 +901,18 @@ func PublishKeyContactIndexer(ctx context.Context, p port.MemberPublisher, kc *m
 			"uid", kc.UID,
 			"error", err,
 			"publish_failed_for_backfill_repair", true)
-		return
+		return err
 	}
 	if pubErr := p.Indexer(ctx, constants.IndexKeyContactSubject, builtMsg, false); pubErr != nil {
 		slog.WarnContext(ctx, "key contact indexer publish failed",
 			"uid", kc.UID,
 			"error", pubErr,
 			"publish_failed_for_backfill_repair", true)
-	} else {
-		slog.DebugContext(ctx, "key contact indexer published",
-			"uid", kc.UID, "subject", constants.IndexKeyContactSubject)
+		return pubErr
 	}
+	slog.DebugContext(ctx, "key contact indexer published",
+		"uid", kc.UID, "subject", constants.IndexKeyContactSubject)
+	return nil
 }
 
 // BuildWorkspaceIndexingConfig constructs an IndexingConfig for a Workspace document.

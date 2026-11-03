@@ -749,15 +749,25 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		usecaseSvc.WithRunnerB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 	}
 	if repoSource == "mock" {
-		opts = append(opts, usecaseSvc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+		opts = append(opts,
+			usecaseSvc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}),
+			usecaseSvc.WithChildLinkReader(mock.NewMockB2BOrgChildLinkReader()),
+		)
 	}
 
 	// cdc_repair drain collaborators — only wired in Salesforce mode where the
-	// NATS cdc-repair bucket and a real quota gauge exist. In mock mode the
-	// repair path returns ServiceUnavailable ("not configured").
+	// NATS cdc-repair bucket and a real quota gauge exist, and the repair
+	// queue only with the NATS publisher: a mock publisher delivers nothing, so
+	// draining would clear markers for records it never republished. Otherwise
+	// the repair path returns ServiceUnavailable ("not configured").
 	if repoSource == "salesforce" {
+		if repairQueueEnabled(messagingSource()) {
+			opts = append(opts, usecaseSvc.WithRepairStore(nats.NewCDCRepairStore(nc)))
+		} else {
+			slog.InfoContext(ctx, "cdc_repair drain not wired: MESSAGING_SOURCE is not nats", "messaging_source", messagingSource())
+		}
 		opts = append(opts,
-			usecaseSvc.WithRepairStore(nats.NewCDCRepairStore(nc)),
+			usecaseSvc.WithChildLinkReader(nats.NewAccessCheckRPC(nc.Conn(), natsTimeoutFromEnv())),
 			usecaseSvc.WithQuotaGauge(salesforce.NewAPIUsageGauge(salesforce.NewLimitsRefreshFunc(sfClient))),
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
@@ -787,6 +797,12 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		ProjectResolverImpl(ctx),
 		opts...,
 	)
+}
+
+// repairQueueEnabled reports whether the cdc_repair drain may be wired for the
+// given MESSAGING_SOURCE.
+func repairQueueEnabled(messaging string) bool {
+	return messaging == "nats"
 }
 
 // adminReindexQuotaThresholdFromEnv parses ADMIN_REINDEX_QUOTA_THRESHOLD (a
@@ -1140,6 +1156,9 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// Durable repair queue — records the records skipped by the quota guard so
 		// they can be repaired via POST /admin/reindex {cdc_repair:true}.
 		usecaseSvc.WithCDCRepairStore(nats.NewCDCRepairStore(natsClient)),
+		// Access-model read of the orgs still listing a changed Account as a
+		// child, so a move with no cached previous record is withdrawn.
+		usecaseSvc.WithCDCChildLinkReader(nats.NewAccessCheckRPC(natsClient.Conn(), natsTimeoutFromEnv())),
 		// Durable grant record — lets a key_contact delete, which carries only the
 		// contact's own SFID after the Salesforce record is gone, address the revoke.
 		usecaseSvc.WithCDCKeyContactGrantIndex(nats.NewKeyContactGrantIndex(natsClient)),
