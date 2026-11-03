@@ -782,7 +782,10 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 		for _, sp := range staleParents {
 			pubErrs = append(pubErrs, publishB2BOrgChildList(ctx, r.publisher, sp.parentUID, sp.children))
 		}
-		if org.ParentUID == "" && len(staleParents) > 0 {
+		// Not gated on staleParents: once a withdrawal lands, the read no
+		// longer finds the old parent, so a clear that failed alongside it
+		// would never be retried.
+		if org.ParentUID == "" {
 			pubErrs = append(pubErrs, publishB2BOrgParentClear(ctx, r.publisher, org.UID))
 		}
 		return r.confirmPublished(ctx, log, sfType, uid, errors.Join(pubErrs...))
@@ -967,12 +970,18 @@ type staleParentChildList struct {
 // staleParentChildLists returns, for every org the access model lists org
 // under other than its current Salesforce parent, that org's current
 // Salesforce children. A failed read returns an error, so nothing is withdrawn
-// on an incomplete picture.
+// on an incomplete picture. A read that can never complete withdraws nothing
+// and does not hold the org's own updates.
 func (r *Runner) staleParentChildLists(ctx context.Context, org *model.B2BOrg, fetchChildUIDs func(string) ([]string, error)) ([]staleParentChildList, error) {
 	if r.childLinks == nil {
 		return nil, nil
 	}
 	parents, err := r.childLinks.ParentsListingChild(ctx, org.UID)
+	if errors.Is(err, port.ErrChildLinksUncheckable) {
+		slog.ErrorContext(ctx, "stale parent links not checked: reply exceeds the read_tuples cap",
+			"uid", org.UID, "error", err)
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

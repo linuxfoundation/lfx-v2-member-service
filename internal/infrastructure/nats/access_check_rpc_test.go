@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -276,6 +277,19 @@ func TestParseChildLinkResponse(t *testing.T) {
 			assert.Equal(t, tt.wantParents, parents)
 		})
 	}
+}
+
+// TestParseChildLinkResponse_CapExceededIsUncheckable: the reply also holds
+// one tuple per child org, so an org with enough children always exceeds the
+// cap. Callers must be able to tell that apart from a transient failure.
+func TestParseChildLinkResponse_CapExceededIsUncheckable(t *testing.T) {
+	_, err := parseChildLinkResponse("org-child", []byte(overCapReadTuplesBody()))
+	assert.ErrorIs(t, err, port.ErrChildLinksUncheckable)
+	var unavailable pkgerrors.ServiceUnavailable
+	assert.ErrorAs(t, err, &unavailable)
+
+	_, err = parseChildLinkResponse("org-child", []byte(`{"results":[],"error":"boom"}`))
+	assert.NotErrorIs(t, err, port.ErrChildLinksUncheckable, "a transient failure stays retryable")
 }
 
 func overCapReadTuplesBody() string {

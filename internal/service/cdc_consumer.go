@@ -1093,6 +1093,11 @@ func (o *CDCConsumer) staleChildLinks(ctx context.Context, orgs []*model.B2BOrg,
 	stale := map[string][]string{}
 	for i, org := range orgs {
 		parents, err := o.childLinks.ParentsListingChild(ctx, org.UID)
+		if errors.Is(err, port.ErrChildLinksUncheckable) {
+			slog.ErrorContext(ctx, "cdc: stale parent links not checked: reply exceeds the read_tuples cap",
+				"uid", org.UID, "error", err)
+			continue
+		}
 		if err != nil {
 			unchecked := make([]string, 0, len(orgs)-i)
 			for _, rest := range orgs[i:] {

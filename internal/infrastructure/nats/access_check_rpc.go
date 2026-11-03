@@ -15,6 +15,7 @@ import (
 	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	"github.com/nats-io/nats.go"
 
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
@@ -39,6 +40,8 @@ const (
 // defense-in-depth against a misbehaving trusted peer, not a real risk under
 // the current trust boundary.
 const maxReadTuplesResults = 1000
+
+var errReadTuplesCapExceeded = errs.NewServiceUnavailable("fga-sync read_tuples reply exceeded result cap")
 
 // AccessCheckRPC provides NATS request/reply calls to the fga-sync service's
 // access-check API.
@@ -75,6 +78,11 @@ func (r *AccessCheckRPC) MembershipUIDsForUser(ctx context.Context, username str
 // read_tuples RPC. fga-sync pages through every result, so a successful reply
 // is complete; anything inconclusive is ServiceUnavailable.
 func (r *AccessCheckRPC) ParentsListingChild(ctx context.Context, childUID string) ([]string, error) {
+	// CDC handlers carry a deadline for the whole event, which readTuples
+	// would otherwise honour in place of the timeout; a stalled fga-sync must
+	// not consume the time the rest of the batch needs.
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
 	data, err := r.readTuples(ctx, b2bOrgObjectType+":"+childUID, b2bOrgObjectType)
 	if err != nil {
 		return nil, err
@@ -141,6 +149,9 @@ func parseReadTuplesResponse(username string, data []byte) ([]string, error) {
 // tuples the child's own children hold on it, are skipped.
 func parseChildLinkResponse(childUID string, data []byte) ([]string, error) {
 	results, err := readTuplesResults(data)
+	if errors.Is(err, errReadTuplesCapExceeded) {
+		return nil, errors.Join(port.ErrChildLinksUncheckable, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +193,7 @@ func readTuplesResults(data []byte) ([]string, error) {
 		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reply omitted results")
 	}
 	if len(resp.Results) > maxReadTuplesResults {
-		return nil, errs.NewServiceUnavailable("fga-sync read_tuples reply exceeded result cap")
+		return nil, errReadTuplesCapExceeded
 	}
 	return resp.Results, nil
 }

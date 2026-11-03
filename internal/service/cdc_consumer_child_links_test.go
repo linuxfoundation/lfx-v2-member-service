@@ -11,6 +11,7 @@ import (
 
 	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	"github.com/stretchr/testify/assert"
@@ -157,6 +158,27 @@ func TestCDCConsumer_Account_ChildLinkReadFails_QueuesUncheckedOrgs(t *testing.T
 	assert.Len(t, links.Calls(), 1, "reads stop at the first failure")
 	assert.Equal(t, 2, pub.indexerCount("lfx.index.b2b_org"), "both orgs still publish their own updates")
 	assert.ElementsMatch(t, []string{first, second}, repairPutsOfType(repair, "b2b_org"))
+}
+
+// TestCDCConsumer_Account_UncheckableOrg_KeepsCheckingTheBatch: a read that
+// can never complete is not an outage, so it neither stops the batch nor
+// queues a marker that retrying could not resolve.
+func TestCDCConsumer_Account_UncheckableOrg_KeepsCheckingTheBatch(t *testing.T) {
+	big, moved, oldParent, sibling := sfid("uc-big"), sfid("uc-moved"), sfid("uc-old"), sfid("uc-sib")
+	accounts := map[string]*model.B2BOrg{big: {UID: big}, moved: {UID: moved}}
+	links := mock.NewMockB2BOrgChildLinkReader()
+	links.SetError(big, errors.Join(port.ErrChildLinksUncheckable, errors.New("reply exceeded cap")))
+	links.SetParents(moved, oldParent)
+	repair := &mock.MockCDCRepairStore{}
+	pub := &subjectCapturingPublisher{}
+
+	runAccountEvent(t, model.CDCChangeUpdate, []string{big, moved},
+		&fakeB2BOrgReader{orgErr: errors.New("cold"), childMap: map[string][]string{oldParent: {sibling}}},
+		accounts, pub, svc.WithCDCChildLinkReader(links), svc.WithCDCRepairStore(repair))
+
+	assert.ElementsMatch(t, []string{big, moved}, links.Calls())
+	assert.Equal(t, [][]string{{"b2b_org:" + sibling}}, childListsFor(t, pub, oldParent))
+	assert.Empty(t, repairPutsOfType(repair, "b2b_org"))
 }
 
 // TestCDCConsumer_Account_ChildQueryFails_SendsNoStaleParentList: without a

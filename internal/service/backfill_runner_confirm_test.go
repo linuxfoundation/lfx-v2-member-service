@@ -12,6 +12,7 @@ import (
 
 	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/mock"
 	svc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	"github.com/stretchr/testify/assert"
@@ -265,6 +266,31 @@ func TestBackfillRunner_RunRepair_B2BOrg_StaleParents(t *testing.T) {
 		assert.Equal(t, map[string][]string{confirmOldParentUID: {confirmSiblingUID}}, childListsSent(pub, org.UID))
 		assert.Equal(t, 1, parentClearsFor(t, pub, org.UID), "the org's own parent tuple is withdrawn too")
 		assert.Len(t, store.Deletes, 1)
+	})
+
+	t.Run("a drain after the withdrawal landed still clears the parent", func(t *testing.T) {
+		org := &model.B2BOrg{UID: confirmOrgUID}
+		pub, store := &subjectCapturingPublisher{}, &mock.MockCDCRepairStore{}
+
+		repairOrg(t, confirmRunner(newCountingChildReader(org, nil), pub, store, mock.NewMockB2BOrgChildLinkReader()))
+
+		assert.Equal(t, 1, parentClearsFor(t, pub, org.UID))
+		assert.Len(t, store.Deletes, 1)
+	})
+
+	t.Run("an uncheckable read still publishes the org and clears the marker", func(t *testing.T) {
+		org := &model.B2BOrg{UID: confirmOrgUID, ParentUID: confirmParentUID}
+		reader := newCountingChildReader(org, map[string][]string{confirmParentUID: {confirmOrgUID}})
+		links := mock.NewMockB2BOrgChildLinkReader()
+		links.SetError(org.UID, errors.Join(port.ErrChildLinksUncheckable, errors.New("reply exceeded cap")))
+		pub, store := &subjectCapturingPublisher{}, &mock.MockCDCRepairStore{}
+
+		repairOrg(t, confirmRunner(reader, pub, store, links))
+
+		assert.NotEmpty(t, pub.indexerMessages)
+		assert.Equal(t, map[string][]string{confirmParentUID: {confirmOrgUID}}, childListsSent(pub, org.UID),
+			"only the current parent's list; nothing is withdrawn")
+		assert.Len(t, store.Deletes, 1, "retrying cannot complete the read, so the marker is not held")
 	})
 
 	t.Run("a failed parent clear keeps the marker", func(t *testing.T) {
