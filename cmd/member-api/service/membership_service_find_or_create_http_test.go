@@ -30,6 +30,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/salesforce"
 	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 )
 
 const findOrCreateToken = "round-trip-token"
@@ -152,6 +153,36 @@ func TestFindOrCreateB2bOrgHTTPRoundTrip(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Empty(t, uc.calls)
 	})
+}
+
+func TestFindOrCreateB2bOrgHTTPParentEtagMatchesGetShape(t *testing.T) {
+	token, version := findOrCreateToken, "1"
+	payload := &membershipservice.FindOrCreateB2bOrgPayload{BearerToken: &token, Version: &version, Name: "Linux Foundation", Website: "https://linuxfoundation.org"}
+	parent := &model.B2BOrg{UID: "001410000FindOrAQI", Name: "Linux Foundation", IsParent: true}
+	cleared := *parent
+	cleared.IsParent = false
+	want, err := etag.LFXEtag(&cleared)
+	require.NoError(t, err)
+	for _, action := range []model.AccountAction{model.AccountActionMatched, model.AccountActionCreated} {
+		t.Run(string(action), func(t *testing.T) {
+			uc := &stubFindOrCreateWriterUC{stubB2BOrgWriterUC: stubB2BOrgWriterUC{org: parent}, action: action}
+			base := newFindOrCreateHTTP(t, uc)
+			req, err := http.NewRequest(http.MethodPost, base+"/b2b_orgs/find-or-create?v=1", strings.NewReader(`{"name":"Linux Foundation","website":"https://linuxfoundation.org"}`))
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+findOrCreateToken)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, want, resp.Header.Get("Etag"), "the ETag a parent org's own If-Match can present")
+			assert.True(t, parent.IsParent, "the source model keeps its parent flag")
+
+			result, err := findOrCreateClient(t, base)(context.Background(), payload)
+			require.NoError(t, err)
+			require.NotNil(t, result.(*membershipservice.FindOrCreateB2bOrgResult).Etag)
+			assert.Equal(t, want, *result.(*membershipservice.FindOrCreateB2bOrgResult).Etag)
+		})
+	}
 }
 
 func TestFindOrCreateB2bOrgHTTPEtagFailureIs500(t *testing.T) {

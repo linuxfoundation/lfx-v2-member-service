@@ -20,8 +20,11 @@ func (s *membershipServicesrvc) FindOrCreateB2bOrg(ctx context.Context, p *membe
 		return nil, wrapError(ctx, err)
 	}
 
-	// the generated 200 (matched) encoder dereferences Etag and LastModified, so neither may stay nil
-	etagVal, etagErr := etag.LFXEtag(org)
+	// the generated 200 (matched) encoder dereferences Etag and LastModified, so neither may stay nil;
+	// IsParent is cleared before hashing so the etag matches the shape GetB2bOrg and If-Match use
+	orgForEtag := *org
+	orgForEtag.IsParent = false
+	etagVal, etagErr := etag.LFXEtag(&orgForEtag)
 	if etagErr != nil {
 		return nil, wrapError(ctx, pkgerrors.NewUnexpected("failed to compute etag for b2b org", etagErr))
 	}

@@ -16,6 +16,7 @@ import (
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 )
 
 // FindOrCreate keeps stubB2BOrgWriterUC a complete usecaseSvc.B2BOrgWriter.
@@ -36,6 +37,20 @@ func (s *stubFindOrCreateWriterUC) FindOrCreate(_ context.Context, name, website
 
 func TestFindOrCreateB2bOrg(t *testing.T) {
 	payload := &membershipservice.FindOrCreateB2bOrgPayload{Name: "Linux Foundation", Website: "https://linuxfoundation.org"}
+
+	t.Run("a parent org gets the same etag shape as GetB2bOrg (IsParent cleared)", func(t *testing.T) {
+		parent := &model.B2BOrg{UID: "001410000FindOrAQI", Name: "Linux Foundation", IsParent: true}
+		uc := &stubFindOrCreateWriterUC{stubB2BOrgWriterUC: stubB2BOrgWriterUC{org: parent}, action: model.AccountActionMatched}
+		result, err := newTestSvc(withB2BOrgWriterUC(uc)).FindOrCreateB2bOrg(context.Background(), payload)
+		require.NoError(t, err)
+		cleared := *parent
+		cleared.IsParent = false
+		want, err := etag.LFXEtag(&cleared)
+		require.NoError(t, err)
+		require.NotNil(t, result.Etag)
+		assert.Equal(t, want, *result.Etag, "the etag must match what a later If-Match on this org can present")
+		assert.True(t, parent.IsParent, "the source model keeps its parent flag")
+	})
 
 	t.Run("an org the etag cannot be computed for fails instead of leaving the header pointers nil", func(t *testing.T) {
 		uc := &stubFindOrCreateWriterUC{stubB2BOrgWriterUC: stubB2BOrgWriterUC{org: &model.B2BOrg{UID: "001410000FindOrAQI", Name: "Linux Foundation", UpdatedAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}, action: model.AccountActionMatched}
