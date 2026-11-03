@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,6 +36,16 @@ func (s *stubFindOrCreateWriterUC) FindOrCreate(_ context.Context, name, website
 
 func TestFindOrCreateB2bOrg(t *testing.T) {
 	payload := &membershipservice.FindOrCreateB2bOrgPayload{Name: "Linux Foundation", Website: "https://linuxfoundation.org"}
+
+	t.Run("an org the etag cannot be computed for fails instead of leaving the header pointers nil", func(t *testing.T) {
+		uc := &stubFindOrCreateWriterUC{stubB2BOrgWriterUC: stubB2BOrgWriterUC{org: &model.B2BOrg{UID: "001410000FindOrAQI", Name: "Linux Foundation", UpdatedAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}, action: model.AccountActionMatched}
+		result, err := newTestSvc(withB2BOrgWriterUC(uc)).FindOrCreateB2bOrg(context.Background(), payload)
+		require.Error(t, err)
+		assert.Nil(t, result)
+		var serviceErr *goa.ServiceError
+		require.True(t, errors.As(err, &serviceErr), "%T: %v", err, err)
+		assert.Equal(t, "InternalServerError", serviceErr.Name)
+	})
 
 	for _, action := range []model.AccountAction{model.AccountActionCreated, model.AccountActionMatched} {
 		t.Run(string(action), func(t *testing.T) {

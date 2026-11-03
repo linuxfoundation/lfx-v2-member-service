@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	sf "github.com/k-capehart/go-salesforce/v3"
 	"github.com/stretchr/testify/assert"
 	tmock "github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -25,6 +27,8 @@ import (
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/auth"
+	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/salesforce"
+	usecaseSvc "github.com/linuxfoundation/lfx-v2-member-service/internal/service"
 	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 )
 
@@ -36,6 +40,11 @@ func withAuth(a *auth.MockJWTAuth) svcOpt {
 
 // newFindOrCreateHTTP mounts the generated HTTP server over the service and returns its base URL
 func newFindOrCreateHTTP(t *testing.T, uc *stubFindOrCreateWriterUC) string {
+	t.Helper()
+	return newFindOrCreateHTTPWith(t, uc)
+}
+
+func newFindOrCreateHTTPWith(t *testing.T, uc usecaseSvc.B2BOrgWriter) string {
 	t.Helper()
 	authMock := &auth.MockJWTAuth{}
 	authMock.On("ParsePrincipal", tmock.Anything, findOrCreateToken, tmock.Anything).Return("round-trip-principal", nil)
@@ -143,4 +152,88 @@ func TestFindOrCreateB2bOrgHTTPRoundTrip(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Empty(t, uc.calls)
 	})
+}
+
+func TestFindOrCreateB2bOrgHTTPEtagFailureIs500(t *testing.T) {
+	token, version := findOrCreateToken, "1"
+	payload := &membershipservice.FindOrCreateB2bOrgPayload{BearerToken: &token, Version: &version, Name: "Linux Foundation", Website: "https://linuxfoundation.org"}
+	for _, action := range []model.AccountAction{model.AccountActionMatched, model.AccountActionCreated} {
+		t.Run(string(action), func(t *testing.T) {
+			uc := &stubFindOrCreateWriterUC{stubB2BOrgWriterUC: stubB2BOrgWriterUC{org: &model.B2BOrg{UID: "001410000FindOrAQI", Name: "Linux Foundation", UpdatedAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}, action: action}
+			base := newFindOrCreateHTTP(t, uc)
+
+			req, err := http.NewRequest(http.MethodPost, base+"/b2b_orgs/find-or-create?v=1", strings.NewReader(`{"name":"Linux Foundation","website":"https://linuxfoundation.org"}`))
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+findOrCreateToken)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err, "a real response, not an aborted connection")
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, string(raw))
+			assert.Empty(t, resp.Header.Get("Etag"))
+
+			_, err = findOrCreateClient(t, base)(context.Background(), payload)
+			var serviceErr *goa.ServiceError
+			require.True(t, errors.As(err, &serviceErr), "%T: %v", err, err)
+			assert.Equal(t, "InternalServerError", serviceErr.Name)
+		})
+	}
+}
+
+// apexFakeTransport answers the Apex find-or-create POST with one canned response and everything else with 200 {}
+type apexFakeTransport struct {
+	status int
+	body   string
+}
+
+func (a apexFakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/services/apexrest/lfx/account") {
+		resp.StatusCode, resp.Body = a.status, io.NopCloser(strings.NewReader(a.body))
+	}
+	return resp, nil
+}
+
+func TestFindOrCreateB2bOrgHTTPKeepsUpstreamTextOut(t *testing.T) {
+	token, version := findOrCreateToken, "1"
+	payload := &membershipservice.FindOrCreateB2bOrgPayload{BearerToken: &token, Version: &version, Name: "Linux Foundation", Website: "https://linuxfoundation.org"}
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		leaked string
+		want   string
+		goaErr string
+	}{
+		"400 non-json": {http.StatusBadRequest, "<html><body>Bad Request from the proxy</body></html>", "proxy", "rejected the account name or website", "BadRequest"},
+		"422 dml":      {http.StatusUnprocessableEntity, `{"message":"FIELD_CUSTOM_VALIDATION_EXCEPTION: Please enter valid domain address."}`, "FIELD_CUSTOM_VALIDATION_EXCEPTION", "cannot be created in salesforce", "UnprocessableEntity"},
+		"409 text":     {http.StatusConflict, "the domain acme.example does not identify exactly one account", "acme.example", "several accounts match the website domain", "Conflict"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sfClient, err := sf.Init(sf.Creds{Domain: "https://test.salesforce.com", AccessToken: "fake-token-for-tests"}, sf.WithRoundTripper(apexFakeTransport{status: tc.status, body: tc.body}))
+			require.NoError(t, err)
+			finder := salesforce.NewApexAccountClient(salesforce.NewSObjectClient(sfClient, nil), "/services/apexrest/lfx/account")
+			base := newFindOrCreateHTTPWith(t, usecaseSvc.NewB2BOrgWriter(usecaseSvc.WithAccountFindOrCreator(finder)))
+
+			req, err := http.NewRequest(http.MethodPost, base+"/b2b_orgs/find-or-create?v=1", strings.NewReader(`{"name":"Linux Foundation","website":"https://linuxfoundation.org"}`))
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+findOrCreateToken)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, tc.status, resp.StatusCode, string(raw))
+			assert.NotContains(t, string(raw), tc.leaked, "upstream text never reaches the client")
+			assert.Contains(t, string(raw), tc.want)
+
+			_, err = findOrCreateClient(t, base)(context.Background(), payload)
+			var serviceErr *goa.ServiceError
+			require.True(t, errors.As(err, &serviceErr), "%T: %v", err, err)
+			assert.Equal(t, tc.goaErr, serviceErr.Name)
+			assert.NotContains(t, serviceErr.Message, tc.leaked)
+		})
+	}
 }

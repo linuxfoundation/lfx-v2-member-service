@@ -5,10 +5,10 @@ package service
 
 import (
 	"context"
-	"log/slog"
 
 	membershipservice "github.com/linuxfoundation/lfx-v2-member-service/gen/membership_service"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
+	pkgerrors "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/etag"
 )
 
@@ -20,19 +20,17 @@ func (s *membershipServicesrvc) FindOrCreateB2bOrg(ctx context.Context, p *membe
 		return nil, wrapError(ctx, err)
 	}
 
+	// the generated 200 (matched) encoder dereferences Etag and LastModified, so neither may stay nil
 	etagVal, etagErr := etag.LFXEtag(org)
 	if etagErr != nil {
-		slog.WarnContext(ctx, "failed to compute etag for b2b org", "uid", org.UID, "error", etagErr)
+		return nil, wrapError(ctx, pkgerrors.NewUnexpected("failed to compute etag for b2b org", etagErr))
 	}
 
 	lastMod := org.UpdatedAt.UTC().Format(constants.HTTPDateFormat)
-	result := &membershipservice.FindOrCreateB2bOrgResult{
+	return &membershipservice.FindOrCreateB2bOrgResult{
 		B2bOrg:       b2bOrgToResponse(org),
 		Action:       string(action),
+		Etag:         &etagVal,
 		LastModified: &lastMod,
-	}
-	if etagVal != "" {
-		result.Etag = &etagVal
-	}
-	return result, nil
+	}, nil
 }

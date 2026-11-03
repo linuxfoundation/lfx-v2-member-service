@@ -69,13 +69,16 @@ func (c *ApexAccountClient) FindOrCreateAccount(ctx context.Context, name, websi
 	switch {
 	case status >= 200 && status < 300:
 	case status == http.StatusBadRequest:
-		return "", "", errs.NewValidation(apexMessage(raw, status))
+		slog.WarnContext(ctx, "apex account find-or-create: request rejected", "status", status, "message", apexMessage(raw, status))
+		return "", "", errs.NewValidation("salesforce rejected the account name or website")
 	case status == http.StatusConflict:
-		return "", model.AccountActionAmbiguous, errs.NewConflict(apexMessage(raw, status))
+		slog.InfoContext(ctx, "apex account find-or-create: ambiguous domain", "website", website, "message", apexMessage(raw, status))
+		return "", model.AccountActionAmbiguous, errs.NewConflict("several accounts match the website domain")
 	case status == http.StatusUnprocessableEntity:
-		return "", "", errs.NewUnprocessableEntity(apexMessage(raw, status))
+		slog.WarnContext(ctx, "apex account find-or-create: account not creatable", "status", status, "message", apexMessage(raw, status))
+		return "", "", errs.NewUnprocessableEntity("the account cannot be created in salesforce")
 	default:
-		return "", "", fmt.Errorf("apex account find-or-create: status %d: %s", status, raw)
+		return "", "", fmt.Errorf("apex account find-or-create: status %d: %s", status, snippet(raw))
 	}
 	var out apexAccountResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -146,7 +149,16 @@ func (c *ApexAccountClient) post(ctx context.Context, body []byte) (int, []byte,
 func apexMessage(raw []byte, status int) string {
 	var out apexAccountResponse
 	if json.Unmarshal(raw, &out) == nil && strings.TrimSpace(out.Message) != "" {
-		return out.Message
+		return snippet([]byte(out.Message))
 	}
-	return fmt.Sprintf("apex account find-or-create: status %d: %s", status, strings.TrimSpace(string(raw)))
+	return fmt.Sprintf("apex account find-or-create: status %d: %s", status, snippet(raw))
+}
+
+// snippet keeps log and error text bounded whatever Salesforce or a proxy answers
+func snippet(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 512 {
+		s = s[:512]
+	}
+	return s
 }

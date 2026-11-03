@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -90,24 +91,29 @@ func TestApexAccountClient_FindOrCreateAccount(t *testing.T) {
 		got, _, err := newApexTestClient(t, transport).FindOrCreateAccount(context.Background(), "Acme", "https://acme.example")
 		var unprocessable errs.UnprocessableEntity
 		require.True(t, errors.As(err, &unprocessable), "%v", err)
-		assert.Contains(t, err.Error(), "FIELD_CUSTOM_VALIDATION_EXCEPTION")
+		assert.NotContains(t, err.Error(), "FIELD_CUSTOM_VALIDATION_EXCEPTION", "upstream text stays in the logs")
+		assert.Contains(t, err.Error(), "cannot be created in salesforce")
 		assert.Empty(t, got)
 
-		transport = newWriterTransport(fakeResponse(http.StatusBadRequest, `{"message":"name and website are required"}`, nil), nil)
+		transport = newWriterTransport(fakeResponse(http.StatusBadRequest, `{"message":"DUPLICATES_DETECTED: use one of these records"}`, nil), nil)
 		_, _, err = newApexTestClient(t, transport).FindOrCreateAccount(context.Background(), "Acme", "https://acme.example")
 		var validation errs.Validation
 		require.True(t, errors.As(err, &validation), "%v", err)
+		assert.NotContains(t, err.Error(), "DUPLICATES_DETECTED")
+		assert.Contains(t, err.Error(), "rejected the account name or website")
 
-		transport = newWriterTransport(fakeResponse(http.StatusConflict, `{"message":"more than one account has the domain acme.example"}`, nil), nil)
+		transport = newWriterTransport(fakeResponse(http.StatusConflict, `{"message":"the domain acme.example does not identify exactly one account"}`, nil), nil)
 		_, action, err := newApexTestClient(t, transport).FindOrCreateAccount(context.Background(), "Acme", "https://acme.example")
 		var conflict errs.Conflict
 		require.True(t, errors.As(err, &conflict), "%v", err)
 		assert.Equal(t, model.AccountActionAmbiguous, action)
+		assert.Contains(t, err.Error(), "several accounts match the website domain")
 
-		transport = newWriterTransport(fakeResponse(http.StatusBadGateway, `<html>bad gateway</html>`, nil), nil)
+		transport = newWriterTransport(fakeResponse(http.StatusBadGateway, "<html>"+strings.Repeat("x", 4096)+"</html>", nil), nil)
 		_, _, err = newApexTestClient(t, transport).FindOrCreateAccount(context.Background(), "Acme", "https://acme.example")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "502")
+		assert.Less(t, len(err.Error()), 700, "an upstream body is truncated before it reaches an error")
 		assert.False(t, errors.As(err, &conflict) || errors.As(err, &validation) || errors.As(err, &unprocessable))
 	})
 
