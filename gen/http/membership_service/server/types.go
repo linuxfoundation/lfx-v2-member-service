@@ -23,6 +23,16 @@ type CreateB2bOrgRequestBody struct {
 	Sfid *string `form:"sfid,omitempty" json:"sfid,omitempty" xml:"sfid,omitempty"`
 }
 
+// FindOrCreateB2bOrgRequestBody is the type of the "membership-service"
+// service "find-or-create-b2b-org" endpoint HTTP request body.
+type FindOrCreateB2bOrgRequestBody struct {
+	// Organization name, used when the Account is created
+	Name *string `form:"name,omitempty" json:"name,omitempty" xml:"name,omitempty"`
+	// Organization website; its domain (scheme, www. and path stripped) is the
+	// match key
+	Website *string `form:"website,omitempty" json:"website,omitempty" xml:"website,omitempty"`
+}
+
 // UpdateB2bOrgRequestBody is the type of the "membership-service" service
 // "update-b2b-org" endpoint HTTP request body.
 type UpdateB2bOrgRequestBody struct {
@@ -204,6 +214,15 @@ type GetB2bOrgResponseBody B2bOrgResponseResponseBody
 // CreateB2bOrgResponseBody is the type of the "membership-service" service
 // "create-b2b-org" endpoint HTTP response body.
 type CreateB2bOrgResponseBody B2bOrgResponseResponseBody
+
+// FindOrCreateB2bOrgOKResponseBody is the type of the "membership-service"
+// service "find-or-create-b2b-org" endpoint HTTP response body.
+type FindOrCreateB2bOrgOKResponseBody B2bOrgResponseResponseBody
+
+// FindOrCreateB2bOrgCreatedResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body.
+type FindOrCreateB2bOrgCreatedResponseBody B2bOrgResponseResponseBody
 
 // UpdateB2bOrgResponseBody is the type of the "membership-service" service
 // "update-b2b-org" endpoint HTTP response body.
@@ -524,6 +543,139 @@ type CreateB2bOrgInternalServerErrorResponseBody struct {
 // "membership-service" service "create-b2b-org" endpoint HTTP response body
 // for the "ServiceUnavailable" error.
 type CreateB2bOrgServiceUnavailableResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgNotImplementedResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "NotImplemented" error.
+type FindOrCreateB2bOrgNotImplementedResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgNotFoundResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "NotFound" error.
+type FindOrCreateB2bOrgNotFoundResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgBadRequestResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "BadRequest" error.
+type FindOrCreateB2bOrgBadRequestResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgConflictResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "Conflict" error.
+type FindOrCreateB2bOrgConflictResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgUnprocessableEntityResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "UnprocessableEntity" error.
+type FindOrCreateB2bOrgUnprocessableEntityResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgInternalServerErrorResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "InternalServerError" error.
+type FindOrCreateB2bOrgInternalServerErrorResponseBody struct {
+	// Name is the name of this class of errors.
+	Name string `form:"name" json:"name" xml:"name"`
+	// ID is a unique identifier for this particular occurrence of the problem.
+	ID string `form:"id" json:"id" xml:"id"`
+	// Message is a human-readable explanation specific to this occurrence of the
+	// problem.
+	Message string `form:"message" json:"message" xml:"message"`
+	// Is the error temporary?
+	Temporary bool `form:"temporary" json:"temporary" xml:"temporary"`
+	// Is the error a timeout?
+	Timeout bool `form:"timeout" json:"timeout" xml:"timeout"`
+	// Is the error a server-side fault?
+	Fault bool `form:"fault" json:"fault" xml:"fault"`
+}
+
+// FindOrCreateB2bOrgServiceUnavailableResponseBody is the type of the
+// "membership-service" service "find-or-create-b2b-org" endpoint HTTP response
+// body for the "ServiceUnavailable" error.
+type FindOrCreateB2bOrgServiceUnavailableResponseBody struct {
 	// Name is the name of this class of errors.
 	Name string `form:"name" json:"name" xml:"name"`
 	// ID is a unique identifier for this particular occurrence of the problem.
@@ -3112,6 +3264,70 @@ func NewCreateB2bOrgResponseBody(res *membershipservice.CreateB2bOrgResult) *Cre
 	return body
 }
 
+// NewFindOrCreateB2bOrgOKResponseBody builds the HTTP response body from the
+// result of the "find-or-create-b2b-org" endpoint of the "membership-service"
+// service.
+func NewFindOrCreateB2bOrgOKResponseBody(res *membershipservice.FindOrCreateB2bOrgResult) *FindOrCreateB2bOrgOKResponseBody {
+	body := &FindOrCreateB2bOrgOKResponseBody{
+		UID:               res.B2bOrg.UID,
+		Name:              res.B2bOrg.Name,
+		Description:       res.B2bOrg.Description,
+		Phone:             res.B2bOrg.Phone,
+		Website:           res.B2bOrg.Website,
+		PrimaryDomain:     res.B2bOrg.PrimaryDomain,
+		LogoURL:           res.B2bOrg.LogoURL,
+		Industry:          res.B2bOrg.Industry,
+		Sector:            res.B2bOrg.Sector,
+		CrunchBaseURL:     res.B2bOrg.CrunchBaseURL,
+		NumberOfEmployees: res.B2bOrg.NumberOfEmployees,
+		Status:            res.B2bOrg.Status,
+		IsMember:          res.B2bOrg.IsMember,
+		Slug:              res.B2bOrg.Slug,
+		ParentUID:         res.B2bOrg.ParentUID,
+		CreatedAt:         res.B2bOrg.CreatedAt,
+		UpdatedAt:         res.B2bOrg.UpdatedAt,
+	}
+	if res.B2bOrg.DomainAliases != nil {
+		body.DomainAliases = make([]string, len(res.B2bOrg.DomainAliases))
+		for i, val := range res.B2bOrg.DomainAliases {
+			body.DomainAliases[i] = val
+		}
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgCreatedResponseBody builds the HTTP response body from
+// the result of the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+func NewFindOrCreateB2bOrgCreatedResponseBody(res *membershipservice.FindOrCreateB2bOrgResult) *FindOrCreateB2bOrgCreatedResponseBody {
+	body := &FindOrCreateB2bOrgCreatedResponseBody{
+		UID:               res.B2bOrg.UID,
+		Name:              res.B2bOrg.Name,
+		Description:       res.B2bOrg.Description,
+		Phone:             res.B2bOrg.Phone,
+		Website:           res.B2bOrg.Website,
+		PrimaryDomain:     res.B2bOrg.PrimaryDomain,
+		LogoURL:           res.B2bOrg.LogoURL,
+		Industry:          res.B2bOrg.Industry,
+		Sector:            res.B2bOrg.Sector,
+		CrunchBaseURL:     res.B2bOrg.CrunchBaseURL,
+		NumberOfEmployees: res.B2bOrg.NumberOfEmployees,
+		Status:            res.B2bOrg.Status,
+		IsMember:          res.B2bOrg.IsMember,
+		Slug:              res.B2bOrg.Slug,
+		ParentUID:         res.B2bOrg.ParentUID,
+		CreatedAt:         res.B2bOrg.CreatedAt,
+		UpdatedAt:         res.B2bOrg.UpdatedAt,
+	}
+	if res.B2bOrg.DomainAliases != nil {
+		body.DomainAliases = make([]string, len(res.B2bOrg.DomainAliases))
+		for i, val := range res.B2bOrg.DomainAliases {
+			body.DomainAliases[i] = val
+		}
+	}
+	return body
+}
+
 // NewUpdateB2bOrgResponseBody builds the HTTP response body from the result of
 // the "update-b2b-org" endpoint of the "membership-service" service.
 func NewUpdateB2bOrgResponseBody(res *membershipservice.UpdateB2bOrgResult) *UpdateB2bOrgResponseBody {
@@ -3784,6 +4000,111 @@ func NewCreateB2bOrgInternalServerErrorResponseBody(res *goa.ServiceError) *Crea
 // service.
 func NewCreateB2bOrgServiceUnavailableResponseBody(res *goa.ServiceError) *CreateB2bOrgServiceUnavailableResponseBody {
 	body := &CreateB2bOrgServiceUnavailableResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgNotImplementedResponseBody builds the HTTP response
+// body from the result of the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+func NewFindOrCreateB2bOrgNotImplementedResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgNotImplementedResponseBody {
+	body := &FindOrCreateB2bOrgNotImplementedResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgNotFoundResponseBody builds the HTTP response body from
+// the result of the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+func NewFindOrCreateB2bOrgNotFoundResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgNotFoundResponseBody {
+	body := &FindOrCreateB2bOrgNotFoundResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgBadRequestResponseBody builds the HTTP response body
+// from the result of the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+func NewFindOrCreateB2bOrgBadRequestResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgBadRequestResponseBody {
+	body := &FindOrCreateB2bOrgBadRequestResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgConflictResponseBody builds the HTTP response body from
+// the result of the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+func NewFindOrCreateB2bOrgConflictResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgConflictResponseBody {
+	body := &FindOrCreateB2bOrgConflictResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgUnprocessableEntityResponseBody builds the HTTP
+// response body from the result of the "find-or-create-b2b-org" endpoint of
+// the "membership-service" service.
+func NewFindOrCreateB2bOrgUnprocessableEntityResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgUnprocessableEntityResponseBody {
+	body := &FindOrCreateB2bOrgUnprocessableEntityResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgInternalServerErrorResponseBody builds the HTTP
+// response body from the result of the "find-or-create-b2b-org" endpoint of
+// the "membership-service" service.
+func NewFindOrCreateB2bOrgInternalServerErrorResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgInternalServerErrorResponseBody {
+	body := &FindOrCreateB2bOrgInternalServerErrorResponseBody{
+		Name:      res.Name,
+		ID:        res.ID,
+		Message:   res.Message,
+		Temporary: res.Temporary,
+		Timeout:   res.Timeout,
+		Fault:     res.Fault,
+	}
+	return body
+}
+
+// NewFindOrCreateB2bOrgServiceUnavailableResponseBody builds the HTTP response
+// body from the result of the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+func NewFindOrCreateB2bOrgServiceUnavailableResponseBody(res *goa.ServiceError) *FindOrCreateB2bOrgServiceUnavailableResponseBody {
+	body := &FindOrCreateB2bOrgServiceUnavailableResponseBody{
 		Name:      res.Name,
 		ID:        res.ID,
 		Message:   res.Message,
@@ -5574,6 +5895,19 @@ func NewCreateB2bOrgPayload(body *CreateB2bOrgRequestBody, version *string, bear
 	return v
 }
 
+// NewFindOrCreateB2bOrgPayload builds a membership-service service
+// find-or-create-b2b-org endpoint payload.
+func NewFindOrCreateB2bOrgPayload(body *FindOrCreateB2bOrgRequestBody, version *string, bearerToken *string) *membershipservice.FindOrCreateB2bOrgPayload {
+	v := &membershipservice.FindOrCreateB2bOrgPayload{
+		Name:    *body.Name,
+		Website: *body.Website,
+	}
+	v.Version = version
+	v.BearerToken = bearerToken
+
+	return v
+}
+
 // NewUpdateB2bOrgPayload builds a membership-service service update-b2b-org
 // endpoint payload.
 func NewUpdateB2bOrgPayload(body *UpdateB2bOrgRequestBody, uid string, version *string, bearerToken *string, ifMatch *string) *membershipservice.UpdateB2bOrgPayload {
@@ -5943,6 +6277,38 @@ func ValidateCreateB2bOrgRequestBody(body *CreateB2bOrgRequestBody) (err error) 
 	if body.Sfid != nil {
 		if utf8.RuneCountInString(*body.Sfid) > 18 {
 			err = goa.MergeErrors(err, goa.InvalidLengthError("body.sfid", *body.Sfid, utf8.RuneCountInString(*body.Sfid), 18, false))
+		}
+	}
+	return
+}
+
+// ValidateFindOrCreateB2bOrgRequestBody runs the validations defined on
+// Find-Or-Create-B2b-OrgRequestBody
+func ValidateFindOrCreateB2bOrgRequestBody(body *FindOrCreateB2bOrgRequestBody) (err error) {
+	if body.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "body"))
+	}
+	if body.Website == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("website", "body"))
+	}
+	if body.Name != nil {
+		if utf8.RuneCountInString(*body.Name) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.name", *body.Name, utf8.RuneCountInString(*body.Name), 1, true))
+		}
+	}
+	if body.Name != nil {
+		if utf8.RuneCountInString(*body.Name) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.name", *body.Name, utf8.RuneCountInString(*body.Name), 255, false))
+		}
+	}
+	if body.Website != nil {
+		if utf8.RuneCountInString(*body.Website) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.website", *body.Website, utf8.RuneCountInString(*body.Website), 1, true))
+		}
+	}
+	if body.Website != nil {
+		if utf8.RuneCountInString(*body.Website) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.website", *body.Website, utf8.RuneCountInString(*body.Website), 255, false))
 		}
 	}
 	return

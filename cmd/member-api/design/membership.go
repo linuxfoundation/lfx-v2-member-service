@@ -118,6 +118,62 @@ var _ = dsl.Service("membership-service", func() {
 		})
 	})
 
+	dsl.Method("find-or-create-b2b-org", func() {
+		dsl.Description("Find the Salesforce Account by website domain or create it as a Company Account, then register it as a B2B organization")
+
+		dsl.Security(JWTAuth)
+
+		dsl.Payload(func() {
+			BearerTokenAttribute()
+			VersionAttribute()
+			dsl.Extend(B2BOrgFindOrCreateBody)
+		})
+
+		dsl.Result(func() {
+			dsl.Attribute("b2b_org", B2BOrgResponse, "The matched or created B2B organization")
+			dsl.Attribute("action", dsl.String, "Whether the Account was matched or created", func() {
+				dsl.Enum("matched", "created")
+			})
+			ETagAttribute()
+			LastModifiedAttribute()
+			dsl.Required("b2b_org", "action")
+		})
+
+		dsl.Error("NotImplemented", dsl.ErrorResult, "Endpoint not implemented")
+		dsl.Error("NotFound", dsl.ErrorResult, "Resource not found")
+		dsl.Error("BadRequest", dsl.ErrorResult, "Bad request")
+		dsl.Error("Conflict", dsl.ErrorResult, "More than one Account has the website domain; nothing was created")
+		dsl.Error("UnprocessableEntity", dsl.ErrorResult, "Account is not eligible as a B2B organization")
+		dsl.Error("InternalServerError", dsl.ErrorResult, "Internal server error", func() { dsl.Fault() })
+		dsl.Error("ServiceUnavailable", dsl.ErrorResult, "Find-or-create is disabled or the Apex endpoint is not configured", func() { dsl.Temporary() })
+
+		dsl.HTTP(func() {
+			dsl.POST("/b2b_orgs/find-or-create")
+			dsl.Header("bearer_token:Authorization")
+			dsl.Param("version:v")
+			dsl.Response(dsl.StatusOK, func() {
+				dsl.Tag("action", "matched")
+				dsl.Header("action:X-Account-Action")
+				dsl.Header("etag:ETag")
+				dsl.Header("last_modified:Last-Modified")
+				dsl.Body("b2b_org")
+			})
+			dsl.Response(dsl.StatusCreated, func() {
+				dsl.Header("action:X-Account-Action")
+				dsl.Header("etag:ETag")
+				dsl.Header("last_modified:Last-Modified")
+				dsl.Body("b2b_org")
+			})
+			dsl.Response("NotImplemented", dsl.StatusNotImplemented)
+			dsl.Response("NotFound", dsl.StatusNotFound)
+			dsl.Response("BadRequest", dsl.StatusBadRequest)
+			dsl.Response("Conflict", dsl.StatusConflict)
+			dsl.Response("UnprocessableEntity", dsl.StatusUnprocessableEntity)
+			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
+			dsl.Response("ServiceUnavailable", dsl.StatusServiceUnavailable)
+		})
+	})
+
 	dsl.Method("update-b2b-org", func() {
 		dsl.Description("Update a B2B organization")
 

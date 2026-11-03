@@ -23,6 +23,9 @@ type Service interface {
 	GetB2bOrg(context.Context, *GetB2bOrgPayload) (res *GetB2bOrgResult, err error)
 	// Create a new B2B organization
 	CreateB2bOrg(context.Context, *CreateB2bOrgPayload) (res *CreateB2bOrgResult, err error)
+	// Find the Salesforce Account by website domain or create it as a Company
+	// Account, then register it as a B2B organization
+	FindOrCreateB2bOrg(context.Context, *FindOrCreateB2bOrgPayload) (res *FindOrCreateB2bOrgResult, err error)
 	// Update a B2B organization
 	UpdateB2bOrg(context.Context, *UpdateB2bOrgPayload) (res *UpdateB2bOrgResult, err error)
 	// Upload a B2B organization logo (PNG/JPEG/SVG, max 2MB) to object storage and
@@ -122,7 +125,7 @@ const ServiceName = "membership-service"
 // MethodNames lists the service method names as defined in the design. These
 // are the same values that are set in the endpoint request contexts under the
 // MethodKey key.
-var MethodNames = [25]string{"get-b2b-org", "create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-member-tiers", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
+var MethodNames = [26]string{"get-b2b-org", "create-b2b-org", "find-or-create-b2b-org", "update-b2b-org", "upload-b2b-org-logo", "get-b2b-org-settings", "update-b2b-org-settings", "add-b2b-org-settings-user", "update-b2b-org-settings-user-role", "delete-b2b-org-settings-user", "get-project-membership", "get-member-tiers", "get-key-contact", "create-key-contact", "update-key-contact", "delete-key-contact", "admin-reindex", "readyz", "livez", "debug-vars", "create-b2b-org-workspace", "update-b2b-org-workspace", "delete-b2b-org-workspace", "add-b2b-org-workspace-project", "bulk-add-b2b-org-workspace-projects", "remove-b2b-org-workspace-project"}
 
 // AddB2bOrgSettingsUserPayload is the payload type of the membership-service
 // service add-b2b-org-settings-user method.
@@ -462,6 +465,33 @@ type DeleteKeyContactPayload struct {
 	UID string
 	// If-Match header value for conditional requests
 	IfMatch *string
+}
+
+// FindOrCreateB2bOrgPayload is the payload type of the membership-service
+// service find-or-create-b2b-org method.
+type FindOrCreateB2bOrgPayload struct {
+	// JWT token issued by Heimdall
+	BearerToken *string
+	// Version of the API
+	Version *string
+	// Organization name, used when the Account is created
+	Name string
+	// Organization website; its domain (scheme, www. and path stripped) is the
+	// match key
+	Website string
+}
+
+// FindOrCreateB2bOrgResult is the result type of the membership-service
+// service find-or-create-b2b-org method.
+type FindOrCreateB2bOrgResult struct {
+	// The matched or created B2B organization
+	B2bOrg *B2bOrgResponse
+	// Whether the Account was matched or created
+	Action string
+	// ETag header value
+	Etag *string
+	// Last-Modified header value (HTTP date format)
+	LastModified *string
 }
 
 // GetB2bOrgPayload is the payload type of the membership-service service

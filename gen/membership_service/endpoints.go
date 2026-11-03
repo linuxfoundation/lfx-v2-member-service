@@ -20,6 +20,7 @@ import (
 type Endpoints struct {
 	GetB2bOrg                      goa.Endpoint
 	CreateB2bOrg                   goa.Endpoint
+	FindOrCreateB2bOrg             goa.Endpoint
 	UpdateB2bOrg                   goa.Endpoint
 	UploadB2bOrgLogo               goa.Endpoint
 	GetB2bOrgSettings              goa.Endpoint
@@ -62,6 +63,7 @@ func NewEndpoints(s Service) *Endpoints {
 	return &Endpoints{
 		GetB2bOrg:                      NewGetB2bOrgEndpoint(s, a.JWTAuth),
 		CreateB2bOrg:                   NewCreateB2bOrgEndpoint(s, a.JWTAuth),
+		FindOrCreateB2bOrg:             NewFindOrCreateB2bOrgEndpoint(s, a.JWTAuth),
 		UpdateB2bOrg:                   NewUpdateB2bOrgEndpoint(s, a.JWTAuth),
 		UploadB2bOrgLogo:               NewUploadB2bOrgLogoEndpoint(s, a.JWTAuth),
 		GetB2bOrgSettings:              NewGetB2bOrgSettingsEndpoint(s, a.JWTAuth),
@@ -93,6 +95,7 @@ func NewEndpoints(s Service) *Endpoints {
 func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 	e.GetB2bOrg = m(e.GetB2bOrg)
 	e.CreateB2bOrg = m(e.CreateB2bOrg)
+	e.FindOrCreateB2bOrg = m(e.FindOrCreateB2bOrg)
 	e.UpdateB2bOrg = m(e.UpdateB2bOrg)
 	e.UploadB2bOrgLogo = m(e.UploadB2bOrgLogo)
 	e.GetB2bOrgSettings = m(e.GetB2bOrgSettings)
@@ -161,6 +164,29 @@ func NewCreateB2bOrgEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endp
 			return nil, err
 		}
 		return s.CreateB2bOrg(ctx, p)
+	}
+}
+
+// NewFindOrCreateB2bOrgEndpoint returns an endpoint function that calls the
+// method "find-or-create-b2b-org" of service "membership-service".
+func NewFindOrCreateB2bOrgEndpoint(s Service, authJWTFn security.AuthJWTFunc) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		p := req.(*FindOrCreateB2bOrgPayload)
+		var err error
+		sc := security.JWTScheme{
+			Name:           "jwt",
+			Scopes:         []string{},
+			RequiredScopes: []string{},
+		}
+		var token string
+		if p.BearerToken != nil {
+			token = *p.BearerToken
+		}
+		ctx, err = authJWTFn(ctx, token, &sc)
+		if err != nil {
+			return nil, err
+		}
+		return s.FindOrCreateB2bOrg(ctx, p)
 	}
 }
 

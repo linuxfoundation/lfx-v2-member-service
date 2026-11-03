@@ -427,6 +427,262 @@ func DecodeCreateB2bOrgResponse(decoder func(*http.Response) goahttp.Decoder, re
 	}
 }
 
+// BuildFindOrCreateB2bOrgRequest instantiates a HTTP request object with
+// method and path set to call the "membership-service" service
+// "find-or-create-b2b-org" endpoint
+func (c *Client) BuildFindOrCreateB2bOrgRequest(ctx context.Context, v any) (*http.Request, error) {
+	u := &url.URL{Scheme: c.scheme, Host: c.host, Path: FindOrCreateB2bOrgMembershipServicePath()}
+	req, err := http.NewRequest("POST", u.String(), nil)
+	if err != nil {
+		return nil, goahttp.ErrInvalidURL("membership-service", "find-or-create-b2b-org", u.String(), err)
+	}
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
+
+	return req, nil
+}
+
+// EncodeFindOrCreateB2bOrgRequest returns an encoder for requests sent to the
+// membership-service find-or-create-b2b-org server.
+func EncodeFindOrCreateB2bOrgRequest(encoder func(*http.Request) goahttp.Encoder) func(*http.Request, any) error {
+	return func(req *http.Request, v any) error {
+		p, ok := v.(*membershipservice.FindOrCreateB2bOrgPayload)
+		if !ok {
+			return goahttp.ErrInvalidType("membership-service", "find-or-create-b2b-org", "*membershipservice.FindOrCreateB2bOrgPayload", v)
+		}
+		if p.BearerToken != nil {
+			head := *p.BearerToken
+			if !strings.Contains(head, " ") {
+				req.Header.Set("Authorization", "Bearer "+head)
+			} else {
+				req.Header.Set("Authorization", head)
+			}
+		}
+		values := req.URL.Query()
+		if p.Version != nil {
+			values.Add("v", *p.Version)
+		}
+		req.URL.RawQuery = values.Encode()
+		body := NewFindOrCreateB2bOrgRequestBody(p)
+		if err := encoder(req).Encode(&body); err != nil {
+			return goahttp.ErrEncodingError("membership-service", "find-or-create-b2b-org", err)
+		}
+		return nil
+	}
+}
+
+// DecodeFindOrCreateB2bOrgResponse returns a decoder for responses returned by
+// the membership-service find-or-create-b2b-org endpoint. restoreBody controls
+// whether the response body should be restored after having been read.
+// DecodeFindOrCreateB2bOrgResponse may return the following errors:
+//   - "NotImplemented" (type *goa.ServiceError): http.StatusNotImplemented
+//   - "NotFound" (type *goa.ServiceError): http.StatusNotFound
+//   - "BadRequest" (type *goa.ServiceError): http.StatusBadRequest
+//   - "Conflict" (type *goa.ServiceError): http.StatusConflict
+//   - "UnprocessableEntity" (type *goa.ServiceError): http.StatusUnprocessableEntity
+//   - "InternalServerError" (type *goa.ServiceError): http.StatusInternalServerError
+//   - "ServiceUnavailable" (type *goa.ServiceError): http.StatusServiceUnavailable
+//   - error: internal error
+func DecodeFindOrCreateB2bOrgResponse(decoder func(*http.Response) goahttp.Decoder, restoreBody bool) func(*http.Response) (any, error) {
+	return func(resp *http.Response) (any, error) {
+		if restoreBody {
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			defer func() {
+				resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			}()
+		} else {
+			defer resp.Body.Close()
+		}
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var (
+				body FindOrCreateB2bOrgOKResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgOKResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			var (
+				action       string
+				etag         *string
+				lastModified *string
+			)
+			actionRaw := resp.Header.Get("X-Account-Action")
+			if actionRaw == "" {
+				err = goa.MergeErrors(err, goa.MissingFieldError("action", "header"))
+			}
+			action = actionRaw
+			if !(action == "matched" || action == "created") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("action", action, []any{"matched", "created"}))
+			}
+			etagRaw := resp.Header.Get("Etag")
+			if etagRaw != "" {
+				etag = &etagRaw
+			}
+			lastModifiedRaw := resp.Header.Get("Last-Modified")
+			if lastModifiedRaw != "" {
+				lastModified = &lastModifiedRaw
+			}
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			res := NewFindOrCreateB2bOrgResultOK(&body, action, etag, lastModified)
+			res.Action = "matched"
+			return res, nil
+		case http.StatusCreated:
+			var (
+				body FindOrCreateB2bOrgCreatedResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgCreatedResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			var (
+				action       string
+				etag         *string
+				lastModified *string
+			)
+			actionRaw := resp.Header.Get("X-Account-Action")
+			if actionRaw == "" {
+				err = goa.MergeErrors(err, goa.MissingFieldError("action", "header"))
+			}
+			action = actionRaw
+			if !(action == "matched" || action == "created") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("action", action, []any{"matched", "created"}))
+			}
+			etagRaw := resp.Header.Get("Etag")
+			if etagRaw != "" {
+				etag = &etagRaw
+			}
+			lastModifiedRaw := resp.Header.Get("Last-Modified")
+			if lastModifiedRaw != "" {
+				lastModified = &lastModifiedRaw
+			}
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			res := NewFindOrCreateB2bOrgResultCreated(&body, action, etag, lastModified)
+			return res, nil
+		case http.StatusNotImplemented:
+			var (
+				body FindOrCreateB2bOrgNotImplementedResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgNotImplementedResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgNotImplemented(&body)
+		case http.StatusNotFound:
+			var (
+				body FindOrCreateB2bOrgNotFoundResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgNotFoundResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgNotFound(&body)
+		case http.StatusBadRequest:
+			var (
+				body FindOrCreateB2bOrgBadRequestResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgBadRequestResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgBadRequest(&body)
+		case http.StatusConflict:
+			var (
+				body FindOrCreateB2bOrgConflictResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgConflictResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgConflict(&body)
+		case http.StatusUnprocessableEntity:
+			var (
+				body FindOrCreateB2bOrgUnprocessableEntityResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgUnprocessableEntityResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgUnprocessableEntity(&body)
+		case http.StatusInternalServerError:
+			var (
+				body FindOrCreateB2bOrgInternalServerErrorResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgInternalServerErrorResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgInternalServerError(&body)
+		case http.StatusServiceUnavailable:
+			var (
+				body FindOrCreateB2bOrgServiceUnavailableResponseBody
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("membership-service", "find-or-create-b2b-org", err)
+			}
+			err = ValidateFindOrCreateB2bOrgServiceUnavailableResponseBody(&body)
+			if err != nil {
+				return nil, goahttp.ErrValidationError("membership-service", "find-or-create-b2b-org", err)
+			}
+			return nil, NewFindOrCreateB2bOrgServiceUnavailable(&body)
+		default:
+			body, _ := io.ReadAll(resp.Body)
+			return nil, goahttp.ErrInvalidResponse("membership-service", "find-or-create-b2b-org", resp.StatusCode, string(body))
+		}
+	}
+}
+
 // BuildUpdateB2bOrgRequest instantiates a HTTP request object with method and
 // path set to call the "membership-service" service "update-b2b-org" endpoint
 func (c *Client) BuildUpdateB2bOrgRequest(ctx context.Context, v any) (*http.Request, error) {

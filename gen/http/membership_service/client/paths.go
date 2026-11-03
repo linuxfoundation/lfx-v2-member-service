@@ -22,6 +22,11 @@ func CreateB2bOrgMembershipServicePath() string {
 	return "/b2b_orgs"
 }
 
+// FindOrCreateB2bOrgMembershipServicePath returns the URL path to the membership-service service find-or-create-b2b-org HTTP endpoint.
+func FindOrCreateB2bOrgMembershipServicePath() string {
+	return "/b2b_orgs/find-or-create"
+}
+
 // UpdateB2bOrgMembershipServicePath returns the URL path to the membership-service service update-b2b-org HTTP endpoint.
 func UpdateB2bOrgMembershipServicePath(uid string) string {
 	return fmt.Sprintf("/b2b_orgs/%v", uid)

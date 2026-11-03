@@ -26,6 +26,10 @@ type Client struct {
 	// create-b2b-org endpoint.
 	CreateB2bOrgDoer goahttp.Doer
 
+	// FindOrCreateB2bOrg Doer is the HTTP client used to make requests to the
+	// find-or-create-b2b-org endpoint.
+	FindOrCreateB2bOrgDoer goahttp.Doer
+
 	// UpdateB2bOrg Doer is the HTTP client used to make requests to the
 	// update-b2b-org endpoint.
 	UpdateB2bOrgDoer goahttp.Doer
@@ -139,6 +143,7 @@ func NewClient(
 	return &Client{
 		GetB2bOrgDoer:                      doer,
 		CreateB2bOrgDoer:                   doer,
+		FindOrCreateB2bOrgDoer:             doer,
 		UpdateB2bOrgDoer:                   doer,
 		UploadB2bOrgLogoDoer:               doer,
 		GetB2bOrgSettingsDoer:              doer,
@@ -213,6 +218,30 @@ func (c *Client) CreateB2bOrg() goa.Endpoint {
 		resp, err := c.CreateB2bOrgDoer.Do(req)
 		if err != nil {
 			return nil, goahttp.ErrRequestError("membership-service", "create-b2b-org", err)
+		}
+		return decodeResponse(resp)
+	}
+}
+
+// FindOrCreateB2bOrg returns an endpoint that makes HTTP requests to the
+// membership-service service find-or-create-b2b-org server.
+func (c *Client) FindOrCreateB2bOrg() goa.Endpoint {
+	var (
+		encodeRequest  = EncodeFindOrCreateB2bOrgRequest(c.encoder)
+		decodeResponse = DecodeFindOrCreateB2bOrgResponse(c.decoder, c.RestoreResponseBody)
+	)
+	return func(ctx context.Context, v any) (any, error) {
+		req, err := c.BuildFindOrCreateB2bOrgRequest(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		err = encodeRequest(req, v)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.FindOrCreateB2bOrgDoer.Do(req)
+		if err != nil {
+			return nil, goahttp.ErrRequestError("membership-service", "find-or-create-b2b-org", err)
 		}
 		return decodeResponse(resp)
 	}
