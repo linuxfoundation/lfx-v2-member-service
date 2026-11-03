@@ -102,12 +102,16 @@ func TestCDCConsumer_Account_ColdCacheMoveToNoParent_ClearsOwnParent(t *testing.
 	assert.Equal(t, 1, parentClearsFor(t, pub, org))
 }
 
-// TestCDCConsumer_Account_WarmCacheMove_NoDuplicateOldParentMessage: the
-// previous-record diff already rebuilds the old parent, so the access-model
-// read must not send it a second time.
-func TestCDCConsumer_Account_WarmCacheMove_NoDuplicateOldParentMessage(t *testing.T) {
-	org, oldParent, newParent := sfid("warm-org"), sfid("warm-old"), sfid("warm-new")
-	reader := &fakeB2BOrgReader{org: &model.B2BOrg{UID: org, ParentUID: oldParent}}
+// TestCDCConsumer_Account_WarmCacheMove_OldParentReadFails_StillWithdrawn: the
+// previous-record diff skips the old parent when its child read fails and
+// queues nothing, so the access-model read must still rebuild it.
+func TestCDCConsumer_Account_WarmCacheMove_OldParentReadFails_StillWithdrawn(t *testing.T) {
+	org, oldParent, newParent, sibling := sfid("warm-org"), sfid("warm-old"), sfid("warm-new"), sfid("warm-sib")
+	reader := &fakeB2BOrgReader{
+		org:      &model.B2BOrg{UID: org, ParentUID: oldParent},
+		childErr: errors.New("soql timeout"),
+		childMap: map[string][]string{oldParent: {sibling}, newParent: {org}},
+	}
 	links := mock.NewMockB2BOrgChildLinkReader()
 	links.SetParents(org, oldParent)
 	pub := &subjectCapturingPublisher{}
@@ -115,7 +119,7 @@ func TestCDCConsumer_Account_WarmCacheMove_NoDuplicateOldParentMessage(t *testin
 	runAccountEvent(t, model.CDCChangeUpdate, []string{org}, reader,
 		map[string]*model.B2BOrg{org: {UID: org, ParentUID: newParent}}, pub, svc.WithCDCChildLinkReader(links))
 
-	assert.Len(t, childListsFor(t, pub, oldParent), 1)
+	assert.Equal(t, [][]string{{"b2b_org:" + sibling}}, childListsFor(t, pub, oldParent))
 }
 
 // TestCDCConsumer_Account_NotAMove_SendsTodaysMessages: an org listed only

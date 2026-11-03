@@ -984,7 +984,7 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	staleParents := parentsToRefresh(upsertIDs, orgs, oldOrgs)
 	var staleLinks map[string][]string
 	if !ownerRecheck {
-		staleLinks = o.staleChildLinks(ctx, orgs, oldOrgs)
+		staleLinks = o.staleChildLinks(ctx, orgs)
 	}
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
@@ -1080,13 +1080,14 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 }
 
 // staleChildLinks asks the access model which orgs list each org as a child
-// and returns, per org, those that are neither its current parent nor the
-// previous parent publishB2BOrgUpsertEvents already rebuilds. A missing cached
+// and returns, per org, those other than its current parent. A missing cached
 // copy hides a move from the previous-record diff, so this read is what finds
-// the old parent then. Reads stop at the first failure so an fga-sync outage
-// costs one timeout per batch, and the unchecked orgs are queued for the
-// repair run, which repeats the check.
-func (o *CDCConsumer) staleChildLinks(ctx context.Context, orgs []*model.B2BOrg, oldOrgs map[string]*model.B2BOrg) map[string][]string {
+// the old parent then. The previous parent is kept even though
+// publishB2BOrgUpsertEvents rebuilds it too: that rebuild swallows read and
+// publish failures, and this one queues them. Reads stop at the first failure
+// so an fga-sync outage costs one timeout per batch, and the unchecked orgs
+// are queued for the repair run, which repeats the check.
+func (o *CDCConsumer) staleChildLinks(ctx context.Context, orgs []*model.B2BOrg) map[string][]string {
 	if o.childLinks == nil {
 		return nil
 	}
@@ -1108,12 +1109,8 @@ func (o *CDCConsumer) staleChildLinks(ctx context.Context, orgs []*model.B2BOrg,
 			o.queueForRepairDetached(ctx, "Account", unchecked)
 			return stale
 		}
-		previous := ""
-		if old := oldOrgs[org.UID]; old != nil {
-			previous = old.ParentUID
-		}
 		for _, parentUID := range parents {
-			if parentUID != org.ParentUID && parentUID != previous {
+			if parentUID != org.ParentUID {
 				stale[org.UID] = append(stale[org.UID], parentUID)
 			}
 		}
