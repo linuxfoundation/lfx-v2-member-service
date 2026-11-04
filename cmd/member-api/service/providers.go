@@ -828,6 +828,7 @@ func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
 	return usecaseSvc.NewB2BOrgWriter(
 		usecaseSvc.WithB2BOrgReader(B2BOrgReaderImpl(ctx)),
 		usecaseSvc.WithB2BOrgWriter(B2BOrgWriterImpl(ctx)),
+		usecaseSvc.WithAccountFindOrCreator(AccountFindOrCreatorImpl(ctx)),
 		usecaseSvc.WithB2BOrgPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),

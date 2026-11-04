@@ -104,6 +104,16 @@ app:
   # published non-member leaves the index (grants kept) on its next change or
   # targeted reindex, and a full reindex leaves it; remove the rest manually.
   includeCompanyAllAccounts: false
+  # findOrCreateB2BOrgEnabled turns on POST /b2b_orgs/find-or-create
+  # (lfx-self-serve#4998): the Account is matched by website domain or created
+  # as a Company Account through the Apex endpoint at apexAccountPath, then
+  # registered like POST /b2b_orgs. A created Account has no membership, so the
+  # route also needs includeCompanyAllAccounts. While off, or while
+  # apexAccountPath is empty, the route answers 503.
+  findOrCreateB2BOrgEnabled: false
+  # apexAccountPath is the Salesforce Apex REST path of the account
+  # find-or-create endpoint (lfx-self-serve#4997), e.g. /services/apexrest/lfx/account.
+  apexAccountPath: ""
   # adminReindexQuotaThreshold is the Salesforce API usage ratio (0,1] at or
   # above which POST /admin/reindex {cdc_repair:true} refuses to start a drain
   # (ServiceUnavailable). Leave empty to use the in-code default (0.80).

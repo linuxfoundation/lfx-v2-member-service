@@ -63,6 +63,10 @@ spec:
               value: {{ .Values.app.lfxSelfServeBaseURL | quote }}
             - name: B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS
               value: {{ .Values.app.includeCompanyAllAccounts | quote }}
+            - name: B2B_ORG_FIND_OR_CREATE_ENABLED
+              value: {{ .Values.app.findOrCreateB2BOrgEnabled | quote }}
+            - name: SF_APEX_ACCOUNT_PATH
+              value: {{ .Values.app.apexAccountPath | trim | quote }}
             {{- $adminReindexQuotaThreshold := .Values.app.adminReindexQuotaThreshold | toString | trim }}
             {{- if ne $adminReindexQuotaThreshold "" }}
             - name: ADMIN_REINDEX_QUOTA_THRESHOLD

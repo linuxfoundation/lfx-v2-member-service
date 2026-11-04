@@ -19,6 +19,7 @@ import (
 type Client struct {
 	GetB2bOrgEndpoint                      goa.Endpoint
 	CreateB2bOrgEndpoint                   goa.Endpoint
+	FindOrCreateB2bOrgEndpoint             goa.Endpoint
 	UpdateB2bOrgEndpoint                   goa.Endpoint
 	UploadB2bOrgLogoEndpoint               goa.Endpoint
 	GetB2bOrgSettingsEndpoint              goa.Endpoint
@@ -46,10 +47,11 @@ type Client struct {
 
 // NewClient initializes a "membership-service" service client given the
 // endpoints.
-func NewClient(getB2bOrg, createB2bOrg, updateB2bOrg, uploadB2bOrgLogo, getB2bOrgSettings, updateB2bOrgSettings, addB2bOrgSettingsUser, updateB2bOrgSettingsUserRole, deleteB2bOrgSettingsUser, getProjectMembership, getMemberTiers, getKeyContact, createKeyContact, updateKeyContact, deleteKeyContact, adminReindex, readyz, livez, debugVars, createB2bOrgWorkspace, updateB2bOrgWorkspace, deleteB2bOrgWorkspace, addB2bOrgWorkspaceProject, bulkAddB2bOrgWorkspaceProjects, removeB2bOrgWorkspaceProject goa.Endpoint) *Client {
+func NewClient(getB2bOrg, createB2bOrg, findOrCreateB2bOrg, updateB2bOrg, uploadB2bOrgLogo, getB2bOrgSettings, updateB2bOrgSettings, addB2bOrgSettingsUser, updateB2bOrgSettingsUserRole, deleteB2bOrgSettingsUser, getProjectMembership, getMemberTiers, getKeyContact, createKeyContact, updateKeyContact, deleteKeyContact, adminReindex, readyz, livez, debugVars, createB2bOrgWorkspace, updateB2bOrgWorkspace, deleteB2bOrgWorkspace, addB2bOrgWorkspaceProject, bulkAddB2bOrgWorkspaceProjects, removeB2bOrgWorkspaceProject goa.Endpoint) *Client {
 	return &Client{
 		GetB2bOrgEndpoint:                      getB2bOrg,
 		CreateB2bOrgEndpoint:                   createB2bOrg,
+		FindOrCreateB2bOrgEndpoint:             findOrCreateB2bOrg,
 		UpdateB2bOrgEndpoint:                   updateB2bOrg,
 		UploadB2bOrgLogoEndpoint:               uploadB2bOrgLogo,
 		GetB2bOrgSettingsEndpoint:              getB2bOrgSettings,
@@ -113,6 +115,26 @@ func (c *Client) CreateB2bOrg(ctx context.Context, p *CreateB2bOrgPayload) (res 
 		return
 	}
 	return ires.(*CreateB2bOrgResult), nil
+}
+
+// FindOrCreateB2bOrg calls the "find-or-create-b2b-org" endpoint of the
+// "membership-service" service.
+// FindOrCreateB2bOrg may return the following errors:
+//   - "NotImplemented" (type *goa.ServiceError): Endpoint not implemented
+//   - "NotFound" (type *goa.ServiceError): Resource not found
+//   - "BadRequest" (type *goa.ServiceError): Bad request
+//   - "Conflict" (type *goa.ServiceError): More than one Account has the website domain; nothing was created
+//   - "UnprocessableEntity" (type *goa.ServiceError): Account is not eligible as a B2B organization
+//   - "InternalServerError" (type *goa.ServiceError): Internal server error
+//   - "ServiceUnavailable" (type *goa.ServiceError): Find-or-create is disabled or the Apex endpoint is not configured
+//   - error: internal error
+func (c *Client) FindOrCreateB2bOrg(ctx context.Context, p *FindOrCreateB2bOrgPayload) (res *FindOrCreateB2bOrgResult, err error) {
+	var ires any
+	ires, err = c.FindOrCreateB2bOrgEndpoint(ctx, p)
+	if err != nil {
+		return
+	}
+	return ires.(*FindOrCreateB2bOrgResult), nil
 }
 
 // UpdateB2bOrg calls the "update-b2b-org" endpoint of the "membership-service"

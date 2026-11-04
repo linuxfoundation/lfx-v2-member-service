@@ -23,6 +23,7 @@ type Server struct {
 	Mounts                         []*MountPoint
 	GetB2bOrg                      http.Handler
 	CreateB2bOrg                   http.Handler
+	FindOrCreateB2bOrg             http.Handler
 	UpdateB2bOrg                   http.Handler
 	UploadB2bOrgLogo               http.Handler
 	GetB2bOrgSettings              http.Handler
@@ -101,6 +102,7 @@ func New(
 		Mounts: []*MountPoint{
 			{"GetB2bOrg", "GET", "/b2b_orgs/{uid}"},
 			{"CreateB2bOrg", "POST", "/b2b_orgs"},
+			{"FindOrCreateB2bOrg", "POST", "/b2b_orgs/find-or-create"},
 			{"UpdateB2bOrg", "PUT", "/b2b_orgs/{uid}"},
 			{"UploadB2bOrgLogo", "POST", "/b2b_orgs/{uid}/logo"},
 			{"GetB2bOrgSettings", "GET", "/b2b_orgs/{uid}/settings"},
@@ -131,6 +133,7 @@ func New(
 		},
 		GetB2bOrg:                      NewGetB2bOrgHandler(e.GetB2bOrg, mux, decoder, encoder, errhandler, formatter),
 		CreateB2bOrg:                   NewCreateB2bOrgHandler(e.CreateB2bOrg, mux, decoder, encoder, errhandler, formatter),
+		FindOrCreateB2bOrg:             NewFindOrCreateB2bOrgHandler(e.FindOrCreateB2bOrg, mux, decoder, encoder, errhandler, formatter),
 		UpdateB2bOrg:                   NewUpdateB2bOrgHandler(e.UpdateB2bOrg, mux, decoder, encoder, errhandler, formatter),
 		UploadB2bOrgLogo:               NewUploadB2bOrgLogoHandler(e.UploadB2bOrgLogo, mux, decoder, encoder, errhandler, formatter),
 		GetB2bOrgSettings:              NewGetB2bOrgSettingsHandler(e.GetB2bOrgSettings, mux, decoder, encoder, errhandler, formatter),
@@ -168,6 +171,7 @@ func (s *Server) Service() string { return "membership-service" }
 func (s *Server) Use(m func(http.Handler) http.Handler) {
 	s.GetB2bOrg = m(s.GetB2bOrg)
 	s.CreateB2bOrg = m(s.CreateB2bOrg)
+	s.FindOrCreateB2bOrg = m(s.FindOrCreateB2bOrg)
 	s.UpdateB2bOrg = m(s.UpdateB2bOrg)
 	s.UploadB2bOrgLogo = m(s.UploadB2bOrgLogo)
 	s.GetB2bOrgSettings = m(s.GetB2bOrgSettings)
@@ -200,6 +204,7 @@ func (s *Server) MethodNames() []string { return membershipservice.MethodNames[:
 func Mount(mux goahttp.Muxer, h *Server) {
 	MountGetB2bOrgHandler(mux, h.GetB2bOrg)
 	MountCreateB2bOrgHandler(mux, h.CreateB2bOrg)
+	MountFindOrCreateB2bOrgHandler(mux, h.FindOrCreateB2bOrg)
 	MountUpdateB2bOrgHandler(mux, h.UpdateB2bOrg)
 	MountUploadB2bOrgLogoHandler(mux, h.UploadB2bOrgLogo)
 	MountGetB2bOrgSettingsHandler(mux, h.GetB2bOrgSettings)
@@ -317,6 +322,60 @@ func NewCreateB2bOrgHandler(
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), goahttp.AcceptTypeKey, r.Header.Get("Accept"))
 		ctx = context.WithValue(ctx, goa.MethodKey, "create-b2b-org")
+		ctx = context.WithValue(ctx, goa.ServiceKey, "membership-service")
+		payload, err := decodeRequest(r)
+		if err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+		res, err := endpoint(ctx, payload)
+		if err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+		if err := encodeResponse(ctx, w, res); err != nil {
+			if errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+		}
+	})
+}
+
+// MountFindOrCreateB2bOrgHandler configures the mux to serve the
+// "membership-service" service "find-or-create-b2b-org" endpoint.
+func MountFindOrCreateB2bOrgHandler(mux goahttp.Muxer, h http.Handler) {
+	f, ok := h.(http.HandlerFunc)
+	if !ok {
+		f = func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r)
+		}
+	}
+	mux.Handle("POST", "/b2b_orgs/find-or-create", f)
+}
+
+// NewFindOrCreateB2bOrgHandler creates a HTTP handler which loads the HTTP
+// request and calls the "membership-service" service "find-or-create-b2b-org"
+// endpoint.
+func NewFindOrCreateB2bOrgHandler(
+	endpoint goa.Endpoint,
+	mux goahttp.Muxer,
+	decoder func(*http.Request) goahttp.Decoder,
+	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
+	errhandler func(context.Context, http.ResponseWriter, error),
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
+) http.Handler {
+	var (
+		decodeRequest  = DecodeFindOrCreateB2bOrgRequest(mux, decoder)
+		encodeResponse = EncodeFindOrCreateB2bOrgResponse(encoder)
+		encodeError    = EncodeFindOrCreateB2bOrgError(encoder, formatter)
+	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), goahttp.AcceptTypeKey, r.Header.Get("Accept"))
+		ctx = context.WithValue(ctx, goa.MethodKey, "find-or-create-b2b-org")
 		ctx = context.WithValue(ctx, goa.ServiceKey, "membership-service")
 		payload, err := decodeRequest(r)
 		if err != nil {

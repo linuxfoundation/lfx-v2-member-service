@@ -20,6 +20,10 @@ import (
 // B2BOrgWriter orchestrates Create/Update for b2b_org records.
 type B2BOrgWriter interface {
 	Create(ctx context.Context, sfid string) (*model.B2BOrg, error)
+	// FindOrCreate finds the Salesforce Account by website domain or creates
+	// it through the Apex endpoint, then registers it exactly like Create;
+	// ServiceUnavailable when no AccountFindOrCreator is configured.
+	FindOrCreate(ctx context.Context, name, website string) (*model.B2BOrg, model.AccountAction, error)
 	Update(ctx context.Context, uid string, input model.B2BOrgInput, ifMatch string) (*model.B2BOrg, error)
 	// UpdateWithoutPublish persists a transient internal state without exposing
 	// it to the indexer or FGA consumers.
@@ -39,6 +43,7 @@ type B2BOrgWriter interface {
 type b2bOrgWriterOrchestrator struct {
 	b2bOrgReader           port.B2BOrgReader
 	b2bOrgWriter           port.B2BOrgWriter
+	accountFinder          port.AccountFindOrCreator
 	memberPublisher        port.MemberPublisher
 	globalOrgAdminTeamName string
 	auditorTeams           []string
@@ -53,6 +58,11 @@ func WithB2BOrgReader(r port.B2BOrgReader) B2BOrgWriterOption {
 
 func WithB2BOrgWriter(w port.B2BOrgWriter) B2BOrgWriterOption {
 	return func(o *b2bOrgWriterOrchestrator) { o.b2bOrgWriter = w }
+}
+
+// WithAccountFindOrCreator enables FindOrCreate; nil leaves it unavailable.
+func WithAccountFindOrCreator(f port.AccountFindOrCreator) B2BOrgWriterOption {
+	return func(o *b2bOrgWriterOrchestrator) { o.accountFinder = f }
 }
 
 func WithB2BOrgPublisher(p port.MemberPublisher) B2BOrgWriterOption {
@@ -88,6 +98,23 @@ func (o *b2bOrgWriterOrchestrator) Create(ctx context.Context, sfid string) (*mo
 	}
 	o.publishEvents(ctx, nil, org, indexerConstants.ActionCreated)
 	return org, nil
+}
+
+// FindOrCreate implements B2BOrgWriter.
+func (o *b2bOrgWriterOrchestrator) FindOrCreate(ctx context.Context, name, website string) (*model.B2BOrg, model.AccountAction, error) {
+	if o.accountFinder == nil {
+		return nil, "", pkgerrors.NewServiceUnavailable("b2b org find-or-create is not enabled")
+	}
+	sfid, action, err := o.accountFinder.FindOrCreateAccount(ctx, name, website)
+	if err != nil {
+		return nil, "", err
+	}
+	org, err := o.Create(ctx, sfid)
+	if err != nil {
+		return nil, "", err
+	}
+	slog.InfoContext(ctx, "b2b org found or created", "uid", org.UID, "action", action)
+	return org, action, nil
 }
 
 // validateForUpdate fetches the current org and, if ifMatch is set, verifies
