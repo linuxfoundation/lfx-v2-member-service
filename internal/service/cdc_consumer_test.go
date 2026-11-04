@@ -145,6 +145,7 @@ type fakeB2BOrgReader struct {
 	org            *model.B2BOrg
 	children       []string
 	orgErr         error
+	childErr       error
 	childMap       map[string][]string
 	batchErr       error
 	getCallCount   atomic.Int32
@@ -158,7 +159,7 @@ func (r *fakeB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg
 }
 func (r *fakeB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) ([]string, error) {
 	r.childCallCount.Add(1)
-	return r.children, nil
+	return r.children, r.childErr
 }
 func (r *fakeB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	r.batchCallCount.Add(1)

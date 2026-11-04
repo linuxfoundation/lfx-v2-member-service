@@ -46,6 +46,19 @@ func TestParseIncludeCompanyAccounts(t *testing.T) {
 	}
 }
 
+// TestRepairQueueEnabled pins that the cdc_repair drain is wired only with the
+// NATS publisher: with a mock publisher a drain would clear real markers
+// without delivering anything.
+func TestRepairQueueEnabled(t *testing.T) {
+	t.Parallel()
+
+	for messaging, want := range map[string]bool{"nats": true, "mock": false, "": false} {
+		if got := repairQueueEnabled(messaging); got != want {
+			t.Errorf("repairQueueEnabled(%q) = %v, want %v", messaging, got, want)
+		}
+	}
+}
+
 func TestWriteEligibilityReader(t *testing.T) {
 	t.Parallel()
 
