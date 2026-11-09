@@ -5,7 +5,7 @@
 
 This repo's pull requests get a Copilot code review. This file tells the
 reviewer where the review method lives: a set of skills under
-`.github/skills/`. Follow it exactly.
+`.github/skills/`. Follow them exactly.
 
 ## Code review
 
