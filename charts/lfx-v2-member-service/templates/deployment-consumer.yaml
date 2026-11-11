@@ -172,6 +172,16 @@ spec:
             failureThreshold: 3
             periodSeconds: 15
             initialDelaySeconds: 10
+          # The consumer's minimal health server only registers /livez (there is
+          # no /readyz), and the pod never receives Service traffic. Readiness
+          # reuses /livez so the pod is Ready once the health server is up.
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: web
+            failureThreshold: 3
+            periodSeconds: 10
+            initialDelaySeconds: 10
           resources:
             {{- toYaml .Values.consumer.resources | nindent 12 }}
 {{- end }}
