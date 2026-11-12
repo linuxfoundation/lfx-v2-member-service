@@ -34,8 +34,10 @@ type b2bOrgLookupByWebsiteRequest struct {
 // b2bOrgLookupByWebsiteResponse is the JSON response body for the b2b_org
 // name/website lookup RPC.
 type b2bOrgLookupByWebsiteResponse struct {
-	ID    string `json:"id,omitempty"`
-	Error string `json:"error,omitempty"`
+	ID string `json:"id,omitempty"`
+	// LogoURL is the org's Account.Logo_URL__c; omitted when it has none.
+	LogoURL string `json:"logo_url,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // processB2BOrgLookupByWebsiteRequest decodes a raw request body and looks up
@@ -63,7 +65,7 @@ func processB2BOrgLookupByWebsiteRequest(ctx context.Context, data []byte, reade
 		return b2bOrgLookupByWebsiteResponse{Error: "b2b org not found"}
 	}
 
-	return b2bOrgLookupByWebsiteResponse{ID: strings.TrimSpace(org.UID)}
+	return b2bOrgLookupByWebsiteResponse{ID: strings.TrimSpace(org.UID), LogoURL: strings.TrimSpace(org.LogoURL)}
 }
 
 // SubscribeB2BOrgLookupByWebsite registers a NATS request/reply subscription on

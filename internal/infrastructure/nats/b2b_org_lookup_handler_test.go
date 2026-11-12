@@ -118,3 +118,35 @@ func TestProcessB2BOrgLookupRequest_missingID(t *testing.T) {
 		t.Fatalf("error = %q", resp.Error)
 	}
 }
+
+func TestProcessB2BOrgLookupRequest_logoURL(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reader stubB2BOrgReader
+		want   string
+	}{
+		{"with logo", stubB2BOrgReader{org: &model.B2BOrg{UID: "0014100000Te2ovAAB", LogoURL: " https://cdn.example/b2b_org_logos/0014100000Te2ovAAB?v=1 "}}, "https://cdn.example/b2b_org_logos/0014100000Te2ovAAB?v=1"},
+		{"without logo", stubB2BOrgReader{org: &model.B2BOrg{UID: "0014100000Te2ovAAB"}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(processB2BOrgLookupRequest(context.Background(), []byte(`{"id":"0014100000Te2ovAAB"}`), tc.reader))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(data, &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, present := resp["logo_url"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("logo_url = %v, want it omitted", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("logo_url = %v, want %q", got, tc.want)
+			}
+		})
+	}
+}

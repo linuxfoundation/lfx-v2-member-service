@@ -33,8 +33,10 @@ type b2bOrgLookupRequest struct {
 
 // b2bOrgLookupResponse is the JSON response body for the b2b_org lookup RPC.
 type b2bOrgLookupResponse struct {
-	ID    string `json:"id,omitempty"`
-	Error string `json:"error,omitempty"`
+	ID string `json:"id,omitempty"`
+	// LogoURL is the org's Account.Logo_URL__c; omitted when it has none.
+	LogoURL string `json:"logo_url,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // processB2BOrgLookupRequest decodes a raw request body and looks up the org by id.
@@ -72,7 +74,7 @@ func processB2BOrgLookupRequest(ctx context.Context, data []byte, reader port.B2
 		return b2bOrgLookupResponse{Error: "b2b org not found"}
 	}
 
-	return b2bOrgLookupResponse{ID: strings.TrimSpace(org.UID)}
+	return b2bOrgLookupResponse{ID: strings.TrimSpace(org.UID), LogoURL: strings.TrimSpace(org.LogoURL)}
 }
 
 // SubscribeB2BOrgLookup registers a NATS request/reply subscription on

@@ -78,8 +78,10 @@ Request body (JSON):
 Success response:
 
 ```json
-{"id": "<canonical 18-char Account SFID>"}
+{"id": "<canonical 18-char Account SFID>", "logo_url": "<Account.Logo_URL__c>"}
 ```
+
+`logo_url` is omitted when the Account has no logo.
 
 Error response (not found):
 
@@ -126,8 +128,10 @@ Request body (JSON):
 Success response:
 
 ```json
-{"id": "<canonical 18-char Account SFID>"}
+{"id": "<canonical 18-char Account SFID>", "logo_url": "<Account.Logo_URL__c>"}
 ```
+
+`logo_url` is omitted when the Account has no logo.
 
 Error response (not found, ambiguous, or invalid):
 
