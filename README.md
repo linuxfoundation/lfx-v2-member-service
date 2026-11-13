@@ -57,8 +57,8 @@ Key-Value cache to minimise round-trips.
 - **NATS RPC endpoints**: Exposes request/reply subjects so other services can
   resolve identifiers without querying Salesforce directly:
   - `lfx.member.project-id-map.lookup` — v2 project UID → Salesforce `Project__c.Id`
-  - `lfx.member.b2b_org_lookup` — validate a `b2b_org` id and return the canonical 18-char Account SFID
-  - `lfx.member.b2b_org_lookup_by_website` — resolve a `b2b_org` by name/website when a caller cannot resolve it directly via `b2b_org_lookup`
+  - `lfx.member.b2b_org_lookup` — validate a `b2b_org` id and return the canonical 18-char Account SFID and logo URL
+  - `lfx.member.b2b_org_lookup_by_website` — resolve a `b2b_org` by name/website when a caller cannot resolve it directly via `b2b_org_lookup` (also returns the logo URL)
 - **Clean Architecture**: Follows hexagonal architecture with clear separation of
   domain, service, and infrastructure layers.
 - **Authorization**: JWT-based authentication with Heimdall middleware integration
@@ -181,8 +181,10 @@ sObject cache → Salesforce Account fetch via `GetB2BOrg`.
 **Response — success:**
 
 ```json
-{"id": "<canonical 18-char Account SFID>"}
+{"id": "<canonical 18-char Account SFID>", "logo_url": "<Account.Logo_URL__c>"}
 ```
+
+`logo_url` is omitted when the Account has no logo.
 
 **Response — not found:**
 
@@ -232,8 +234,10 @@ resolution entirely rather than falling through to a less specific tier.
 **Response — success:**
 
 ```json
-{"id": "<canonical 18-char Account SFID>"}
+{"id": "<canonical 18-char Account SFID>", "logo_url": "<Account.Logo_URL__c>"}
 ```
+
+`logo_url` is omitted when the Account has no logo.
 
 **Response — not found, ambiguous, or invalid:**
 
