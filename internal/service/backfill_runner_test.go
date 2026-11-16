@@ -1553,6 +1553,55 @@ func TestBackfillRunner_RunRepair_KeyContact_UsernameLookup(t *testing.T) {
 		})
 	}
 
+	// Drains are not serialized (no distributed lock), so two can select the
+	// same marker. Drain A resolves the username, republishes and settles the
+	// marker; drain B's lookup then fails and its empty-username publish lands
+	// on top of A's repair. B's requeue must recreate the marker, or nothing
+	// retries the contact. Running B after A with the marker B selected before A
+	// ran is the deterministic form of that interleaving.
+	t.Run("a drain that lost the race to a settled marker recreates it", func(t *testing.T) {
+		kc := &model.KeyContact{UID: "001000000000024AAA", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "jdoe@example.com"}
+		resolver := mock.NewMockProjectResolver()
+		resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+		marker := port.RepairMarker{Type: "key_contact", SFID: kc.UID, Revision: 4}
+		repairStore := &mock.MockCDCRepairStore{Pending: map[string][]port.RepairMarker{"key_contact": {marker}}}
+		gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+		newRunner := func(lookup userReaderFunc) *svc.Runner {
+			return svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), kcReaderByUID{kc.UID: kc}, nil, &subjectCapturingPublisher{}, nil, "", resolver,
+				svc.WithUserReader(lookup), svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge),
+				svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+		}
+		req := svc.BackfillRequest{RunID: "r", Type: "key_contact"}
+		selected := []port.RepairMarker{marker}
+
+		newRunner(func(context.Context, string) (string, error) { return "jdoe", nil }).RunRepair(context.Background(), req, selected)
+		require.Empty(t, repairStore.Pending["key_contact"], "drain A settles the marker")
+
+		newRunner(lookupUnavailable).RunRepair(context.Background(), req, selected)
+
+		require.Len(t, repairStore.Pending["key_contact"], 1, "drain B's failed lookup must leave a marker to retry")
+		assert.Equal(t, kc.UID, repairStore.Pending["key_contact"][0].SFID)
+		assert.Equal(t, 1, repairStore.Pending["key_contact"][0].LookupAttempts)
+	})
+
+	// A marker a fresh write put there while drain B ran is not overwritten.
+	t.Run("a newer marker survives a stale drain's requeue", func(t *testing.T) {
+		kc := &model.KeyContact{UID: "001000000000025AAA", ProjectSlug: "my-project", MembershipUID: "pm-1", B2BOrgUID: "org-1", Email: "jdoe@example.com"}
+		resolver := mock.NewMockProjectResolver()
+		resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "my-project"})
+		selected := port.RepairMarker{Type: "key_contact", SFID: kc.UID, Revision: 4}
+		newer := port.RepairMarker{Type: "key_contact", SFID: kc.UID, Revision: 9}
+		repairStore := &mock.MockCDCRepairStore{Pending: map[string][]port.RepairMarker{"key_contact": {newer}}}
+		runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), kcReaderByUID{kc.UID: kc}, nil, &subjectCapturingPublisher{}, nil, "", resolver,
+			svc.WithUserReader(userReaderFunc(lookupUnavailable)), svc.WithRepairStore(repairStore),
+			svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+		runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}, []port.RepairMarker{selected})
+
+		assert.Equal(t, []port.RepairMarker{newer}, repairStore.Pending["key_contact"])
+	})
+
 	// A full page of failing lookups must not starve the marker behind it (for
 	// example a quota-skipped Project_Role__c upsert): requeued markers move to
 	// the back, so the next drain selects it first. The page cap is not

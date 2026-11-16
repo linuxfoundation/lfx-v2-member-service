@@ -2522,6 +2522,46 @@ func TestCDCConsumer_ProjectRole_Upsert_UsernameResolution(t *testing.T) {
 	}
 }
 
+// ctxStrictRepairStore rejects a marker write whose context is already done,
+// like the NATS KV client does.
+type ctxStrictRepairStore struct{ mock.MockCDCRepairStore }
+
+func (s *ctxStrictRepairStore) PutPending(ctx context.Context, reindexType, sfid string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.MockCDCRepairStore.PutPending(ctx, reindexType, sfid)
+}
+
+// expiringUserReader fails the lookup once the event's deadline has passed,
+// the way a slow auth-service request uses up the handler's deadline.
+type expiringUserReader struct{}
+
+func (expiringUserReader) UsernameByEmail(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", pkgerrors.NewUnexpected("auth-service timed out", ctx.Err())
+}
+
+func (expiringUserReader) UserMetadataByPrincipal(_ context.Context, _ string) (port.UserMetadata, error) {
+	return port.UserMetadata{}, nil
+}
+
+// The retry marker is the only durable record of a failed lookup, so it must be
+// written even when the lookup itself used up the event's deadline.
+func TestCDCConsumer_ProjectRole_Upsert_LookupTimeout_StillQueuesRetry(t *testing.T) {
+	defer svc.SetCDCEventTimeoutForTest(20 * time.Millisecond)()
+	kc := &model.KeyContact{UID: sfid("kc-res-7"), MembershipUID: "pm-7", B2BOrgUID: "001000000000007AAA", Email: "jdoe@example.com"}
+	repairStore := &ctxStrictRepairStore{}
+	consumer := newProjectRoleCDCConsumer(kc, &subjectCapturingPublisher{},
+		svc.WithCDCUserReader(expiringUserReader{}),
+		svc.WithCDCRepairStore(repairStore),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, []mock.MockRepairPut{{Type: "key_contact", SFID: kc.UID}}, repairStore.Puts)
+}
+
 func TestCDCConsumer_ProjectRole_Upsert_NilUserReader_PreservesExistingBehavior(t *testing.T) {
 	// nil userReader must not regress existing behavior: a contact with a stored
 	// Username still gets FGA member_put; no provisioning attempt is made.

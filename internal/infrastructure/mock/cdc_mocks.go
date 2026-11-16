@@ -281,7 +281,23 @@ func (s *MockCDCRepairStore) RequeuePending(_ context.Context, marker port.Repai
 		stored.Revision++
 		stored.LookupAttempts = lookupAttempts
 		s.Pending[marker.Type] = append(s.Pending[marker.Type], stored)
+		return nil
 	}
+	// The selected revision is gone. A marker stored under another revision is
+	// newer and survives untouched; an absent one is recreated create-only,
+	// like the NATS store, so a settled-and-overwritten contact keeps a retry.
+	for _, m := range s.Pending[marker.Type] {
+		if m.SFID == marker.SFID {
+			return errs.NewConflict(fmt.Sprintf("mock cdc-repair: marker for %s/%s changed since selection", marker.Type, marker.SFID))
+		}
+	}
+	if s.Pending == nil {
+		s.Pending = map[string][]port.RepairMarker{}
+	}
+	s.Pending[marker.Type] = append(s.Pending[marker.Type], port.RepairMarker{
+		Type: marker.Type, SFID: marker.SFID, SkippedAt: marker.SkippedAt,
+		Revision: marker.Revision + 1, LookupAttempts: lookupAttempts,
+	})
 	return nil
 }
 

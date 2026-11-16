@@ -331,8 +331,12 @@ func (o *CDCConsumer) processWithAuthorizationRetry(
 	}
 }
 
+// cdcEventTimeout bounds one CDC event's handling. A variable only so a test
+// can shorten it; nothing else changes it.
+var cdcEventTimeout = 30 * time.Second
+
 func (o *CDCConsumer) processEvent(channel string, event model.CDCEvent) error {
-	handleCtx, handleCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	handleCtx, handleCancel := context.WithTimeout(context.Background(), cdcEventTimeout)
 	defer handleCancel()
 	handleCtx, span := cdcTracer.Start(handleCtx, "salesforce.cdc.process",
 		trace.WithSpanKind(trace.SpanKindConsumer),
@@ -1925,9 +1929,11 @@ func (o *CDCConsumer) processKeyContact(ctx context.Context, kc *model.KeyContac
 
 	// Queued only after this contact's publishes: a marker visible earlier lets
 	// a concurrent drain repair the username and settle the marker before the
-	// empty-username publish above lands on top of it.
+	// empty-username publish above lands on top of it. Detached: a slow
+	// auth-service lookup can use up this event's deadline, and the marker is
+	// the only durable retry.
 	if lookupFailed {
-		o.recordSkippedForRepair(ctx, "Project_Role__c", []string{kc.UID})
+		o.queueForRepairDetached(ctx, "Project_Role__c", []string{kc.UID})
 	}
 
 	inactive := strings.EqualFold(kc.Status, constants.RoleStatusInactive)

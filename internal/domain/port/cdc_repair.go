@@ -52,9 +52,12 @@ type CDCRepairStore interface {
 
 	// RequeuePending revision-conditionally rewrites marker with the given
 	// LookupAttempts, keeping its SkippedAt. The rewrite moves it behind every
-	// other pending marker of its type. Returns Conflict when the stored
-	// revision no longer matches (a fresh write or a concurrent drain won) or
-	// the marker is gone; the stored marker is then left as it is.
+	// other pending marker of its type. Returns Conflict when a newer marker
+	// is stored (a fresh write or a concurrent drain's requeue won); that
+	// marker is left as it is. A marker that is gone (a concurrent drain
+	// settled it after a successful publish) is recreated create-only with the
+	// given attempts, since the caller's own empty-username publish may have
+	// overwritten that repair; it returns Conflict if a fresh write lands first.
 	RequeuePending(ctx context.Context, marker RepairMarker, lookupAttempts int) error
 
 	// DeletePending revision-conditionally deletes the marker for
