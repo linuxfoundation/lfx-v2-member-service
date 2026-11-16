@@ -217,23 +217,36 @@ func (g *MockSalesforceQuotaGauge) Refresh(ctx context.Context) (port.QuotaSnaps
 }
 
 // MockCDCRepairStore is a test double for port.CDCRepairStore. Pending is keyed
-// by reindex type. Puts and Deletes record calls for assertions; the *Err
-// fields inject failures.
+// by reindex type and kept in listing order, like the NATS store: ListPending
+// returns the front of the slice, RequeuePending moves a marker to the back
+// with a new revision, and DeletePending removes it on a revision match.
+// Puts, Requeues and Deletes record calls for assertions; the *Err fields
+// inject failures.
 type MockCDCRepairStore struct {
 	Pending map[string][]port.RepairMarker
 
-	Puts    []MockRepairPut
-	Deletes []MockRepairDelete
+	Puts     []MockRepairPut
+	Requeues []MockRepairRequeue
+	Deletes  []MockRepairDelete
 
-	PutErr    error
-	ListErr   error
-	DeleteErr error
+	PutErr     error
+	ListErr    error
+	RequeueErr error
+	DeleteErr  error
 }
 
 // MockRepairPut records a PutPending call.
 type MockRepairPut struct {
 	Type string
 	SFID string
+}
+
+// MockRepairRequeue records a RequeuePending call.
+type MockRepairRequeue struct {
+	Type           string
+	SFID           string
+	Revision       uint64
+	LookupAttempts int
 }
 
 // MockRepairDelete records a DeletePending call.
@@ -256,12 +269,58 @@ func (s *MockCDCRepairStore) ListPending(_ context.Context, reindexType string, 
 	if limit > 0 && len(all) > limit {
 		all = all[:limit]
 	}
-	return all, nil
+	return append([]port.RepairMarker(nil), all...), nil
+}
+
+func (s *MockCDCRepairStore) RequeuePending(_ context.Context, marker port.RepairMarker, lookupAttempts int) error {
+	s.Requeues = append(s.Requeues, MockRepairRequeue{Type: marker.Type, SFID: marker.SFID, Revision: marker.Revision, LookupAttempts: lookupAttempts})
+	if s.RequeueErr != nil {
+		return s.RequeueErr
+	}
+	if stored, ok := s.take(marker.Type, marker.SFID, marker.Revision); ok {
+		stored.Revision++
+		stored.LookupAttempts = lookupAttempts
+		s.Pending[marker.Type] = append(s.Pending[marker.Type], stored)
+		return nil
+	}
+	// The selected revision is gone. A marker stored under another revision is
+	// newer and survives untouched; an absent one is recreated create-only,
+	// like the NATS store, so a settled-and-overwritten contact keeps a retry.
+	for _, m := range s.Pending[marker.Type] {
+		if m.SFID == marker.SFID {
+			return errs.NewConflict(fmt.Sprintf("mock cdc-repair: marker for %s/%s changed since selection", marker.Type, marker.SFID))
+		}
+	}
+	if s.Pending == nil {
+		s.Pending = map[string][]port.RepairMarker{}
+	}
+	s.Pending[marker.Type] = append(s.Pending[marker.Type], port.RepairMarker{
+		Type: marker.Type, SFID: marker.SFID, SkippedAt: marker.SkippedAt,
+		Revision: marker.Revision + 1, LookupAttempts: lookupAttempts,
+	})
+	return nil
 }
 
 func (s *MockCDCRepairStore) DeletePending(_ context.Context, reindexType, sfid string, revision uint64) error {
 	s.Deletes = append(s.Deletes, MockRepairDelete{Type: reindexType, SFID: sfid, Revision: revision})
-	return s.DeleteErr
+	if s.DeleteErr != nil {
+		return s.DeleteErr
+	}
+	s.take(reindexType, sfid, revision)
+	return nil
+}
+
+// take removes and returns the seeded marker for (reindexType, sfid) when its
+// revision matches. Markers handed to a drain without being seeded in Pending
+// are not found, which leaves Pending untouched.
+func (s *MockCDCRepairStore) take(reindexType, sfid string, revision uint64) (port.RepairMarker, bool) {
+	for i, m := range s.Pending[reindexType] {
+		if m.SFID == sfid && m.Revision == revision {
+			s.Pending[reindexType] = append(s.Pending[reindexType][:i:i], s.Pending[reindexType][i+1:]...)
+			return m, true
+		}
+	}
+	return port.RepairMarker{}, false
 }
 
 // MockKeyContactGrantIndex is an in-memory test double for
