@@ -132,8 +132,11 @@ type KeyContact struct {
 	Email string `json:"email,omitempty"`
 
 	// Username is the resolved LFID username for this contact's email.
-	// Empty when the email hasn't been resolved yet or the user doesn't have
-	// an LFID account. Re-resolved on next mutation when empty.
+	// Salesforce does not store it: every publish path (API write, CDC upsert,
+	// /admin/reindex) resolves it from Email via auth-service. Empty when the
+	// email has no registered LFID, or when the lookup failed; on a failed
+	// lookup the CDC and reindex paths queue a key_contact cdc-repair marker
+	// so a cdc_repair drain retries it.
 	Username string `json:"username,omitempty"`
 
 	// Emails is the full list of email addresses for this contact (primary +
