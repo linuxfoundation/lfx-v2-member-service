@@ -101,7 +101,7 @@ protoc-gen: ## Regenerate pb.go stubs from api/salesforce/pubsub/pubsub_api.prot
 .PHONY: lint
 lint: ## Run golangci-lint (local Go linting)
 	@echo "Running golangci-lint..."
-	@$(LINT_TOOL) version 2>/dev/null | grep -q 'version $(GOLANGCI_LINT_VERSION:v%=%) ' || (echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..." && go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
+	@$(LINT_TOOL) version 2>/dev/null | grep -q 'version $(GOLANGCI_LINT_VERSION:v%=%) ' || (echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..." && GOBIN=$(dir $(LINT_TOOL)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	@$(LINT_TOOL) run ./... && echo "==> Lint OK"
 
 # Format code
