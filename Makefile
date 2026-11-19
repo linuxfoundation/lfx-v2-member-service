@@ -17,7 +17,7 @@ HELM_RELEASE_NAME=lfx-v2-member-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.24.5
+GO_VERSION := 1.27.4
 GOOS := linux
 GOARCH := amd64
 GOA_VERSION := v3.25.3
@@ -25,7 +25,7 @@ PROTOC_VERSION := 35.0
 PROTOC_OS := osx-aarch_64
 
 # Linting
-GOLANGCI_LINT_VERSION := v2.2.2
+GOLANGCI_LINT_VERSION := v2.15.0
 LINT_TIMEOUT := 10m
 LINT_TOOL=$(shell go env GOPATH)/bin/golangci-lint
 GO_FILES=$(shell find . -name '*.go' -not -path './gen/*' -not -path './vendor/*')
@@ -101,8 +101,8 @@ protoc-gen: ## Regenerate pb.go stubs from api/salesforce/pubsub/pubsub_api.prot
 .PHONY: lint
 lint: ## Run golangci-lint (local Go linting)
 	@echo "Running golangci-lint..."
-	@which golangci-lint >/dev/null 2>&1 || (echo "Installing golangci-lint..." && go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
-	@golangci-lint run ./... && echo "==> Lint OK"
+	@$(LINT_TOOL) version 2>/dev/null | grep -q 'version $(GOLANGCI_LINT_VERSION:v%=%) ' || (echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..." && GOBIN=$(dir $(LINT_TOOL)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
+	@$(LINT_TOOL) run ./... && echo "==> Lint OK"
 
 # Format code
 .PHONY: fmt

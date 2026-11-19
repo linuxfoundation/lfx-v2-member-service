@@ -27,8 +27,9 @@ RUN go build -o /go/bin/member-api -trimpath -ldflags="-w -s" github.com/linuxfo
 # Run our go binary standalone
 FROM cgr.dev/chainguard/static:latest
 
-# Implicit with base image; setting explicitly for linters.
-USER nonroot
+# Numeric UID of the Chainguard nonroot user (implicit with the base image;
+# set explicitly for linters).
+USER 65532
 
 # Expose port 8080 for the member service API.
 EXPOSE 8080
