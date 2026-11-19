@@ -17,7 +17,7 @@ HELM_RELEASE_NAME=lfx-v2-member-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.24.5
+GO_VERSION := 1.26.11
 GOOS := linux
 GOARCH := amd64
 GOA_VERSION := v3.25.3
