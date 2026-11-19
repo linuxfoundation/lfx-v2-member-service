@@ -20,7 +20,7 @@ The same binary also runs as a **CDC consumer** (`RUN_MODE=consumer`) that subsc
 
 ### Key Technologies
 
-- **Language**: Go 1.26.11+
+- **Language**: Go 1.27.4+
 - **API Framework**: Goa v3 (code generation framework)
 - **Messaging**: NATS with JetStream for KV caching and RPC
 - **Storage**: Eight NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `cdc-repair`, `org-workspaces`, `org_workspace_projects`, `key-contact-grants`

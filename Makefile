@@ -17,7 +17,7 @@ HELM_RELEASE_NAME=lfx-v2-member-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.26.11
+GO_VERSION := 1.27.4
 GOOS := linux
 GOARCH := amd64
 GOA_VERSION := v3.25.3
@@ -25,7 +25,7 @@ PROTOC_VERSION := 35.0
 PROTOC_OS := osx-aarch_64
 
 # Linting
-GOLANGCI_LINT_VERSION := v2.2.2
+GOLANGCI_LINT_VERSION := v2.15.0
 LINT_TIMEOUT := 10m
 LINT_TOOL=$(shell go env GOPATH)/bin/golangci-lint
 GO_FILES=$(shell find . -name '*.go' -not -path './gen/*' -not -path './vendor/*')
