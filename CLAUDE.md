@@ -20,7 +20,7 @@ The same binary also runs as a **CDC consumer** (`RUN_MODE=consumer`) that subsc
 
 ### Key Technologies
 
-- **Language**: Go 1.24+
+- **Language**: Go 1.27.4+
 - **API Framework**: Goa v3 (code generation framework)
 - **Messaging**: NATS with JetStream for KV caching and RPC
 - **Storage**: Eight NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `cdc-repair`, `org-workspaces`, `org_workspace_projects`, `key-contact-grants`
@@ -218,6 +218,23 @@ Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or 
 > **Internal filtering:** SOQL-level membership filtering (`MembershipFilters` in `internal/domain/model/list_params.go`, e.g. tier UID / product) is applied internally on the Salesforce read path. It is not exposed as an HTTP `filter` query parameter on the current resource-rooted surface.
 
 ## Development Workflow
+
+### Go version
+
+This repo targets Go 1.27.x (currently 1.27.4, the latest patch). This
+supersedes the Go version policy in the `lfx-megalinter` skill, which targets
+the latest stable minor minus one: don't move `go.mod` back to Go 1.26. Take
+every 1.27.x patch release, and update `go.mod`, `GO_VERSION` in the
+`Makefile`, this file and
+`.claude/skills/member-service-dev/references/development-workflow.md`
+together.
+
+MegaLinter (v10.2.0) runs Go 1.26.10 in its image, so
+`.github/workflows/mega-linter.yml` sets `GOTOOLCHAIN: auto` to let its Go
+linters download the `go.mod` toolchain. osv-scanner's govulncheck call
+analysis is built with Go 1.26 and cannot load this module, so osv-scanner
+falls back to matching vulnerabilities by version: any known vulnerability in
+a dependency version fails the check, reachable or not.
 
 ### Common Development Tasks
 
