@@ -21,8 +21,8 @@ adding or changing an HTTP endpoint lives in the local
 ## Prerequisites
 
 ```bash
-# Go 1.27.4+ in PATH
-make deps       # installs goa v3.25.3 from GOA_VERSION
+# Go 1.26.11+ in PATH
+make deps       # installs the Goa version from go.mod
 make setup-dev  # installs golangci-lint v2.15.0 from GOLANGCI_LINT_VERSION
 ```
 

@@ -20,7 +20,7 @@ The same binary also runs as a **CDC consumer** (`RUN_MODE=consumer`) that subsc
 
 ### Key Technologies
 
-- **Language**: Go 1.27.4+
+- **Language**: Go 1.26.11+
 - **API Framework**: Goa v3 (code generation framework)
 - **Messaging**: NATS with JetStream for KV caching and RPC
 - **Storage**: Eight NATS Key-Value buckets — `membership-cache`, `org-settings`, `member-service-cache`, `pubsub-state`, `cdc-repair`, `org-workspaces`, `org_workspace_projects`, `key-contact-grants`
@@ -217,24 +217,16 @@ Returns HTTP 202 with `{ "run_id": "<uuid>" }` for full/since/targeted runs, or 
 
 > **Internal filtering:** SOQL-level membership filtering (`MembershipFilters` in `internal/domain/model/list_params.go`, e.g. tier UID / product) is applied internally on the Salesforce read path. It is not exposed as an HTTP `filter` query parameter on the current resource-rooted surface.
 
+> **Breaking OpenAPI schema rename (Goa v3.30.0, LFXV2-3338):** the Goa generator/runtime upgrade from v3.25.3 to v3.30.0 renames public component IDs in the served `/_memberships/openapi3.yaml` contract even though the underlying Goa design did not change (for example, `AdminReindexPayload` becomes `AdminReindexRequestBody`, and several `MembershipService...`-prefixed response schemas are renamed). This is an intentional, accepted breaking change as part of standardizing on a current Goa version. Downstream consumers that generate client models from these schema names must regenerate against the new names.
+
 ## Development Workflow
 
 ### Go version
 
-This repo targets Go 1.27.x (currently 1.27.4, the latest patch). This
-supersedes the Go version policy in the `lfx-megalinter` skill, which targets
-the latest stable minor minus one: don't move `go.mod` back to Go 1.26. Take
-every 1.27.x patch release, and update `go.mod`, `GO_VERSION` in the
-`Makefile`, this file and
-`.claude/skills/member-service-dev/references/development-workflow.md`
-together.
-
-MegaLinter (v10.2.0) runs Go 1.26.10 in its image, so
-`.github/workflows/mega-linter.yml` sets `GOTOOLCHAIN: auto` to let its Go
-linters download the `go.mod` toolchain. osv-scanner's govulncheck call
-analysis is built with Go 1.26 and cannot load this module, so osv-scanner
-falls back to matching vulnerabilities by version: any known vulnerability in
-a dependency version fails the check, reachable or not.
+**Go toolchain version**: Follow the `lfx-megalinter` skill's Go version policy.
+It sets `go.mod` to the latest patch of the previous stable Go minor and caps it
+at the minor bundled by the pinned MegaLinter release. This importable module
+declares the minor in `go` and pins the patch in `toolchain`.
 
 ### Common Development Tasks
 

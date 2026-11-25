@@ -858,6 +858,19 @@ var _ = dsl.Service("membership-service", func() {
 			BearerTokenAttribute()
 			VersionAttribute()
 			dsl.Extend(AdminReindexPayload)
+			// The merged/extended payload is an anonymous type, so it does not
+			// inherit AdminReindexPayload's own Example; Goa would otherwise
+			// combine every attribute's per-field example into one invalid
+			// request (cdc_repair alongside since/until/items). Pin a valid one.
+			dsl.Example(map[string]any{
+				"bearer_token": "eyJhbGci...",
+				"version":      "1",
+				"type":         "b2b_org",
+				"since":        "2026-05-20T00:00:00Z",
+				"until":        "2026-06-20T00:00:00Z",
+				"cdc_repair":   false,
+				"dry_run":      false,
+			})
 		})
 
 		dsl.Result(func() {

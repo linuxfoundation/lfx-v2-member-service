@@ -17,10 +17,10 @@ HELM_RELEASE_NAME=lfx-v2-member-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.27.4
+GO_VERSION := 1.26.11
 GOOS := linux
 GOARCH := amd64
-GOA_VERSION := v3.25.3
+GOA_VERSION := $(shell go list -m -f '{{.Version}}' goa.design/goa/v3)
 PROTOC_VERSION := 35.0
 PROTOC_OS := osx-aarch_64
 
@@ -29,6 +29,10 @@ GOLANGCI_LINT_VERSION := v2.15.0
 LINT_TIMEOUT := 10m
 LINT_TOOL=$(shell go env GOPATH)/bin/golangci-lint
 GO_FILES=$(shell find . -name '*.go' -not -path './gen/*' -not -path './vendor/*')
+
+# Run MegaLinter locally using the same image as CI.
+# Keep this digest in sync with .github/workflows/mega-linter.yml.
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:e676b8e9dac00d148bf1abb6ab809f1df76f07e804d8061f78631975d0c90925  # v10.2.0
 
 ##@ Development
 
@@ -47,11 +51,17 @@ setup: ## Setup development environment
 .PHONY: deps
 deps: ## Install dependencies
 	@echo "Installing dependencies..."
+	@command -v jq >/dev/null || { echo "jq is required; install it (e.g. brew install jq)"; exit 1; }
 	go install goa.design/goa/v3/cmd/goa@$(GOA_VERSION)
 
 .PHONY: apigen
 apigen: deps #@ Generate API code using Goa
 	goa gen github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
+	@# Swagger 2 security requirements use arrays instead of null values.
+	@tmp=$$(mktemp) && \
+		jq 'walk(if type == "object" and has("security") and (.security | type) == "array" then .security |= map(with_entries(.value = (.value // []))) else . end)' gen/http/openapi.json > "$$tmp" && \
+		chmod 0644 "$$tmp" && \
+		mv "$$tmp" gen/http/openapi.json
 
 # PROTO_GEN: one-time regeneration of Salesforce Pub/Sub API gRPC stubs.
 # Only needed when api/salesforce/pubsub/pubsub_api.proto is updated.
@@ -103,6 +113,11 @@ lint: ## Run golangci-lint (local Go linting)
 	@echo "Running golangci-lint..."
 	@$(LINT_TOOL) version 2>/dev/null | grep -q 'version $(GOLANGCI_LINT_VERSION:v%=%) ' || (echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..." && GOBIN=$(dir $(LINT_TOOL)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	@$(LINT_TOOL) run ./... && echo "==> Lint OK"
+
+.PHONY: megalinter
+megalinter: ## Run MegaLinter locally using Docker
+	docker pull $(MEGALINTER_IMAGE)
+	docker run --rm --platform linux/amd64 -e GOTOOLCHAIN=auto -v '$(CURDIR):/tmp/lint:rw' $(MEGALINTER_IMAGE)
 
 # Format code
 .PHONY: fmt

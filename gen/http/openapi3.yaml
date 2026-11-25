@@ -26,18 +26,15 @@ paths:
                         - "1"
                   example: "1"
             requestBody:
+                description: Request body for admin-reindex.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/AdminReindexPayload'
+                            $ref: '#/components/schemas/AdminReindexRequestBody'
                         example:
-                            cdc_repair: true
+                            cdc_repair: false
                             dry_run: false
-                            items:
-                                - uid: 001B000000IqhSLIAZ
-                                - uid: 001B000000IqhSLIAZ
-                                - uid: 001B000000IqhSLIAZ
                             since: "2026-05-20T00:00:00Z"
                             type: b2b_org
                             until: "2026-06-20T00:00:00Z"
@@ -47,7 +44,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/AdminReindexResult'
+                                $ref: '#/components/schemas/AdminReindexResponseBody'
                             example:
                                 run_id: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                                 selected_count: 42
@@ -109,11 +106,12 @@ paths:
                         - "1"
                   example: "1"
             requestBody:
+                description: Request body for create-b2b-org.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/B2bOrgCreateBody'
+                            $ref: '#/components/schemas/CreateB2bOrgRequestBody'
                         example:
                             sfid: 001Hs00001AbCdEFAZ
             responses:
@@ -137,7 +135,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
                             example:
                                 created_at: "2025-01-01T00:00:00Z"
                                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
@@ -234,7 +232,6 @@ paths:
                 - name: If-None-Match
                   in: header
                   description: If-None-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-None-Match header value for conditional requests
@@ -243,7 +240,6 @@ paths:
                 - name: If-Modified-Since
                   in: header
                   description: If-Modified-Since header value for conditional requests (HTTP date format)
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Modified-Since header value for conditional requests (HTTP date format)
@@ -270,7 +266,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
                             example:
                                 created_at: "2025-01-01T00:00:00Z"
                                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
@@ -360,13 +356,13 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for update-b2b-org.
                 required: true
                 content:
                     application/json:
@@ -404,7 +400,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
                             example:
                                 created_at: "2025-01-01T00:00:00Z"
                                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
@@ -495,7 +491,6 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   required: true
                   schema:
                     type: string
@@ -505,7 +500,6 @@ paths:
                 - name: Content-Type
                   in: header
                   description: MIME type of the uploaded logo (image/png, image/jpeg, or image/svg+xml)
-                  allowEmptyValue: true
                   required: true
                   schema:
                     type: string
@@ -533,7 +527,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
                             example:
                                 created_at: "2025-01-01T00:00:00Z"
                                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
@@ -642,9 +636,15 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgSettingsResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgSettingsResponseBody'
                             example:
                                 auditors:
+                                    - avatar: https://avatars.githubusercontent.com/u/12345
+                                      email: alice@example.com
+                                      invite_status: accepted
+                                      invited_as: writer
+                                      name: Alice Smith
+                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -666,12 +666,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -740,13 +734,13 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for update-b2b-org-settings.
                 required: true
                 content:
                     application/json:
@@ -766,25 +760,7 @@ paths:
                                   invited_as: writer
                                   name: Alice Smith
                                   username: alice
-                                - avatar: https://avatars.githubusercontent.com/u/12345
-                                  email: alice@example.com
-                                  invite_status: accepted
-                                  invited_as: writer
-                                  name: Alice Smith
-                                  username: alice
-                                - avatar: https://avatars.githubusercontent.com/u/12345
-                                  email: alice@example.com
-                                  invite_status: accepted
-                                  invited_as: writer
-                                  name: Alice Smith
-                                  username: alice
                             writers:
-                                - avatar: https://avatars.githubusercontent.com/u/12345
-                                  email: alice@example.com
-                                  invite_status: accepted
-                                  invited_as: writer
-                                  name: Alice Smith
-                                  username: alice
                                 - avatar: https://avatars.githubusercontent.com/u/12345
                                   email: alice@example.com
                                   invite_status: accepted
@@ -818,9 +794,15 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgSettingsResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgSettingsResponseBody'
                             example:
                                 auditors:
+                                    - avatar: https://avatars.githubusercontent.com/u/12345
+                                      email: alice@example.com
+                                      invite_status: accepted
+                                      invited_as: writer
+                                      name: Alice Smith
+                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -842,12 +824,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -929,18 +905,18 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for add-b2b-org-settings-user.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/OrgUserAddBody'
+                            $ref: '#/components/schemas/AddB2bOrgSettingsUserRequestBody'
                         example:
                             email: alice@example.com
                             invited_as: auditor
@@ -966,9 +942,15 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgSettingsResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgSettingsResponseBody'
                             example:
                                 auditors:
+                                    - avatar: https://avatars.githubusercontent.com/u/12345
+                                      email: alice@example.com
+                                      invite_status: accepted
+                                      invited_as: writer
+                                      name: Alice Smith
+                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -990,12 +972,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1087,7 +1063,6 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
@@ -1114,9 +1089,15 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgSettingsResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgSettingsResponseBody'
                             example:
                                 auditors:
+                                    - avatar: https://avatars.githubusercontent.com/u/12345
+                                      email: alice@example.com
+                                      invite_status: accepted
+                                      invited_as: writer
+                                      name: Alice Smith
+                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1138,12 +1119,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1234,18 +1209,18 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for update-b2b-org-settings-user-role.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/OrgUserRoleBody'
+                            $ref: '#/components/schemas/UpdateB2bOrgSettingsUserRoleRequestBody'
                         example:
                             invited_as: writer
             responses:
@@ -1269,9 +1244,15 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgSettingsResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgSettingsResponseBody'
                             example:
                                 auditors:
+                                    - avatar: https://avatars.githubusercontent.com/u/12345
+                                      email: alice@example.com
+                                      invite_status: accepted
+                                      invited_as: writer
+                                      name: Alice Smith
+                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1293,12 +1274,6 @@ paths:
                                 created_at: "2025-01-01T00:00:00Z"
                                 updated_at: "2025-06-01T12:00:00Z"
                                 writers:
-                                    - avatar: https://avatars.githubusercontent.com/u/12345
-                                      email: alice@example.com
-                                      invite_status: accepted
-                                      invited_as: writer
-                                      name: Alice Smith
-                                      username: alice
                                     - avatar: https://avatars.githubusercontent.com/u/12345
                                       email: alice@example.com
                                       invite_status: accepted
@@ -1380,18 +1355,18 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for create-b2b-org-workspace.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/WorkspaceCreateBody'
+                            $ref: '#/components/schemas/CreateB2bOrgWorkspaceRequestBody'
                         example:
                             name: My Workspace
             responses:
@@ -1415,7 +1390,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/WorkspaceResponse'
+                                $ref: '#/components/schemas/MembershipServicecreateB2bOrgWorkspaceResponseBody'
                             example:
                                 created_at: "2026-01-01T00:00:00Z"
                                 created_by: alice
@@ -1517,7 +1492,6 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
@@ -1598,18 +1572,18 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for update-b2b-org-workspace.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/WorkspaceCreateBody'
+                            $ref: '#/components/schemas/CreateB2bOrgWorkspaceRequestBody'
                         example:
                             name: Renamed Workspace
             responses:
@@ -1633,7 +1607,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/WorkspaceResponse'
+                                $ref: '#/components/schemas/MembershipServicecreateB2bOrgWorkspaceResponseBody'
                             example:
                                 created_at: "2026-01-01T00:00:00Z"
                                 created_by: alice
@@ -1735,18 +1709,18 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for add-b2b-org-workspace-project.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/WorkspaceProjectAddBody'
+                            $ref: '#/components/schemas/AddB2bOrgWorkspaceProjectRequestBody'
                         example:
                             project_name: Kubernetes
                             project_slug: kubernetes
@@ -1771,7 +1745,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/WorkspaceResponse'
+                                $ref: '#/components/schemas/MembershipServicecreateB2bOrgWorkspaceResponseBody'
                             example:
                                 created_at: "2026-01-01T00:00:00Z"
                                 created_by: alice
@@ -1883,7 +1857,6 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
@@ -1910,7 +1883,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/WorkspaceResponse'
+                                $ref: '#/components/schemas/MembershipServicecreateB2bOrgWorkspaceResponseBody'
                             example:
                                 created_at: "2026-01-01T00:00:00Z"
                                 created_by: alice
@@ -2012,20 +1985,22 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for bulk-add-b2b-org-workspace-projects.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/WorkspaceProjectsBulkAddBody'
+                            $ref: '#/components/schemas/BulkAddB2bOrgWorkspaceProjectsRequestBody'
                         example:
                             projects:
+                                - project_name: Kubernetes
+                                  project_slug: kubernetes
                                 - project_name: Kubernetes
                                   project_slug: kubernetes
             responses:
@@ -2049,9 +2024,13 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/WorkspaceBulkResponse2'
+                                $ref: '#/components/schemas/WorkspaceBulkResponse'
                             example:
                                 failed:
+                                    - error: project_slug is required
+                                      project_slug: ""
+                                    - error: project_slug is required
+                                      project_slug: ""
                                     - error: project_slug is required
                                       project_slug: ""
                                     - error: project_slug is required
@@ -2138,11 +2117,12 @@ paths:
                         - "1"
                   example: "1"
             requestBody:
+                description: Request body for find-or-create-b2b-org.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/B2bOrgFindOrCreateBody'
+                            $ref: '#/components/schemas/FindOrCreateB2bOrgRequestBody'
                         example:
                             name: Example Corp
                             website: https://example.com
@@ -2169,15 +2149,15 @@ paths:
                             schema:
                                 type: string
                                 description: Whether the Account was matched or created
-                                example: created
+                                example: matched
                                 enum:
                                     - matched
                                     - created
-                            example: matched
+                            example: created
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
                             example:
                                 created_at: "2025-01-01T00:00:00Z"
                                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
@@ -2225,11 +2205,11 @@ paths:
                                 enum:
                                     - matched
                                     - created
-                            example: matched
+                            example: created
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/B2bOrgResponse'
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
                             example:
                                 created_at: "2025-01-01T00:00:00Z"
                                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
@@ -2358,51 +2338,7 @@ paths:
                                       tier: gold
                                       tier_name: Gold Corporate Membership
                                       tier_uid: 01t2M000009ABCdIAM
-                                    - b2b_org_uid: 001B000000IqhSLIAZ
-                                      company_name: Example Corp
-                                      end_date: "2025-12-31"
-                                      membership_uid: 02i2M000009ABCdIAM
-                                      project_slug: lf-main
-                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
-                                      start_date: "2025-02-01"
-                                      status: Active
-                                      tier: gold
-                                      tier_name: Gold Corporate Membership
-                                      tier_uid: 01t2M000009ABCdIAM
-                                    - b2b_org_uid: 001B000000IqhSLIAZ
-                                      company_name: Example Corp
-                                      end_date: "2025-12-31"
-                                      membership_uid: 02i2M000009ABCdIAM
-                                      project_slug: lf-main
-                                      project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
-                                      start_date: "2025-02-01"
-                                      status: Active
-                                      tier: gold
-                                      tier_name: Gold Corporate Membership
-                                      tier_uid: 01t2M000009ABCdIAM
                             example:
-                                - b2b_org_uid: 001B000000IqhSLIAZ
-                                  company_name: Example Corp
-                                  end_date: "2025-12-31"
-                                  membership_uid: 02i2M000009ABCdIAM
-                                  project_slug: lf-main
-                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
-                                  start_date: "2025-02-01"
-                                  status: Active
-                                  tier: gold
-                                  tier_name: Gold Corporate Membership
-                                  tier_uid: 01t2M000009ABCdIAM
-                                - b2b_org_uid: 001B000000IqhSLIAZ
-                                  company_name: Example Corp
-                                  end_date: "2025-12-31"
-                                  membership_uid: 02i2M000009ABCdIAM
-                                  project_slug: lf-main
-                                  project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
-                                  start_date: "2025-02-01"
-                                  status: Active
-                                  tier: gold
-                                  tier_name: Gold Corporate Membership
-                                  tier_uid: 01t2M000009ABCdIAM
                                 - b2b_org_uid: 001B000000IqhSLIAZ
                                   company_name: Example Corp
                                   end_date: "2025-12-31"
@@ -2474,11 +2410,12 @@ paths:
                     example: 02i2M000009ABCdIAM
                   example: 02i2M000009ABCdIAM
             requestBody:
+                description: Request body for create-key-contact.
                 required: true
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/KeyContactCreateBody'
+                            $ref: '#/components/schemas/CreateKeyContactRequestBody'
                         example:
                             board_member: false
                             email: john.doe@example.com
@@ -2486,7 +2423,7 @@ paths:
                             last_name: Doe
                             primary_contact: false
                             role: Technical Contact
-                            send_invite: true
+                            send_invite: false
                             status: Active
                             title: CTO
             responses:
@@ -2510,7 +2447,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/ProjectKeyContactResponse'
+                                $ref: '#/components/schemas/MembershipServicegetKeyContactResponseBody'
                             example:
                                 b2b_org_uid: 001B000000IqhSLIAZ
                                 board_member: false
@@ -2615,7 +2552,6 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
@@ -2701,7 +2637,6 @@ paths:
                 - name: If-None-Match
                   in: header
                   description: If-None-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-None-Match header value for conditional requests
@@ -2710,7 +2645,6 @@ paths:
                 - name: If-Modified-Since
                   in: header
                   description: If-Modified-Since header value for conditional requests (HTTP date format)
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Modified-Since header value for conditional requests (HTTP date format)
@@ -2737,7 +2671,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/ProjectKeyContactResponse'
+                                $ref: '#/components/schemas/MembershipServicegetKeyContactResponseBody'
                             example:
                                 b2b_org_uid: 001B000000IqhSLIAZ
                                 board_member: false
@@ -2835,13 +2769,13 @@ paths:
                 - name: If-Match
                   in: header
                   description: If-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Match header value for conditional requests
                     example: "123"
                   example: "123"
             requestBody:
+                description: Request body for update-key-contact.
                 required: true
                 content:
                     application/json:
@@ -2852,7 +2786,7 @@ paths:
                             email: john.doe@example.com
                             primary_contact: false
                             role: Technical Contact
-                            send_invite: true
+                            send_invite: false
                             status: Active
                             title: CTO
             responses:
@@ -2876,7 +2810,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/ProjectKeyContactResponse'
+                                $ref: '#/components/schemas/MembershipServicegetKeyContactResponseBody'
                             example:
                                 b2b_org_uid: 001B000000IqhSLIAZ
                                 board_member: false
@@ -2972,7 +2906,6 @@ paths:
                 - name: If-None-Match
                   in: header
                   description: If-None-Match header value for conditional requests
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-None-Match header value for conditional requests
@@ -2981,7 +2914,6 @@ paths:
                 - name: If-Modified-Since
                   in: header
                   description: If-Modified-Since header value for conditional requests (HTTP date format)
-                  allowEmptyValue: true
                   schema:
                     type: string
                     description: If-Modified-Since header value for conditional requests (HTTP date format)
@@ -3008,7 +2940,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/ProjectMembershipResponse'
+                                $ref: '#/components/schemas/MembershipServicegetProjectMembershipResponseBody'
                             example:
                                 agreement_date: "2025-01-01T00:00:00Z"
                                 annual_full_price: 50000
@@ -3077,6 +3009,53 @@ paths:
                 - jwt_header_Authorization: []
 components:
     schemas:
+        AddB2bOrgSettingsUserRequestBody:
+            type: object
+            properties:
+                email:
+                    type: string
+                    description: Invitee email; identity key for the grant
+                    example: alice@example.com
+                    format: email
+                invited_as:
+                    type: string
+                    description: 'Relation to grant: writer (Admin) or auditor (Viewer)'
+                    example: auditor
+                    enum:
+                        - writer
+                        - auditor
+                name:
+                    type: string
+                    description: Optional display name; stored as provided and left empty when omitted (no server-side user lookup)
+                    example: Alice Smith
+            description: Request body for add-b2b-org-settings-user.
+            example:
+                email: alice@example.com
+                invited_as: auditor
+                name: Alice Smith
+            required:
+                - email
+                - invited_as
+        AddB2bOrgWorkspaceProjectRequestBody:
+            type: object
+            properties:
+                project_name:
+                    type: string
+                    description: Optional human-readable project name for indexer search and display
+                    example: Kubernetes
+                    maxLength: 255
+                project_slug:
+                    type: string
+                    description: Caller-owned project identifier (for example, an Org Lens project slug). Idempotency key within the workspace; member-service generates the project_uid.
+                    example: kubernetes
+                    minLength: 1
+                    maxLength: 512
+            description: Request body for add-b2b-org-workspace-project.
+            example:
+                project_name: Kubernetes
+                project_slug: kubernetes
+            required:
+                - project_slug
         AdminReindexItem:
             type: object
             properties:
@@ -3089,19 +3068,19 @@ components:
                 uid: 001B000000IqhSLIAZ
             required:
                 - uid
-        AdminReindexPayload:
+        AdminReindexRequestBody:
             type: object
             properties:
                 cdc_repair:
                     type: boolean
                     description: When true, drain the CDC quota-repair queue for the given type (one of b2b_org, project_membership, key_contact). Mutually exclusive with since, until, and items; does not support dry_run.
                     default: false
-                    example: false
+                    example: true
                 dry_run:
                     type: boolean
                     description: When true, walk SOQL/live-path but skip publishing. Final log includes would_publish_count.
                     default: false
-                    example: true
+                    example: false
                 items:
                     type: array
                     items:
@@ -3126,20 +3105,16 @@ components:
                     description: ISO 8601 / RFC 3339 timestamp with explicit zone; upper bound (inclusive) so only records with LastModifiedDate <= until are reindexed. Requires since; together they define a bounded [since, until] window sized to fit available Salesforce quota. Mutually exclusive with items and cdc_repair. Handler normalises to UTC.
                     example: "2026-06-20T00:00:00Z"
                     format: date-time
-            description: Request payload for triggering a reindex operation
+            description: Request body for admin-reindex.
             example:
                 cdc_repair: false
-                dry_run: true
-                items:
-                    - uid: 001B000000IqhSLIAZ
-                    - uid: 001B000000IqhSLIAZ
-                    - uid: 001B000000IqhSLIAZ
+                dry_run: false
                 since: "2026-05-20T00:00:00Z"
                 type: b2b_org
                 until: "2026-06-20T00:00:00Z"
             required:
                 - type
-        AdminReindexResult:
+        AdminReindexResponseBody:
             type: object
             properties:
                 run_id:
@@ -3152,48 +3127,11 @@ components:
                     description: 'For cdc_repair runs: number of pending repair markers selected for this run. Omitted (not present in the response body) for other modes.'
                     example: 42
                     format: int64
-            description: Result of a reindex operation
             example:
                 run_id: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                 selected_count: 42
             required:
                 - run_id
-        B2bOrgCreateBody:
-            type: object
-            properties:
-                sfid:
-                    type: string
-                    description: Salesforce Account.Id (15- or 18-character); used to fetch and cache the org record
-                    example: 001Hs00001AbCdEFAZ
-                    minLength: 15
-                    maxLength: 18
-            description: Request body for registering a B2B organization by its Salesforce Account ID
-            example:
-                sfid: 001Hs00001AbCdEFAZ
-            required:
-                - sfid
-        B2bOrgFindOrCreateBody:
-            type: object
-            properties:
-                name:
-                    type: string
-                    description: Organization name, used when the Account is created
-                    example: Example Corp
-                    minLength: 1
-                    maxLength: 255
-                website:
-                    type: string
-                    description: Organization website; its domain (scheme, www. and path stripped) is the match key
-                    example: https://example.com
-                    minLength: 1
-                    maxLength: 255
-            description: Request body for finding the Salesforce Account by website domain or creating it as a Company Account
-            example:
-                name: Example Corp
-                website: https://example.com
-            required:
-                - name
-                - website
         B2bOrgResponse:
             type: object
             properties:
@@ -3214,7 +3152,7 @@ components:
                     type: array
                     items:
                         type: string
-                        example: Aut vitae ut.
+                        example: Illo numquam in et veniam est.
                     description: Additional domains; each item is a bare host with the same normalization as primary_domain
                     example:
                         - example.org
@@ -3321,6 +3259,18 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
+                        - avatar: https://avatars.githubusercontent.com/u/12345
+                          email: alice@example.com
+                          invite_status: accepted
+                          invited_as: writer
+                          name: Alice Smith
+                          username: alice
                 created_at:
                     type: string
                     description: Settings record creation timestamp
@@ -3370,6 +3320,12 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
+                    - avatar: https://avatars.githubusercontent.com/u/12345
+                      email: alice@example.com
+                      invite_status: accepted
+                      invited_as: writer
+                      name: Alice Smith
+                      username: alice
                 created_at: "2025-01-01T00:00:00Z"
                 updated_at: "2025-06-01T12:00:00Z"
                 writers:
@@ -3385,202 +3341,59 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-        B2bOrgSettingsUpdateBody:
+        BulkAddB2bOrgWorkspaceProjectsRequestBody:
             type: object
             properties:
-                auditors:
+                projects:
                     type: array
                     items:
-                        $ref: '#/components/schemas/OrgUser'
-                    description: Complete replacement list for org auditors. Nil = leave unchanged; [] = remove all.
+                        $ref: '#/components/schemas/WorkspaceProjectAddItem'
+                    description: Projects to add; at most 100 per request
                     example:
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
-                writers:
-                    type: array
-                    items:
-                        $ref: '#/components/schemas/OrgUser'
-                    description: Complete replacement list for org writers. Nil = leave unchanged; [] = remove all.
-                    example:
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
-            description: 'Request body for replacing the writers and/or auditors list on a b2b_org. Full-replace: nil = keep existing; [] = remove all.'
+                        - project_name: Kubernetes
+                          project_slug: kubernetes
+                        - project_name: Kubernetes
+                          project_slug: kubernetes
+                    minItems: 1
+                    maxItems: 100
+            description: Request body for bulk-add-b2b-org-workspace-projects.
             example:
-                auditors:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                writers:
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-        B2bOrgUpdateBody:
+                projects:
+                    - project_name: Kubernetes
+                      project_slug: kubernetes
+                    - project_name: Kubernetes
+                      project_slug: kubernetes
+            required:
+                - projects
+        CreateB2bOrgRequestBody:
             type: object
             properties:
-                crunch_base_url:
+                sfid:
                     type: string
-                    description: CrunchBase profile URL (Account.CrunchBase_URL__c); pass empty string to explicitly clear
-                    example: https://www.crunchbase.com/organization/example-corp
-                description:
-                    type: string
-                    description: Organization free-text description
-                    example: A leading technology company
-                industry:
-                    type: string
-                    description: Industry classification (Account.Industry)
-                    example: Technology
-                logo_url:
-                    type: string
-                    description: URL of the organization logo (Account.Logo_URL__c)
-                    example: https://example.com/logo.png
-                name:
-                    type: string
-                    description: Organization name
-                    example: Example Corp
-                number_of_employees:
-                    type: integer
-                    description: Employee count (Account.NumberOfEmployees)
-                    example: 500
-                    format: int64
-                phone:
-                    type: string
-                    description: Organization contact phone number
-                    example: +1-555-000-0000
-                primary_domain:
-                    type: string
-                    description: Primary domain (bare host)
-                    example: example.com
-                sector:
-                    type: string
-                    description: Sector classification (Account.Sector__c)
-                    example: Software
-                website:
-                    type: string
-                    description: Organization website URL
-                    example: https://example.com
-            description: Request body for updating mutable fields on a B2B organization
+                    description: Salesforce Account.Id (15- or 18-character); used to fetch and cache the org record
+                    example: 001Hs00001AbCdEFAZ
+                    minLength: 15
+                    maxLength: 18
+            description: Request body for create-b2b-org.
             example:
-                crunch_base_url: https://www.crunchbase.com/organization/example-corp
-                description: A leading technology company
-                industry: Technology
-                logo_url: https://example.com/logo.png
-                name: Example Corp
-                number_of_employees: 500
-                phone: +1-555-000-0000
-                primary_domain: example.com
-                sector: Software
-                website: https://example.com
-        Error:
+                sfid: 001Hs00001AbCdEFAZ
+            required:
+                - sfid
+        CreateB2bOrgWorkspaceRequestBody:
             type: object
             properties:
-                fault:
-                    type: boolean
-                    description: Is the error a server-side fault?
-                    example: false
-                id:
-                    type: string
-                    description: ID is a unique identifier for this particular occurrence of the problem.
-                    example: 123abc
-                message:
-                    type: string
-                    description: Message is a human-readable explanation specific to this occurrence of the problem.
-                    example: parameter 'p' must be an integer
                 name:
                     type: string
-                    description: Name is the name of this class of errors.
-                    example: bad_request
-                temporary:
-                    type: boolean
-                    description: Is the error temporary?
-                    example: true
-                timeout:
-                    type: boolean
-                    description: Is the error a timeout?
-                    example: true
-            description: Endpoint not implemented
+                    description: Workspace display name; must be unique within the org
+                    example: My Workspace
+                    minLength: 1
+                    maxLength: 255
+            description: Request body for create-b2b-org-workspace.
             example:
-                fault: false
-                id: 123abc
-                message: parameter 'p' must be an integer
-                name: bad_request
-                temporary: false
-                timeout: false
+                name: My Workspace
             required:
                 - name
-                - id
-                - message
-                - temporary
-                - timeout
-                - fault
-        KeyContactCreateBody:
+        CreateKeyContactRequestBody:
             type: object
             properties:
                 board_member:
@@ -3634,7 +3447,7 @@ components:
                     type: string
                     description: Contact job title. Only persisted when a new Salesforce Contact is created (email resolves to an unknown address); ignored if the Contact already exists.
                     example: CTO
-            description: Request body for creating a key contact (Project_Role__c record)
+            description: Request body for create-key-contact.
             example:
                 board_member: false
                 email: john.doe@example.com
@@ -3650,77 +3463,70 @@ components:
                 - first_name
                 - last_name
                 - role
-        KeyContactUpdateBody:
+        Error:
             type: object
             properties:
-                board_member:
+                fault:
                     type: boolean
-                    description: Whether this contact holds a board member role
+                    description: Is the error a server-side fault?
                     example: false
-                email:
+                id:
                     type: string
-                    description: Contact email address; normalized to lowercase before update
-                    example: john.doe@example.com
-                    format: email
-                primary_contact:
+                    description: ID is a unique identifier for this particular occurrence of the problem.
+                    example: 123abc
+                message:
+                    type: string
+                    description: Message is a human-readable explanation specific to this occurrence of the problem.
+                    example: parameter 'p' must be an integer
+                name:
+                    type: string
+                    description: Name is the name of this class of errors.
+                    example: bad_request
+                temporary:
                     type: boolean
-                    description: Whether this is the primary contact for the membership
+                    description: Is the error temporary?
                     example: false
-                role:
-                    type: string
-                    description: Contact role designation
-                    example: Technical Contact
-                    enum:
-                        - Representative/Voting Contact
-                        - Authorized Signatory
-                        - Billing Contact
-                        - Marketing Contact
-                        - Technical Contact
-                        - Legal Contact
-                        - Event Sponsorship Contact
-                        - PO Contact
-                        - PR Contact
-                send_invite:
+                timeout:
                     type: boolean
-                    description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
-                    default: false
-                    example: false
-                status:
-                    type: string
-                    description: Role record status, e.g. 'Active'
-                    example: Active
-                    enum:
-                        - Active
-                        - Inactive
-                title:
-                    type: string
-                    description: Contact job title. Only persisted when the email change resolves to an unknown address and a new Salesforce Contact is created; ignored if the Contact already exists.
-                    example: CTO
-            description: Request body for updating a key contact (Project_Role__c record)
+                    description: Is the error a timeout?
+                    example: true
+            description: Endpoint not implemented
             example:
-                board_member: false
-                email: john.doe@example.com
-                primary_contact: false
-                role: Technical Contact
-                send_invite: true
-                status: Active
-                title: CTO
-        ListMetadata:
+                fault: false
+                id: 123abc
+                message: parameter 'p' must be an integer
+                name: bad_request
+                temporary: false
+                timeout: true
+            required:
+                - name
+                - id
+                - message
+                - temporary
+                - timeout
+                - fault
+        FindOrCreateB2bOrgRequestBody:
             type: object
             properties:
-                next_page_token:
+                name:
                     type: string
-                    description: Opaque cursor for the next page. Pass this value as the page_token query parameter to retrieve the next page. Empty or absent when this is the last page.
-                    example: ""
-                total_size:
-                    type: integer
-                    description: Total number of records matching the query. Set on the first page; may be 0 on continuation pages.
-                    example: 100
-                    format: int64
-            description: Pagination metadata for list responses
+                    description: Organization name, used when the Account is created
+                    example: Example Corp
+                    minLength: 1
+                    maxLength: 255
+                website:
+                    type: string
+                    description: Organization website; its domain (scheme, www. and path stripped) is the match key
+                    example: https://example.com
+                    minLength: 1
+                    maxLength: 255
+            description: Request body for find-or-create-b2b-org.
             example:
-                next_page_token: ""
-                total_size: 100
+                name: Example Corp
+                website: https://example.com
+            required:
+                - name
+                - website
         MemberOrgTierResponse:
             type: object
             properties:
@@ -3786,49 +3592,21 @@ components:
                 - b2b_org_uid
                 - membership_uid
                 - tier
-        MembershipTierResponse:
-            type: object
-            properties:
-                created_at:
-                    type: string
-                    description: Creation timestamp
-                    example: "2025-01-01T00:00:00Z"
-                    format: date-time
-                family:
-                    type: string
-                    description: Product family, e.g. 'Membership'
-                    example: Membership
-                name:
-                    type: string
-                    description: Product name, e.g. 'Gold Corporate Membership'
-                    example: Gold Corporate Membership
-                product_type:
-                    type: string
-                    description: Product type (Type__c)
-                    example: Corporate
-                project_uid:
-                    type: string
-                    description: V2 project UUID
-                    example: a27394a3-7a6c-4d0f-9e0f-692d8753924f
-                    format: uuid
-                uid:
-                    type: string
-                    description: Tier UID (Salesforce Product2.Id)
-                    example: 01t2M000009ABCdIAM
-                updated_at:
-                    type: string
-                    description: Last update timestamp
-                    example: "2025-06-01T12:00:00Z"
-                    format: date-time
-            description: A membership tier (Product2) scoped to a project
-            example:
-                created_at: "2025-01-01T00:00:00Z"
-                family: Membership
-                name: Gold Corporate Membership
-                product_type: Corporate
-                project_uid: a27394a3-7a6c-4d0f-9e0f-692d8753924f
-                uid: 01t2M000009ABCdIAM
-                updated_at: "2025-06-01T12:00:00Z"
+        MembershipServicecreateB2bOrgWorkspaceResponseBody:
+            description: The created workspace
+            $ref: '#/components/schemas/WorkspaceResponse'
+        MembershipServicegetB2bOrgResponseBody:
+            description: B2B organization details
+            $ref: '#/components/schemas/B2bOrgResponse'
+        MembershipServicegetB2bOrgSettingsResponseBody:
+            description: B2B organization access-control settings
+            $ref: '#/components/schemas/B2bOrgSettingsResponse'
+        MembershipServicegetKeyContactResponseBody:
+            description: Key contact details
+            $ref: '#/components/schemas/ProjectKeyContactResponse'
+        MembershipServicegetProjectMembershipResponseBody:
+            description: Project membership details
+            $ref: '#/components/schemas/ProjectMembershipResponse'
         OrgUser:
             type: object
             properties:
@@ -3875,48 +3653,6 @@ components:
                 username: alice
             required:
                 - email
-                - invited_as
-        OrgUserAddBody:
-            type: object
-            properties:
-                email:
-                    type: string
-                    description: Invitee email; identity key for the grant
-                    example: alice@example.com
-                    format: email
-                invited_as:
-                    type: string
-                    description: 'Relation to grant: writer (Admin) or auditor (Viewer)'
-                    example: auditor
-                    enum:
-                        - writer
-                        - auditor
-                name:
-                    type: string
-                    description: Optional display name; stored as provided and left empty when omitted (no server-side user lookup)
-                    example: Alice Smith
-            description: Request body to add (invite) a single principal to a b2b_org's writers or auditors
-            example:
-                email: alice@example.com
-                invited_as: auditor
-                name: Alice Smith
-            required:
-                - email
-                - invited_as
-        OrgUserRoleBody:
-            type: object
-            properties:
-                invited_as:
-                    type: string
-                    description: 'Target relation: writer (Admin) or auditor (Viewer)'
-                    example: writer
-                    enum:
-                        - writer
-                        - auditor
-            description: Request body to change a single principal's role on a b2b_org
-            example:
-                invited_as: writer
-            required:
                 - invited_as
         ProjectKeyContactResponse:
             type: object
@@ -4210,6 +3946,7 @@ components:
                     type: string
                     description: Organization website URL
                     example: https://example.com
+            description: Request body for update-b2b-org.
             example:
                 crunch_base_url: https://www.crunchbase.com/organization/example-corp
                 description: A leading technology company
@@ -4242,18 +3979,6 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
                 writers:
                     type: array
                     items:
@@ -4272,12 +3997,7 @@ components:
                           invited_as: writer
                           name: Alice Smith
                           username: alice
-                        - avatar: https://avatars.githubusercontent.com/u/12345
-                          email: alice@example.com
-                          invite_status: accepted
-                          invited_as: writer
-                          name: Alice Smith
-                          username: alice
+            description: Request body for update-b2b-org-settings.
             example:
                 auditors:
                     - avatar: https://avatars.githubusercontent.com/u/12345
@@ -4305,18 +4025,21 @@ components:
                       invited_as: writer
                       name: Alice Smith
                       username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
-                    - avatar: https://avatars.githubusercontent.com/u/12345
-                      email: alice@example.com
-                      invite_status: accepted
-                      invited_as: writer
-                      name: Alice Smith
-                      username: alice
+        UpdateB2bOrgSettingsUserRoleRequestBody:
+            type: object
+            properties:
+                invited_as:
+                    type: string
+                    description: 'Target relation: writer (Admin) or auditor (Viewer)'
+                    example: writer
+                    enum:
+                        - writer
+                        - auditor
+            description: Request body for update-b2b-org-settings-user-role.
+            example:
+                invited_as: writer
+            required:
+                - invited_as
         UpdateKeyContactRequestBody:
             type: object
             properties:
@@ -4351,7 +4074,7 @@ components:
                     type: boolean
                     description: When true, send a platform invite (unregistered user) or role-assignment email (registered user) if the email changes. Defaults to false — org-dashboard access is still provisioned silently for registered users.
                     default: false
-                    example: true
+                    example: false
                 status:
                     type: string
                     description: Role record status, e.g. 'Active'
@@ -4363,12 +4086,13 @@ components:
                     type: string
                     description: Contact job title. Only persisted when the email change resolves to an unknown address and a new Salesforce Contact is created; ignored if the Contact already exists.
                     example: CTO
+            description: Request body for update-key-contact.
             example:
                 board_member: false
                 email: john.doe@example.com
                 primary_contact: false
                 role: Technical Contact
-                send_invite: true
+                send_invite: false
                 status: Active
                 title: CTO
         WorkspaceBulkAddItemError:
@@ -4392,10 +4116,6 @@ components:
         WorkspaceBulkResponse:
             type: object
             properties:
-                etag:
-                    type: string
-                    description: ETag header value
-                    example: "123"
                 failed:
                     type: array
                     items:
@@ -4410,15 +4130,11 @@ components:
                           project_slug: ""
                         - error: project_slug is required
                           project_slug: ""
-                last_modified:
-                    type: string
-                    description: Last-Modified header value (HTTP date format)
-                    example: Wed, 21 Oct 2025 07:28:00 GMT
                 succeeded:
                     type: array
                     items:
                         type: string
-                        example: Tempora quasi quaerat ratione magnam beatae.
+                        example: Dignissimos qui ab.
                     description: Slugs of the projects that were successfully added (or were already present)
                     example:
                         - kubernetes
@@ -4426,85 +4142,6 @@ components:
                     $ref: '#/components/schemas/WorkspaceResponse'
             description: 'Result of a bulk workspace project add: the updated workspace plus per-item success/failure detail'
             example:
-                etag: "123"
-                failed:
-                    - error: project_slug is required
-                      project_slug: ""
-                    - error: project_slug is required
-                      project_slug: ""
-                    - error: project_slug is required
-                      project_slug: ""
-                last_modified: Wed, 21 Oct 2025 07:28:00 GMT
-                succeeded:
-                    - kubernetes
-                workspace:
-                    created_at: "2026-01-01T00:00:00Z"
-                    created_by: alice
-                    name: My Workspace
-                    projects:
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
-                    uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
-                    updated_at: "2026-06-01T12:00:00Z"
-                    updated_by: alice
-            required:
-                - workspace
-                - succeeded
-                - failed
-        WorkspaceBulkResponse2:
-            type: object
-            properties:
-                failed:
-                    type: array
-                    items:
-                        $ref: '#/components/schemas/WorkspaceBulkAddItemError'
-                    description: Projects that could not be added with per-item error detail
-                    example:
-                        - error: project_slug is required
-                          project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
-                        - error: project_slug is required
-                          project_slug: ""
-                succeeded:
-                    type: array
-                    items:
-                        type: string
-                        example: Perferendis est.
-                    description: Slugs of the projects that were successfully added (or were already present)
-                    example:
-                        - kubernetes
-                workspace:
-                    $ref: '#/components/schemas/WorkspaceResponse'
-            example:
                 failed:
                     - error: project_slug is required
                       project_slug: ""
@@ -4542,40 +4179,6 @@ components:
                 - workspace
                 - succeeded
                 - failed
-        WorkspaceCreateBody:
-            type: object
-            properties:
-                name:
-                    type: string
-                    description: Workspace display name; must be unique within the org
-                    example: My Workspace
-                    minLength: 1
-                    maxLength: 255
-            description: Request body for creating a workspace
-            example:
-                name: My Workspace
-            required:
-                - name
-        WorkspaceProjectAddBody:
-            type: object
-            properties:
-                project_name:
-                    type: string
-                    description: Optional human-readable project name for indexer search and display
-                    example: Kubernetes
-                    maxLength: 255
-                project_slug:
-                    type: string
-                    description: Caller-owned project identifier (for example, an Org Lens project slug). Idempotency key within the workspace; member-service generates the project_uid.
-                    example: kubernetes
-                    minLength: 1
-                    maxLength: 512
-            description: Request body for adding a single project to a workspace
-            example:
-                project_name: Kubernetes
-                project_slug: kubernetes
-            required:
-                - project_slug
         WorkspaceProjectAddItem:
             type: object
             properties:
@@ -4642,26 +4245,6 @@ components:
             required:
                 - project_uid
                 - project_slug
-        WorkspaceProjectsBulkAddBody:
-            type: object
-            properties:
-                projects:
-                    type: array
-                    items:
-                        $ref: '#/components/schemas/WorkspaceProjectAddItem'
-                    description: Projects to add; at most 100 per request
-                    example:
-                        - project_name: Kubernetes
-                          project_slug: kubernetes
-                    minItems: 1
-                    maxItems: 100
-            description: Request body for adding multiple projects to a workspace in one operation
-            example:
-                projects:
-                    - project_name: Kubernetes
-                      project_slug: kubernetes
-            required:
-                - projects
         WorkspaceResponse:
             type: object
             properties:
@@ -4684,13 +4267,6 @@ components:
                         $ref: '#/components/schemas/WorkspaceProjectResponse'
                     description: Project associations in this workspace
                     example:
-                        - created_at: "2026-01-01T00:00:00Z"
-                          created_by: alice
-                          project_name: Kubernetes
-                          project_slug: kubernetes
-                          project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                          updated_at: "2026-01-01T00:00:00Z"
-                          updated_by: alice
                         - created_at: "2026-01-01T00:00:00Z"
                           created_by: alice
                           project_name: Kubernetes
@@ -4739,45 +4315,18 @@ components:
                       project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                       updated_at: "2026-01-01T00:00:00Z"
                       updated_by: alice
-                    - created_at: "2026-01-01T00:00:00Z"
-                      created_by: alice
-                      project_name: Kubernetes
-                      project_slug: kubernetes
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                      updated_at: "2026-01-01T00:00:00Z"
-                      updated_by: alice
-                    - created_at: "2026-01-01T00:00:00Z"
-                      created_by: alice
-                      project_name: Kubernetes
-                      project_slug: kubernetes
-                      project_uid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-                      updated_at: "2026-01-01T00:00:00Z"
-                      updated_by: alice
                 uid: 4c46585f-9f01-8bda-a0a5-f0c8eeef7fff
                 updated_at: "2026-06-01T12:00:00Z"
                 updated_by: alice
             required:
                 - uid
                 - name
-        WorkspaceUpdateBody:
-            type: object
-            properties:
-                name:
-                    type: string
-                    description: New workspace display name; must be unique within the org
-                    example: Renamed Workspace
-                    minLength: 1
-                    maxLength: 255
-            description: Request body for renaming a workspace
-            example:
-                name: Renamed Workspace
-            required:
-                - name
     securitySchemes:
         jwt_header_Authorization:
             type: http
             description: Heimdall authorization
             scheme: bearer
+            bearerFormat: JWT
 tags:
     - name: membership-service
       description: Membership management service — direct resource endpoints for B2B orgs, memberships, and key contacts

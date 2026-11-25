@@ -100,14 +100,15 @@ func main() {
 // runAvatarBackfill runs the one-off b2b_org_settings avatar backfill (RUN_MODE=avatar-backfill) then exits.
 func runAvatarBackfill(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	go cancelOnSignal(ctx, cancel)
 
 	if err := service.RunAvatarBackfill(ctx); err != nil {
 		slog.ErrorContext(ctx, "avatar backfill failed", "error", err)
+		cancel()
 		os.Exit(1)
 	}
 	slog.InfoContext(ctx, "avatar backfill complete")
+	cancel()
 }
 
 // runAPI starts the HTTP membership API server. This is the default run mode.
