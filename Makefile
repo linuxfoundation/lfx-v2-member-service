@@ -30,6 +30,10 @@ LINT_TIMEOUT := 10m
 LINT_TOOL=$(shell go env GOPATH)/bin/golangci-lint
 GO_FILES=$(shell find . -name '*.go' -not -path './gen/*' -not -path './vendor/*')
 
+# Run MegaLinter locally using the same image as CI.
+# Keep this digest in sync with .github/workflows/mega-linter.yml.
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:e676b8e9dac00d148bf1abb6ab809f1df76f07e804d8061f78631975d0c90925  # v10.2.0
+
 ##@ Development
 
 .PHONY: setup-dev
@@ -108,6 +112,11 @@ lint: ## Run golangci-lint (local Go linting)
 	@echo "Running golangci-lint..."
 	@$(LINT_TOOL) version 2>/dev/null | grep -q 'version $(GOLANGCI_LINT_VERSION:v%=%) ' || (echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..." && GOBIN=$(dir $(LINT_TOOL)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	@$(LINT_TOOL) run ./... && echo "==> Lint OK"
+
+.PHONY: megalinter
+megalinter: ## Run MegaLinter locally using Docker
+	docker pull $(MEGALINTER_IMAGE)
+	docker run --rm --platform linux/amd64 -e GOTOOLCHAIN=auto -v '$(CURDIR):/tmp/lint:rw' $(MEGALINTER_IMAGE)
 
 # Format code
 .PHONY: fmt

@@ -1,10 +1,10 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 
-title = "gitleaks config"
+title = "betterleaks config"
 
 [extend]
-# useDefault will extend the base configuration with the default gitleaks config
+# Extend the base configuration with the default betterleaks rules.
 useDefault = true
 
 [allowlist]

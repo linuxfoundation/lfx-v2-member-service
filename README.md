@@ -283,6 +283,8 @@ To contribute to this repository:
 
 ### Building
 
+API generation requires Go and `jq`.
+
 ```bash
 make apigen    # Generate Goa API code
 make build     # Build the member-api binary
