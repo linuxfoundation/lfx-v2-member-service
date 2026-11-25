@@ -52,6 +52,12 @@ deps: ## Install dependencies
 .PHONY: apigen
 apigen: deps #@ Generate API code using Goa
 	goa gen github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
+	@# Goa v3.30.0 emits invalid Swagger 2 "security" requirements
+	@# (e.g. "jwt_header_Authorization": null instead of an empty array),
+	@# which Swagger 2 validators reject. Patch the requirement values back
+	@# to empty arrays until upstream fixes this.
+	@jq 'walk(if type == "object" and has("security") and (.security | type) == "array" then .security |= map(with_entries(.value = (.value // []))) else . end)' gen/http/openapi.json > /tmp/openapi.json.fixed \
+		&& mv /tmp/openapi.json.fixed gen/http/openapi.json
 
 # PROTO_GEN: one-time regeneration of Salesforce Pub/Sub API gRPC stubs.
 # Only needed when api/salesforce/pubsub/pubsub_api.proto is updated.

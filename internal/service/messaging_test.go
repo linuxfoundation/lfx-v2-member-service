@@ -24,6 +24,7 @@ var testB2BOrg = &model.B2BOrg{
 	UID:           "b2b-org-uid-001",
 	SFID:          "001000000000001AAA",
 	Name:          "Linux Foundation",
+	Slug:          "linux-foundation",
 	PrimaryDomain: "linuxfoundation.org",
 	Description:   "Supporting open source ecosystems.",
 	Industry:      "Technology",
@@ -44,14 +45,17 @@ func TestBuildB2BOrgIndexingConfig(t *testing.T) {
 	assert.Equal(t, fgaconstants.RelationAuditor, cfg.HistoryCheckRelation)
 	assert.Equal(t, "linux foundation", cfg.SortName)
 	assert.Equal(t,
-		[]string{"Linux Foundation", "linuxfoundation.org", "lf.org", "thelinuxfoundation.org"},
+		[]string{"Linux Foundation", "linuxfoundation.org", "lf.org", "thelinuxfoundation.org", "linux-foundation"},
 		cfg.NameAndAliases,
+		"slug rides along so typeahead matches the address bar (lfx-self-serve#2570)",
 	)
 	assert.Contains(t, cfg.Fulltext, "Linux Foundation")
 	assert.Contains(t, cfg.Fulltext, "linuxfoundation.org")
 	assert.Contains(t, cfg.Fulltext, "Supporting open source ecosystems.")
 	assert.Contains(t, cfg.Fulltext, "Technology")
 	assert.Contains(t, cfg.Fulltext, "Non-Profit")
+	assert.Contains(t, cfg.Fulltext, "linux-foundation")
+	assert.Contains(t, cfg.Tags, "slug:linux-foundation")
 	assert.Equal(t, testB2BOrg.Tags(), cfg.Tags)
 }
 
@@ -919,7 +923,7 @@ func TestBuildWorkspaceProjectIndexingConfig_ObjectIDIsColonCompound(t *testing.
 
 func TestPublishWorkspaceIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
-	org := &model.B2BOrg{UID: "0014100000Te2QjAAJ", Name: "Red Hat LLC"}
+	org := &model.B2BOrg{UID: "0014100000AcmeAAAA", Name: "Acme Motors, Inc."}
 	ws := &model.Workspace{UID: "ws-uid-del-001", Name: "Delete probe"}
 
 	PublishWorkspaceIndexer(context.Background(), pub, org, ws, indexerConstants.ActionDeleted)
@@ -941,7 +945,7 @@ func TestPublishWorkspaceIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
 
 func TestPublishWorkspaceProjectIndexer_DeleteMessageDataIsCompoundID(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
-	org := &model.B2BOrg{UID: "0014100000Te2QjAAJ", Name: "Red Hat LLC"}
+	org := &model.B2BOrg{UID: "0014100000AcmeAAAA", Name: "Acme Motors, Inc."}
 	ws := &model.Workspace{UID: "ws-uid-del-001", Name: "Delete probe"}
 	wp := model.WorkspaceProject{ProjectUID: "proj-uid-cncf", ProjectSlug: "cncf"}
 	wps := model.WorkspaceProjects{WorkspaceUID: ws.UID, OrgUID: org.UID}
@@ -977,7 +981,7 @@ func assertDeleteDataIsUIDString(t *testing.T, msg *model.MemberIndexerMessage, 
 }
 
 func TestBuildB2BOrgIndexerInput_DeleteVsCreate(t *testing.T) {
-	org := &model.B2BOrg{UID: "org-uid-001", Name: "Red Hat"}
+	org := &model.B2BOrg{UID: "org-uid-001", Name: "Acme Motors"}
 	assert.Equal(t, "org-uid-001", buildB2BOrgIndexerInput(org, indexerConstants.ActionDeleted))
 	assert.Equal(t, org, buildB2BOrgIndexerInput(org, indexerConstants.ActionCreated))
 }
@@ -996,7 +1000,7 @@ func TestBuildKeyContactIndexerInput_DeleteVsCreate(t *testing.T) {
 
 func TestPublishB2BOrgIndexer_DeleteMessageDataIsUIDString(t *testing.T) {
 	pub := mock.NewMockMemberPublisher()
-	org := &model.B2BOrg{UID: "org-del-001", Name: "Red Hat LLC"}
+	org := &model.B2BOrg{UID: "org-del-001", Name: "Acme Motors, Inc."}
 
 	PublishB2BOrgIndexer(context.Background(), pub, org, indexerConstants.ActionDeleted)
 

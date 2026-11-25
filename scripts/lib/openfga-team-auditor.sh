@@ -181,10 +181,10 @@ fga_require_store_id() {
 #
 # The caller names the variables instead of this helper reading every team
 # variable it knows about, so each script declares its reach explicitly. Both
-# callers currently read the same two variables — LFXV2-3071 ratified
-# staff/contractor parity, so grant and revoke have the same reach. Grant
-# backfills every exported team together; revoke targets whichever subset is
-# exported, so export only the team you intend to remove.
+# callers no longer read the same variables. Grant reads LF_STAFF_TEAM_NAME
+# only, so a backfill cannot re-create the withdrawn contractor grant; revoke
+# reads both, because rollback must be able to target a team the service no
+# longer emits. Export only the team you intend to remove.
 fga_team_names() {
 	if [[ $# -eq 0 ]]; then
 		echo "ERROR: fga_team_names requires the names of the environment" >&2

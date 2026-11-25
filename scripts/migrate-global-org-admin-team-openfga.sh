@@ -29,6 +29,7 @@ Options:
   --census-file FILE
   --salesforce-count N
   --approve-census-difference
+  --stable-roster-from-live
   --allowed-user USER --denied-user USER --sample-org UID
   --dry-run
   --confirm
@@ -36,6 +37,8 @@ Options:
 
 cleanup requires the allowed/denied/sample controls and --cutover-complete.
 restore verifies the final precleanup tuple hashes before previewing or writing.
+plan --stable-roster-from-live records the current stable-team roster as the approved
+roster instead of copying the legacy roster; verify and cleanup then require exactly it.
 USAGE
 }
 
@@ -181,7 +184,9 @@ migration_write_plan_summary() {
 	local missing_uids="$4"
 	local salesforce_count="$5"
 	local approve_difference="$6"
+	local roster_source="${7:-legacy}"
 	local census_count orphan_count missing_count difference approved manifest_hash roster_hash grants_hash
+	local roster_count roster_delta roster_added roster_removed
 	census_count=$(migration_line_count "$census_uids")
 	orphan_count=$(migration_line_count "$orphan_uids")
 	missing_count=$(migration_line_count "$missing_uids")
@@ -191,17 +196,32 @@ migration_write_plan_summary() {
 	manifest_hash=$(fga_hash_file "$directory/manifest.json")
 	roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
 	grants_hash=$(fga_hash_file "$directory/live-grants.jsonl")
+	roster_count=$(migration_line_count "$directory/stable-roster-plan.jsonl")
+	# Members added and removed relative to the legacy roster, computed in one
+	# jq pass so no principal-bearing temp file is left behind on an error.
+	roster_delta=$(jq -rn \
+		--slurpfile legacy "$directory/legacy-roster.jsonl" \
+		--slurpfile stable "$directory/stable-roster-plan.jsonl" \
+		'([$legacy[].user] | unique) as $l | ([$stable[].user] | unique) as $s
+		 | "\(($s - $l) | length) \(($l - $s) | length)"')
+	roster_added=${roster_delta% *}
+	roster_removed=${roster_delta#* }
 	jq -n --argjson census_count "$census_count" --argjson salesforce_count "$salesforce_count" \
 		--argjson difference "$difference" --argjson orphan_count "$orphan_count" \
 		--argjson missing_source_count "$missing_count" --argjson census_approved "$approved" \
 		--arg manifest_hash "$manifest_hash" --arg roster_hash "$roster_hash" \
-		--arg grants_hash "$grants_hash" \
+		--arg grants_hash "$grants_hash" --arg roster_source "$roster_source" \
+		--argjson roster_count "$roster_count" --argjson roster_added "$roster_added" \
+		--argjson roster_removed "$roster_removed" \
 		'{census_count:$census_count,salesforce_count:$salesforce_count,census_difference:$difference,
 		  census_approved:$census_approved,live_count:$census_count,orphan_count:$orphan_count,
 		  missing_source_count:$missing_source_count,snapshot_manifest_sha256:$manifest_hash,
+		  stable_roster_source:$roster_source,stable_roster_count:$roster_count,
+		  stable_roster_added_vs_legacy:$roster_added,stable_roster_removed_vs_legacy:$roster_removed,
 		  stable_roster_sha256:$roster_hash,
 		  live_grants_sha256:$grants_hash}' >"$directory/summary.json"
-	echo "Plan: $census_count live, $orphan_count orphan, $missing_count missing source"
+	echo "Plan: $census_count live, $orphan_count orphan, $missing_count missing source;" \
+		"stable roster $roster_count ($roster_source, +$roster_added/-$roster_removed vs legacy)"
 	if [[ "$approved" != true ]]; then
 		fga_error "non-zero census difference requires --approve-census-difference"
 		return 4
@@ -213,6 +233,7 @@ migration_plan() {
 	local census_file="$2"
 	local salesforce_count="$3"
 	local approve_difference="$4"
+	local roster_source="${5:-legacy}"
 	[[ -f "$directory/manifest.json" && -f "$directory/legacy-grants.jsonl" &&
 		-f "$directory/legacy-roster.jsonl" && -f "$census_file" ]] || {
 		fga_error "snapshot or census artifact is missing"
@@ -222,15 +243,19 @@ migration_plan() {
 		fga_error "salesforce count must be a non-negative integer"
 		return 2
 	}
+	# A new plan starts a new apply: an interrupted apply's resume marker must
+	# not let a later legacy apply accept a subset left by sso-tools removals.
+	rm -f "$directory/legacy-roster-apply.started"
 
 	local census_uids source_uids orphan_uids missing_uids
 	census_uids=$(mktemp)
 	source_uids=$(mktemp)
 	orphan_uids=$(mktemp)
 	missing_uids=$(mktemp)
+	local plan_tmp_files=("$census_uids" "$source_uids" "$orphan_uids" "$missing_uids")
 	jq -r 'select(.uid | type == "string" and length > 0) | .uid' "$census_file" | LC_ALL=C sort -u >"$census_uids"
 	if [[ ! -s "$census_uids" ]]; then
-		rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+		rm -f "${plan_tmp_files[@]}"
 		fga_error "live-organization census is empty"
 		return 4
 	fi
@@ -243,13 +268,49 @@ migration_plan() {
 	migration_write_grant_file "$census_uids" "$FGA_STABLE_TEAM" "$directory/live-grants.jsonl"
 	migration_write_grant_file "$orphan_uids" "$old_team" "$directory/orphan-grants.jsonl"
 	migration_write_grant_file "$missing_uids" "$FGA_STABLE_TEAM" "$directory/missing-source-grants.jsonl"
-	jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
-		"$directory/legacy-roster.jsonl" >"$directory/stable-roster-plan.jsonl"
+	if [[ "$roster_source" == live ]]; then
+		# The stable team is authoritative: approve its current roster as-is.
+		# verify and cleanup then require exactly this hash-bound roster.
+		migration_sorted_read \
+			"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
+			"$directory/stable-roster-plan.jsonl" || {
+			local read_status=$?
+			rm -f "${plan_tmp_files[@]}"
+			return "$read_status"
+		}
+		if [[ ! -s "$directory/stable-roster-plan.jsonl" ]]; then
+			rm -f "${plan_tmp_files[@]}"
+			fga_error "stable team roster is empty; refusing to approve it"
+			return 4
+		fi
+		# Rejected subjects are principals: keep them in the owner-only output
+		# directory (umask 077) rather than on stderr, which ends up in logs.
+		local rejected="$directory/stable-roster-rejected.jsonl"
+		jq -c 'select((.user | test("^user:[^*#\\s]+$") | not) or has("condition"))' \
+			"$directory/stable-roster-plan.jsonl" >"$rejected"
+		if [[ -s "$rejected" ]]; then
+			rm -f "${plan_tmp_files[@]}" "$directory/stable-roster-plan.jsonl"
+			fga_error "stable team has $(migration_line_count "$rejected") member(s) that are not direct users (wildcard, userset, or conditional); refusing to approve. Review $rejected"
+			return 4
+		fi
+		rm -f "$rejected"
+	else
+		jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
+			"$directory/legacy-roster.jsonl" >"$directory/stable-roster-plan.jsonl"
+	fi
 	local status=0
 	migration_write_plan_summary "$directory" "$census_uids" "$orphan_uids" \
-		"$missing_uids" "$salesforce_count" "$approve_difference" || status=$?
-	rm -f "$census_uids" "$source_uids" "$orphan_uids" "$missing_uids"
+		"$missing_uids" "$salesforce_count" "$approve_difference" "$roster_source" || status=$?
+	rm -f "${plan_tmp_files[@]}"
 	return "$status"
+}
+
+migration_require_census_approved() {
+	local directory="$1"
+	[[ "$(jq -r '.census_approved' "$directory/summary.json" 2>/dev/null)" == true ]] || {
+		fga_error "census difference is not approved; re-run plan with --approve-census-difference after review"
+		return 4
+	}
 }
 
 migration_validate_plan_hashes() {
@@ -287,14 +348,72 @@ migration_apply() {
 		fga_error "summary.json is missing; run plan first"
 		return 6
 	}
-	[[ "$(jq -r '.census_approved' "$directory/summary.json")" == true ]] || {
-		fga_error "census difference is not approved"
-		return 4
-	}
+	migration_require_census_approved "$directory" || return $?
 	migration_validate_plan_hashes "$directory" || return $?
 	migration_require_execution_mode apply "$dry_run" "$confirm" || return $?
-	fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" "$dry_run"
-	fga_apply_tuple_file writes "$directory/live-grants.jsonl" "$dry_run"
+	case "$(jq -r '.stable_roster_source // "legacy"' "$directory/summary.json")" in
+	legacy)
+		# stable_roster_source is a plain summary field. Writing members is
+		# only safe for a plan that copied the legacy roster, so check the
+		# hash-bound roster itself: a live plan relabelled "legacy" must not
+		# write its roster back over removals made since plan.
+		migration_assert_plan_roster_is_legacy "$directory" || return $?
+		# A legacy plan re-copies the legacy roster. Write it only into an empty
+		# stable team (first migration), or to resume this output directory's
+		# own interrupted write: roster writes commit per batch, so a failed
+		# write can leave part of the roster. An equal team needs no write. Any
+		# other state means the team was curated in sso-tools, and copying
+		# would re-add members removed there.
+		local roster_marker="$directory/legacy-roster-apply.started"
+		local planned_roster_hash roster_snapshot roster_state live_roster_hash
+		planned_roster_hash=$(fga_hash_file "$directory/stable-roster-plan.jsonl")
+		roster_snapshot=$(migration_stable_roster_state "$directory") || return $?
+		roster_state=${roster_snapshot%% *}
+		live_roster_hash=${roster_snapshot#* }
+		case "$roster_state" in
+		equal)
+			# Nothing to write; an earlier interrupted write is now complete.
+			[[ "$dry_run" == true ]] || rm -f "$roster_marker"
+			;;
+		empty | partial)
+			# Resume only the exact partial roster this directory's failed write
+			# left and verified. Any other partial team may hide an sso-tools
+			# removal, which the write would undo.
+			if [[ "$roster_state" == partial ]] &&
+				! [[ -f "$roster_marker" &&
+					"$(cat "$roster_marker")" == "$planned_roster_hash $live_roster_hash" ]]; then
+				fga_error "stable team holds only part of the legacy plan and does not match an interrupted apply recorded in this output directory. If members were removed in sso-tools, re-run plan with --stable-roster-from-live; if an earlier apply from another output directory was interrupted, resume it there"
+				return 4
+			fi
+			if [[ "$dry_run" == true ]]; then
+				fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" true
+			else
+				migration_write_legacy_roster "$directory" "$roster_marker" "$planned_roster_hash" || return $?
+			fi
+			;;
+		*)
+			fga_error "stable team has members outside the legacy plan, so it was curated in sso-tools; re-run plan with --stable-roster-from-live instead of copying the legacy roster"
+			return 4
+			;;
+		esac
+		;;
+	live)
+		# The approved roster is the stable team as it was at plan time. Never
+		# write it back: that would undo a removal made since, and verify
+		# would then pass. Refuse instead if the team changed.
+		local live_snapshot
+		live_snapshot=$(migration_stable_roster_state "$directory") || return $?
+		[[ "${live_snapshot%% *}" == equal ]] || {
+			fga_error "stable team changed since plan; re-run snapshot and plan, then review again"
+			return 4
+		}
+		;;
+	*)
+		fga_error "summary.json has an unknown stable_roster_source"
+		return 6
+		;;
+	esac
+	fga_apply_tuple_file writes "$directory/live-grants.jsonl" "$dry_run" || return $?
 	if [[ "$dry_run" == false ]]; then
 		local migrated_count summary_tmp
 		migrated_count=$(migration_line_count "$directory/live-grants.jsonl")
@@ -310,6 +429,77 @@ migration_normalize_file() {
 	local output="$2"
 	jq -cS 'if .condition == null then del(.condition) else . end' "$input" |
 		LC_ALL=C sort -u >"$output"
+}
+
+migration_assert_plan_roster_is_legacy() {
+	local directory="$1"
+	local temp_dir status
+	temp_dir=$(mktemp -d)
+	if jq -c --arg object "team:$FGA_STABLE_TEAM" '.object = $object' \
+		"$directory/legacy-roster.jsonl" >"$temp_dir/legacy-as-stable" &&
+		migration_normalize_file "$temp_dir/legacy-as-stable" "$temp_dir/expected-roster" &&
+		migration_normalize_file "$directory/stable-roster-plan.jsonl" "$temp_dir/planned-roster"; then
+		:
+	else
+		status=$?
+		rm -rf "$temp_dir"
+		return "$status"
+	fi
+	if ! cmp -s "$temp_dir/planned-roster" "$temp_dir/expected-roster"; then
+		rm -rf "$temp_dir"
+		fga_error "stable_roster_source is legacy but the planned roster is not the legacy roster; refusing to write members"
+		return 6
+	fi
+	rm -rf "$temp_dir"
+}
+
+# Writes the legacy roster. On success the resume marker is removed. If the
+# write fails partway, the marker records the planned roster hash and the hash
+# of the partial roster read back afterwards, so only that exact state can be
+# resumed; if the read-back fails or the team is not partial, no marker is kept.
+migration_write_legacy_roster() {
+	local directory="$1"
+	local roster_marker="$2"
+	local planned_roster_hash="$3"
+	local status=0 after
+	rm -f "$roster_marker"
+	fga_apply_tuple_file writes "$directory/stable-roster-plan.jsonl" false || status=$?
+	[[ "$status" -ne 0 ]] || return 0
+	if after=$(migration_stable_roster_state "$directory") && [[ "${after%% *}" == partial ]]; then
+		printf '%s %s' "$planned_roster_hash" "${after#* }" >"$roster_marker"
+	fi
+	return "$status"
+}
+
+# Prints the live stable team's state relative to the planned roster (equal,
+# empty, partial for a non-empty proper subset of the plan, or other) followed
+# by the sha256 of the normalized live roster. Returns the read error if the
+# stable team cannot be read.
+migration_stable_roster_state() {
+	local directory="$1"
+	local temp_dir status state
+	temp_dir=$(mktemp -d)
+	if migration_sorted_read \
+		"$(jq -n --arg object "team:$FGA_STABLE_TEAM" '{relation:"member",object:$object}')" \
+		"$temp_dir/actual-roster" &&
+		migration_normalize_file "$directory/stable-roster-plan.jsonl" "$temp_dir/planned-roster"; then
+		:
+	else
+		status=$?
+		rm -rf "$temp_dir"
+		return "$status"
+	fi
+	if cmp -s "$temp_dir/actual-roster" "$temp_dir/planned-roster"; then
+		state=equal
+	elif [[ ! -s "$temp_dir/actual-roster" ]]; then
+		state=empty
+	elif [[ -z "$(comm -23 "$temp_dir/actual-roster" "$temp_dir/planned-roster")" ]]; then
+		state=partial
+	else
+		state=other
+	fi
+	printf '%s %s\n' "$state" "$(fga_hash_file "$temp_dir/actual-roster")"
+	rm -rf "$temp_dir"
 }
 
 migration_assert_live_stable_plan() {
@@ -381,6 +571,7 @@ migration_verify() {
 		fga_error "baseline-checks.json is missing; rerun snapshot"
 		return 6
 	}
+	migration_require_census_approved "$directory" || return $?
 	local extra_grants status
 	extra_grants=$(mktemp)
 	migration_assert_live_stable_plan "$directory" "$extra_grants" || {
@@ -594,6 +785,9 @@ migration_cleanup() {
 		return 6
 	}
 
+	# A verified.checkpoint written before verify enforced census approval can
+	# bind an unapproved summary; re-check here before any delete.
+	migration_require_census_approved "$directory" || return $?
 	migration_assert_live_stable_plan "$directory" || return $?
 	migration_assert_authorization_baseline "$directory" "$directory/precleanup-checks.json" \
 		"$allowed_user" "$denied_user" "$sample_org" || return $?
@@ -653,6 +847,7 @@ migration_parse_args() {
 		--denied-user) MIGRATION_DENIED_USER="${2:-}"; shift 2 ;;
 		--sample-org) MIGRATION_SAMPLE_ORG="${2:-}"; shift 2 ;;
 		--approve-census-difference) MIGRATION_APPROVE_DIFFERENCE=true; shift ;;
+		--stable-roster-from-live) MIGRATION_STABLE_ROSTER_SOURCE=live; shift ;;
 		--dry-run) MIGRATION_DRY_RUN=true; shift ;;
 		--confirm) MIGRATION_CONFIRM=true; shift ;;
 		--cutover-complete) MIGRATION_CUTOVER_COMPLETE=true; shift ;;
@@ -674,7 +869,7 @@ migration_dispatch() {
 			return 2
 		}
 		migration_plan "$MIGRATION_OUTPUT_DIR" "$MIGRATION_CENSUS_FILE" \
-			"$MIGRATION_SALESFORCE_COUNT" "$MIGRATION_APPROVE_DIFFERENCE"
+			"$MIGRATION_SALESFORCE_COUNT" "$MIGRATION_APPROVE_DIFFERENCE" "$MIGRATION_STABLE_ROSTER_SOURCE"
 		;;
 	apply) migration_apply "$MIGRATION_OUTPUT_DIR" "$MIGRATION_DRY_RUN" "$MIGRATION_CONFIRM" ;;
 	verify)
@@ -702,9 +897,13 @@ migration_main() {
 	MIGRATION_CENSUS_FILE="" MIGRATION_SALESFORCE_COUNT=""
 	MIGRATION_BASE_URL="${OPENFGA_URL:-http://localhost:8080}"
 	MIGRATION_APPROVE_DIFFERENCE=false MIGRATION_DRY_RUN=false
-	MIGRATION_CONFIRM=false MIGRATION_CUTOVER_COMPLETE=false
+	MIGRATION_CONFIRM=false MIGRATION_CUTOVER_COMPLETE=false MIGRATION_STABLE_ROSTER_SOURCE=legacy
 	MIGRATION_ALLOWED_USER="" MIGRATION_DENIED_USER="" MIGRATION_SAMPLE_ORG=""
 	migration_parse_args "$@" || return $?
+	if [[ "$MIGRATION_STABLE_ROSTER_SOURCE" == live && "$MIGRATION_PHASE" != plan ]]; then
+		fga_error "--stable-roster-from-live only applies to plan"
+		return 2
+	fi
 	[[ -n "$MIGRATION_STORE_ID" && -n "$MIGRATION_OLD_TEAM" && -n "$MIGRATION_OUTPUT_DIR" ]] || {
 		fga_error "--store-id, --old-team, and --output-dir are required"
 		return 2

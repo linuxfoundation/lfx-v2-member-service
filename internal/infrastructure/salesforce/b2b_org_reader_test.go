@@ -39,7 +39,6 @@ const canonicalAccountJSON = `{
 	"CrunchBase_URL__c":"https://www.crunchbase.com/organization/linux-foundation",
 	"NumberOfEmployees":200,
 	"LF_Membership_Status__c":"Active",
-	"Slug__c":"linux-foundation",
 	"CreatedDate":"2020-01-15T10:30:00.000+0000",
 	"LastModifiedDate":"2024-06-01T08:00:00.000+0000",
 	"SystemModstamp":"2024-06-01T08:00:00.000+0000"
@@ -48,9 +47,9 @@ const canonicalAccountJSON = `{
 // TestSobjectAccountToB2BOrg_FixtureEquivalence verifies that
 // sobjectAccountToB2BOrg (sObject REST path) and convertSOQLToB2BOrg (SOQL
 // path) produce identical model.B2BOrg values for every field that both
-// converters handle. The sObject path additionally populates Slug (Slug__c),
-// which accountsSOQLBase does not select — that divergence is expected and
-// asserted explicitly below.
+// converters handle — including Slug, which both paths derive from Name with
+// model.Slugify (spec 050, DR-007) so `data.slug` never depends on which read
+// path last published the org.
 func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	t.Parallel()
 
@@ -65,8 +64,7 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	require.NotNil(t, sObjOrg)
 
 	// ── SOQL path ─────────────────────────────────────────────────────────────
-	// Populate soqlAccount with the same values (Slug__c excluded — accountsSOQLBase
-	// does not select it).
+	// Populate soqlAccount with the same values.
 	crunchURL := "https://www.crunchbase.com/organization/linux-foundation"
 	var empCount int64 = 200
 	logoURL := "https://linuxfoundation.org/logo.png"
@@ -118,9 +116,9 @@ func TestSobjectAccountToB2BOrg_FixtureEquivalence(t *testing.T) {
 	assert.Equal(t, soqlOrg.CreatedAt.UTC(), sObjOrg.CreatedAt.UTC(), "CreatedAt")
 	assert.Equal(t, soqlOrg.UpdatedAt.UTC(), sObjOrg.UpdatedAt.UTC(), "UpdatedAt")
 
-	// Slug is only populated by the sObject path (Slug__c absent from accountsSOQLBase).
-	assert.Equal(t, "linux-foundation", sObjOrg.Slug, "sObject path must populate Slug")
-	assert.Empty(t, soqlOrg.Slug, "SOQL path must leave Slug empty (not in accountsSOQLBase)")
+	// Both paths derive the slug from the same Name.
+	assert.Equal(t, "linux-foundation", sObjOrg.Slug, "sObject path must derive Slug from Name")
+	assert.Equal(t, sObjOrg.Slug, soqlOrg.Slug, "SOQL path must derive the same Slug")
 }
 
 // TestB2BOrgReader_GetB2BOrg_Happy verifies that GetB2BOrg returns a fully-
@@ -196,7 +194,6 @@ const canonicalAccountWithParentJSON = `{
 	"CrunchBase_URL__c":null,
 	"NumberOfEmployees":200,
 	"LF_Membership_Status__c":"Active",
-	"Slug__c":"linux-foundation",
 	"CreatedDate":"2020-01-15T10:30:00.000+0000",
 	"LastModifiedDate":"2024-06-01T08:00:00.000+0000",
 	"SystemModstamp":"2024-06-01T08:00:00.000+0000"
@@ -453,7 +450,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 2: full org fetch for the same Account. Must be a cache miss on
-	// "b2b_org_v2.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
+	// "b2b_org_v4.{uid}" and issue a fresh fetch rather than reusing the narrow entry.
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 	require.NotNil(t, org)
@@ -466,7 +463,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 }
 
 // TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief verifies the
-// reverse order: once a full org fetch has populated "b2b_org_v2.{uid}", a
+// reverse order: once a full org fetch has populated "b2b_org_v4.{uid}", a
 // later narrow parent-detail fetch for the same Account must not overwrite it.
 func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	t.Parallel()
@@ -491,7 +488,7 @@ func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
 	reader := NewB2BOrgReader(client, nil)
 
-	// Step 1: full org fetch populates "b2b_org_v2.{uid}".
+	// Step 1: full org fetch populates "b2b_org_v4.{uid}".
 	org1, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 	require.NotNil(t, org1)
@@ -556,7 +553,7 @@ func TestSObjectClient_CacheKeyIsolation_FlatAccountThenFullOrg(t *testing.T) {
 // TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored verifies
 // that a legacy under-shaped "b2b_org.{uid}" entry written before the cache-key
 // split is ignored after deploy. The current full-org fetch must read from the
-// versioned "b2b_org_v2.{uid}" key instead of trusting the legacy body.
+// versioned "b2b_org_v4.{uid}" key instead of trusting the legacy body.
 func TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored(t *testing.T) {
 	t.Parallel()
 
@@ -596,4 +593,63 @@ func TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored(t *test
 	require.NoError(t, err)
 	require.NotNil(t, current)
 	assert.JSONEq(t, canonicalAccountJSON, string(current.Body))
+}
+
+// TestSObjectClient_CacheKeyIsolation_RetiredFullOrgKeysIgnored verifies that a
+// body cached under any retired full-org prefix — "b2b_org_v2" (pre-#109
+// field list), "b2b_org_v3" / "b2b_org_v3_noslug" (#109's Slug__c projection
+// and its toggle) — is ignored after the v4 bump: the sObject cache key
+// carries no field-list component and handle304 keeps a hot entry's TTL alive
+// forever, so without the bump an under-shaped body would be served
+// indefinitely (LFXV2-2654, spec 050). InvalidateB2BOrg must still evict them.
+func TestSObjectClient_CacheKeyIsolation_RetiredFullOrgKeysIgnored(t *testing.T) {
+	t.Parallel()
+
+	for _, retired := range []string{sobjectKeyPrefixB2BOrgV2Legacy, sobjectKeyPrefixB2BOrgV3Legacy, sobjectKeyPrefixB2BOrgV3NoSlugLegacy} {
+		t.Run(retired, func(t *testing.T) {
+			t.Parallel()
+
+			uid, err := sfuuid.Normalize18(canonicalAccountSFID)
+			require.NoError(t, err)
+
+			// A poisoned body under the retired key: a different Name proves the
+			// fresh fetch, not the cache, produced the returned record and slug.
+			cache := newMemCache()
+			require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(retired, uid), &nats.SObjectCacheEntry{
+				Body: json.RawMessage(`{"Id":"` + canonicalAccountSFID + `","Name":"Stale Name"}`),
+				ETag: `"stale"`,
+			}))
+
+			callCount := 0
+			rt := &countingTransport{
+				callCount:  &callCount,
+				firstResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+				retryResp:  fakeResponse(http.StatusOK, canonicalAccountJSON, nil),
+				limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
+			}
+			client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
+
+			org, _, err := client.FetchB2BOrg(context.Background(), uid)
+			require.NoError(t, err)
+			require.NotNil(t, org)
+
+			assert.Equal(t, 1, callCount, "FetchB2BOrg must ignore the retired key and issue a fresh HTTP request")
+			assert.Equal(t, "Linux Foundation", org.Name)
+			assert.Equal(t, "linux-foundation", org.Slug, "slug is derived from the freshly fetched Name")
+
+			current, err := cache.Get(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid))
+			require.NoError(t, err)
+			require.NotNil(t, current, "fresh body must be written under the v4 key")
+			assert.JSONEq(t, canonicalAccountJSON, string(current.Body))
+
+			stale, err := cache.Get(context.Background(), sobjectCacheKey(retired, uid))
+			require.NoError(t, err)
+			require.NotNil(t, stale, "retired entry is left for InvalidateB2BOrg / the deploy purge, never read")
+
+			require.NoError(t, client.InvalidateB2BOrg(context.Background(), uid))
+			gone, err := cache.Get(context.Background(), sobjectCacheKey(retired, uid))
+			require.NoError(t, err)
+			assert.Nil(t, gone, "InvalidateB2BOrg must evict the retired key too")
+		})
+	}
 }

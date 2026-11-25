@@ -5,11 +5,11 @@ This guide provides essential information for Claude instances working with the 
 > **Central LFX skills:**
 > - `lfx-skills:lfx` for cross-repo tasks, "where does X live" questions, owner/peer repo routing, or missing checkouts.
 > - `lfx-skills:lfx-platform-architecture` for platform composition, V2 service classes, write/read/access-check flows, NATS/KV ownership, and handoff points across FGA, indexer, query, Heimdall, OpenFGA, Helm, or ArgoCD.
-> - For the post-commit review lifecycle, launch the central pre-PR reviewers through the Agent tool after every commit: `lfx-skills:lfx-general-code-reviewer` for general code review, `lfx-skills:lfx-member-service-code-reviewer` for repo-specific member-service conventions/contracts, and `lfx-skills:lfx-member-service-learnings-reviewer` for empirical-pattern matching against `docs/reviews/knowledge-base/`.
+> - Local review lifecycle: see [Pre-PR review](#pre-pr-review) below. Every commit is signed and DCO-signed-off (`git commit -s -S`); `/member-service-pr-readiness` fails otherwise.
 > - **Local skills:**
 >   - `member-service-dev` auto-attaches on Go and service paths (`**/*.go`, `cmd/**`, `internal/**`, `pkg/**`, `gen/**`, `Makefile`) and owns Go conventions, Goa boundaries, NATS/KV cache and RPC rules, tests, formatting, and the Salesforce-integration callout.
 >   - `member-add-endpoint` is the entry point for adding or changing any membership HTTP endpoint (Goa design, regen, handler, tests, Heimdall ruleset update).
->   - Before opening a PR, run the repo-local cycle in order: `/member-service-pr-readiness` for branch/commit shape, then `/member-service-preflight` for mechanical Go validation.
+>   - Repo-local pre-PR check skills: `/member-service-pr-readiness origin/main` (branch/commit shape), then `/member-service-preflight origin/main --dry-run` (mechanical Go validation and PR summary) — the `Preflight` value of [Pre-PR review](#pre-pr-review).
 > - Repo-local docs own concrete subjects, payloads, contracts, chart values, and domain behavior. If the plugin is missing, install with `/plugin marketplace add linuxfoundation/lfx-skills` then `/plugin install lfx-skills@lfx-skills`.
 
 ## Project Overview
@@ -309,37 +309,27 @@ curl -s "https://go.dev/dl/?mode=json&include=all" \
   | sort -V | tail -1
 ```
 
-## Work cycle — post-commit and pre-PR reviews
+## Pre-PR review
 
-> **CRITICAL — while the branch is pre-PR, post-commit review is mandatory.** After every commit on the local branch, launch `lfx-skills:lfx-general-code-reviewer`, `lfx-skills:lfx-member-service-code-reviewer`, AND `lfx-skills:lfx-member-service-learnings-reviewer` via the Agent tool with `run_in_background: true` — then keep working while they run. If Claude displays plugin agents without the `lfx-skills:` namespace, use the equivalent displayed reviewer names. Before opening a PR, every running review must return clean (or remaining findings explicitly documented as trade-offs), the **full-branch sweep** must run clean if the branch has more than one commit (`branch` arg), AND `/member-service-pr-readiness` must clear every Critical finding before `/member-service-preflight` runs.
+> **IMPORTANT — follow this exactly.** When the implementation is complete
+> and committed and you are about to open a PR:
 >
-> **Once the PR is open, do NOT invoke the central reviewers on iteration commits.** CodeRabbit + Copilot auto-trigger on every push and own the audit surface from that point. The central reviewers are pre-PR insurance only.
+> 1. **Review once.** Load `/lfx-skills:lfx-pre-pr-review` with the Skill
+>    tool and follow it: it tells you how to launch the reviewers. You run
+>    **one** review round of the whole branch and land **all accepted
+>    findings in exactly one fix commit** (none if there is nothing to fix).
+>    Do not work from memory: **load the skill before launching the
+>    reviewers**.
+> 2. **Preflight.** Run the `Preflight` value below and make it pass. It is
+>    deterministic checks, not a review: fix what it reports in its own
+>    commit(s), as many as it takes, and rerun it — never the reviewers.
+> 3. **Open the PR.** From then on there are **no local reviews of any
+>    kind** — iterate only on the PR's bot and human feedback, still running
+>    tests and checks. Where a `PR driver` is named below, load that skill and
+>    follow it for that iteration instead of `/lfx-skills:lfx-pr-resolve`.
 
-### Post-commit (pre-PR phase, after every commit, asynchronous)
-
-1. **Commit your work.** `git commit -s -S`. Do not wait for any prior review to finish.
-2. **Immediately launch all three reviewer subagents in parallel.** Use `subagent_type: lfx-skills:lfx-general-code-reviewer`, `run_in_background: true`; `subagent_type: lfx-skills:lfx-member-service-code-reviewer`, `run_in_background: true`; and `subagent_type: lfx-skills:lfx-member-service-learnings-reviewer`, `run_in_background: true`.
-3. **Post-commit mode prompt for each reviewer (exact):** `target repo: lfx-v2-member-service\n\nReview the latest commit.` Append `extra: <focus>` on a new line only when there is a priority hint to add. Do NOT pass `branch` here. If this work cycle is launched from the LFX workspace parent, the `target repo:` line is required so both reviewers operate in this repo.
-4. **Keep working.** Start the next commit while the reviewers run. Do not block on them.
-5. **When the reviews return:** roll every Critical finding and every reasonable Important finding into the next commit.
-
-### Pre-PR (drain the queue, sweep cumulative state, then open)
-
-When the work is done and no more code commits are planned:
-
-1. **Wait for every running review to complete.**
-2. **If any returned review flags Critical or reasonable Important:** add a fix commit, launch both reviewers again on the new state, wait, and loop until clean or explicitly documented as a trade-off.
-3. **Full-branch sweep — only if the branch has more than one commit.** Launch `lfx-skills:lfx-general-code-reviewer`, `lfx-skills:lfx-member-service-code-reviewer`, and `lfx-skills:lfx-member-service-learnings-reviewer` with prompt **`target repo: lfx-v2-member-service\nbranch\n\nReview the branch's diff against origin/main.`**. Address any new findings, then re-run the sweep until clean.
-4. **Run `/member-service-pr-readiness`** for branch and commit shape only.
-5. **Run `/member-service-preflight`** for mechanical Go validation and PR summary.
-6. **Only then push and open the PR.**
-
-### Post-PR iteration (responding to bot feedback on an open PR)
-
-1. Wait for CodeRabbit + Copilot to comment after each push.
-2. Triage every Critical and reasonable Important finding against current code.
-3. Roll fixes into a `fix(review): ...` commit.
-4. Push. Repeat until clean.
+- KB review skill: `/member-service-learnings-reviewer`
+- Preflight: `/member-service-pr-readiness origin/main`, then `/member-service-preflight origin/main --dry-run`
 
 ## Adding New Endpoints (Goa is design-first)
 
@@ -495,7 +485,7 @@ Set `RUN_MODE=consumer` to run as a CDC consumer instead of the HTTP API. The co
 **Non-obvious invariants:**
 - **GAP_DELETE**: `dispatchRecordIDs` checks `changeType == CDCChangeDelete || changeType == CDCChangeGapDelete` explicitly — `HasSuffix` was avoided because `UNDELETE` also ends with `"DELETE"` and would incorrectly route to the delete path. Since LFXV2-3034 the delete path withdraws FGA tuples, so the blast radius of getting this wrong is a live restored object losing all its access, not just a spurious index tombstone.
 - **Real deletes only purge FGA**: the delete handlers are reached from two call sites — a genuine CDC delete, and `handleAbsentAsDelete` for records missing from the periodic SOQL query. Only the first may publish `delete_access`, because a record can be absent while still existing (a lapsed membership drops an org from the query). The two are separate entry points (`handleAccountDelete`/`handleAccountAbsent`, `handleAssetDelete`/`handleAssetAbsent`) so absence cannot reach the purge without someone changing a call site on purpose. Index convergence still runs on both paths — a tombstone is rebuilt by `/admin/reindex`, a revoked grant is not.
-- **A purge never leaves zero tuples**: fga-sync refuses to delete `team:`-subject tuples, so a deleted object keeps the configured LF-team `auditor` grants (staff, LFXV2-2937; contractor, LFXV2-3071). Any test or audit asserting an empty tuple set for a deleted object will fail against a correct implementation.
+- **A purge never leaves zero tuples**: fga-sync preserves `team:`-subject tuples on relations not prefixed `global_`, so a deleted object keeps configured non-global `auditor` team grants. Any test or audit asserting an empty tuple set for a deleted object will fail against a correct implementation.
 - **Replay cursor**: written on a fresh `context.Background()` after each event so a SIGTERM does not skip the final commit. Cursor survives pod restarts via `pubsub-state` NATS KV.
 - **Early exit → pod restart**: `defer cancel()` in the Run goroutine ensures that if the gRPC stream dies unrecoverably, `<-ctx.Done()` unblocks and the pod exits so Kubernetes restarts it.
 - **Liveness probe**: always returns 200 — K8s handles shutdown via SIGTERM, not probe failures.
@@ -560,7 +550,7 @@ type project_membership
 
 **Downward cascade to memberships:** `project_membership.auditor` includes `auditor from b2b_org`, so an `auditor` grant on an org also confers auditor on every `project_membership` under it — and, since key-contact routes access-check the parent membership, on every key contact under those. This is why the LF team grant below is written on `b2b_org` only.
 
-**Blanket LF team auditor grants:** the teams named by `LF_STAFF_TEAM_NAME` and `LF_CONTRACTOR_TEAM_NAME` hold `auditor` on **every** `b2b_org`, asserted on every full-sync publish path (see [docs/fga-contract.md](./docs/fga-contract.md)). Combined with the cascade above, LF staff and contractors have read access to all orgs, memberships and key contacts. The names are env-invariant, so `charts/lfx-v2-member-service/values.yaml` holds the single authoritative copy and the deploy — not the backfill — is when grants start being written. Parity ratified in LFXV2-3071: lf-contractor holds the same root-project auditor tuple as lf-staff, so the per-org grant is identical for both populations. These grants are effectively permanent: fga-sync never deletes a tuple whose subject begins with `team:` (the guard is in the deployed fga-sync, v0.3.1 or later, not this repo's `go.mod` pin), so no service code path can revoke them — only `scripts/revoke-lf-teams-auditor-openfga.sh`.
+**Blanket LF team auditor grant:** the team named by `LF_STAFF_TEAM_NAME` holds `auditor` on **every** `b2b_org`, asserted on every full-sync publish path (see [docs/fga-contract.md](./docs/fga-contract.md)). Combined with the cascade above, LF staff have read access to all orgs, memberships and key contacts. The name is env-invariant, so `charts/lfx-v2-member-service/values.yaml` holds the single authoritative copy and the deploy — not the backfill — is when grants start being written. **Staff only:** `LF_CONTRACTOR_TEAM_NAME` was withdrawn under LFXV2-3071 (lfx-self-serve#2157); any tuples written before withdrawal require the explicit revoke procedure. These grants are effectively permanent because fga-sync preserves team subjects on the non-global `auditor` relation; the `global_*` exception does not apply. Only `scripts/revoke-lf-teams-auditor-openfga.sh` removes them.
 
 Authorization checks in Heimdall ruleset (`charts/lfx-v2-member-service/templates/ruleset.yaml`):
 - **GET `/b2b_orgs/:uid`** — `auditor` on `b2b_org:{uid}`
@@ -609,8 +599,8 @@ When `openfga.enabled` is false (local dev), every rule falls back to `allow_all
 | `RUN_MODE`                               | `consumer` (CDC consumer) / `avatar-backfill` (one-off Job); omit for API | `""` (API mode)           | No       |
 | `MESSAGING_SOURCE`                       | NATS messaging backend (`nats` or `mock`)    | `nats`                                  | No       |
 | `LFX_SELF_SERVE_BASE_URL`                | Base URL injected as `ReturnURL` in org-settings invite emails | `""`          | No       |
-| `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set from `values.yaml` (`lf-staff`), which is the only copy of the name; unset grants nothing. Clearing it stops new grants but already-written tuples survive (fga-sync never deletes a `team:`-subject tuple) | `""` (chart sets `lf-staff`) | No |
-| `LF_CONTRACTOR_TEAM_NAME`                | OpenFGA team name granted blanket `auditor` on every `b2b_org`, alongside `LF_STAFF_TEAM_NAME`. Set from `values.yaml` (`lf-contractor`); unset grants nothing. Same one-way-door semantics as the staff variable | `""` (chart sets `lf-contractor`) | No |
+| `LF_STAFF_TEAM_NAME`                     | OpenFGA team name granted blanket `auditor` on every `b2b_org`. Set from `values.yaml`, which is the only copy of the name; unset grants nothing. Clearing it stops new grants but already-written tuples survive because `auditor` is not a `global_*` relation | `""` (chart configured) | No |
+| ~~`LF_CONTRACTOR_TEAM_NAME`~~ | **No longer read.** Granted blanket `auditor` on every `b2b_org` under LFXV2-3071; withdrawn in the rollback of lfx-self-serve#2157. The chart key is gone, so setting this variable grants nothing. Already-written tuples survive until revoked | — | — |
 | `ADMIN_REINDEX_QUOTA_THRESHOLD`          | Fraction of daily Salesforce REST quota at/above which the backfill quota guard refuses/stops a run: the `cdc_repair` drain (refuses to start / stops mid-page) **and** the full/filtered reindex paths (synchronous HTTP `503` + mid-run stop). Targeted (`items`) is exempt. | `0.80` | No |
 
 ### Avatar Backfill Mode (`RUN_MODE=avatar-backfill`)
@@ -639,7 +629,7 @@ before the Job exits non-zero. `REPOSITORY_SOURCE=mock` runs it end to end witho
 | `CDC_QUOTA_REFRESH_STALE_AFTER` | Go duration; how old a quota reading must be before the quota guard issues an active `/limits` refresh. `0` disables active refresh. | `5m` | No |
 | `GLOBAL_ORG_ADMIN_TEAM_NAME` | Stable platform org-admin team name (same as API mode)              | `global_org_admin`                   | No       |
 | `LF_STAFF_TEAM_NAME`  | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `""` (chart sets `lf-staff`) | No       |
-| `LF_CONTRACTOR_TEAM_NAME` | Blanket `auditor` team name (same as API mode) — the CDC Account upsert path asserts it too | `""` (chart sets `lf-contractor`) | No |
+| ~~`LF_CONTRACTOR_TEAM_NAME`~~ | **No longer read** (same rollback as API mode — lfx-self-serve#2157) | — | — |
 
 ### Salesforce Credentials
 

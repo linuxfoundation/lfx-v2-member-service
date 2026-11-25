@@ -22,20 +22,22 @@ type soqlAccountID struct {
 	ID string `salesforce:"Id" json:"Id"`
 }
 
-// accountsSOQLBase is the SELECT and fixed WHERE base for Account search/list
-// queries. The caller appends optional LIKE predicates and an ORDER BY clause
-// before executing. Only Accounts that are not deleted and have at least one
-// membership Asset are returned — the SOQL semi-join on Asset ensures we do
-// not expose arbitrary Account records to the API.
-const accountsSOQLBase = `
-SELECT
-    Id, Name, Logo_URL__c, Website,
-    Account_Domain__c, Domain_Alias__c,
-    Description, Phone, ParentId,
-    Parent.Id, Parent.Name, Parent.Logo_URL__c,
-    Industry, Sector__c, CrunchBase_URL__c,
-    NumberOfEmployees, LF_Membership_Status__c, IsMember__c,
-    CreatedDate, LastModifiedDate
+// accountsSOQLSelect is the fixed Account projection shared by every list/search
+// query. The organization slug is not a Salesforce field: it is derived from Name
+// by model.Slugify when the record is converted (spec 050, DR-007).
+const accountsSOQLSelect = "Id, Name, Logo_URL__c, Website," +
+	" Account_Domain__c, Domain_Alias__c," +
+	" Description, Phone, ParentId," +
+	" Parent.Id, Parent.Name, Parent.Logo_URL__c," +
+	" Industry, Sector__c, CrunchBase_URL__c," +
+	" NumberOfEmployees, LF_Membership_Status__c, IsMember__c," +
+	" CreatedDate, LastModifiedDate"
+
+// accountsSOQLWhere is the fixed WHERE base for Account search/list queries.
+// Only Accounts that are not deleted and have at least one membership Asset are
+// returned — the SOQL semi-join on Asset ensures we do not expose arbitrary
+// Account records to the API.
+const accountsSOQLWhere = `
 FROM Account
 WHERE IsDeleted = false
     AND Id IN (
@@ -43,6 +45,11 @@ WHERE IsDeleted = false
         WHERE Product2.Family = 'Membership'
             AND IsDeleted = false
     )`
+
+// accountsSOQLBase is the SELECT + fixed WHERE base for Account search/list
+// queries. The caller appends optional predicates and an ORDER BY clause before
+// executing.
+const accountsSOQLBase = "\nSELECT\n    " + accountsSOQLSelect + accountsSOQLWhere
 
 // AccountRepo handles Salesforce SOQL queries for Account (B2BOrg) records.
 type AccountRepo struct {
@@ -294,6 +301,10 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 	if acc.IsMember != nil {
 		org.IsMember = *acc.IsMember
 	}
+	// URL identity for Org Lens (spec 050, DR-007): a pure function of the name,
+	// so `data.slug`, the `slug:` search tag and the canonical address agree on
+	// every publish path.
+	org.Slug = model.Slugify(org.Name)
 
 	if parentSFID := derefString(acc.ParentID); parentSFID != "" {
 		parentUID, convErr := sfuuid.Normalize18(parentSFID)

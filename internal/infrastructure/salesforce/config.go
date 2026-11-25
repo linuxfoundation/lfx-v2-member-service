@@ -90,8 +90,8 @@ type Config struct {
 //
 // Optional:
 //
-//	SF_API_VERSION     — API version (default: "v63.0").
-//	SF_PUBSUB_ENDPOINT — Salesforce Pub/Sub gRPC endpoint; empty disables the CDC consumer.
+//	SF_API_VERSION                — API version (default: "v63.0").
+//	SF_PUBSUB_ENDPOINT            — Salesforce Pub/Sub gRPC endpoint; empty disables the CDC consumer.
 func ConfigFromEnv() (Config, error) {
 	domain := os.Getenv("SF_INSTANCE_URL")
 	if domain == "" {

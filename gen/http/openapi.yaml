@@ -1619,7 +1619,7 @@ definitions:
                 example: Software
             slug:
                 type: string
-                description: URL-friendly organization identifier; populated when Account.Slug__c is available
+                description: URL-friendly organization identifier derived from the organization name (lowercase, [a-z0-9-], max 50); omitted when the name yields none
                 example: example-corp
             status:
                 type: string
@@ -2654,12 +2654,8 @@ definitions:
                 example: "2026-06-20T00:00:00Z"
                 format: date-time
         example:
-            cdc_repair: true
+            cdc_repair: false
             dry_run: false
-            items:
-                - uid: 001B000000IqhSLIAZ
-                - uid: 001B000000IqhSLIAZ
-                - uid: 001B000000IqhSLIAZ
             since: "2026-05-20T00:00:00Z"
             type: b2b_org
             until: "2026-06-20T00:00:00Z"

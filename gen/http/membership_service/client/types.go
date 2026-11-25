@@ -2771,8 +2771,8 @@ type B2bOrgResponseResponseBody struct {
 	// Whether the organization is currently an LF member (Account.IsMember__c);
 	// read-only, managed by Salesforce workflows
 	IsMember *bool `form:"is_member,omitempty" json:"is_member,omitempty" xml:"is_member,omitempty"`
-	// URL-friendly organization identifier; populated when Account.Slug__c is
-	// available
+	// URL-friendly organization identifier derived from the organization name
+	// (lowercase, [a-z0-9-], max 50); omitted when the name yields none
 	Slug *string `form:"slug,omitempty" json:"slug,omitempty" xml:"slug,omitempty"`
 	// UID of the parent organization (Account.ParentId); omitted when no parent
 	ParentUID *string `form:"parent_uid,omitempty" json:"parent_uid,omitempty" xml:"parent_uid,omitempty"`

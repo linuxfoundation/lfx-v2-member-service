@@ -14,21 +14,30 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/infrastructure/nats"
 )
 
-// TestInvalidateB2BOrg_ClearsAllFourKeys verifies that InvalidateB2BOrg evicts
-// the legacy full-org, current full-org, flat-account, and parent-brief cache
-// entries for the same UID. After the field-list split, deploys can see both
-// the legacy and current full-org keys until the old entries age out.
-func TestInvalidateB2BOrg_ClearsAllFourKeys(t *testing.T) {
+// TestInvalidateB2BOrg_ClearsAllB2BOrgKeys verifies that InvalidateB2BOrg evicts
+// every B2BOrg-family cache entry for the same UID: the legacy full-org key, the
+// retired v2 / v3 / v3_noslug keys, the current v4 key, the flat-account key,
+// and the parent-brief key. Deploys can leave any of them populated until the
+// old entries are evicted.
+func TestInvalidateB2BOrg_ClearsAllB2BOrgKeys(t *testing.T) {
 	t.Parallel()
 
 	const uid = "00000000-0000-0000-0000-000000000001"
 
 	cache := newMemCache()
 	entry := &nats.SObjectCacheEntry{Body: json.RawMessage(`{}`)}
-	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid), entry))
-	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid), entry))
-	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid), entry))
-	require.NoError(t, cache.Put(context.Background(), sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid), entry))
+	allKeys := []string{
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgV2Legacy, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgV3Legacy, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgV3NoSlugLegacy, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid),
+		sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid),
+	}
+	for _, key := range allKeys {
+		require.NoError(t, cache.Put(context.Background(), key, entry))
+	}
 
 	transport := &routingTransport{}
 	transport.route("/limits", fakeResponse(200, `{}`, nil))
@@ -37,12 +46,7 @@ func TestInvalidateB2BOrg_ClearsAllFourKeys(t *testing.T) {
 	err := client.InvalidateB2BOrg(context.Background(), uid)
 	require.NoError(t, err)
 
-	for _, key := range []string{
-		sobjectCacheKey(sobjectKeyPrefixB2BOrgLegacy, uid),
-		sobjectCacheKey(sobjectKeyPrefixB2BOrg, uid),
-		sobjectCacheKey(sobjectKeyPrefixB2BOrgFlat, uid),
-		sobjectCacheKey(sobjectKeyPrefixB2BOrgParentBrief, uid),
-	} {
+	for _, key := range allKeys {
 		stored, getErr := cache.Get(context.Background(), key)
 		require.NoError(t, getErr)
 		assert.Nil(t, stored, "key %q must be evicted", key)

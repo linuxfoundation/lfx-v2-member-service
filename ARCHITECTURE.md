@@ -9,6 +9,10 @@ This document describes the current architecture of the LFX v2 Member Service an
 implementation plan for graduating it to full v2 platform idioms: OpenFGA fine-grained
 authorization, OpenSearch indexing via the Indexer Service, and a clean v2 API surface.
 
+Not a review finding (2026-09-29): code diverging from the Target Architecture sections is
+expected until that part of the migration ships; see
+`docs/reviews/knowledge-base/known-false-positives.md` § Target Architecture in `ARCHITECTURE.md`.
+
 ## Current State
 
 The v2 member service is currently a **read/write Salesforce B2B proxy** with a NATS KV caching
@@ -1163,10 +1167,10 @@ been removed. Primary owners were LFXV2-1359 (API + handlers) and LFXV2-1366 (He
   tombstoned document is rebuilt by `POST /admin/reindex`, whereas a revoked grant is recovered
   only by an operator re-applying the org's settings.
 - A `delete_access` on a deleted object does **not** leave it with zero tuples. fga-sync
-  declines to delete any tuple whose subject begins with `team:`, so the configured LF-team reader
-  grants (staff, LFXV2-2937; contractor, LFXV2-3071) survive. They confer access to an object
-  that no longer resolves, so they are inert — but an audit asserting zero remaining tuples will
-  report a correct implementation as broken.
+  preserves team-subject tuples on relations not prefixed `global_`, so configured non-global
+  LF-team reader grants on `auditor` survive. They confer access to an object that no longer
+  resolves, so they are inert — but an audit asserting zero remaining tuples will report a
+  correct implementation as broken.
 
 ### Step 6: Indexer integration — *Done*
 
