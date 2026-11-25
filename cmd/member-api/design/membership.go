@@ -863,7 +863,7 @@ var _ = dsl.Service("membership-service", func() {
 			// combine every attribute's per-field example into one invalid
 			// request (cdc_repair alongside since/until/items). Pin a valid one.
 			dsl.Example(map[string]any{
-				"bearer_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+				"bearer_token": "eyJhbGci...",
 				"version":      "1",
 				"type":         "b2b_org",
 				"since":        "2026-05-20T00:00:00Z",
