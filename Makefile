@@ -60,6 +60,7 @@ apigen: deps #@ Generate API code using Goa
 	@# Swagger 2 security requirements use arrays instead of null values.
 	@tmp=$$(mktemp) && \
 		jq 'walk(if type == "object" and has("security") and (.security | type) == "array" then .security |= map(with_entries(.value = (.value // []))) else . end)' gen/http/openapi.json > "$$tmp" && \
+		chmod 0644 "$$tmp" && \
 		mv "$$tmp" gen/http/openapi.json
 
 # PROTO_GEN: one-time regeneration of Salesforce Pub/Sub API gRPC stubs.
