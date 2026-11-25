@@ -113,7 +113,7 @@ When OpenFGA is disabled (local dev only), every rule falls through to
 docker build -t lfx-v2-member-service:latest .
 ```
 
-Dockerfile uses the Go Alpine image for building and Chainguard static
+Dockerfile uses Chainguard Go for building and Chainguard static
 (distroless) for runtime, multi-stage for minimal image size.
 
 GitHub Actions workflows:
