@@ -91,3 +91,33 @@ func IsConflict(err error) bool {
 	var conflict Conflict
 	return errors.As(err, &conflict)
 }
+
+// UnprocessableEntity represents a well-formed request for a resource that
+// exists but cannot be used for the requested operation.
+type UnprocessableEntity struct {
+	base
+}
+
+// Error returns the error message for UnprocessableEntity.
+func (u UnprocessableEntity) Error() string {
+	return u.error()
+}
+
+// NewUnprocessableEntity creates a new UnprocessableEntity error with the provided message.
+func NewUnprocessableEntity(message string, err ...error) UnprocessableEntity {
+	return UnprocessableEntity{
+		base: base{
+			message: message,
+			err:     errors.Join(err...),
+		},
+	}
+}
+
+// IsUnprocessableEntity reports whether err is an UnprocessableEntity error.
+func IsUnprocessableEntity(err error) bool {
+	if err == nil {
+		return false
+	}
+	var unprocessable UnprocessableEntity
+	return errors.As(err, &unprocessable)
+}

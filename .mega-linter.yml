@@ -3,8 +3,8 @@
 ---
 GITHUB_COMMENT_REPORTER: false
 DISABLE_LINTERS:
-  # Prefer Revive (golangci-lint version embedded in MegaLinter is older than
-  # the toolchain).
+  # Revive runs here; golangci-lint runs locally through `make lint`. Its
+  # existing errcheck findings must be fixed before it can be enabled here.
   - GO_GOLANGCI_LINT
   # We are setting KUBERNETES_DIRECTORY to the helm chart so the
   # KUBERNETES_HELM linter can find the chart, but then this linter expects to
@@ -31,8 +31,10 @@ DISABLE_ERRORS_LINTERS:
   - REPOSITORY_CHECKOV
   - REPOSITORY_DEVSKIM
 YAML_YAMLLINT_CONFIG_FILE: .yamllint
-# yamllint disable-line rule:line-length
-REPOSITORY_KICS_ARGUMENTS: scan --no-progress --exclude-severities="medium,low,info,trace" --exclude-paths="gen/*"
+# zizmor's online audits call the GitHub API to check action refs, which
+# requires GITHUB_TOKEN.
+ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES:
+  - GITHUB_TOKEN
 SPELL_CSPELL_ANALYZE_FILE_NAMES: false
 SPELL_CSPELL_PRE_COMMANDS:
   - command: >-

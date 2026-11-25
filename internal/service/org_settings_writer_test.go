@@ -408,6 +408,10 @@ func (r *seedB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []str
 	return map[string][]string{}, nil
 }
 
+func (r *seedB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // ── AddPrincipal (invite flow) ─────────────────────────────────────────────
 
 // stubInviteSender is a controllable stub for port.InviteSender.
@@ -824,6 +828,10 @@ func (r *countingOrgReader) FetchChildUIDsByParentUID(ctx context.Context, uid s
 
 func (r *countingOrgReader) FetchChildUIDsByParentUIDs(ctx context.Context, uids []string) (map[string][]string, error) {
 	return r.inner.FetchChildUIDsByParentUIDs(ctx, uids)
+}
+
+func (r *countingOrgReader) FindByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error) {
+	return r.inner.FindByNameOrWebsite(ctx, name, website)
 }
 
 // ── AddPrincipal (SuppressNotification) ──────────────────────────────────────

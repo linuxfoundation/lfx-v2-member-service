@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,7 +40,7 @@ func TestBackfillRunner_FullMode_PublishesAllTypes(t *testing.T) {
 		KeyContacts: [][]*model.KeyContact{{kc}},
 	}
 
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	// Each request carries a single type (BREAKING: no all-types shortcut), so a
 	// full reindex is one run per type.
 	for _, tp := range []string{"b2b_org", "project_membership", "key_contact"} {
@@ -60,7 +61,7 @@ func TestBackfillRunner_DryRun_DoesNotPublish(t *testing.T) {
 		B2BOrgs: [][]*model.B2BOrg{{org}},
 	}
 
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{RunID: "test-run", Type: "b2b_org", DryRun: true}
 	require.NoError(t, runner.Run(context.Background(), req))
 
@@ -79,7 +80,7 @@ func TestBackfillRunner_MidRunError_OtherTypesStillRun(t *testing.T) {
 		Memberships: [][]*model.ProjectMembership{{pm}}, // project_membership succeeds
 	}
 
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	// Single type per run: a failing b2b_org run must not affect a separate
 	// project_membership run.
 	require.Error(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}))
@@ -94,7 +95,7 @@ func TestBackfillRunner_SinceFilter_PassedThroughToIterator(t *testing.T) {
 	var capturedSince *time.Time
 
 	iter := &capturingSinceIterator{capturedSince: &capturedSince}
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{RunID: "test-run", Type: "b2b_org", Since: &since}
 	require.NoError(t, runner.Run(context.Background(), req))
 
@@ -110,7 +111,7 @@ func TestBackfillRunner_TargetedMode_FetchesLiveSObjectAndPublishes(t *testing.T
 	var publishCount atomic.Int32
 	pub := &countingPublisher{count: &publishCount}
 
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, b2bReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, b2bReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org",
@@ -121,14 +122,13 @@ func TestBackfillRunner_TargetedMode_FetchesLiveSObjectAndPublishes(t *testing.T
 	assert.Equal(t, int32(1), publishCount.Load(), "targeted mode should publish the fetched record")
 }
 
-func TestBackfillRunner_TargetedMode_NotFoundIsSkipped(t *testing.T) {
+func TestBackfillRunner_TargetedMode_NotFoundIsRemovedFromIndex(t *testing.T) {
 	const orgUID = "00000000-0000-0000-0000-000000000002"
 
-	var publishCount atomic.Int32
-	pub := &countingPublisher{count: &publishCount}
+	pub := &subjectCapturingPublisher{}
 
 	// MockB2BOrgReader always returns not-found
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org",
@@ -136,7 +136,69 @@ func TestBackfillRunner_TargetedMode_NotFoundIsSkipped(t *testing.T) {
 	}
 	require.NoError(t, runner.Run(context.Background(), req))
 
-	assert.Equal(t, int32(0), publishCount.Load(), "not-found items must not publish")
+	require.Len(t, pub.indexerMessages, 1, "a deleted Account must be removed from the index")
+	assert.Equal(t, "deleted", pub.indexerAction(0))
+	assert.Empty(t, pub.accessMessages, "removal from the index keeps authorization")
+}
+
+type fakeEligibility struct {
+	eligible bool
+	err      error
+}
+
+func (f fakeEligibility) FetchB2BOrgEligibility(_ context.Context, uids []string) (map[string]bool, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		out[uid] = f.eligible
+	}
+	return out, nil
+}
+
+// TestBackfillRunner_TargetedB2BOrg_Eligibility: GetB2BOrg does not apply the
+// eligibility rule, so the per-item path must, or a targeted reindex would
+// re-index and grant an Account CDC removed.
+func TestBackfillRunner_TargetedB2BOrg_Eligibility(t *testing.T) {
+	const orgUID = "00000000-0000-0000-0000-000000000003"
+
+	run := func(t *testing.T, e fakeEligibility, dryRun bool) *subjectCapturingPublisher {
+		t.Helper()
+		pub := &subjectCapturingPublisher{}
+		runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: &model.B2BOrg{UID: orgUID}},
+			mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "global_org_admin", nil,
+			svc.WithB2BOrgEligibilityReader(e))
+		require.NoError(t, runner.Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "b2b_org", Items: []string{orgUID}, DryRun: dryRun}))
+		return pub
+	}
+
+	t.Run("ineligible is removed from the index and keeps its grants", func(t *testing.T) {
+		pub := run(t, fakeEligibility{eligible: false}, false)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Equal(t, "deleted", pub.indexerAction(0))
+		assert.Empty(t, pub.accessMessages, "no FGA message: neither a grant nor a delete_access")
+	})
+
+	t.Run("eligible publishes as before", func(t *testing.T) {
+		pub := run(t, fakeEligibility{eligible: true}, false)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Equal(t, "updated", pub.indexerAction(0))
+		assert.NotEmpty(t, pub.accessMessages)
+	})
+
+	t.Run("lookup error publishes nothing", func(t *testing.T) {
+		pub := run(t, fakeEligibility{err: errors.New("salesforce timeout")}, false)
+		assert.Empty(t, pub.indexerMessages)
+		assert.Empty(t, pub.accessMessages)
+	})
+
+	t.Run("dry run publishes nothing", func(t *testing.T) {
+		pub := run(t, fakeEligibility{eligible: false}, true)
+		assert.Empty(t, pub.indexerMessages)
+		assert.Empty(t, pub.accessMessages)
+	})
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -192,6 +254,10 @@ func (r *seededB2BOrgReaderForBackfill) FetchChildUIDsByParentUIDs(_ context.Con
 	return map[string][]string{}, nil
 }
 
+func (r *seededB2BOrgReaderForBackfill) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // seededB2BOrgReaderWithChildren returns orgs with configurable child relationships and tracks fetch calls.
 type seededB2BOrgReaderWithChildren struct {
 	orgs                []*model.B2BOrg
@@ -239,6 +305,10 @@ func (r *seededB2BOrgReaderWithChildren) FetchChildUIDsByParentUIDs(_ context.Co
 	return result, nil
 }
 
+func (r *seededB2BOrgReaderWithChildren) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 func (r *seededB2BOrgReaderWithChildren) getFetchCallCount() int32 {
 	return r.fetchCallCount.Load()
 }
@@ -266,7 +336,7 @@ func TestBackfillRunner_B2BOrgs_PopulatesChildrenFromCache(t *testing.T) {
 		B2BOrgs: [][]*model.B2BOrg{{parentOrg, child1Org, child2Org}},
 	}
 
-	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}
 	require.NoError(t, runner.Run(context.Background(), req))
 
@@ -302,7 +372,7 @@ func TestBackfillRunner_B2BOrgs_MemoizesFetchesPerPage(t *testing.T) {
 		B2BOrgs: [][]*model.B2BOrg{{parentOrg, child1, child2}},
 	}
 
-	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}
 	require.NoError(t, runner.Run(context.Background(), req))
 
@@ -329,7 +399,7 @@ func TestBackfillRunner_TargetedB2BOrg_PopulatesChildren(t *testing.T) {
 		fetchedUIDs: map[string]bool{},
 	}
 
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org",
@@ -362,7 +432,7 @@ func TestBackfillRunner_Settings_FullMode_PublishesOnePerUID(t *testing.T) {
 	var publishCount atomic.Int32
 	pub := &countingPublisher{count: &publishCount}
 
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, b2bMultiReader, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, b2bMultiReader, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{RunID: "test-run", Type: "b2b_org_settings"}
 	require.NoError(t, runner.Run(context.Background(), req))
 
@@ -382,7 +452,7 @@ func TestBackfillRunner_Settings_TargetedMode_PublishesOne(t *testing.T) {
 	var publishCount atomic.Int32
 	pub := &countingPublisher{count: &publishCount}
 
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: org}, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: org}, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org_settings",
@@ -403,7 +473,7 @@ func TestBackfillRunner_Settings_TargetedMode_OrgNotFound_Skips(t *testing.T) {
 	pub := &countingPublisher{count: &publishCount}
 
 	// MockB2BOrgReader always returns not-found
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org_settings",
@@ -424,7 +494,7 @@ func TestBackfillRunner_Settings_TargetedMode_SettingsAbsent_Skips(t *testing.T)
 	var publishCount atomic.Int32
 	pub := &countingPublisher{count: &publishCount}
 
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: org}, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: org}, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	req := svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org_settings",
@@ -453,6 +523,31 @@ func (r *multiOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string) 
 
 func (r *multiOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	return map[string][]string{}, nil
+}
+
+func (r *multiOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
+// TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant: the backfill
+// treats a non-member org the iterator returns like any other org.
+func TestBackfillRunner_B2BOrg_NonMemberPublishesIndexAndTeamGrant(t *testing.T) {
+	org := &model.B2BOrg{UID: "org-non-member", Name: "Non-member Co", IsMember: false}
+	iter := &mock.MockBackfillIterator{B2BOrgs: [][]*model.B2BOrg{{org}}}
+	pub := &subjectCapturingPublisher{}
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "global_org_admin", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}))
+
+	require.Len(t, pub.indexerMessages, 1)
+	assert.Equal(t, "updated", pub.indexerAction(0))
+	var granted bool
+	for _, data := range pub.b2bOrgUpdateAccess(t) {
+		if data.UID == org.UID && len(data.References["global_org_admin"]) > 0 {
+			granted = true
+		}
+	}
+	assert.True(t, granted, "the non-member org must receive the global org admin team grant")
 }
 
 // ── GlobalOrgAdminFGA publish ────────────────────────────────────────────────
@@ -485,7 +580,7 @@ func TestBackfillRunner_B2BOrg_GlobalAdminFGA(t *testing.T) {
 			iter := &mock.MockBackfillIterator{B2BOrgs: [][]*model.B2BOrg{{org}}}
 			var accessCount atomic.Int32
 			pub := &countingAccessPublisher{accessCount: &accessCount}
-			runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, tt.globalOrgAdminTeamName, nil)
+			runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, tt.globalOrgAdminTeamName, nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 			require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}))
 			tt.assertFn(t, accessCount.Load())
 		})
@@ -499,7 +594,7 @@ func TestBackfillRunner_TargetedMode_GlobalAdminFGA_PublishedWhenUIDSet(t *testi
 	var accessCount atomic.Int32
 	pub := &countingAccessPublisher{accessCount: &accessCount}
 
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: org}, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "team-uid-xyz", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &seededB2BOrgReaderForBackfill{org: org}, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "team-uid-xyz", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "test-run",
 		Type:  "b2b_org",
@@ -601,7 +696,7 @@ func TestBackfillRunner_B2BOrgs_IsParentAndFGATuplesFromBatch(t *testing.T) {
 		B2BOrgs: [][]*model.B2BOrg{{parentOrg, child1, child2}},
 	}
 
-	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil)
+	runner := svc.NewRunner(iter, childReader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "test-run", Type: "b2b_org"}))
 
 	// Batch fetch called once — not per org.
@@ -661,7 +756,7 @@ func TestBackfillRunner_ProjectMembership_FullMode_ResolverSuccess_StampsUID(t *
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}))
 
 	require.NotEmpty(t, pub.indexerMessages, "resolver success must publish the project_membership")
@@ -677,7 +772,7 @@ func TestBackfillRunner_ProjectMembership_MixedCaseSlug_ResolverSuccess_StampsUI
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}))
 
 	require.NotEmpty(t, pub.indexerMessages, "mixed-case slug must resolve and publish the project_membership")
@@ -693,7 +788,7 @@ func TestBackfillRunner_ProjectMembership_FullMode_ResolverFailure_PublishesFGAO
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{Memberships: [][]*model.ProjectMembership{{pm}}}
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}))
 
 	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the indexer publish")
@@ -707,7 +802,7 @@ func TestBackfillRunner_KeyContact_FullMode_ResolverSuccess_StampsUID(t *testing
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	require.NotEmpty(t, pub.indexerMessages, "resolver success must publish the key_contact")
@@ -721,7 +816,7 @@ func TestBackfillRunner_KeyContact_FullMode_ResolverFailure_PublishesFGAOnly(t *
 
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
-	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	assert.Empty(t, pub.indexerMessages, "resolver failure must skip the indexer publish")
@@ -729,11 +824,11 @@ func TestBackfillRunner_KeyContact_FullMode_ResolverFailure_PublishesFGAOnly(t *
 }
 
 func TestBackfillRunner_ProjectMembership_TargetedMode_ResolverFailure_PublishesFGAOnly(t *testing.T) {
-	pm := &model.ProjectMembership{UID: "pm-tgt-1", ProjectSlug: "unknown-slug", B2BOrgUID: "org-tgt-1"}
+	pm := &model.ProjectMembership{UID: "pm-tgt-1", ProjectSlug: "unknown-slug", B2BOrgUID: "org-tgt-1", TierFamily: "Membership"}
 	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), &seededPMReaderForResolver{pm: pm}, nil, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), &seededPMReaderForResolver{pm: pm}, nil, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r",
 		Type:  "project_membership",
@@ -763,8 +858,7 @@ func TestBackfillRunner_KeyContact_ResolvesUsernameBeforePublishing(t *testing.T
 			assert.Equal(t, "alice@example.com", email)
 			return "alice", nil
 		})),
-		svc.WithKeyContactGrantIndex(grants),
-	)
+		svc.WithKeyContactGrantIndex(grants), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	fgaMsgs := pub.fgaMessages(t)
@@ -803,8 +897,7 @@ func TestBackfillRunner_KeyContact_FullMode_IndexerReflectsResolvedUsername(t *t
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{KeyContacts: [][]*model.KeyContact{{kc}}}
 	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
-		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil })),
-	)
+		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) { return "alice", nil })), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	require.NotEmpty(t, pub.indexerMessages)
@@ -825,8 +918,7 @@ func TestBackfillRunner_KeyContact_UnregisteredEmail_PublishesNothing(t *testing
 	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
 		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
 			return "", pkgerrors.NewNotFound("no LFID for email")
-		})),
-	)
+		})), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	assert.Empty(t, pub.fgaMessages(t), "an unregistered email must leave the contact pending, not error")
@@ -852,8 +944,7 @@ func TestBackfillRunner_KeyContact_DefinitiveMiss_RevokesRecordedGrant(t *testin
 		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
 			return "", pkgerrors.NewNotFound("no such user")
 		})),
-		svc.WithKeyContactGrantIndex(grants),
-	)
+		svc.WithKeyContactGrantIndex(grants), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	removes := pub.fgaMessages(t)
@@ -885,8 +976,7 @@ func TestBackfillRunner_KeyContact_TransientLookupFailure_LeavesGrantUntouched(t
 		svc.WithUserReader(userReaderFunc(func(_ context.Context, _ string) (string, error) {
 			return "", pkgerrors.NewUnexpected("auth-service unreachable", nil)
 		})),
-		svc.WithKeyContactGrantIndex(grants),
-	)
+		svc.WithKeyContactGrantIndex(grants), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}))
 
 	assert.Empty(t, pub.fgaMessages(t), "a transient lookup failure must not revoke a still-valid grant")
@@ -898,7 +988,7 @@ func TestBackfillRunner_KeyContact_TargetedMode_ResolverFailure_PublishesFGAOnly
 	resolver := mock.NewMockProjectResolver()
 
 	pub := &subjectCapturingPublisher{}
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r",
 		Type:  "key_contact",
@@ -954,6 +1044,10 @@ func (r *configurableB2BOrgReaderForRepair) FetchChildUIDsByParentUIDs(_ context
 	return map[string][]string{}, nil
 }
 
+func (r *configurableB2BOrgReaderForRepair) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 func TestBackfillRunner_RunRepair_B2BOrg_Issued_DeletesMarker(t *testing.T) {
 	org := &model.B2BOrg{UID: "001000000000001AAA"}
 	reader := &configurableB2BOrgReaderForRepair{orgs: map[string]*model.B2BOrg{org.UID: org}}
@@ -962,7 +1056,7 @@ func TestBackfillRunner_RunRepair_B2BOrg_Issued_DeletesMarker(t *testing.T) {
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "b2b_org", SFID: org.UID, Revision: 7}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
@@ -978,13 +1072,87 @@ func TestBackfillRunner_RunRepair_B2BOrg_NotFound_DeletesMarker(t *testing.T) {
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "b2b_org", SFID: "001000000000009AAA", Revision: 3}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
 
-	assert.Empty(t, pub.indexerMessages, "not_found outcome must not publish")
-	require.Len(t, repairStore.Deletes, 1, "not_found outcome must still delete the marker")
+	require.Len(t, pub.indexerMessages, 1, "a deleted Account must be removed from the index")
+	assert.Equal(t, "deleted", pub.indexerAction(0))
+	assert.Equal(t, 1, pub.flushCount, "the removal is confirmed before the marker is cleared")
+	require.Len(t, repairStore.Deletes, 1, "a confirmed removal clears the marker")
+}
+
+func TestBackfillRunner_RunRepair_B2BOrg_NotFound_UnconfirmedKeepsMarker(t *testing.T) {
+	pub := &subjectCapturingPublisher{flushErr: assert.AnError}
+	repairStore := &mock.MockCDCRepairStore{}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+	markers := []port.RepairMarker{{Type: "b2b_org", SFID: "001000000000010AAA", Revision: 4}}
+	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
+
+	require.Len(t, pub.indexerMessages, 1)
+	assert.Equal(t, "deleted", pub.indexerAction(0))
+	assert.Empty(t, repairStore.Deletes, "an unconfirmed removal keeps the marker for the next run")
+}
+
+// TestBackfillRunner_RunRepair_ProjectMembership_Removal: a membership that is
+// gone, or whose product is no longer in the Membership family (including an
+// Asset with no product), is removed from the index rather than republished,
+// and its marker is cleared only once the removal is confirmed.
+func TestBackfillRunner_RunRepair_ProjectMembership_Removal(t *testing.T) {
+	const pmUID = "02i000000000001AAA"
+	readers := map[string]port.ProjectMembershipReader{
+		"not found":     &seededPMReaderForResolver{err: pkgerrors.NewNotFound("gone")},
+		"other product": &seededPMReaderForResolver{pm: &model.ProjectMembership{UID: pmUID, TierFamily: "Event"}},
+		"no product":    &seededPMReaderForResolver{pm: &model.ProjectMembership{UID: pmUID}},
+	}
+	for name, reader := range readers {
+		for _, flushErr := range []error{nil, assert.AnError} {
+			t.Run(fmt.Sprintf("%s/flush_err=%v", name, flushErr != nil), func(t *testing.T) {
+				pub := &subjectCapturingPublisher{flushErr: flushErr}
+				repairStore := &mock.MockCDCRepairStore{}
+				runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), reader, nil, nil, pub, nil, "", nil,
+					svc.WithRepairStore(repairStore), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+					svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+				markers := []port.RepairMarker{{Type: "project_membership", SFID: pmUID, Revision: 2}}
+				runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}, markers)
+
+				require.Len(t, pub.indexerMessages, 1, "removed, not republished")
+				assert.Equal(t, "deleted", pub.indexerAction(0))
+				assert.Empty(t, pub.accessMessages, "removal from the index keeps authorization")
+				if flushErr != nil {
+					assert.Empty(t, repairStore.Deletes, "an unconfirmed removal keeps the marker")
+					return
+				}
+				require.Len(t, repairStore.Deletes, 1, "a confirmed removal clears the marker")
+			})
+		}
+	}
+}
+
+// TestBackfillRunner_RunRepair_ProjectMembership_FamilyCaseInsensitive: the
+// Membership family matches regardless of case, so the membership is
+// republished, not removed.
+func TestBackfillRunner_RunRepair_ProjectMembership_FamilyCaseInsensitive(t *testing.T) {
+	const pmUID = "02i000000000001AAA"
+	reader := &seededPMReaderForResolver{pm: &model.ProjectMembership{UID: pmUID, ProjectUID: "p1", TierFamily: "membership"}}
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), reader, nil, nil, pub, nil, "", nil,
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+		svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+
+	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"},
+		[]port.RepairMarker{{Type: "project_membership", SFID: pmUID, Revision: 2}})
+
+	require.Len(t, pub.indexerMessages, 1)
+	assert.NotEqual(t, "deleted", pub.indexerAction(0))
+	require.Len(t, repairStore.Deletes, 1)
 }
 
 func TestBackfillRunner_RunRepair_B2BOrg_ChildFetchError_RetriesAndKeepsMarker(t *testing.T) {
@@ -998,13 +1166,78 @@ func TestBackfillRunner_RunRepair_B2BOrg_ChildFetchError_RetriesAndKeepsMarker(t
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "b2b_org", SFID: org.UID, Revision: 1}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
 
 	assert.Empty(t, pub.indexerMessages, "a dependency failure must not publish a partial projection")
 	assert.Empty(t, repairStore.Deletes, "retry outcome must retain the marker (no delete)")
+}
+
+type failingIndexerPublisher struct{ *subjectCapturingPublisher }
+
+func (failingIndexerPublisher) Indexer(context.Context, string, any, bool) error {
+	return errors.New("nats unavailable")
+}
+
+// TestBackfillRunner_RunRepair_B2BOrg_NoEligibilityReader_RetainsMarker: an
+// unwired eligibility reader must not publish unchecked orgs; the marker is kept.
+func TestBackfillRunner_RunRepair_B2BOrg_NoEligibilityReader_RetainsMarker(t *testing.T) {
+	org := &model.B2BOrg{UID: "001000000000021AAA"}
+	reader := &configurableB2BOrgReaderForRepair{orgs: map[string]*model.B2BOrg{org.UID: org}}
+	pub := &subjectCapturingPublisher{}
+	repairStore := &mock.MockCDCRepairStore{}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+
+	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"},
+		[]port.RepairMarker{{Type: "b2b_org", SFID: org.UID, Revision: 1}})
+
+	assert.Empty(t, pub.indexerMessages)
+	assert.Empty(t, pub.accessMessages)
+	assert.Empty(t, repairStore.Deletes, "the marker must be retained for retry")
+}
+
+func TestBackfillRunner_RunRepair_B2BOrg_Ineligible(t *testing.T) {
+	org := &model.B2BOrg{UID: "001000000000003AAA"}
+	reader := &configurableB2BOrgReaderForRepair{orgs: map[string]*model.B2BOrg{org.UID: org}}
+	markers := []port.RepairMarker{{Type: "b2b_org", SFID: org.UID, Revision: 4}}
+
+	run := func(pub port.MemberPublisher) *mock.MockCDCRepairStore {
+		repairStore := &mock.MockCDCRepairStore{}
+		runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(repairStore), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(fakeEligibility{eligible: false}))
+		runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
+		return repairStore
+	}
+
+	t.Run("index delete sent deletes the marker", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		repairStore := run(pub)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Equal(t, "deleted", pub.indexerAction(0))
+		assert.Empty(t, pub.accessMessages)
+		assert.Equal(t, 1, pub.flushCount, "the delete must be flushed before the marker goes")
+		assert.Len(t, repairStore.Deletes, 1)
+	})
+
+	t.Run("failed index delete keeps the marker", func(t *testing.T) {
+		pub := failingIndexerPublisher{&subjectCapturingPublisher{}}
+		repairStore := run(pub)
+		assert.Empty(t, pub.accessMessages)
+		assert.Empty(t, repairStore.Deletes, "the delete is the only convergence step, so the marker must be retained")
+	})
+
+	t.Run("unconfirmed index delete keeps the marker", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{flushErr: errors.New("flush timeout")}
+		repairStore := run(pub)
+		require.Len(t, pub.indexerMessages, 1)
+		assert.Empty(t, repairStore.Deletes, "a buffered delete may never reach the broker")
+	})
 }
 
 func TestBackfillRunner_RunRepair_ProjectMembership_Issued_DeletesMarker(t *testing.T) {
@@ -1016,7 +1249,7 @@ func TestBackfillRunner_RunRepair_ProjectMembership_Issued_DeletesMarker(t *test
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), &seededPMReaderForResolver{pm: pm}, nil, nil, pub, nil, "", resolver,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "project_membership", SFID: pm.UID, Revision: 5}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}, markers)
@@ -1033,24 +1266,25 @@ func TestBackfillRunner_RunRepair_ProjectMembership_NotFound_DeletesMarker(t *te
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(),
 		&seededPMReaderForResolver{err: pkgerrors.NewNotFound("project membership not found")}, nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "project_membership", SFID: "001000000000004AAA", Revision: 1}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}, markers)
 
-	assert.Empty(t, pub.indexerMessages)
-	require.Len(t, repairStore.Deletes, 1, "not_found outcome must still delete the marker")
+	require.Len(t, pub.indexerMessages, 1, "a deleted membership must be removed from the index")
+	assert.Equal(t, "deleted", pub.indexerAction(0))
+	require.Len(t, repairStore.Deletes, 1, "a confirmed removal clears the marker")
 }
 
 func TestBackfillRunner_RunRepair_ProjectMembership_UnresolvedProjectUID_RetriesAndKeepsMarker(t *testing.T) {
-	pm := &model.ProjectMembership{UID: "001000000000005AAA", ProjectSlug: "unknown-slug", B2BOrgUID: "org-1"}
+	pm := &model.ProjectMembership{UID: "001000000000005AAA", ProjectSlug: "unknown-slug", B2BOrgUID: "org-1", TierFamily: "Membership"}
 	resolver := mock.NewMockProjectResolver() // unseeded — resolution fails
 	pub := &subjectCapturingPublisher{}
 	repairStore := &mock.MockCDCRepairStore{}
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), &seededPMReaderForResolver{pm: pm}, nil, nil, pub, nil, "", resolver,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "project_membership", SFID: pm.UID, Revision: 1}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "project_membership"}, markers)
@@ -1069,7 +1303,7 @@ func TestBackfillRunner_RunRepair_KeyContact_Issued_DeletesMarker(t *testing.T) 
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "key_contact", SFID: kc.UID, Revision: 2}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}, markers)
@@ -1086,7 +1320,7 @@ func TestBackfillRunner_RunRepair_KeyContact_NotFound_DeletesMarker(t *testing.T
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(),
 		&seededKCReaderForResolver{err: pkgerrors.NewNotFound("key contact not found")}, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "key_contact", SFID: "001000000000007AAA", Revision: 1}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}, markers)
@@ -1103,7 +1337,7 @@ func TestBackfillRunner_RunRepair_KeyContact_UnresolvedProjectUID_RetriesAndKeep
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), &seededKCReaderForResolver{kc: kc}, nil, pub, nil, "", resolver,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "key_contact", SFID: kc.UID, Revision: 1}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "key_contact"}, markers)
@@ -1123,7 +1357,7 @@ func TestBackfillRunner_RunRepair_MixedOutcomes_CountsEachCorrectly(t *testing.T
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{
 		{Type: "b2b_org", SFID: issuedOrg.UID, Revision: 1},        // issued
@@ -1131,7 +1365,9 @@ func TestBackfillRunner_RunRepair_MixedOutcomes_CountsEachCorrectly(t *testing.T
 	}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
 
-	assert.Len(t, pub.indexerMessages, 1, "only the issued item must publish")
+	require.Len(t, pub.indexerMessages, 2, "the issued item publishes; the not_found item is removed from the index")
+	assert.Equal(t, "updated", pub.indexerAction(0))
+	assert.Equal(t, "deleted", pub.indexerAction(1))
 	assert.Len(t, repairStore.Deletes, 2, "both issued and not_found markers must be deleted")
 }
 
@@ -1146,7 +1382,7 @@ func TestBackfillRunner_RunRepair_DeleteConflict_RetainsMarker_NoLostRecord(t *t
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{{Type: "b2b_org", SFID: org.UID, Revision: 1}}
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, markers)
@@ -1162,7 +1398,7 @@ func TestBackfillRunner_RunRepair_EmptyQueue_NoOp(t *testing.T) {
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	runner.RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, nil)
 
@@ -1184,7 +1420,7 @@ func TestBackfillRunner_RunRepair_StopsMidPage_WhenPassiveGaugeCrossesThreshold(
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 85, Limit: 100}
 
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers := []port.RepairMarker{
 		{Type: "b2b_org", SFID: org1.UID, Revision: 1},
@@ -1201,7 +1437,7 @@ func TestBackfillRunner_RunRepair_StopsMidPage_WhenPassiveGaugeCrossesThreshold(
 
 func TestBackfillRunner_PrepareRepair_NoRepairStore_ReturnsServiceUnavailable(t *testing.T) {
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}))
+		svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	_, err := runner.PrepareRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true})
 	require.Error(t, err)
@@ -1211,7 +1447,7 @@ func TestBackfillRunner_PrepareRepair_NoRepairStore_ReturnsServiceUnavailable(t 
 
 func TestBackfillRunner_PrepareRepair_NoQuotaGauge_ReturnsServiceUnavailable(t *testing.T) {
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithRepairStore(&mock.MockCDCRepairStore{}))
+		svc.WithRepairStore(&mock.MockCDCRepairStore{}), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	_, err := runner.PrepareRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true})
 	require.Error(t, err)
@@ -1223,7 +1459,7 @@ func TestBackfillRunner_PrepareRepair_QuotaUnreadable_ReturnsServiceUnavailable(
 	// Never observed, and the active refresh also fails — truly unreadable.
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 0, Limit: 0, RefreshErr: errors.New("no route to host")}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithRepairStore(&mock.MockCDCRepairStore{}), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(&mock.MockCDCRepairStore{}), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	_, err := runner.PrepareRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true})
 	require.Error(t, err)
@@ -1234,7 +1470,7 @@ func TestBackfillRunner_PrepareRepair_QuotaUnreadable_ReturnsServiceUnavailable(
 func TestBackfillRunner_PrepareRepair_QuotaAtOrAboveThreshold_ReturnsServiceUnavailable(t *testing.T) {
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 80, Limit: 100} // 0.80 == default threshold
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithRepairStore(&mock.MockCDCRepairStore{}), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(&mock.MockCDCRepairStore{}), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	_, err := runner.PrepareRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true})
 	require.Error(t, err)
@@ -1253,7 +1489,7 @@ func TestBackfillRunner_PrepareRepair_QuotaBelowThreshold_ReturnsSelectedMarkers
 	}
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers, err := runner.PrepareRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true})
 	require.NoError(t, err)
@@ -1274,9 +1510,280 @@ func TestBackfillRunner_PrepareRepair_RefreshFails_FallsBackToLastObservedSnapsh
 		RefreshErr: errors.New("salesforce: rate limited"),
 	}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge))
+		svc.WithRepairStore(repairStore), svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	markers, err := runner.PrepareRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true})
 	require.NoError(t, err)
 	assert.Len(t, markers, 1)
+}
+
+// ── Eligibility is read once per page ─────────────────────────────────────────
+
+// pageEligibility records each FetchB2BOrgEligibility call; uids in ineligible
+// come back false and uids in missing are left out of the map.
+type pageEligibility struct {
+	ineligible map[string]bool
+	missing    map[string]bool
+	err        error
+	calls      [][]string
+	afterCall  func()
+}
+
+func (e *pageEligibility) FetchB2BOrgEligibility(_ context.Context, uids []string) (map[string]bool, error) {
+	e.calls = append(e.calls, append([]string(nil), uids...))
+	if e.afterCall != nil {
+		defer e.afterCall()
+	}
+	if e.err != nil {
+		return nil, e.err
+	}
+	out := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		if !e.missing[uid] {
+			out[uid] = !e.ineligible[uid]
+		}
+	}
+	return out, nil
+}
+
+func pageOrgs(uids ...string) *configurableB2BOrgReaderForRepair {
+	orgs := make(map[string]*model.B2BOrg, len(uids))
+	for _, uid := range uids {
+		orgs[uid] = &model.B2BOrg{UID: uid}
+	}
+	return &configurableB2BOrgReaderForRepair{orgs: orgs}
+}
+
+func TestBackfillRunner_TargetedB2BOrg_OneEligibilityReadPerPage(t *testing.T) {
+	a, b, gone := "001000000000031AAA", "001000000000032AAA", "001000000000033AAA"
+	elig := &pageEligibility{missing: map[string]bool{gone: true}}
+	pub := &subjectCapturingPublisher{}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, pageOrgs(a, b, gone), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+		svc.WithB2BOrgEligibilityReader(elig))
+
+	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", Items: []string{a, b, gone}}))
+
+	require.Len(t, elig.calls, 1)
+	assert.Equal(t, []string{a, b, gone}, elig.calls[0])
+	require.Len(t, pub.indexerMessages, 3)
+	assert.Equal(t, []string{"updated", "updated", "deleted"},
+		[]string{pub.indexerAction(0), pub.indexerAction(1), pub.indexerAction(2)},
+		"a uid missing from the map is removed from the index")
+}
+
+func repairMarkers(reindexType string, uids ...string) []port.RepairMarker {
+	markers := make([]port.RepairMarker, 0, len(uids))
+	for i, uid := range uids {
+		markers = append(markers, port.RepairMarker{Type: reindexType, SFID: uid, Revision: uint64(i + 1)})
+	}
+	return markers
+}
+
+func TestBackfillRunner_RunRepair_EligibilityPerPage(t *testing.T) {
+	a, b := "001000000000034AAA", "001000000000035AAA"
+	newRunner := func(elig *pageEligibility, pub *subjectCapturingPublisher, store *mock.MockCDCRepairStore) *svc.Runner {
+		return svc.NewRunner(&mock.MockBackfillIterator{}, pageOrgs(a, b), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(store), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(elig))
+	}
+
+	t.Run("b2b_org page reads once", func(t *testing.T) {
+		elig, pub, store := &pageEligibility{ineligible: map[string]bool{b: true}}, &subjectCapturingPublisher{}, &mock.MockCDCRepairStore{}
+		newRunner(elig, pub, store).RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, repairMarkers("b2b_org", a, b))
+
+		require.Len(t, elig.calls, 1)
+		assert.Equal(t, []string{a, b}, elig.calls[0])
+		assert.Equal(t, []string{"updated", "deleted"}, []string{pub.indexerAction(0), pub.indexerAction(1)})
+		assert.Len(t, store.Deletes, 2)
+	})
+
+	t.Run("failed read retries every item", func(t *testing.T) {
+		elig, pub, store := &pageEligibility{err: assert.AnError}, &subjectCapturingPublisher{}, &mock.MockCDCRepairStore{}
+		newRunner(elig, pub, store).RunRepair(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"}, repairMarkers("b2b_org", a, b))
+
+		assert.Len(t, elig.calls, 1)
+		assert.Empty(t, pub.indexerMessages)
+		assert.Empty(t, store.Deletes, "every marker is kept for the next drain")
+	})
+
+	t.Run("membership page reads none", func(t *testing.T) {
+		elig, store := &pageEligibility{}, &mock.MockCDCRepairStore{}
+		newRunner(elig, &subjectCapturingPublisher{}, store).RunRepair(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "project_membership"}, repairMarkers("project_membership", "02i000000000031AAA"))
+
+		assert.Empty(t, elig.calls)
+	})
+}
+
+// ── Settings reindex skips organizations that do not qualify ─────────────────
+
+func settingsRunner(elig *pageEligibility, pub *subjectCapturingPublisher, store *mock.MockCDCRepairStore, uids ...string) *svc.Runner {
+	settingsStore := mock.NewMockB2BOrgSettings()
+	orgs := make(map[string]*model.B2BOrg, len(uids))
+	for _, uid := range uids {
+		settingsStore.Seed(uid, &model.B2BOrgSettings{UID: uid}, 1)
+		orgs[uid] = &model.B2BOrg{UID: uid}
+	}
+	return svc.NewRunner(&mock.MockBackfillIterator{}, &multiOrgReader{orgs: orgs}, mock.NewMockProjectMembershipReader(), nil, settingsStore, pub, nil, "", nil,
+		svc.WithRepairStore(store), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+		svc.WithB2BOrgEligibilityReader(elig))
+}
+
+func TestBackfillRunner_Settings_Targeted_SkipsIneligible(t *testing.T) {
+	ok, ineligible, gone := "001000000000041AAA", "001000000000042AAA", "001000000000043AAA"
+	elig := &pageEligibility{ineligible: map[string]bool{ineligible: true}, missing: map[string]bool{gone: true}}
+	pub := &subjectCapturingPublisher{}
+
+	require.NoError(t, settingsRunner(elig, pub, &mock.MockCDCRepairStore{}, ok, ineligible, gone).Run(context.Background(),
+		svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings", Items: []string{ok, ineligible, gone}}))
+
+	require.Len(t, elig.calls, 1, "one eligibility read for the request")
+	assert.Len(t, pub.indexerMessages, 1, "only the qualifying org's settings are published")
+}
+
+func TestBackfillRunner_Settings_Targeted_EligibilityFails_PublishesNothing(t *testing.T) {
+	uid := "001000000000044AAA"
+	pub := &subjectCapturingPublisher{}
+
+	require.NoError(t, settingsRunner(&pageEligibility{err: assert.AnError}, pub, &mock.MockCDCRepairStore{}, uid).Run(context.Background(),
+		svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings", Items: []string{uid}}))
+
+	assert.Empty(t, pub.indexerMessages)
+}
+
+func TestBackfillRunner_Settings_Full_SkipsIneligible(t *testing.T) {
+	ok, ineligible := "001000000000045AAA", "001000000000046AAA"
+
+	t.Run("ineligible org skipped", func(t *testing.T) {
+		elig, pub := &pageEligibility{ineligible: map[string]bool{ineligible: true}}, &subjectCapturingPublisher{}
+		require.NoError(t, settingsRunner(elig, pub, &mock.MockCDCRepairStore{}, ok, ineligible).Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings"}))
+
+		require.Len(t, elig.calls, 1)
+		assert.ElementsMatch(t, []string{ok, ineligible}, elig.calls[0])
+		assert.Len(t, pub.indexerMessages, 1)
+	})
+
+	t.Run("failed read publishes nothing", func(t *testing.T) {
+		pub := &subjectCapturingPublisher{}
+		err := settingsRunner(&pageEligibility{err: assert.AnError}, pub, &mock.MockCDCRepairStore{}, ok, ineligible).Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings"})
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.Empty(t, pub.indexerMessages)
+	})
+}
+
+func TestBackfillRunner_Settings_Full_CountingDryRun_ReadsNoEligibility(t *testing.T) {
+	uid := "001000000000047AAA"
+
+	elig := &pageEligibility{}
+	require.NoError(t, settingsRunner(elig, &subjectCapturingPublisher{}, &mock.MockCDCRepairStore{}, uid).Run(context.Background(),
+		svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings", DryRun: true}))
+	assert.Empty(t, elig.calls, "a counting dry run makes no Salesforce read")
+}
+
+func TestBackfillRunner_Settings_Full_QuotaStopsBetweenEligibilityPages(t *testing.T) {
+	uids := make([]string, 250)
+	settingsStore := mock.NewMockB2BOrgSettings()
+	orgs := make(map[string]*model.B2BOrg, len(uids))
+	for i := range uids {
+		uids[i] = fmt.Sprintf("001%012dAAA", 100+i)
+		settingsStore.Seed(uids[i], &model.B2BOrgSettings{UID: uids[i]}, 1)
+		orgs[uids[i]] = &model.B2BOrg{UID: uids[i]}
+	}
+	gauge := &mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}
+	elig := &pageEligibility{afterCall: func() { gauge.Current = 99 }}
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, &multiOrgReader{orgs: orgs}, mock.NewMockProjectMembershipReader(), nil, settingsStore,
+		&subjectCapturingPublisher{}, nil, "", nil, svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(elig))
+
+	err := runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org_settings"})
+
+	require.ErrorContains(t, err, "quota threshold reached")
+	require.Len(t, elig.calls, 1, "the quota check stops the run before the next page is read")
+	assert.Len(t, elig.calls[0], 200)
+}
+
+// ── Membership repair queues its owner for an eligibility re-check ───────────
+
+func TestBackfillRunner_RunRepair_Membership_QueuesOwner(t *testing.T) {
+	const pmUID, owner = "11111111-1111-1111-1111-111111111111", "org-1"
+	newRunner := func(store *mock.MockCDCRepairStore, pub *subjectCapturingPublisher) *svc.Runner {
+		return svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(store), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+	}
+	repairReq := svc.BackfillRequest{RunID: "r", Type: "project_membership", CDCRepair: true}
+
+	t.Run("owner queued before the marker is cleared", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{}, &subjectCapturingPublisher{}
+		newRunner(store, pub).RunRepair(context.Background(), repairReq, repairMarkers("project_membership", pmUID))
+
+		assert.Equal(t, []string{owner}, repairPutsOfType(store, "b2b_org"))
+		assert.Len(t, store.Deletes, 1)
+		assert.Len(t, pub.indexerMessages, 1)
+	})
+
+	t.Run("failed owner write keeps the marker", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{PutErr: assert.AnError}, &subjectCapturingPublisher{}
+		newRunner(store, pub).RunRepair(context.Background(), repairReq, repairMarkers("project_membership", pmUID))
+
+		assert.Empty(t, store.Deletes, "the membership marker stays until its owner is queued")
+		assert.Empty(t, pub.indexerMessages)
+	})
+
+	t.Run("targeted reindex queues nothing", func(t *testing.T) {
+		store := &mock.MockCDCRepairStore{}
+		require.NoError(t, newRunner(store, &subjectCapturingPublisher{}).Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "project_membership", Items: []string{pmUID}}))
+
+		assert.Empty(t, store.Puts)
+	})
+}
+
+// ── b2b_org repair queues its parent for an is_parent refresh ────────────────
+
+func TestBackfillRunner_RunRepair_B2BOrg_QueuesParent(t *testing.T) {
+	const childUID, parentUID = "001000000000010AAA", "001000000000011AAA"
+	newRunner := func(store *mock.MockCDCRepairStore, pub *subjectCapturingPublisher, parent string) *svc.Runner {
+		child := &model.B2BOrg{UID: childUID, ParentUID: parent}
+		reader := &configurableB2BOrgReaderForRepair{orgs: map[string]*model.B2BOrg{childUID: child}}
+		return svc.NewRunner(&mock.MockBackfillIterator{}, reader, mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
+			svc.WithRepairStore(store), svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 10, Limit: 100}),
+			svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+	}
+	repairReq := svc.BackfillRequest{RunID: "r", Type: "b2b_org", CDCRepair: true}
+
+	t.Run("parent queued before the marker is cleared", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{}, &subjectCapturingPublisher{}
+		newRunner(store, pub, parentUID).RunRepair(context.Background(), repairReq, repairMarkers("b2b_org", childUID))
+
+		assert.Equal(t, []string{parentUID}, repairPutsOfType(store, "b2b_org"))
+		assert.Len(t, store.Deletes, 1)
+		assert.NotEmpty(t, pub.indexerMessages)
+	})
+
+	t.Run("failed parent write keeps the marker", func(t *testing.T) {
+		store, pub := &mock.MockCDCRepairStore{PutErr: assert.AnError}, &subjectCapturingPublisher{}
+		newRunner(store, pub, parentUID).RunRepair(context.Background(), repairReq, repairMarkers("b2b_org", childUID))
+
+		assert.Empty(t, store.Deletes, "the child marker stays until its parent is queued")
+		assert.Empty(t, pub.indexerMessages)
+	})
+
+	t.Run("org without a parent queues nothing", func(t *testing.T) {
+		store := &mock.MockCDCRepairStore{}
+		newRunner(store, &subjectCapturingPublisher{}, "").RunRepair(context.Background(), repairReq, repairMarkers("b2b_org", childUID))
+
+		assert.Empty(t, store.Puts)
+		assert.Len(t, store.Deletes, 1)
+	})
+
+	t.Run("targeted reindex queues nothing", func(t *testing.T) {
+		store := &mock.MockCDCRepairStore{}
+		require.NoError(t, newRunner(store, &subjectCapturingPublisher{}, parentUID).Run(context.Background(),
+			svc.BackfillRequest{RunID: "r", Type: "b2b_org", Items: []string{childUID}}))
+
+		assert.Empty(t, store.Puts)
+	})
 }

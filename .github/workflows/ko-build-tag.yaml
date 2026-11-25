@@ -29,16 +29,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Prepare versions and chart name
         id: prepare
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          APP_VERSION=${REF_NAME#v}
+          APP_VERSION="${GITHUB_REF_NAME#v}"
           CHART_NAME="$(yq '.name' charts/*/Chart.yaml)"
-          CHART_VERSION=${REF_NAME#v}
+          CHART_VERSION="${GITHUB_REF_NAME#v}"
           {
             echo "app_version=$APP_VERSION"
             echo "chart_name=$CHART_NAME"
@@ -49,6 +49,7 @@ jobs:
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+          # Release builds don't restore a cache an earlier run could have poisoned.
           cache: false
 
       - name: Setup Ko
@@ -60,7 +61,6 @@ jobs:
         env:
           VERSION: ${{ steps.prepare.outputs.app_version }}
           GIT_COMMIT: ${{ github.sha }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
           export BUILD_TIME
@@ -69,8 +69,8 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t "$REF_NAME" \
-            -t "$VERSION" \
+            -t "${GITHUB_REF_NAME}" \
+            -t "${VERSION}" \
             -t latest \
             --sbom spdx
 
@@ -87,11 +87,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Publish Chart to GHCR
         id: publish-ghcr
         # yamllint disable-line rule:line-length
-        uses: linuxfoundation/lfx-public-workflows/.github/actions/helm-chart-oci-publisher@a93335d2abc2a2e2bb1b7a4cdefbbf15351681ce # v0.1.0
+        uses: linuxfoundation/lfx-public-workflows/.github/actions/helm-chart-oci-publisher@17e4144d7ba68f7c3e8c16eece5aed15fd7c2dc8 # main
         with:
           name: ${{ needs.publish.outputs.chart_name }}
           repository: ${{ github.repository }}/chart
@@ -117,10 +119,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_NAME: ${{ steps.publish-ghcr.outputs.image_name }}
-          IMAGE_DIGEST: ${{ steps.publish-ghcr.outputs.digest }}
+          CHART_DIGEST: ${{ steps.publish-ghcr.outputs.digest }}
         run: |
           set -euo pipefail
-          cosign sign --yes "${IMAGE_NAME}@${IMAGE_DIGEST}"
+          cosign sign --yes "${IMAGE_NAME}@${CHART_DIGEST}"
 
   create-ghcr-helm-provenance:
     needs:
@@ -129,8 +131,8 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    # Note, this action *cannot* be pinned to a SHA: see the project's
-    # explanation at "Referencing SLSA builders and generators" in their README.
+    # Tag ref required: pinning the commit SHA breaks SLSA builder ref resolution.
+    # yamllint disable-line rule:line-length
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0  # zizmor: ignore[unpinned-uses]
     with:
       image: ${{ needs.release-helm-chart.outputs.image_name }}
@@ -169,9 +171,8 @@ jobs:
         with:
           client-id: ${{ env.TRIGGER_CLIENT_ID }}
           private-key: ${{ env.TRIGGER_PRIVATE_KEY }}
-          # Rationale: repositories: below already scopes
-          # this token to one repo. Fixed upstream in zizmor v1.25.1/v1.29.0
-          # (zizmorcore/zizmor#2011, #2227); MegaLinter v9.6.0 bundles the buggy v1.25.0.
+          # zizmor flags owner plus repositories as all-repository access;
+          # repositories scopes the token, so this is a false positive.
           owner: linuxfoundation  # zizmor: ignore[github-app]
           repositories: lfx-v2-argocd
           permission-actions: write

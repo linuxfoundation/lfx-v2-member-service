@@ -72,6 +72,10 @@ func (s stubB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []stri
 	return map[string][]string{}, nil
 }
 
+func (s stubB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	return nil, false, nil
+}
+
 // ── AddPrincipal ──────────────────────────────────────────────────────────────
 
 func TestOrgSettingsWriter_AddPrincipal_PreservesExistingMembers(t *testing.T) {

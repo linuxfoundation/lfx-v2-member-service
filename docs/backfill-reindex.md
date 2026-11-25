@@ -33,6 +33,7 @@ For the downstream message payloads the runner produces, see:
 - [`project_uid` Resolution Parity](#project_uid-resolution-parity)
 - [Avatar Enrichment (`avatar-backfill`)](#avatar-enrichment-avatar-backfill)
 - [Org Slug Backfill (lfx-self-serve#2570)](#org-slug-backfill-lfx-self-serve2570)
+- [Company Account Rollout (lfx-self-serve#3401)](#company-account-rollout-lfx-self-serve3401)
 - [Dry Run](#dry-run)
 - [Failure Modes & Log Signals](#failure-modes--log-signals)
 - [Configuration](#configuration)
@@ -197,12 +198,18 @@ So: **idempotent reindex + revision-conditional delete is the sole race guard.**
 ### Two-phase drain
 
 1. **`PrepareRepair` (synchronous, in the HTTP request):**
-   - Requires both a repair store and a quota gauge to be wired (`WithRepairStore`, `WithQuotaGauge` in `cmd/member-api/service/providers.go`, Salesforce mode only) — returns `503` ("not configured") otherwise.
+   - Requires both a repair store and a quota gauge to be wired (`WithRepairStore`, `WithQuotaGauge` in `cmd/member-api/service/providers.go`, Salesforce mode only) — returns `503` ("not configured") otherwise. The repair store is wired only when `MESSAGING_SOURCE=nats` (`repairQueueEnabled`): with the mock publisher nothing is delivered, so a drain would clear markers for records it never republished.
    - Issues an active quota refresh (falls back to the last valid observation if the refresh request fails); returns `503` if the quota has never been observed (truly unreadable).
    - Returns `503` if `current/limit >= ADMIN_REINDEX_QUOTA_THRESHOLD` (default `0.80` — see [Threshold asymmetry](#threshold-asymmetry) below).
    - Otherwise lists up to 100 pending markers for `Type` from the `cdc-repair` bucket (`ListPending`) and returns them as `selected_count`.
 2. **`RunRepair` (asynchronous goroutine, `context.WithoutCancel`):**
+   - For a `b2b_org` page, reads eligibility once for every marker (`FetchB2BOrgEligibility`); a failed read retains every marker.
    - For each marker: calls `reindexItem`, then on `issued`/`not_found` revision-conditionally deletes the marker; on `retry` (a fetch, dependency-resolution, persistence, or partial-projection failure) the marker is retained and logged (`repair item retained for next drain`) for the next run.
+   - `issued` means every indexer and fga-sync publish for the item returned no error and one `Flush` then confirmed the broker received them. A failed publish or flush is `retry`. As with removals, the flush confirms broker receipt, not downstream processing. Targeted (`items`) reindex shares this step only on the per-item path (`b2b_org`, `b2b_org_settings`, and `project_membership`/`key_contact` when no batch reader is wired), where an unconfirmed item is not counted in `published`. The batched `project_membership` and `key_contact` arms (`runTargetedMemberships`, `runTargetedKeyContacts`, used in Salesforce mode) still count a publish as `published` without confirming it.
+   - A `b2b_org` also asks fga-sync (`lfx.access_check.read_tuples`, user `b2b_org:<uid>`) which orgs list it as a `child`. Every one other than its current Salesforce parent is a parent the org moved away from while the consumer skipped it; that parent's child list is rebuilt from Salesforce (`FetchChildUIDsByParentUID`, empty for a deleted parent) and sent as an `update_access` replacement, withdrawing the stale link and the `writer`/`auditor` access that flowed through it. An org with no Salesforce parent always gets its own `parent` relation cleared, because no new-parent message replaces it; this is not gated on finding an old parent, since after a partial success the withdrawal has already removed the link the read would find. An org listed only under its current parent costs no extra Salesforce read. A failed or malformed reply, or a failed child read, sends nothing for the old parents and is `retry`. A reply over the 1000-tuple cap cannot complete on retry (it also carries one `parent` tuple per child org), so it is logged at ERROR (`stale parent links not checked`), nothing is withdrawn, and the org's own updates are published and confirmed as usual.
+   - A record that is deleted or no longer qualifies (a `b2b_org` that is missing or ineligible, a `project_membership` Asset that is gone or whose `Product2.Family` is not `Membership`, compared case-insensitively) gets an index delete, keeps its FGA grants, and is flushed. A membership whose related Account, Product2, or Project record cannot be read reports not-found from the per-item reader, so it is removed too; the next CDC event or reindex republishes it once the related record resolves. Only a confirmed delete is `not_found`; a failed publish or flush is `retry`, so the marker stays until the removal lands.
+   - A published `project_membership` first queues its owner Account as a `b2b_org` marker, because a first membership can make the owner eligible with no Account change event and the marker does not record whether it came from a creation. A failed owner write is `retry`, so the membership marker stays. Drain `project_membership` before `b2b_org` so the owners are re-checked in the same pass.
+   - A published `b2b_org` with a parent first queues that parent as a `b2b_org` marker, because the repaired org may be a child that just started qualifying and only the CDC path refreshes the parent's `is_parent`. A failed parent write is `retry`. Each level of the hierarchy is refreshed on a later page or drain, up to the root.
    - Before each item, re-reads the **passive** gauge (no additional `/limits` call) and stops mid-page if usage has crossed the threshold since the page was selected (`stopped_early` in the summary log) — this catches live traffic pushing usage up while a page is draining.
 
 ### Threshold asymmetry
@@ -235,13 +242,13 @@ The consumer's `CDC_QUOTA_SKIP_THRESHOLD` (default `0.95`) and the drain's `ADMI
 | `b2b_org` | Batched child-UID fetch for every org + its parent (`FetchChildUIDsByParentUIDs`, one query per page) → set `IsParent` → `PublishB2BOrgIndexer` (`updated`) + `PublishB2BOrgTeamGrantsFGA` (the `global_org_admin` grant and the auditor team grants; publishes when *either* is configured) + `PublishB2BOrgParentFGA` when `ParentUID` is set and children are cached. |
 | `project_membership` | resolve `project_uid` → on success: `PublishProjectMembershipIndexer` (`updated`) + `PublishProjectMembershipFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only**. |
 | `key_contact` | resolve LFID via `userReader.UsernameByEmail` when the assembled record has no `Username` (the SOQL/sObject sources set `Email` only) → resolve `project_uid` → on success: `PublishKeyContactIndexer` (`updated`) + `PublishKeyContactFGA`. On resolver failure: skip indexer, log ERROR, **OpenFGA only** (when `Username` resolved). Logs a warning when `since` is set (the filter only checks `Project_Role__c.LastModifiedDate`; Contact/Asset field changes are not captured). |
-| `b2b_org_settings` | List org UIDs (`ListSettingsOrgUIDs`) → `GetSettings` → (optionally enrich avatars) → `GetB2BOrg` → `PublishB2BOrgSettingsIndexer` (`updated`). Requires a `settingsReader`; avatar enrichment additionally requires a `userReader` + `settingsWriter`. Publishes the **indexer** doc only (no FGA message). |
+| `b2b_org_settings` | List org UIDs (`ListSettingsOrgUIDs`) → one eligibility read per 200 orgs (`FetchB2BOrgEligibility`), each after the loop's quota check, so a quota stop also stops the reads; a failed read fails the run → skip deleted or ineligible orgs (`not_found=true` log) → `GetSettings` → (optionally enrich avatars) → `GetB2BOrg` → `PublishB2BOrgSettingsIndexer` (`updated`). A non-enrich dry run skips the eligibility read. Requires a `settingsReader`; avatar enrichment additionally requires a `userReader` + `settingsWriter`. Publishes the **indexer** doc only (no FGA message). |
 
 ### Targeted (`runTargeted`)
 
-`project_membership` and `key_contact` — the prod volume drivers — are fetched in **one SOQL batch** (`FetchMembershipsBySFIDs` / `FetchKeyContactsBySFIDs`, the same batch ports the CDC consumer uses), cutting per-request cost from ~3–5 SF calls/item to ~1 batch. Each returned record is resolved (`resolveProjectUID`) and published with the same per-type calls as the full/filtered path. A requested SFID **absent** from the batch result (soft-deleted or no longer membership-eligible) is classified `not_found` and skipped; a SFID present in SOQL but unconvertible is counted as a distinct **`conversion_error`** (neither published nor deleted). This is the *lighter* batch path — deliberately **no** cache-invalidation or absent-as-delete convergence (that is LFXV2-2808). When the batch reader is unwired (mock mode) PM/KC fall back to the per-item path below.
+`project_membership` and `key_contact` — the prod volume drivers — are fetched in **one SOQL batch** (`FetchMembershipsBySFIDs` / `FetchKeyContactsBySFIDs`, the same batch ports the CDC consumer uses), cutting per-request cost from ~3–5 SF calls/item to ~1 batch. Each returned record is resolved (`resolveProjectUID`) and published with the same per-type calls as the full/filtered path. A requested SFID **absent** from the batch result (soft-deleted or no longer membership-eligible) is classified `not_found`; for `project_membership` it also gets an index delete (`removeAbsentMemberships`), keeps its FGA grants, and every removal in the request is confirmed by one flush, matching the per-item path. A dry run removes nothing, and an unconfirmed removal is logged with `publish_failed_for_backfill_repair=true` for a rerun. An absent `key_contact` is only skipped. A SFID present in SOQL but unconvertible is counted as a distinct **`conversion_error`** (neither published nor deleted). This is the *lighter* batch path — deliberately **no** cache invalidation (that is LFXV2-2808). When the batch reader is unwired (mock mode) PM/KC fall back to the per-item path below.
 
-`b2b_org` (and any type without a wired batch reader) stays **per item** via the shared `reindexItem` helper (the same one `RunRepair` uses for `cdc_repair`): `GetB2BOrg` applies child-UID/parent-FGA logic that a batch semi-join would change, so it is intentionally not batched. `b2b_org_settings` targeted also runs per item (`GetB2BOrg`+`GetSettings`). Child-UID lookups are memoised within the request so siblings sharing a parent don't each issue a SOQL call. `outcomeNotFound` is counted as `not_found`; `outcomeRetry` is logged inside `reindexItem` and otherwise ignored (targeted mode does not retain/retry a marker — that persistence is exclusive to `cdc_repair`).
+`b2b_org` (and any type without a wired batch reader) stays **per item** via the shared `reindexItem` helper (the same one `RunRepair` uses for `cdc_repair`): `GetB2BOrg` applies child-UID/parent-FGA logic that a batch eligibility filter would change, so it is intentionally not batched. Eligibility, however, is read **once per request** (`FetchB2BOrgEligibility`) for both `b2b_org` and `b2b_org_settings`; a failed read makes every item `retry`. `b2b_org_settings` targeted also runs per item (`GetB2BOrg`+`GetSettings`) and skips a deleted or ineligible org as `not_found` without publishing. Child-UID lookups are memoised within the request so siblings sharing a parent don't each issue a SOQL call. `outcomeNotFound` is counted as `not_found`; `outcomeRetry` is logged inside `reindexItem` and otherwise ignored (targeted mode does not retain/retry a marker — that persistence is exclusive to `cdc_repair`).
 
 The final log line reports `total_items`, `published`, `not_found`, and `would_publish_count`; the batched arms additionally report `conversion_error` so `published + not_found + conversion_error` reconciles against `total_items`.
 
@@ -345,8 +352,9 @@ curl -sS -X POST "$MEMBER_SERVICE_URL/admin/reindex" \
   -d '{"type":"b2b_org"}'
 ```
 
-This walks the SOQL list path (`accountsSOQLBase`) and republishes every member-eligible Account
-through `convertSOQLToB2BOrg`, which sets the slug; CDC keeps the population converged afterwards.
+This walks the SOQL list path (`accountsSOQLBase`) and republishes every eligible Account (see
+[Company Account Rollout](#company-account-rollout-lfx-self-serve3401)) through
+`convertSOQLToB2BOrg`, which sets the slug; CDC keeps the population converged afterwards.
 The run is quota-gated (see [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex)). If
 headroom is tight, use **contiguous `since`/`until` windows that together cover the whole Account
 history** (oldest `LastModifiedDate` through now), run sequentially — every window republishes with
@@ -386,6 +394,44 @@ renames or disambiguates slugs.
 
 ---
 
+## Company Account Rollout (lfx-self-serve#3401)
+
+With `app.includeCompanyAllAccounts` on (`B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS=true`), a `b2b_org` is
+any non-deleted Account that is a Company Account (`RecordType.DeveloperName =
+'Company_Account'`) or holds a non-deleted Membership Asset; `model.IsB2BOrgEligible` evaluates
+the whole rule. With it off (the default), only the second group qualifies, as before this rule,
+and registration refuses non-member Company Accounts with 422. The chart injects the one value
+into both the API and the CDC consumer; they must agree, or one publishes an org the other
+removes on its next change event. Turning the setting on publishes a non-member Company Account
+only when its Account next changes; the rest stay missing until a reindex publishes them, so in
+each environment the order is: set it on, let both deployments roll, then run the steps below.
+Run an EasyCLA import against an environment only after this, since its non-member rows get 422
+while the setting is off. Every org indexed under the old rule still qualifies, so the reindex
+only adds.
+
+Turning it off again stops new additions and does no bulk cleanup, but published non-member
+orgs do not stay put: each one is removed from the index, with its FGA grants kept, the next time
+its Account changes (the CDC absent path) or a targeted or `cdc_repair` run reaches it. A full
+or filtered reindex skips it, so it neither removes nor refreshes it. Removing the rest after a
+switch-off is a manual step. On the full and filtered scan, ineligible Accounts are dropped inside
+`AccountRepo`, before the runner sees them, so they are neither counted nor logged. Targeted
+(`items`) and `cdc_repair` runs read each Account through `GetB2BOrg`, which does not apply the
+rule, so the runner reads eligibility once per page and `reindexItem` checks it: a deleted or
+ineligible Account gets a flushed index delete, keeps its FGA grants, and counts as `not_found`
+(`retry` when the delete is not confirmed).
+
+1. **Dry run.** `POST /admin/reindex` with `{"type":"b2b_org","dry_run":true}`. The last
+   `backfill page processed` line's `total_so_far` is the eligible population. Compare it with
+   the number of non-deleted Company Accounts plus non-company Accounts holding a Membership Asset.
+   A total close to the old member-only count means the setting is not on in this deployment.
+2. **Reindex.** Drop `dry_run`. If headroom is tight, run contiguous `since`/`until` windows
+   sequentially, as in [Windowed reindex](#windowed-reindex-since--until).
+3. **Quota stop.** `backfill stopped early — salesforce quota threshold reached` with
+   `stopped_early=true` means the window did not finish; rerun that window once quota recovers.
+4. **Verify.** Count `b2b_org` documents in OpenSearch; the result should match step 1.
+
+---
+
 ## Dry Run
 
 `dry_run=true` walks the read path but skips every publish. The full/filtered path counts records; the targeted path reports `would_publish_count`. For `b2b_org_settings`, a **non-enrich** dry-run counts only (it does not read each settings record); an enrich dry-run still performs the avatar drift computation without persisting or publishing.
@@ -420,6 +466,7 @@ The runner is resilient: a per-record fetch/publish failure is logged and the ru
 | Variable | Description | Default |
 |---|---|---|
 | `ADMIN_REINDEX_QUOTA_THRESHOLD` | Fraction of the daily Salesforce REST quota (`current/limit`) at/above which the backfill quota guard refuses/stops a run. Covers the `cdc_repair` drain (`PrepareRepair`/`RunRepair`) **and** the full/filtered reindex paths (`GateBackfillStart` → HTTP `503`; `runType` start + mid-run stop). Targeted (`items`) is exempt. See [Quota Guard & Windowed Reindex](#quota-guard--windowed-reindex). | `0.80` |
+| `B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS` | `true` makes every Company Account a `b2b_org`; unset or `false` keeps members only. Shared with the API and the CDC consumer (chart `app.includeCompanyAllAccounts`). An unparseable value stops startup. See [Company Account Rollout](#company-account-rollout-lfx-self-serve3401). | `false` |
 
 The full/filtered/targeted paths take no other dedicated environment variables beyond the shared service/Salesforce/NATS config (see [README](../README.md) / [CLAUDE.md](../CLAUDE.md)). The corresponding consumer-side variable (`CDC_QUOTA_REFRESH_STALE_AFTER`, `CDC_QUOTA_SKIP_THRESHOLD`) that governs what gets written into the queue this endpoint drains is documented in [CDC Consumer — Configuration](./cdc-consumer.md#configuration).
 

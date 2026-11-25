@@ -17,15 +17,15 @@ HELM_RELEASE_NAME=lfx-v2-member-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.24.5
+GO_VERSION := 1.27.4
 GOOS := linux
 GOARCH := amd64
-GOA_VERSION := v3.30.0
+GOA_VERSION := $(shell go list -m -f '{{.Version}}' goa.design/goa/v3)
 PROTOC_VERSION := 35.0
 PROTOC_OS := osx-aarch_64
 
 # Linting
-GOLANGCI_LINT_VERSION := v2.2.2
+GOLANGCI_LINT_VERSION := v2.15.0
 LINT_TIMEOUT := 10m
 LINT_TOOL=$(shell go env GOPATH)/bin/golangci-lint
 GO_FILES=$(shell find . -name '*.go' -not -path './gen/*' -not -path './vendor/*')
@@ -47,17 +47,16 @@ setup: ## Setup development environment
 .PHONY: deps
 deps: ## Install dependencies
 	@echo "Installing dependencies..."
+	@command -v jq >/dev/null || { echo "jq is required; install it (e.g. brew install jq)"; exit 1; }
 	go install goa.design/goa/v3/cmd/goa@$(GOA_VERSION)
 
 .PHONY: apigen
 apigen: deps #@ Generate API code using Goa
 	goa gen github.com/linuxfoundation/lfx-v2-member-service/cmd/member-api/design
-	@# Goa v3.30.0 emits invalid Swagger 2 "security" requirements
-	@# (e.g. "jwt_header_Authorization": null instead of an empty array),
-	@# which Swagger 2 validators reject. Patch the requirement values back
-	@# to empty arrays until upstream fixes this.
-	@jq 'walk(if type == "object" and has("security") and (.security | type) == "array" then .security |= map(with_entries(.value = (.value // []))) else . end)' gen/http/openapi.json > /tmp/openapi.json.fixed \
-		&& mv /tmp/openapi.json.fixed gen/http/openapi.json
+	@# Swagger 2 security requirements use arrays instead of null values.
+	@tmp=$$(mktemp) && \
+		jq 'walk(if type == "object" and has("security") and (.security | type) == "array" then .security |= map(with_entries(.value = (.value // []))) else . end)' gen/http/openapi.json > "$$tmp" && \
+		mv "$$tmp" gen/http/openapi.json
 
 # PROTO_GEN: one-time regeneration of Salesforce Pub/Sub API gRPC stubs.
 # Only needed when api/salesforce/pubsub/pubsub_api.proto is updated.
@@ -107,8 +106,8 @@ protoc-gen: ## Regenerate pb.go stubs from api/salesforce/pubsub/pubsub_api.prot
 .PHONY: lint
 lint: ## Run golangci-lint (local Go linting)
 	@echo "Running golangci-lint..."
-	@which golangci-lint >/dev/null 2>&1 || (echo "Installing golangci-lint..." && go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
-	@golangci-lint run ./... && echo "==> Lint OK"
+	@$(LINT_TOOL) version 2>/dev/null | grep -q 'version $(GOLANGCI_LINT_VERSION:v%=%) ' || (echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..." && GOBIN=$(dir $(LINT_TOOL)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
+	@$(LINT_TOOL) run ./... && echo "==> Lint OK"
 
 # Format code
 .PHONY: fmt
@@ -123,8 +122,10 @@ test: test-scripts ## Run tests
 	go test -v -race -coverprofile=coverage.out ./...
 
 .PHONY: test-scripts
-test-scripts: ## Run shell migration tests
+test-scripts: ## Run shell operator-script tests (global org-admin migration + OpenFGA residue cleanup + LF team auditor reach)
 	@bash scripts/test-global-org-admin-team-migration.sh
+	@bash scripts/test-openfga-residue-cleanup.sh
+	@bash scripts/test-lf-teams-auditor-openfga.sh
 
 .PHONY: build
 build: ## Build the application for local OS

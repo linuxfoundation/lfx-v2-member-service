@@ -74,7 +74,7 @@ app:
   # scripts/revoke-lf-teams-auditor-openfga.sh. Adding a team here remains a
   # one-way door. See docs/lf-team-auditor-grants.md.
   #
-  # Staff only. lfContractorTeamName was added under LFXV2-3071 and has been
+  # Contractors excluded. lfContractorTeamName was added under LFXV2-3071 and has been
   # withdrawn: that parity rested on lf-contractor holding auditor on the tenant
   # root project, and lfx-self-serve#2814 Release 2 deletes that tuple (dropped,
   # not migrated). Contractors keep explicit per-org grants only (Manish Dixit,
@@ -82,9 +82,38 @@ app:
   # `org auditor surplus` count is the live figure) are NOT removed by
   # this key — see docs/lf-team-auditor-grants.md for the revoke runbook.
   lfStaffTeamName: "lf-staff"
+  # globalOrgAuditorsTeamName is the hand-picked sso-tools team (not
+  # LDAP-synced) granted blanket auditor (read-only) access on every b2b_org
+  # alongside lfStaffTeamName. Like lfStaffTeamName it is the same in every
+  # environment, so this file is its single authoritative copy.
+  #
+  # Same one-way door as lfStaffTeamName: setting it to "" stops new grants
+  # but revokes nothing already written. Removal is
+  # scripts/revoke-lf-teams-auditor-openfga.sh.
+  globalOrgAuditorsTeamName: "global-org-auditors"
   # lfxSelfServeBaseURL is the base URL injected as ReturnURL in org-settings invite emails.
   # Leave empty to omit the return link from the invite email.
   lfxSelfServeBaseURL: ""
+  # includeCompanyAllAccounts makes every Company Account a b2b_org, member or
+  # not. When false, only Accounts holding a membership qualify and
+  # registration refuses other Company Accounts with 422. Both deployment
+  # templates inject it, because the API and the CDC consumer must agree: if
+  # they differ, one publishes an org the other removes on its next change.
+  # Turning it on publishes a non-member Account on its next change and the
+  # rest on the next b2b_org reindex. Turning it off does no bulk cleanup: a
+  # published non-member leaves the index (grants kept) on its next change or
+  # targeted reindex, and a full reindex leaves it; remove the rest manually.
+  includeCompanyAllAccounts: false
+  # findOrCreateB2BOrgEnabled turns on POST /b2b_orgs/find-or-create
+  # (lfx-self-serve#4998): the Account is matched by website domain or created
+  # as a Company Account through the Apex endpoint at apexAccountPath, then
+  # registered like POST /b2b_orgs. A created Account has no membership, so the
+  # route also needs includeCompanyAllAccounts. While off, or while
+  # apexAccountPath is empty, the route answers 503.
+  findOrCreateB2BOrgEnabled: false
+  # apexAccountPath is the Salesforce Apex REST path of the account
+  # find-or-create endpoint (lfx-self-serve#4997), e.g. /services/apexrest/lfx/account.
+  apexAccountPath: ""
   # adminReindexQuotaThreshold is the Salesforce API usage ratio (0,1] at or
   # above which POST /admin/reindex {cdc_repair:true} refuses to start a drain
   # (ServiceUnavailable). Leave empty to use the in-code default (0.80).

@@ -28,8 +28,7 @@ func newAvatarEnrichRunner(store *mock.MockB2BOrgSettings, ur avatarStubUserRead
 		"",
 		nil,
 		svc.WithSettingsWriter(store),
-		svc.WithUserReader(ur),
-	)
+		svc.WithUserReader(ur), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 }
 
 func TestAvatarBackfill_Runner_EnrichesAndIsIdempotent(t *testing.T) {

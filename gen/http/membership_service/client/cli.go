@@ -112,6 +112,60 @@ func BuildCreateB2bOrgPayload(membershipServiceCreateB2bOrgBody string, membersh
 	return v, nil
 }
 
+// BuildFindOrCreateB2bOrgPayload builds the payload for the membership-service
+// find-or-create-b2b-org endpoint from CLI flags.
+func BuildFindOrCreateB2bOrgPayload(membershipServiceFindOrCreateB2bOrgBody string, membershipServiceFindOrCreateB2bOrgVersion string, membershipServiceFindOrCreateB2bOrgBearerToken string) (*membershipservice.FindOrCreateB2bOrgPayload, error) {
+	var err error
+	var body FindOrCreateB2bOrgRequestBody
+	{
+		err = json.Unmarshal([]byte(membershipServiceFindOrCreateB2bOrgBody), &body)
+		if err != nil {
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"name\": \"Example Corp\",\n      \"website\": \"https://example.com\"\n   }'")
+		}
+		if utf8.RuneCountInString(body.Name) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.name", body.Name, utf8.RuneCountInString(body.Name), 1, true))
+		}
+		if utf8.RuneCountInString(body.Name) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.name", body.Name, utf8.RuneCountInString(body.Name), 255, false))
+		}
+		if utf8.RuneCountInString(body.Website) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.website", body.Website, utf8.RuneCountInString(body.Website), 1, true))
+		}
+		if utf8.RuneCountInString(body.Website) > 255 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("body.website", body.Website, utf8.RuneCountInString(body.Website), 255, false))
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	var version *string
+	{
+		if membershipServiceFindOrCreateB2bOrgVersion != "" {
+			version = &membershipServiceFindOrCreateB2bOrgVersion
+			if !(*version == "1") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("version", *version, []any{"1"}))
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var bearerToken *string
+	{
+		if membershipServiceFindOrCreateB2bOrgBearerToken != "" {
+			bearerToken = &membershipServiceFindOrCreateB2bOrgBearerToken
+		}
+	}
+	v := &membershipservice.FindOrCreateB2bOrgPayload{
+		Name:    body.Name,
+		Website: body.Website,
+	}
+	v.Version = version
+	v.BearerToken = bearerToken
+
+	return v, nil
+}
+
 // BuildUpdateB2bOrgPayload builds the payload for the membership-service
 // update-b2b-org endpoint from CLI flags.
 func BuildUpdateB2bOrgPayload(membershipServiceUpdateB2bOrgBody string, membershipServiceUpdateB2bOrgUID string, membershipServiceUpdateB2bOrgVersion string, membershipServiceUpdateB2bOrgBearerToken string, membershipServiceUpdateB2bOrgIfMatch string) (*membershipservice.UpdateB2bOrgPayload, error) {

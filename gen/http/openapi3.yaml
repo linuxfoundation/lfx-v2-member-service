@@ -175,6 +175,12 @@ paths:
                         application/vnd.goa.error:
                             schema:
                                 $ref: '#/components/schemas/Error'
+                "422":
+                    description: 'UnprocessableEntity: Account is not eligible as a B2B organization'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 "500":
                     description: 'InternalServerError: Internal server error'
                     content:
@@ -2091,6 +2097,184 @@ paths:
                                 $ref: '#/components/schemas/Error'
             security:
                 - jwt_header_Authorization: []
+    /b2b_orgs/find-or-create:
+        post:
+            tags:
+                - membership-service
+            summary: find-or-create-b2b-org membership-service
+            description: Find the Salesforce Account by website domain or create it as a Company Account, then register it as a B2B organization
+            operationId: membership-service#find-or-create-b2b-org
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  allowEmptyValue: true
+                  schema:
+                    type: string
+                    description: Version of the API
+                    example: "1"
+                    enum:
+                        - "1"
+                  example: "1"
+            requestBody:
+                description: Request body for find-or-create-b2b-org.
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/FindOrCreateB2bOrgRequestBody'
+                        example:
+                            name: Example Corp
+                            website: https://example.com
+            responses:
+                "200":
+                    description: OK response.
+                    headers:
+                        ETag:
+                            description: ETag header value
+                            schema:
+                                type: string
+                                description: ETag header value
+                                example: "123"
+                            example: "123"
+                        Last-Modified:
+                            description: Last-Modified header value (HTTP date format)
+                            schema:
+                                type: string
+                                description: Last-Modified header value (HTTP date format)
+                                example: Wed, 21 Oct 2025 07:28:00 GMT
+                            example: Wed, 21 Oct 2025 07:28:00 GMT
+                        X-Account-Action:
+                            description: Whether the Account was matched or created
+                            schema:
+                                type: string
+                                description: Whether the Account was matched or created
+                                example: matched
+                                enum:
+                                    - matched
+                                    - created
+                            example: created
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
+                            example:
+                                created_at: "2025-01-01T00:00:00Z"
+                                crunch_base_url: https://www.crunchbase.com/organization/example-corp
+                                description: A leading technology company
+                                domain_aliases:
+                                    - example.org
+                                    - example.net
+                                industry: Technology
+                                is_member: true
+                                logo_url: https://example.com/logo.png
+                                name: Example Corp
+                                number_of_employees: 500
+                                parent_uid: 001B000000IqhSLIAZ
+                                phone: +1-555-000-0000
+                                primary_domain: example.com
+                                sector: Software
+                                slug: example-corp
+                                status: Active
+                                uid: 001B000000IqhSLIAZ
+                                updated_at: "2025-06-01T12:00:00Z"
+                                website: https://example.com
+                "201":
+                    description: Created response.
+                    headers:
+                        ETag:
+                            description: ETag header value
+                            schema:
+                                type: string
+                                description: ETag header value
+                                example: "123"
+                            example: "123"
+                        Last-Modified:
+                            description: Last-Modified header value (HTTP date format)
+                            schema:
+                                type: string
+                                description: Last-Modified header value (HTTP date format)
+                                example: Wed, 21 Oct 2025 07:28:00 GMT
+                            example: Wed, 21 Oct 2025 07:28:00 GMT
+                        X-Account-Action:
+                            description: Whether the Account was matched or created
+                            schema:
+                                type: string
+                                description: Whether the Account was matched or created
+                                example: matched
+                                enum:
+                                    - matched
+                                    - created
+                            example: created
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/MembershipServicegetB2bOrgResponseBody'
+                            example:
+                                created_at: "2025-01-01T00:00:00Z"
+                                crunch_base_url: https://www.crunchbase.com/organization/example-corp
+                                description: A leading technology company
+                                domain_aliases:
+                                    - example.org
+                                    - example.net
+                                industry: Technology
+                                is_member: true
+                                logo_url: https://example.com/logo.png
+                                name: Example Corp
+                                number_of_employees: 500
+                                parent_uid: 001B000000IqhSLIAZ
+                                phone: +1-555-000-0000
+                                primary_domain: example.com
+                                sector: Software
+                                slug: example-corp
+                                status: Active
+                                uid: 001B000000IqhSLIAZ
+                                updated_at: "2025-06-01T12:00:00Z"
+                                website: https://example.com
+                "400":
+                    description: 'BadRequest: Bad request'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "404":
+                    description: 'NotFound: Resource not found'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "409":
+                    description: 'Conflict: More than one Account has the website domain; nothing was created'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "422":
+                    description: 'UnprocessableEntity: Account is not eligible as a B2B organization'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "500":
+                    description: 'InternalServerError: Internal server error'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "501":
+                    description: 'NotImplemented: Endpoint not implemented'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                "503":
+                    description: 'ServiceUnavailable: Find-or-create is disabled or the Apex endpoint is not configured'
+                    content:
+                        application/vnd.goa.error:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+            security:
+                - jwt_header_Authorization: []
     /b2b_orgs/member-tiers/{username}:
         get:
             tags:
@@ -3321,6 +3505,28 @@ components:
                 - temporary
                 - timeout
                 - fault
+        FindOrCreateB2bOrgRequestBody:
+            type: object
+            properties:
+                name:
+                    type: string
+                    description: Organization name, used when the Account is created
+                    example: Example Corp
+                    minLength: 1
+                    maxLength: 255
+                website:
+                    type: string
+                    description: Organization website; its domain (scheme, www. and path stripped) is the match key
+                    example: https://example.com
+                    minLength: 1
+                    maxLength: 255
+            description: Request body for find-or-create-b2b-org.
+            example:
+                name: Example Corp
+                website: https://example.com
+            required:
+                - name
+                - website
         MemberOrgTierResponse:
             type: object
             properties:

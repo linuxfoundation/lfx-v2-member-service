@@ -1,0 +1,146 @@
+<!-- Copyright The Linux Foundation and each contributor to LFX. -->
+<!-- SPDX-License-Identifier: MIT -->
+
+# OpenFGA residue cleanup
+
+This runbook removes a reviewed list of leftover OpenFGA tuples with
+`scripts/cleanup-openfga-residue.sh`. The tool exists for the residue left by LFXV2-2049, which moved
+the public `uid` of `b2b_org` and `project_membership` from UUID v8 to the 18-character Salesforce
+ID without deleting the UUID-keyed objects.
+No member-service code path reads or writes UUID-keyed objects, so nothing republishes or repairs
+them; they stay in OpenFGA until deleted.
+
+The tool does not decide what is residue. The list is built and reviewed before the change window,
+and the tool deletes only tuples from that list.
+
+## Safety properties
+
+- The list is bound to its reviewed content hash (`--expect-sha256`). A mismatch stops before any
+  OpenFGA call.
+- The list may only contain unconditional tuples on UUID-keyed `b2b_org` and `project_membership`
+  objects and must never grant `team:global_org_admin#member`; a tuple on a live Salesforce-ID object
+  cannot be listed. Lists that violate this are refused even when the hash matches. A conditional
+  tuple found on a listed object fails `verify` as unexpected, so a
+  conditional grant is never deleted or restored without its condition.
+- `verify` reads every listed object in full, in parallel (`--concurrency`, default 16). Each read is
+  retried up to 3 times; a read that still fails fails the run before anything is written. Tuples
+  already gone are recorded and skipped. A tuple on a listed object that the list lacks fails closed:
+  the list is stale and must be rebuilt.
+- `delete` and `restore` require exactly one of `--dry-run` or `--confirm`.
+- Before the first delete, `delete --confirm` records exactly the tuples it is about to remove in
+  `deleted-set.<sha256>.jsonl`. The seal `deleted-set.sha256` names that file and binds it to its
+  content hash and the store ID. A retry merges into a new file and commits it by atomically
+  replacing the seal, so an interrupted retry leaves the previous record valid and restore covers
+  every committed run. Use one output directory per environment; a directory sealed for another
+  store is refused.
+- Only one run at a time may use an output directory. A run holds `<output-dir>/.lock` from before
+  it touches any file until it exits, including on Ctrl-C; a second run exits 7 without reading or
+  writing anything. A lock left by a killed process (`kill -9`, lost host) must be removed by hand,
+  and only after confirming no run is active.
+- Deletes and restores use batches of at most 100, pause between batches (`--pause-seconds`), and
+  ignore tuples that are already absent or already present, so every phase can be retried.
+- `restore` writes back only the recorded deleted set and refuses a set that no longer matches its
+  seal. Like `delete`, it then reads the affected objects back and fails if any recorded tuple is
+  still missing (listed in `missing.jsonl`), so a write that was acknowledged but not persisted
+  cannot pass as a completed rollback.
+- Interrupting a run (Ctrl-C) stops every parallel reader and removes their temporary output, so
+  nothing is left in `TMPDIR`. Staging files an interrupted run can leave are all inside the
+  owner-only output directory: the current `batch.*` file, `list.*` from loading the list, and,
+  if the interrupt lands while the deleted-set record is being committed, `deleted-set.next.*`,
+  `deleted-set.sha256.next`, or an uncommitted `deleted-set.<sha256>.jsonl`. None of them is used
+  unless the seal names it: the last committed record stays valid, and the next successful commit
+  prunes uncommitted generations. Treat the leftovers like any other output file under the
+  retention policy below.
+- Output files contain principal identifiers and are written with owner-only permissions. Keep them
+  outside the repository and delete them according to the approved operational retention policy.
+
+## Building the list
+
+The list is JSONL, one tuple per line: `{"user": ..., "relation": ..., "object": ...}`. Field order,
+duplicates, and extra fields do not matter; the tool canonicalizes before hashing. Compute the hash
+the tool expects with `sha256sum` where available (Linux) and `shasum -a 256` otherwise (macOS), the
+same precedence the tool uses:
+
+```bash
+if command -v sha256sum >/dev/null; then SHA256="sha256sum"; else SHA256="shasum -a 256"; fi
+LIST_SHA256=$(jq -cS '{user, relation, object}' list.jsonl | LC_ALL=C sort -u | $SHA256 | awk '{print $1}')
+```
+
+Build it read-only from OpenFGA and review it before the change window:
+
+1. Enumerate every `b2b_org` and `project_membership` object whose ID is a UUID, and read each
+   object's tuples in full. Those tuples are the list. They include edges between residue objects,
+   for example `parent`/`child` between UUID orgs and the `b2b_org` relation of a UUID membership.
+2. Find tuples on live Salesforce-ID objects whose subject is a listed object, for example a live
+   org's `child` edge to a UUID org or a live membership's `b2b_org` pointing at one. These are out of
+   scope: the tool refuses any tuple on a non-UUID object, and removing a reference from a live
+   object needs its own reviewed change.
+3. Confirm that no live object depends on a listed object. A live object that would lose access
+   through the list (step 2 found a reference) is a blocker for that object, not residue.
+4. Leave out legacy global org-admin team grants. `docs/global-org-admin-team-migration.md` removes
+   those, and its cleanup must be complete in the environment first: `verify` reads every listed
+   object in full, so a legacy grant still on a listed organization fails the run as unexpected.
+5. Record the canonical content hash next to the list and have it peer-reviewed.
+
+## 1. Verify
+
+```bash
+export OPENFGA_URL=http://localhost:8080
+STORE_ID=<explicit-store-id>
+LIST=<reviewed-list.jsonl>
+LIST_SHA256=<reviewed-hash>
+OUT=/tmp/openfga-residue-cleanup/<environment>
+
+scripts/cleanup-openfga-residue.sh verify \
+  --store-id "$STORE_ID" \
+  --list "$LIST" \
+  --expect-sha256 "$LIST_SHA256" \
+  --output-dir "$OUT"
+```
+
+Review the counts and `present.jsonl`, `gone.jsonl`, and `unexpected.jsonl`. Each read is one
+request per listed object, so wall time is dominated by request latency: through a
+`kubectl port-forward` a request takes about a second, and `--concurrency 32` keeps a verify of
+tens of thousands of objects under an hour. A confirmed `delete` verifies twice, before and after
+deleting. Lower `--concurrency` if OpenFGA shows read pressure.
+
+## 2. Preview and delete
+
+Run `delete` with `--dry-run`, review the count, then replace `--dry-run` with `--confirm` in the
+approved window:
+
+```bash
+scripts/cleanup-openfga-residue.sh delete \
+  --store-id "$STORE_ID" \
+  --list "$LIST" \
+  --expect-sha256 "$LIST_SHA256" \
+  --output-dir "$OUT" \
+  --dry-run
+```
+
+A confirmed delete re-runs verify, records the deleted set, deletes in paced batches, and verifies
+again: it ends with zero listed tuples left or returns an error. On failure, re-run the same command;
+already-deleted tuples are skipped.
+
+The script writes to OpenFGA directly, so fga-sync's check cache is not invalidated by it. No live
+access decision should depend on the listed objects, but invalidating is cheap and removes any doubt:
+
+```bash
+kubectl -n lfx exec deploy/lfx-platform-nats-box -- nats kv put fga-sync-cache inv 1
+```
+
+## Rollback
+
+```bash
+scripts/cleanup-openfga-residue.sh restore \
+  --store-id "$STORE_ID" \
+  --list "$LIST" \
+  --expect-sha256 "$LIST_SHA256" \
+  --output-dir "$OUT" \
+  --dry-run
+```
+
+Review the count, then replace `--dry-run` with `--confirm`. `restore` writes back only the deleted
+set named by `deleted-set.sha256` in the same output directory and refuses if it no longer matches
+the content hash and store ID sealed there. A confirmed restore ends with `Restore complete` only
+after every recorded tuple reads back as present. Invalidate `fga-sync-cache` afterwards.

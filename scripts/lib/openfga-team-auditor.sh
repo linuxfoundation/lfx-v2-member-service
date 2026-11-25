@@ -181,10 +181,12 @@ fga_require_store_id() {
 #
 # The caller names the variables instead of this helper reading every team
 # variable it knows about, so each script declares its reach explicitly. Both
-# callers no longer read the same variables. Grant reads LF_STAFF_TEAM_NAME
-# only, so a backfill cannot re-create the withdrawn contractor grant; revoke
-# reads both, because rollback must be able to target a team the service no
-# longer emits. Export only the team you intend to remove.
+# callers no longer read the same variables. Grant reads LF_STAFF_TEAM_NAME and
+# GLOBAL_ORG_AUDITORS_TEAM_NAME, so a backfill cannot re-create the withdrawn
+# contractor grant; revoke reads all three, because rollback must be able to
+# target a team the service no longer emits. An unset name is skipped silently,
+# so export every name you mean — and, for revoke, only the team you intend to
+# remove.
 fga_team_names() {
 	if [[ $# -eq 0 ]]; then
 		echo "ERROR: fga_team_names requires the names of the environment" >&2
@@ -208,10 +210,10 @@ fga_team_names() {
 	if [[ ${#names[@]} -eq 0 ]]; then
 		echo "ERROR: no auditor team configured. Set at least one of" >&2
 		echo "       ${varnames[*]}." >&2
-		echo "       They are deliberately not defaulted here — the authoritative value" >&2
-		echo "       is in charts/lfx-v2-member-service/values.yaml. Export it to match" >&2
-		echo "       the environment you are targeting, e.g.:" >&2
-		echo "         export ${varnames[0]}=<team-name>" >&2
+		echo "       They are deliberately not defaulted here — the authoritative values" >&2
+		echo "       are in charts/lfx-v2-member-service/values.yaml; read them back from" >&2
+		echo "       the deployment you are targeting. Export only the variable for the" >&2
+		echo "       team you intend to target (one of: ${varnames[*]})." >&2
 		exit 1
 	fi
 

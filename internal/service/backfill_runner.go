@@ -19,6 +19,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-member-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/redaction"
+	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
 )
 
 // BackfillIterator provides paged SOQL iterators for full and since-filtered
@@ -74,6 +75,11 @@ const repairPageCap = 100
 // stops mid-run.
 const settingsQuotaCheckInterval = 100
 
+// settingsEligibilityPageSize is how many settings orgs share one eligibility
+// read. It must be a multiple of settingsQuotaCheckInterval so every read after
+// the first follows a quota check.
+const settingsEligibilityPageSize = 2 * settingsQuotaCheckInterval
+
 // errQuotaStop is returned from a full/filtered page callback (or the settings
 // flat loop) when the passive quota gauge reaches the admin threshold. runType
 // propagates it and Run treats it as a clean stop (stopped_early), not a
@@ -118,6 +124,16 @@ type Runner struct {
 	// Inactive-revoke check via a fresh fetch, not the stale
 	// membership-group cache. Nil disables the sibling check.
 	keyContactsByMembership port.KeyContactsByMembershipReader
+
+	// b2bEligibility gates targeted and cdc_repair b2b_org reindex, read once
+	// per page: GetB2BOrg reads the sObject, which does not apply the
+	// eligibility rule. Nil is a wiring error: b2b_org items are retried rather
+	// than published unchecked.
+	b2bEligibility port.B2BOrgEligibilityReader
+
+	// childLinks finds orgs the access model still lists a b2b_org under, so
+	// a reparent missed by the CDC consumer is withdrawn. Nil skips the check.
+	childLinks port.B2BOrgChildLinkReader
 }
 
 // RunnerOption configures optional Runner collaborators. The avatar-enrichment path (the
@@ -157,6 +173,18 @@ func WithKeyContactGrantIndex(i port.KeyContactGrantIndex) RunnerOption {
 // WithQuotaGauge wires the Salesforce quota gauge used to gate cdc_repair drains.
 func WithQuotaGauge(g port.SalesforceQuotaGauge) RunnerOption {
 	return func(r *Runner) { r.quotaGauge = g }
+}
+
+// WithB2BOrgEligibilityReader wires the eligibility check applied to targeted
+// and cdc_repair b2b_org items, one read per page.
+func WithB2BOrgEligibilityReader(e port.B2BOrgEligibilityReader) RunnerOption {
+	return func(r *Runner) { r.b2bEligibility = e }
+}
+
+// WithChildLinkReader wires the access-model read of a b2b_org's listed
+// parents, used by targeted and cdc_repair b2b_org items.
+func WithChildLinkReader(c port.B2BOrgChildLinkReader) RunnerOption {
+	return func(r *Runner) { r.childLinks = c }
 }
 
 // WithMembershipBatchReader wires the batch SOQL reader used to fetch
@@ -450,10 +478,14 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 		if req.EnrichAvatars && (r.userReader == nil || r.settingsWriter == nil) {
 			return fmt.Errorf("b2b_org_settings avatar enrichment requires a userReader and settingsWriter — pass WithUserReader/WithSettingsWriter to NewRunner")
 		}
+		if r.b2bEligibility == nil {
+			return fmt.Errorf("b2b_org_settings backfill requires a b2bEligibility reader — pass WithB2BOrgEligibilityReader to NewRunner")
+		}
 		orgUIDs, listErr := r.settingsReader.ListSettingsOrgUIDs(ctx)
 		if listErr != nil {
 			return fmt.Errorf("listing org-settings keys: %w", listErr)
 		}
+		var eligible map[string]bool
 		var avatarFailures int
 		for i, uid := range orgUIDs {
 			// Flat loop (no pages): check the passive gauge every N iterations so a
@@ -464,6 +496,17 @@ func (r *Runner) runType(ctx context.Context, log *slog.Logger, req BackfillRequ
 			total++
 			// Non-enrich dry-run keeps the original "count only, no reads" behavior.
 			if req.DryRun && !req.EnrichAvatars {
+				continue
+			}
+			if i%settingsEligibilityPageSize == 0 {
+				page := orgUIDs[i:min(i+settingsEligibilityPageSize, len(orgUIDs))]
+				var eligErr error
+				if eligible, eligErr = r.b2bEligibility.FetchB2BOrgEligibility(ctx, page); eligErr != nil {
+					return fmt.Errorf("reading org eligibility for settings backfill: %w", eligErr)
+				}
+			}
+			if !eligible[uid] {
+				log.InfoContext(ctx, "org deleted or not eligible — skipping settings backfill", "uid", uid, "not_found", true)
 				continue
 			}
 
@@ -640,17 +683,59 @@ func (r *Runner) newChildUIDsFetcher(ctx context.Context) func(uid string) ([]st
 	}
 }
 
+// eligibilityPage is one eligibility read covering every b2b_org uid of a
+// reindex page. A uid missing from eligible is deleted or unknown.
+type eligibilityPage struct {
+	eligible map[string]bool
+	err      error
+}
+
+// readEligibility reads eligibility once for the page's b2b_org or
+// b2b_org_settings uids; other types need none.
+func (r *Runner) readEligibility(ctx context.Context, sfType string, uids []string) eligibilityPage {
+	if (sfType != entityTypeB2BOrg && sfType != entityTypeB2BOrgSettings) || r.b2bEligibility == nil || len(uids) == 0 {
+		return eligibilityPage{}
+	}
+	eligible, err := r.b2bEligibility.FetchB2BOrgEligibility(ctx, uids)
+	return eligibilityPage{eligible: eligible, err: err}
+}
+
 // reindexItem reindexes a single (sfType, uid) and returns the outcome. It is
 // the shared per-item projection used by targeted reindex and cdc_repair. All
 // publish helpers are idempotent, so a repeated call is safe. A dependency
-// failure (child lookup, unresolved project UID, settings persist) is classified
-// as retry so a repair marker is retained rather than deleted.
-func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string, fetchChildUIDs func(string) ([]string, error)) reindexOutcome {
+// failure (child lookup, unresolved project UID, settings persist), a failed
+// publish, or an unconfirmed flush is classified as retry so a repair marker
+// is retained rather than deleted.
+func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string,
+	fetchChildUIDs func(string) ([]string, error), eligibility eligibilityPage) reindexOutcome {
 	switch sfType {
 	case entityTypeB2BOrg:
+		if r.b2bEligibility == nil {
+			log.ErrorContext(ctx, "b2b_org reindex requires b2bEligibility — wiring error",
+				"uid", uid, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		removeOrg := func() error {
+			return publishB2BOrgIndexer(ctx, r.publisher, &model.B2BOrg{UID: uid}, indexerConstants.ActionDeleted)
+		}
+		if eligibility.err != nil {
+			log.WarnContext(ctx, "failed to check b2b_org eligibility — retaining for retry",
+				"type", sfType, "uid", uid, "error", eligibility.err, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		if !eligibility.eligible[uid] {
+			// Same convergence as the CDC absent path: remove from the index,
+			// keep authorization.
+			log.InfoContext(ctx, "b2b_org deleted or not eligible — removing from index",
+				"type", sfType, "uid", uid, "not_found", true)
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeOrg)
+		}
 		org, err := r.b2bReader.GetB2BOrg(ctx, uid)
 		if err != nil {
-			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+			if outcome := logItemFetchOutcome(ctx, log, sfType, uid, err); outcome != outcomeNotFound {
+				return outcome
+			}
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeOrg)
 		}
 		// Resolve all dependencies before publishing so we never leave a partial
 		// projection (indexer without the matching parent FGA tuple).
@@ -669,21 +754,59 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 				return outcomeRetry
 			}
 		}
+		staleParents, staleErr := r.staleParentChildLists(ctx, org, fetchChildUIDs)
+		if staleErr != nil {
+			log.WarnContext(ctx, "failed to read stale parent links — retaining for retry",
+				"type", sfType, "uid", org.UID, "error", staleErr, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
 		if req.DryRun {
 			return outcomeIssued
 		}
-		org.IsParent = len(childUIDs) > 0
-		PublishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated)
-		PublishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamName, r.b2bOrgAuditorTeams)
-		if org.ParentUID != "" {
-			PublishB2BOrgParentFGA(ctx, r.publisher, org, parentChildren)
+		if req.CDCRepair && org.ParentUID != "" && r.repairStore != nil {
+			// A repaired org may be a child that just started qualifying, and its
+			// parent's is_parent is only refreshed on the CDC path; the parent's
+			// own drain recomputes it. Queued before this marker is cleared.
+			if err := r.repairStore.PutPending(ctx, entityTypeB2BOrg, org.ParentUID); err != nil {
+				log.WarnContext(ctx, "failed to queue parent for is_parent refresh — retaining for retry",
+					"uid", uid, "parent_uid", org.ParentUID, "error", err, "publish_failed_for_backfill_repair", true)
+				return outcomeRetry
+			}
 		}
-		return outcomeIssued
+		org.IsParent = len(childUIDs) > 0
+		pubErrs := []error{
+			publishB2BOrgIndexer(ctx, r.publisher, org, indexerConstants.ActionUpdated),
+			publishB2BOrgTeamGrantsFGA(ctx, r.publisher, org, r.globalOrgAdminTeamName, r.b2bOrgAuditorTeams),
+			publishB2BOrgParentFGA(ctx, r.publisher, org, parentChildren),
+		}
+		for _, sp := range staleParents {
+			pubErrs = append(pubErrs, publishB2BOrgChildList(ctx, r.publisher, sp.parentUID, sp.children))
+		}
+		// Not gated on staleParents: once a withdrawal lands, the read no
+		// longer finds the old parent, so a clear that failed alongside it
+		// would never be retried.
+		if org.ParentUID == "" {
+			pubErrs = append(pubErrs, publishB2BOrgParentClear(ctx, r.publisher, org.UID))
+		}
+		return r.confirmPublished(ctx, log, sfType, uid, errors.Join(pubErrs...))
 
 	case entityTypeProjectMembership:
+		removeMembership := func() error {
+			return publishProjectMembershipIndexer(ctx, r.publisher, &model.ProjectMembership{UID: uid}, indexerConstants.ActionDeleted)
+		}
 		pm, _, err := r.pmReader.AssembleProjectMembership(ctx, uid)
 		if err != nil {
-			return logItemFetchOutcome(ctx, log, sfType, uid, err)
+			if outcome := logItemFetchOutcome(ctx, log, sfType, uid, err); outcome != outcomeNotFound {
+				return outcome
+			}
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeMembership)
+		}
+		if !strings.EqualFold(pm.TierFamily, membershipProductFamily) {
+			// The CDC batch query only returns Membership-product Assets, so
+			// an Asset outside that family is an absent record there too.
+			log.InfoContext(ctx, "project_membership is not a Membership product — removing from index",
+				"type", sfType, "uid", uid, "tier_family", pm.TierFamily, "not_found", true)
+			return r.removeFromIndex(ctx, log, req, sfType, uid, removeMembership)
 		}
 		if req.DryRun {
 			return outcomeIssued
@@ -698,9 +821,20 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			return outcomeRetry
 		}
 		pm.ProjectUID = resolvedUID
-		PublishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated)
-		PublishProjectMembershipFGA(ctx, r.publisher, pm)
-		return outcomeIssued
+		if req.CDCRepair && pm.B2BOrgUID != "" && r.repairStore != nil {
+			// The marker does not record a creation, and a first membership can
+			// make its owner eligible with no Account event; the b2b_org drain
+			// re-checks it. Queued before this marker is cleared so it survives.
+			if err := r.repairStore.PutPending(ctx, entityTypeB2BOrg, pm.B2BOrgUID); err != nil {
+				log.WarnContext(ctx, "failed to queue membership owner for re-check — retaining for retry",
+					"uid", uid, "owner_uid", pm.B2BOrgUID, "error", err, "publish_failed_for_backfill_repair", true)
+				return outcomeRetry
+			}
+		}
+		return r.confirmPublished(ctx, log, sfType, uid, errors.Join(
+			publishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionUpdated),
+			publishProjectMembershipAccess(ctx, r.publisher, pm, BuildProjectMembershipFGAMessage(pm)),
+		))
 
 	case entityTypeKeyContact:
 		kc, _, err := r.kcReader.AssembleKeyContact(ctx, uid)
@@ -720,15 +854,30 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 			return outcomeRetry
 		}
 		kc.ProjectUID = resolvedUID
-		PublishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
-		PublishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister, lister)
-		return outcomeIssued
+		indexErr := publishKeyContactIndexer(ctx, r.publisher, kc, indexerConstants.ActionUpdated)
+		_, fgaErr := publishKeyContactFGA(ctx, r.publisher, r.grantIndex, kc, lister, lister)
+		return r.confirmPublished(ctx, log, sfType, uid, errors.Join(indexErr, fgaErr))
 
 	case entityTypeB2BOrgSettings:
 		if r.settingsReader == nil {
 			log.ErrorContext(ctx, "b2b_org_settings reindex requires settingsReader — wiring error",
 				"uid", uid, "publish_failed_for_backfill_repair", true)
 			return outcomeRetry
+		}
+		if r.b2bEligibility == nil {
+			log.ErrorContext(ctx, "b2b_org_settings reindex requires b2bEligibility — wiring error",
+				"uid", uid, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		if eligibility.err != nil {
+			log.WarnContext(ctx, "failed to check b2b_org eligibility — retaining for retry",
+				"type", sfType, "uid", uid, "error", eligibility.err, "publish_failed_for_backfill_repair", true)
+			return outcomeRetry
+		}
+		if !eligibility.eligible[uid] {
+			log.InfoContext(ctx, "org deleted or not eligible — skipping settings reindex",
+				"type", sfType, "uid", uid, "not_found", true)
+			return outcomeNotFound
 		}
 		org, orgErr := r.b2bReader.GetB2BOrg(ctx, uid)
 		if orgErr != nil {
@@ -761,13 +910,93 @@ func (r *Runner) reindexItem(ctx context.Context, log *slog.Logger, req Backfill
 				return outcomeRetry
 			}
 		}
-		PublishB2BOrgSettingsIndexer(ctx, r.publisher, org, settings, indexerConstants.ActionUpdated)
-		return outcomeIssued
+		return r.confirmPublished(ctx, log, sfType, uid,
+			publishB2BOrgSettingsIndexer(ctx, r.publisher, org, settings, indexerConstants.ActionUpdated))
 
 	default:
 		log.ErrorContext(ctx, "unhandled reindex type", "type", sfType, "uid", uid)
 		return outcomeRetry
 	}
+}
+
+// membershipProductFamily is the Product2.Family of a qualifying membership,
+// the same value the CDC batch query filters on.
+const membershipProductFamily = "Membership"
+
+// removeFromIndex publishes an index delete for a record that no longer exists
+// or no longer qualifies, keeping its authorization, and confirms delivery.
+// outcomeNotFound clears a repair marker, so an unconfirmed removal returns
+// outcomeRetry: full scans skip such records, and this delete is the only
+// convergence step.
+func (r *Runner) removeFromIndex(ctx context.Context, log *slog.Logger, req BackfillRequest, sfType, uid string, publish func() error) reindexOutcome {
+	if req.DryRun {
+		return outcomeNotFound
+	}
+	if err := publish(); err != nil {
+		return outcomeRetry
+	}
+	if err := r.publisher.Flush(ctx); err != nil {
+		log.WarnContext(ctx, "index delete not confirmed — retaining for retry",
+			"type", sfType, "uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+		return outcomeRetry
+	}
+	return outcomeNotFound
+}
+
+// confirmPublished maps an item's joined publish error to an outcome. Issued
+// clears a repair marker, so it requires every publish to have succeeded and
+// one broker flush to confirm them; anything less is outcomeRetry.
+func (r *Runner) confirmPublished(ctx context.Context, log *slog.Logger, sfType, uid string, pubErr error) reindexOutcome {
+	if pubErr != nil {
+		log.WarnContext(ctx, "reindex publish failed — retaining for retry",
+			"type", sfType, "uid", uid, "error", pubErr, "publish_failed_for_backfill_repair", true)
+		return outcomeRetry
+	}
+	if err := r.publisher.Flush(ctx); err != nil {
+		log.WarnContext(ctx, "reindex publish not confirmed — retaining for retry",
+			"type", sfType, "uid", uid, "error", err, "publish_failed_for_backfill_repair", true)
+		return outcomeRetry
+	}
+	return outcomeIssued
+}
+
+// staleParentChildList is a parent's Salesforce child list, sent to replace
+// the access model's list for a parent the org no longer belongs to.
+type staleParentChildList struct {
+	parentUID string
+	children  []string
+}
+
+// staleParentChildLists returns, for every org the access model lists org
+// under other than its current Salesforce parent, that org's current
+// Salesforce children. A failed read returns an error, so nothing is withdrawn
+// on an incomplete picture. A read that can never complete withdraws nothing
+// and does not hold the org's own updates.
+func (r *Runner) staleParentChildLists(ctx context.Context, org *model.B2BOrg, fetchChildUIDs func(string) ([]string, error)) ([]staleParentChildList, error) {
+	if r.childLinks == nil {
+		return nil, nil
+	}
+	parents, err := r.childLinks.ParentsListingChild(ctx, org.UID)
+	if errors.Is(err, port.ErrChildLinksUncheckable) {
+		slog.ErrorContext(ctx, "stale parent links not checked: reply exceeds the read_tuples cap",
+			"uid", org.UID, "error", err)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var stale []staleParentChildList
+	for _, parentUID := range parents {
+		if parentUID == org.ParentUID {
+			continue
+		}
+		children, err := fetchChildUIDs(parentUID)
+		if err != nil {
+			return nil, fmt.Errorf("fetching children of stale parent %s: %w", parentUID, err)
+		}
+		stale = append(stale, staleParentChildList{parentUID: parentUID, children: children})
+	}
+	return stale, nil
 }
 
 // logItemFetchOutcome logs a per-item fetch error and maps it to an outcome:
@@ -785,8 +1014,9 @@ func logItemFetchOutcome(ctx context.Context, log *slog.Logger, sfType, uid stri
 func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req BackfillRequest) {
 	// PM and KC are the prod volume drivers: when a batch reader is wired, fetch
 	// the whole page in one SOQL query instead of per-item Assemble* (~3–5 SF
-	// calls/item → ~1 batch). b2b_org stays per-item (see D2), and either type
-	// falls back to per-item when its batch reader is unwired (e.g. mock mode).
+	// calls/item → ~1 batch). b2b_org stays per-item except for eligibility,
+	// which is read once per page, and either type falls back to per-item when
+	// its batch reader is unwired (e.g. mock mode).
 	switch req.Type {
 	case entityTypeProjectMembership:
 		if r.membershipBatch != nil {
@@ -801,9 +1031,10 @@ func (r *Runner) runTargeted(ctx context.Context, log *slog.Logger, req Backfill
 	}
 
 	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
+	eligibility := r.readEligibility(ctx, req.Type, req.Items)
 	var notFound, published int
 	for _, uid := range req.Items {
-		switch r.reindexItem(ctx, log, req, req.Type, uid, fetchChildUIDs) {
+		switch r.reindexItem(ctx, log, req, req.Type, uid, fetchChildUIDs, eligibility) {
 		case outcomeIssued:
 			published++
 		case outcomeNotFound:
@@ -858,7 +1089,45 @@ func (r *Runner) runTargetedMemberships(ctx context.Context, log *slog.Logger, r
 
 	returned := makeReturnedSet(memberships, func(pm *model.ProjectMembership) string { return pm.UID }, convErrSFIDs)
 	notFound := countAbsent(req.Items, returned)
+	if !req.DryRun {
+		r.removeAbsentMemberships(ctx, log, req.Items, returned)
+	}
 	logTargetedBatchComplete(ctx, log, req, published, notFound, len(convErrSFIDs))
+}
+
+// removeAbsentMemberships removes the index documents of requested memberships
+// the batch query did not return: the Asset is gone or is no longer a
+// Membership product. One flush confirms them all. Targeted reindex keeps no
+// repair marker, so an unconfirmed removal is logged for a rerun.
+func (r *Runner) removeAbsentMemberships(ctx context.Context, log *slog.Logger, items []string, returned map[string]struct{}) {
+	present := make(map[string]struct{}, len(returned))
+	for id := range returned {
+		if uid, err := sfuuid.Normalize18(id); err == nil {
+			present[uid] = struct{}{}
+		}
+	}
+	var removed []string
+	for _, item := range items {
+		uid, err := sfuuid.Normalize18(item)
+		if err != nil {
+			continue
+		}
+		if _, ok := present[uid]; ok {
+			continue
+		}
+		pm := &model.ProjectMembership{UID: uid}
+		if err := publishProjectMembershipIndexer(ctx, r.publisher, pm, indexerConstants.ActionDeleted); err != nil {
+			continue
+		}
+		removed = append(removed, uid)
+	}
+	if len(removed) == 0 {
+		return
+	}
+	if err := r.publisher.Flush(ctx); err != nil {
+		log.WarnContext(ctx, "index delete not confirmed — rerun the targeted reindex",
+			"type", entityTypeProjectMembership, "uids", removed, "error", err, "publish_failed_for_backfill_repair", true)
+	}
 }
 
 // runTargetedKeyContacts is the batched key_contact arm of targeted reindex.
@@ -1090,6 +1359,13 @@ func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []p
 	log.InfoContext(ctx, "repair drain started", "selected", len(markers))
 
 	fetchChildUIDs := r.newChildUIDsFetcher(ctx)
+	markerUIDs := make([]string, 0, len(markers))
+	for _, m := range markers {
+		if m.Type == req.Type {
+			markerUIDs = append(markerUIDs, m.SFID)
+		}
+	}
+	eligibility := r.readEligibility(ctx, req.Type, markerUIDs)
 	var issued, notFound, retryRetained, stoppedEarly int
 	for i, m := range markers {
 		if r.midRunQuotaExceeded() {
@@ -1099,7 +1375,7 @@ func (r *Runner) RunRepair(ctx context.Context, req BackfillRequest, markers []p
 			break
 		}
 
-		outcome := r.reindexItem(ctx, log, req, m.Type, m.SFID, fetchChildUIDs)
+		outcome := r.reindexItem(ctx, log, req, m.Type, m.SFID, fetchChildUIDs, eligibility)
 		if outcome == outcomeRetry {
 			// Retain the marker (fetch/dependency/partial-projection failure).
 			retryRetained++

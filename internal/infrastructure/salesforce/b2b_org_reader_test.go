@@ -131,7 +131,7 @@ func TestB2BOrgReader_GetB2BOrg_Happy(t *testing.T) {
 
 	transport := newRoutingTransport(fakeResponse(http.StatusOK, canonicalAccountJSON, nil))
 	client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 
@@ -160,7 +160,7 @@ func TestB2BOrgReader_GetB2BOrg_NotFound(t *testing.T) {
 		`[{"errorCode":"NOT_FOUND","message":"The requested resource does not exist"}]`,
 		nil))
 	client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 
@@ -377,7 +377,7 @@ func TestB2BOrgReader_GetB2BOrg_WithParent(t *testing.T) {
 	transport.route("/sobjects/Account/", fakeResponse(http.StatusOK, canonicalAccountWithParentJSON, nil))
 
 	client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 
@@ -400,7 +400,7 @@ func TestB2BOrgReader_GetB2BOrg_InvalidUID(t *testing.T) {
 	transport := &routingTransport{}
 	transport.route("/limits", fakeResponse(http.StatusOK, `{}`, nil))
 	client := &SObjectClient{sf: fakeSalesforce(t, transport), cache: newMemCache()}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	org, err := reader.GetB2BOrg(context.Background(), "not-a-valid-uid")
 
@@ -441,7 +441,7 @@ func TestSObjectClient_CacheKeyIsolation_ParentBriefThenFullOrg(t *testing.T) {
 		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
 	}
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: newMemCache()}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	// Step 1: narrow parent-detail fetch, as fetchParentAccountDetail performs
 	// when processing some other Account's ParentId. Populates
@@ -486,7 +486,7 @@ func TestSObjectClient_CacheKeyIsolation_FullOrgThenParentBrief(t *testing.T) {
 	}
 	cache := newMemCache()
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	// Step 1: full org fetch populates "b2b_org_v4.{uid}".
 	org1, err := reader.GetB2BOrg(context.Background(), uid)
@@ -533,7 +533,7 @@ func TestSObjectClient_CacheKeyIsolation_FlatAccountThenFullOrg(t *testing.T) {
 		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
 	}
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: newMemCache()}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	// Step 1: FetchAccount populates "b2b_org_flat.{uid}".
 	account, err := client.FetchAccount(context.Background(), uid)
@@ -579,7 +579,7 @@ func TestSObjectClient_CacheKeyIsolation_LegacyPoisonedFullOrgKeyIgnored(t *test
 		limitsResp: fakeResponse(http.StatusOK, `{}`, nil),
 	}
 	client := &SObjectClient{sf: fakeSalesforce(t, rt), cache: cache}
-	reader := NewB2BOrgReader(client, nil)
+	reader := NewB2BOrgReader(client, nil, true)
 
 	org, err := reader.GetB2BOrg(context.Background(), uid)
 	require.NoError(t, err)

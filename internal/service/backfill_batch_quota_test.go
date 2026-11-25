@@ -54,7 +54,7 @@ func TestBackfillRunner_TargetedMembership_BatchPath_PublishesAllInOneFetch(t *t
 	batch := &countingMembershipBatchReader{memberships: []*model.ProjectMembership{pm1, pm2}}
 	pub := &subjectCapturingPublisher{}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
-		svc.WithMembershipBatchReader(batch))
+		svc.WithMembershipBatchReader(batch), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	// Request three items — two returned, one absent (not-found).
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
@@ -64,7 +64,48 @@ func TestBackfillRunner_TargetedMembership_BatchPath_PublishesAllInOneFetch(t *t
 	}))
 
 	assert.Equal(t, 1, batch.calls, "targeted PM reindex must issue exactly one batch fetch")
-	assert.Len(t, pub.indexerMessages, 2, "both returned records must be published; absent one skipped")
+	require.Len(t, pub.indexerMessages, 3, "both returned records are published and the absent one removed")
+	assert.Equal(t, "deleted", pub.indexerAction(2))
+}
+
+// TestBackfillRunner_TargetedMembership_BatchPath_RemovesAbsent: a requested
+// membership the batch query does not return (gone, or no longer a Membership
+// product) is removed from the index with one confirming flush. A
+// conversion-error id, a returned id requested in 15-char form, and a dry run
+// remove nothing.
+func TestBackfillRunner_TargetedMembership_BatchPath_RemovesAbsent(t *testing.T) {
+	present := &model.ProjectMembership{UID: "02i000000000001AAA", ProjectSlug: "proj", B2BOrgUID: "org-1"}
+	const absent1, absent2, convErr = "02i000000000002AAA", "02i000000000003AAA", "02i000000000004AAA"
+	resolver := mock.NewMockProjectResolver()
+	resolver.SeedProject(model.ProjectInfo{UID: "resolved-uid", Slug: "proj"})
+	run := func(dryRun bool) *subjectCapturingPublisher {
+		pub := &subjectCapturingPublisher{}
+		batch := &countingMembershipBatchReader{memberships: []*model.ProjectMembership{present}, convErr: []string{convErr}}
+		runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
+			svc.WithMembershipBatchReader(batch), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
+		require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
+			RunID: "r", Type: "project_membership", DryRun: dryRun,
+			Items: []string{"02i000000000001", absent1, absent2, convErr},
+		}))
+		return pub
+	}
+
+	pub := run(false)
+	var deleted []string
+	for i := range pub.indexerMessages {
+		if pub.indexerAction(i) == "deleted" {
+			uid, ok := pub.indexerDataIsString(i)
+			require.True(t, ok, "a delete carries the uid as string data")
+			deleted = append(deleted, uid)
+		}
+	}
+	assert.Equal(t, []string{absent1, absent2}, deleted)
+	assert.Equal(t, 1, pub.flushCount, "one flush confirms every removal")
+	assert.Len(t, pub.accessMessages, 1, "only the returned record's grant; removal from the index keeps authorization")
+
+	dry := run(true)
+	assert.Empty(t, dry.indexerMessages)
+	assert.Zero(t, dry.flushCount)
 }
 
 func TestBackfillRunner_TargetedMembership_BatchPath_ConversionErrorNotPublished(t *testing.T) {
@@ -80,7 +121,7 @@ func TestBackfillRunner_TargetedMembership_BatchPath_ConversionErrorNotPublished
 	}
 	pub := &subjectCapturingPublisher{}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
-		svc.WithMembershipBatchReader(batch))
+		svc.WithMembershipBatchReader(batch), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r",
@@ -99,7 +140,7 @@ func TestBackfillRunner_TargetedKeyContact_BatchPath_Publishes(t *testing.T) {
 	batch := &countingKeyContactBatchReader{contacts: []*model.KeyContact{kc}}
 	pub := &subjectCapturingPublisher{}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", resolver,
-		svc.WithKeyContactBatchReader(batch))
+		svc.WithKeyContactBatchReader(batch), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r",
@@ -131,7 +172,7 @@ func TestBackfillRunner_TargetedKeyContact_QuotaHigh_LiveRecheckStillRuns(t *tes
 		svc.WithKeyContactBatchReader(batch),
 		svc.WithKeyContactGrantIndex(grants),
 		svc.WithRunnerKeyContactsByMembershipReader(&mock.MockKeyContactsByMembershipReader{}),
-		svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 99, Limit: 100}))
+		svc.WithQuotaGauge(&mock.MockSalesforceQuotaGauge{Current: 99, Limit: 100}), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	require.NoError(t, runner.Run(context.Background(), svc.BackfillRequest{
 		RunID: "r", Type: "key_contact", Items: []string{kc.UID},
@@ -148,7 +189,7 @@ func TestBackfillRunner_TargetedKeyContact_QuotaHigh_LiveRecheckStillRuns(t *tes
 func TestBackfillRunner_GateBackfillStart_FullOverThreshold_ReturnsServiceUnavailable(t *testing.T) {
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 85, Limit: 100} // 0.85 >= 0.80
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithQuotaGauge(gauge))
+		svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	err := runner.GateBackfillStart(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"})
 	require.Error(t, err)
@@ -159,7 +200,7 @@ func TestBackfillRunner_GateBackfillStart_FullOverThreshold_ReturnsServiceUnavai
 func TestBackfillRunner_GateBackfillStart_TargetedExempt(t *testing.T) {
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 99, Limit: 100} // well over threshold
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithQuotaGauge(gauge))
+		svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	err := runner.GateBackfillStart(context.Background(), svc.BackfillRequest{
 		RunID: "r", Type: "b2b_org", Items: []string{"001000000000001AAA"},
@@ -171,7 +212,7 @@ func TestBackfillRunner_GateBackfillStart_FilteredOverThreshold_ReturnsServiceUn
 	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	gauge := &mock.MockSalesforceQuotaGauge{Current: 85, Limit: 100}
 	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil,
-		svc.WithQuotaGauge(gauge))
+		svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	err := runner.GateBackfillStart(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org", Since: &since})
 	require.Error(t, err)
@@ -180,7 +221,7 @@ func TestBackfillRunner_GateBackfillStart_FilteredOverThreshold_ReturnsServiceUn
 }
 
 func TestBackfillRunner_GateBackfillStart_NilGauge_FailsOpen(t *testing.T) {
-	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil)
+	runner := svc.NewRunner(&mock.MockBackfillIterator{}, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, mock.NewMockMemberPublisher(), nil, "", nil, svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	err := runner.GateBackfillStart(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"})
 	assert.NoError(t, err, "an unwired gauge must fail open (preserve ungated behavior)")
@@ -192,7 +233,7 @@ func TestBackfillRunner_RunType_StartGate_StopsFullRunBeforePublishing(t *testin
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{B2BOrgs: [][]*model.B2BOrg{{org}}}
 	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithQuotaGauge(gauge))
+		svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	// The direct Run path (avatar Job) must be gated at runType start and return
 	// a non-nil error so the Job exits non-zero.
@@ -213,7 +254,7 @@ func TestBackfillRunner_MidRun_PassiveQuotaStop(t *testing.T) {
 	pub := &subjectCapturingPublisher{}
 	iter := &mock.MockBackfillIterator{B2BOrgs: [][]*model.B2BOrg{{org}}}
 	runner := svc.NewRunner(iter, mock.NewMockB2BOrgReader(), mock.NewMockProjectMembershipReader(), nil, nil, pub, nil, "", nil,
-		svc.WithQuotaGauge(gauge))
+		svc.WithQuotaGauge(gauge), svc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}))
 
 	err := runner.Run(context.Background(), svc.BackfillRequest{RunID: "r", Type: "b2b_org"})
 	require.Error(t, err)

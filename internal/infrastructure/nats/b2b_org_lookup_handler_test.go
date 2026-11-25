@@ -15,6 +15,10 @@ import (
 type stubB2BOrgReader struct {
 	org *model.B2BOrg
 	err error
+
+	websiteOrg   *model.B2BOrg
+	websiteFound bool
+	websiteErr   error
 }
 
 func (s stubB2BOrgReader) GetB2BOrg(_ context.Context, _ string) (*model.B2BOrg, error) {
@@ -30,6 +34,13 @@ func (s stubB2BOrgReader) FetchChildUIDsByParentUID(_ context.Context, _ string)
 
 func (s stubB2BOrgReader) FetchChildUIDsByParentUIDs(_ context.Context, _ []string) (map[string][]string, error) {
 	return nil, nil
+}
+
+func (s stubB2BOrgReader) FindByNameOrWebsite(_ context.Context, _, _ string) (*model.B2BOrg, bool, error) {
+	if s.websiteErr != nil {
+		return nil, false, s.websiteErr
+	}
+	return s.websiteOrg, s.websiteFound, nil
 }
 
 func TestProcessB2BOrgLookupRequest_found(t *testing.T) {
@@ -105,5 +116,37 @@ func TestProcessB2BOrgLookupRequest_missingID(t *testing.T) {
 	_ = json.Unmarshal(data, &resp)
 	if resp.Error != "id is required" {
 		t.Fatalf("error = %q", resp.Error)
+	}
+}
+
+func TestProcessB2BOrgLookupRequest_logoURL(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reader stubB2BOrgReader
+		want   string
+	}{
+		{"with logo", stubB2BOrgReader{org: &model.B2BOrg{UID: "0014100000Te2ovAAB", LogoURL: " https://cdn.example/b2b_org_logos/0014100000Te2ovAAB?v=1 "}}, "https://cdn.example/b2b_org_logos/0014100000Te2ovAAB?v=1"},
+		{"without logo", stubB2BOrgReader{org: &model.B2BOrg{UID: "0014100000Te2ovAAB"}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(processB2BOrgLookupRequest(context.Background(), []byte(`{"id":"0014100000Te2ovAAB"}`), tc.reader))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(data, &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, present := resp["logo_url"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("logo_url = %v, want it omitted", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("logo_url = %v, want %q", got, tc.want)
+			}
+		})
 	}
 }

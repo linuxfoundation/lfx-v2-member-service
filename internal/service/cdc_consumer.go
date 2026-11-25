@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,10 @@ type CDCConsumer struct {
 	// storage supplies ListKeyContactsForOrg for org-dashboard reconciliation
 	// when an Inactive contact's provisioning is skipped. Nil disables the scan.
 	storage port.MemberReader
+	// childLinks finds orgs the access model still lists a changed Account
+	// under, so a move the previous-record diff missed is withdrawn. Nil
+	// disables the read.
+	childLinks port.B2BOrgChildLinkReader
 
 	// refreshMu guards lastRefreshAttemptAt so failed/attempted refreshes are
 	// throttled to at most once per staleness window even under concurrent calls.
@@ -102,6 +107,12 @@ type CDCConsumer struct {
 
 // CDCConsumerOption configures a CDCConsumer.
 type CDCConsumerOption func(*CDCConsumer)
+
+// WithCDCChildLinkReader wires the access-model read of a changed Account's
+// listed parents.
+func WithCDCChildLinkReader(c port.B2BOrgChildLinkReader) CDCConsumerOption {
+	return func(o *CDCConsumer) { o.childLinks = c }
+}
 
 func WithCDCSubscriber(s port.CDCSubscriber) CDCConsumerOption {
 	return func(o *CDCConsumer) { o.subscriber = s }
@@ -249,8 +260,10 @@ func (o *CDCConsumer) Run(ctx context.Context, channel string, replay port.Repla
 	}
 
 	for event := range eventCh {
-		if err := o.processWithAuthorizationRetry(ctx, channel, event); err != nil {
-			return err
+		if !event.CursorOnly {
+			if err := o.processWithAuthorizationRetry(ctx, channel, event); err != nil {
+				return err
+			}
 		}
 
 		// Use a short-lived background context for the Save so that a
@@ -809,13 +822,75 @@ func (o *CDCConsumer) handleAccount(ctx context.Context, event model.CDCEvent) e
 	// not suppress unrelated work carried in the same event.
 	deleteIDs, upsertIDs := partitionRecordIDs(ctx, "Account", event)
 	err := o.dispatchEntity(ctx, "Account", event, deleteIDs, o.handleAccountDelete)
+	if len(deleteIDs) > 0 {
+		o.refreshParentsOfDeleted(ctx, deleteIDs)
+	}
 	if len(upsertIDs) > 0 {
-		err = errors.Join(err, o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType))
+		err = errors.Join(err, o.handleAccountUpsertBatch(ctx, upsertIDs, event.ChangeType, false))
 	}
 	return err
 }
 
-func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType) error {
+// refreshParentsOfDeleted republishes is_parent for the parents of deleted
+// Accounts. A delete event carries only the record id and the deleted record
+// no longer reads through the live query, so the parent comes from the
+// recycle bin. Parents deleted in the same event are skipped. A failure here
+// leaves the parent's is_parent stale until a reindex; it never fails the
+// delete itself.
+func (o *CDCConsumer) refreshParentsOfDeleted(ctx context.Context, deleteIDs []string) {
+	if o.accountBatch == nil {
+		return
+	}
+	if exceeded, _ := o.quotaGuardExceeded(ctx, "Account"); exceeded {
+		slog.WarnContext(ctx, "cdc: parent refresh for deleted accounts skipped by Salesforce quota guard",
+			"record_count", len(deleteIDs), "publish_failed_for_backfill_repair", true)
+		return
+	}
+	parentOf, err := o.accountBatch.FetchDeletedAccountParents(ctx, deleteIDs)
+	if err != nil {
+		slog.WarnContext(ctx, "cdc: parent read for deleted accounts failed — is_parent left stale",
+			"record_count", len(deleteIDs), "error", err, "publish_failed_for_backfill_repair", true)
+		return
+	}
+	deleted := make(map[string]struct{}, len(deleteIDs))
+	for _, id := range deleteIDs {
+		deleted[id] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var parents []string
+	for _, id := range deleteIDs {
+		parentUID, ok := parentOf[id]
+		if !ok {
+			continue
+		}
+		if _, skip := deleted[parentUID]; skip {
+			continue
+		}
+		if _, dup := seen[parentUID]; !dup {
+			seen[parentUID] = struct{}{}
+			parents = append(parents, parentUID)
+		}
+	}
+	if len(parents) == 0 {
+		return
+	}
+	childMap, err := o.b2bOrgReader.FetchChildUIDsByParentUIDs(ctx, parents)
+	if err != nil {
+		slog.WarnContext(ctx, "cdc: child read for parents of deleted accounts failed — queued for the repair run",
+			"parent_count", len(parents), "error", err, "publish_failed_for_backfill_repair", true)
+		o.queueForRepairDetached(ctx, "Account", parents)
+		return
+	}
+	o.refreshParentIndex(ctx, parents, childMap, nil)
+}
+
+// handleAccountUpsertBatch publishes the qualifying Accounts among upsertIDs
+// and converges the rest out of the index. ownerRecheck marks a batch of
+// membership owners rather than changed Accounts: their parent link did not
+// change, so each org is its own previous record (no reparenting reads), and a
+// failed Account read queues them for the repair run because no Account event
+// will ever retry them.
+func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []string, changeType model.CDCChangeType, ownerRecheck bool) error {
 	if o.accountBatch == nil {
 		slog.WarnContext(ctx, "cdc: accountBatch reader not wired — skipping Account upsert; use /admin/reindex to repair",
 			"record_count", len(upsertIDs), "publish_failed_for_backfill_repair", true)
@@ -833,9 +908,10 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 
 	// Capture old record state BEFORE cache eviction for reparenting diff.
 	// If the cache is cold, GetB2BOrg returns the post-change record — in that
-	// case oldOrg == new org and no reparenting messages are emitted (safe).
+	// case oldOrg == new org and no reparenting messages are emitted here; the
+	// old parent is found by staleChildLinks instead.
 	oldOrgs := make(map[string]*model.B2BOrg, len(upsertIDs))
-	if !isRestore(changeType) {
+	if !isRestore(changeType) && !ownerRecheck {
 		for _, id := range upsertIDs {
 			if current, err := o.b2bOrgReader.GetB2BOrg(ctx, id); err == nil {
 				oldOrgs[id] = current
@@ -843,39 +919,91 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		}
 	}
 
-	for _, id := range upsertIDs {
-		if err := o.cacheInvalidator.InvalidateB2BOrg(ctx, id); err != nil {
-			slog.WarnContext(ctx, "cdc: b2b_org cache invalidation failed, continuing",
-				"uid", id, "error", err, "publish_failed_for_backfill_repair", true)
+	// An owner re-check reads Accounts that did not change, so their cache stays valid.
+	if !ownerRecheck {
+		for _, id := range upsertIDs {
+			if err := o.cacheInvalidator.InvalidateB2BOrg(ctx, id); err != nil {
+				slog.WarnContext(ctx, "cdc: b2b_org cache invalidation failed, continuing",
+					"uid", id, "error", err, "publish_failed_for_backfill_repair", true)
+			}
 		}
 	}
 
-	orgs, convErrSFIDs, err := o.accountBatch.FetchAccountsBySFIDs(ctx, upsertIDs)
+	// Parents known from the previous records ride in the same query, so their
+	// is_parent refresh below costs no extra Salesforce call.
+	inBatch := make(map[string]struct{}, len(upsertIDs))
+	for _, id := range upsertIDs {
+		inBatch[id] = struct{}{}
+	}
+	knownParents := map[string]*model.B2BOrg{} // nil value: read, but not eligible
+	readIDs := slices.Clone(upsertIDs)
+	for _, id := range upsertIDs {
+		old := oldOrgs[id]
+		if old == nil || old.ParentUID == "" {
+			continue
+		}
+		if _, skip := inBatch[old.ParentUID]; skip {
+			continue
+		}
+		if _, dup := knownParents[old.ParentUID]; !dup {
+			knownParents[old.ParentUID] = nil
+			readIDs = append(readIDs, old.ParentUID)
+		}
+	}
+
+	fetched, convErrSFIDs, err := o.accountBatch.FetchAccountsBySFIDs(ctx, readIDs)
 	if err != nil {
 		logBatchFetchError(ctx, "Account", upsertIDs, changeType, err)
+		if !isRestore(changeType) {
+			// The stream advances past this event, so only a marker brings these
+			// Accounts and their previous parents back; a restore holds the
+			// replay cursor instead.
+			o.queueForRepairDetached(ctx, "Account", readIDs)
+		}
 		if isRestore(changeType) {
 			return errors.Join(errRestoreIncomplete, err)
 		}
 		return nil
 	}
+	orgs := make([]*model.B2BOrg, 0, len(fetched))
+	for _, org := range fetched {
+		if _, ok := inBatch[org.UID]; ok {
+			orgs = append(orgs, org)
+		} else {
+			knownParents[org.UID] = org
+		}
+	}
 
-	// SFIDs absent from the SOQL result are soft-deleted or no longer hold a
-	// membership Asset — route them to the absent path for *index* convergence.
-	// The second case is a live org, so this path withdraws no authorization.
+	// SFIDs absent from the SOQL result are soft-deleted or no longer eligible
+	// (record type and membership rule, model.IsB2BOrgEligible) — route them to
+	// the absent path for *index* convergence. The second case is a live org,
+	// so this path withdraws no authorization.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(orgs, func(o *model.B2BOrg) string { return o.UID }, convErrSFIDs)
-	// handleAccountAbsent always returns nil, so this can never produce a
-	// sentinel; captured anyway since the caller already has a return path.
-	absentErr := o.handleAbsentAsDelete(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
+	o.removeAbsentFromIndex(ctx, "Account", upsertIDs, returned, o.handleAccountAbsent)
+	staleParents := parentsToRefresh(upsertIDs, orgs, oldOrgs)
+	var staleLinks map[string][]string
+	if !ownerRecheck {
+		staleLinks = o.staleChildLinks(ctx, orgs)
+	}
 
 	// One batched query for the whole batch — replaces N per-org FetchChildUIDsByParentUID calls.
 	// Include each org's ParentUID so we also have the parent's full child list for the
-	// hierarchy tuple emitted below.
-	uidSet := make(map[string]struct{}, len(orgs))
+	// hierarchy tuple emitted below, and every stale-link parent so its list is rebuilt
+	// from the same read.
+	uidSet := make(map[string]struct{}, len(orgs)+len(staleParents))
 	for _, org := range orgs {
 		uidSet[org.UID] = struct{}{}
 		if org.ParentUID != "" {
 			uidSet[org.ParentUID] = struct{}{}
+		}
+	}
+	for _, parentUID := range staleParents {
+		uidSet[parentUID] = struct{}{}
+	}
+	for _, parents := range staleLinks {
+		for _, parentUID := range parents {
+			uidSet[parentUID] = struct{}{}
 		}
 	}
 	uids := make([]string, 0, len(uidSet))
@@ -889,6 +1017,17 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		if childMap == nil {
 			childMap = map[string][]string{}
 		}
+		o.queueForRepairDetached(ctx, "Account", staleParents)
+		if ownerRecheck {
+			// The owners did not change: publishing them with an empty child
+			// list would clear a correct is_parent.
+			owners := make([]string, 0, len(orgs))
+			for _, org := range orgs {
+				owners = append(owners, org.UID)
+			}
+			o.queueForRepairDetached(ctx, "Account", owners)
+			return nil
+		}
 	}
 	for _, org := range orgs {
 		org.IsParent = len(childMap[org.UID]) > 0
@@ -899,7 +1038,6 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 	if isRestore(changeType) && childMapErr != nil {
 		restoreErr = fmt.Errorf("read org hierarchy for restore: %w", childMapErr)
 	}
-	restoreErr = errors.Join(restoreErr, absentErr)
 	restorePublished := false
 	for _, org := range orgs {
 		if isRestore(changeType) {
@@ -911,13 +1049,22 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 			continue
 		}
 
-		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, oldOrgs[org.UID], org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamName, o.b2bOrgAuditorTeams)
+		previous := oldOrgs[org.UID]
+		if ownerRecheck {
+			// nil would read as a parent change and cost a child read per parented owner.
+			previous = org
+		}
+		publishB2BOrgUpsertEvents(ctx, o.b2bOrgReader, o.publisher, previous, org, indexerConstants.ActionUpdated, o.globalOrgAdminTeamName, o.b2bOrgAuditorTeams)
 		// Emit the parent hierarchy tuple unconditionally for parented orgs so a
 		// CDC-created child org gets its parent + child-list tuples even when no
 		// reparent was detected.
 		if org.ParentUID != "" {
 			PublishB2BOrgParentFGA(ctx, o.publisher, org, childMap[org.ParentUID])
 		}
+	}
+	o.withdrawStaleChildLinks(ctx, orgs, staleLinks, childMap, childMapErr)
+	if childMapErr == nil {
+		o.refreshParentIndex(ctx, staleParents, childMap, knownParents)
 	}
 	if restorePublished {
 		restoreErr = errors.Join(restoreErr, o.publisher.Flush(ctx))
@@ -930,6 +1077,142 @@ func (o *CDCConsumer) handleAccountUpsertBatch(ctx context.Context, upsertIDs []
 		return errors.Join(errRestoreIncomplete, restoreErr)
 	}
 	return nil
+}
+
+// staleChildLinks asks the access model which orgs list each org as a child
+// and returns, per org, those other than its current parent. A missing cached
+// copy hides a move from the previous-record diff, so this read is what finds
+// the old parent then. The previous parent is kept even though
+// publishB2BOrgUpsertEvents rebuilds it too: that rebuild swallows read and
+// publish failures, and this one queues them. Reads stop at the first failure
+// so an fga-sync outage costs one timeout per batch, and the unchecked orgs
+// are queued for the repair run, which repeats the check.
+func (o *CDCConsumer) staleChildLinks(ctx context.Context, orgs []*model.B2BOrg) map[string][]string {
+	if o.childLinks == nil {
+		return nil
+	}
+	stale := map[string][]string{}
+	for i, org := range orgs {
+		parents, err := o.childLinks.ParentsListingChild(ctx, org.UID)
+		if errors.Is(err, port.ErrChildLinksUncheckable) {
+			slog.ErrorContext(ctx, "cdc: stale parent links not checked: reply exceeds the read_tuples cap",
+				"uid", org.UID, "error", err)
+			continue
+		}
+		if err != nil {
+			unchecked := make([]string, 0, len(orgs)-i)
+			for _, rest := range orgs[i:] {
+				unchecked = append(unchecked, rest.UID)
+			}
+			slog.WarnContext(ctx, "cdc: child-link read failed — stale parent links left for the repair run",
+				"unchecked_count", len(unchecked), "error", err, "publish_failed_for_backfill_repair", true)
+			o.queueForRepairDetached(ctx, "Account", unchecked)
+			return stale
+		}
+		for _, parentUID := range parents {
+			if parentUID != org.ParentUID {
+				stale[org.UID] = append(stale[org.UID], parentUID)
+			}
+		}
+	}
+	return stale
+}
+
+// withdrawStaleChildLinks replaces each stale parent's child list with its
+// Salesforce children from the batch read, and clears a parentless org's own
+// parent tuple. Without a complete read nothing is sent, and the org is queued
+// for the repair run instead; a failed publish is queued the same way.
+func (o *CDCConsumer) withdrawStaleChildLinks(ctx context.Context, orgs []*model.B2BOrg, staleLinks, childMap map[string][]string, childMapErr error) {
+	var retry []string
+	for _, org := range orgs {
+		parents := staleLinks[org.UID]
+		if len(parents) == 0 {
+			continue
+		}
+		if childMapErr != nil {
+			retry = append(retry, org.UID)
+			continue
+		}
+		var pubErrs []error
+		for _, parentUID := range parents {
+			pubErrs = append(pubErrs, publishB2BOrgChildList(ctx, o.publisher, parentUID, childMap[parentUID]))
+		}
+		if org.ParentUID == "" {
+			pubErrs = append(pubErrs, publishB2BOrgParentClear(ctx, o.publisher, org.UID))
+		}
+		if errors.Join(pubErrs...) != nil {
+			retry = append(retry, org.UID)
+		}
+	}
+	if len(retry) > 0 {
+		o.queueForRepairDetached(ctx, "Account", retry)
+	}
+}
+
+// parentsToRefresh returns the parents outside the batch whose is_parent may
+// have changed: the current parent of every qualifying org (it may have just
+// been created or started qualifying, which the event does not say), and the
+// previous parent of every org, which loses the child when it stops qualifying
+// or moves. Parents inside the batch are already published with a fresh
+// is_parent.
+func parentsToRefresh(upsertIDs []string, orgs []*model.B2BOrg, oldOrgs map[string]*model.B2BOrg) []string {
+	inBatch := make(map[string]struct{}, len(upsertIDs))
+	for _, id := range upsertIDs {
+		inBatch[id] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var parents []string
+	add := func(parentUID string) {
+		if _, skip := inBatch[parentUID]; skip || parentUID == "" {
+			return
+		}
+		if _, dup := seen[parentUID]; !dup {
+			seen[parentUID] = struct{}{}
+			parents = append(parents, parentUID)
+		}
+	}
+	for _, org := range orgs {
+		add(org.ParentUID)
+	}
+	for _, id := range upsertIDs {
+		if old := oldOrgs[id]; old != nil {
+			add(old.ParentUID)
+		}
+	}
+	return parents
+}
+
+// refreshParentIndex republishes only the index document of each qualifying
+// parent, with is_parent from the batch's child read. Its grants and family
+// links did not change. Parents in known were already read with the batch (a
+// nil entry did not qualify); only the rest are read here. A failed read
+// queues those parents for the repair run.
+func (o *CDCConsumer) refreshParentIndex(ctx context.Context, parentUIDs []string, childMap map[string][]string,
+	known map[string]*model.B2BOrg) {
+	parents := make([]*model.B2BOrg, 0, len(parentUIDs))
+	var unread []string
+	for _, uid := range parentUIDs {
+		parent, ok := known[uid]
+		switch {
+		case !ok:
+			unread = append(unread, uid)
+		case parent != nil:
+			parents = append(parents, parent)
+		}
+	}
+	if len(unread) > 0 {
+		read, _, err := o.accountBatch.FetchAccountsBySFIDs(ctx, unread)
+		if err != nil {
+			slog.WarnContext(ctx, "cdc: parent read failed — is_parent refresh queued for the repair run",
+				"parent_count", len(unread), "error", err, "publish_failed_for_backfill_repair", true)
+			o.queueForRepairDetached(ctx, "Account", unread)
+		}
+		parents = append(parents, read...)
+	}
+	for _, parent := range parents {
+		parent.IsParent = len(childMap[parent.UID]) > 0
+		PublishB2BOrgIndexer(ctx, o.publisher, parent, indexerConstants.ActionUpdated)
+	}
 }
 
 // makeReturnedSet builds a set of UIDs from a batch-fetch result. Items in
@@ -979,7 +1262,7 @@ func (o *CDCConsumer) handleAbsentAsDelete(ctx context.Context, entity string, u
 
 // handleAccountDelete handles an Account genuinely deleted in Salesforce.
 func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error {
-	o.publishAccountDeleteIndex(ctx, uid)
+	indexErr := o.publishAccountDeleteIndex(ctx, uid)
 
 	// A surviving team subject on auditor is expected rather than a failure.
 	// fga-sync preserves team subjects on relations not prefixed "global_", so
@@ -992,34 +1275,91 @@ func (o *CDCConsumer) handleAccountDelete(ctx context.Context, uid string) error
 	// delete_access. dispatchEntity continues to the next ID either way, so no
 	// other record in the batch is affected; only an unrecorded purge travels
 	// further, up to the replay-cursor decision in Run.
+	// The index delete is confirmed by the same flush that confirms the purge,
+	// so any failure on the way leaves it unconfirmed. Its marker is written
+	// after the purge marker: a purge has no other recovery path.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildB2BOrgDeleteAccessMessage(uid)); err != nil {
-		return purgeFailure(constants.ReindexTypeB2BOrgDeleteAccess, uid, err,
+		purgeErr := purgeFailure(constants.ReindexTypeB2BOrgDeleteAccess, uid, err,
 			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid))
+		o.queueUnconfirmedIndexDeletes(ctx, "Account", []string{uid}, errors.Join(indexErr, err))
+		return purgeErr
 	}
-	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
+	err := o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeB2BOrgDeleteAccess, uid)
+	if unconfirmed := errors.Join(indexErr, err); unconfirmed != nil {
+		o.queueUnconfirmedIndexDeletes(ctx, "Account", []string{uid}, unconfirmed)
+	}
+	return err
 }
 
-// handleAccountAbsent handles an Account that was requested in a batch upsert
-// but did not come back from SOQL. Absence is not deletion: an org that still
-// exists but no longer holds a qualifying membership lands here too, which is
-// why this entry point exists separately rather than sharing the delete one.
+// handleAccountAbsent publishes the index delete for an Account that was
+// requested in a batch upsert but did not come back from SOQL;
+// removeAbsentFromIndex confirms it. Absence is not deletion: an org that still
+// exists but is no longer eligible (record type and membership rule,
+// model.IsB2BOrgEligible) lands here too, which is why this entry point exists
+// separately rather than sharing the delete one.
 func (o *CDCConsumer) handleAccountAbsent(ctx context.Context, uid string) error {
-	o.publishAccountDeleteIndex(ctx, uid)
-	return nil
+	return o.publishAccountDeleteIndex(ctx, uid)
 }
 
 // publishAccountDeleteIndex converges the search state shared by both a genuine
-// delete and a record that is merely absent from the qualifying SOQL query.
+// delete and a record that is merely absent from the qualifying SOQL query, and
+// returns the publish error so the caller can confirm or queue the removal.
 // Authorization cleanup deliberately remains in handleAccountDelete so the
 // absent path cannot reach it through a boolean mode flag.
-func (o *CDCConsumer) publishAccountDeleteIndex(ctx context.Context, uid string) {
+func (o *CDCConsumer) publishAccountDeleteIndex(ctx context.Context, uid string) error {
 	if err := o.cacheInvalidator.InvalidateB2BOrg(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: b2b_org cache invalidation failed on delete",
 			"uid", uid, "error", err)
 	}
 
 	stubOrg := &model.B2BOrg{UID: uid}
-	PublishB2BOrgIndexer(ctx, o.publisher, stubOrg, indexerConstants.ActionDeleted)
+	return publishB2BOrgIndexer(ctx, o.publisher, stubOrg, indexerConstants.ActionDeleted)
+}
+
+// removeAbsentFromIndex publishes an index delete for every id requested in a
+// batch upsert but absent from the SOQL result, confirms them with one flush,
+// and queues any unconfirmed id for the repair run. Full scans skip a record
+// that no longer qualifies, so without the marker nothing would ever remove
+// it. The stream is never held for a removal.
+func (o *CDCConsumer) removeAbsentFromIndex(ctx context.Context, entity string, upsertIDs []string,
+	returned map[string]struct{}, publishDelete func(context.Context, string) error) {
+	var published, unconfirmed []string
+	var cause error
+	for _, id := range upsertIDs {
+		if _, found := returned[id]; found {
+			continue
+		}
+		slog.DebugContext(ctx, "cdc: absent from SOQL result, removing from index", "entity", entity, "uid", id)
+		if err := publishDelete(ctx, id); err != nil {
+			unconfirmed = append(unconfirmed, id)
+			cause = errors.Join(cause, err)
+			continue
+		}
+		published = append(published, id)
+	}
+	if len(published) > 0 {
+		if err := o.publisher.Flush(ctx); err != nil {
+			unconfirmed = append(unconfirmed, published...)
+			cause = errors.Join(cause, err)
+		}
+	}
+	if len(unconfirmed) > 0 {
+		o.queueUnconfirmedIndexDeletes(ctx, entity, unconfirmed, cause)
+	}
+}
+
+func (o *CDCConsumer) queueUnconfirmedIndexDeletes(ctx context.Context, entity string, uids []string, cause error) {
+	slog.WarnContext(ctx, "cdc: index delete not confirmed — queued for the repair run",
+		"entity", entity, "uids", uids, "error", cause, "publish_failed_for_backfill_repair", true)
+	o.queueForRepairDetached(ctx, entity, uids)
+}
+
+// queueForRepairDetached writes repair markers on a detached, bounded context:
+// the handler's own deadline may be what made the read or delete fail.
+func (o *CDCConsumer) queueForRepairDetached(ctx context.Context, entity string, uids []string) {
+	markerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteAccessMarkerTimeout)
+	defer cancel()
+	o.recordSkippedForRepair(markerCtx, entity, uids)
 }
 
 // ── Asset (project_membership) ────────────────────────────────────────────────
@@ -1081,9 +1421,7 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 	// which converges the index only, since the latter case is a live record.
 	// SFIDs present but unconvertible are also marked seen so they are not deleted.
 	returned := makeReturnedSet(memberships, func(pm *model.ProjectMembership) string { return pm.UID }, convErrSFIDs)
-	// handleAssetAbsent always returns nil, so this can never produce a
-	// sentinel; captured anyway since the caller already has a return path.
-	absentErr := o.handleAbsentAsDelete(ctx, "Asset", upsertIDs, returned, o.handleAssetAbsent)
+	o.removeAbsentFromIndex(ctx, "Asset", upsertIDs, returned, o.handleAssetAbsent)
 
 	action := indexerConstants.ActionUpdated
 	if changeType == model.CDCChangeCreate {
@@ -1112,7 +1450,7 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		}
 	}
 
-	restoreErr := absentErr
+	var restoreErr error
 	restorePublished := false
 	for _, pm := range memberships {
 		if isRestore(changeType) {
@@ -1142,6 +1480,9 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 			PublishProjectMembershipFGAPreservingMissingRefs(ctx, o.publisher, pm)
 		}
 	}
+	if changeType == model.CDCChangeCreate {
+		o.recheckMembershipOwners(ctx, memberships)
+	}
 	if restorePublished {
 		restoreErr = errors.Join(restoreErr, o.publisher.Flush(ctx))
 	}
@@ -1153,6 +1494,29 @@ func (o *CDCConsumer) handleAssetUpsertBatch(ctx context.Context, upsertIDs []st
 		return errors.Join(errRestoreIncomplete, restoreErr)
 	}
 	return nil
+}
+
+// recheckMembershipOwners sends the owners of newly created memberships through
+// the Account path. An Account can become eligible by gaining its first
+// membership, and Salesforce sends no Account change event for that.
+func (o *CDCConsumer) recheckMembershipOwners(ctx context.Context, memberships []*model.ProjectMembership) {
+	if o.accountBatch == nil {
+		return // mock mode
+	}
+	seen := make(map[string]struct{}, len(memberships))
+	owners := make([]string, 0, len(memberships))
+	for _, pm := range memberships {
+		if _, dup := seen[pm.B2BOrgUID]; dup || pm.B2BOrgUID == "" {
+			continue
+		}
+		seen[pm.B2BOrgUID] = struct{}{}
+		owners = append(owners, pm.B2BOrgUID)
+	}
+	if len(owners) == 0 {
+		return
+	}
+	// A non-restore batch reports failures through logs and repair markers only.
+	_ = o.handleAccountUpsertBatch(ctx, owners, model.CDCChangeCreate, true)
 }
 
 func (o *CDCConsumer) publishRestoredProjectMembership(
@@ -1320,30 +1684,38 @@ func (o *CDCConsumer) restoreKeyContactGrants(
 
 // handleAssetDelete handles an Asset genuinely deleted in Salesforce.
 func (o *CDCConsumer) handleAssetDelete(ctx context.Context, uid string) error {
-	o.publishAssetDeleteIndex(ctx, uid)
+	indexErr := o.publishAssetDeleteIndex(ctx, uid)
 
 	// Propagate unrecorded delivery failures for the same reason as
 	// handleAccountDelete: no later upsert can rebuild a deleted membership.
+	// As there, one flush confirms both the index delete and the purge.
 	if err := o.publisher.Access(ctx, constants.FGASyncDeleteAccessSubject, BuildProjectMembershipDeleteAccessMessage(uid)); err != nil {
-		return purgeFailure(constants.ReindexTypeProjectMembershipDeleteAccess, uid, err,
+		purgeErr := purgeFailure(constants.ReindexTypeProjectMembershipDeleteAccess, uid, err,
 			o.recordFailedDeleteAccess(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid))
+		o.queueUnconfirmedIndexDeletes(ctx, "Asset", []string{uid}, errors.Join(indexErr, err))
+		return purgeErr
 	}
-	return o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
+	err := o.confirmDeleteAccessDelivery(ctx, constants.ReindexTypeProjectMembershipDeleteAccess, uid)
+	if unconfirmed := errors.Join(indexErr, err); unconfirmed != nil {
+		o.queueUnconfirmedIndexDeletes(ctx, "Asset", []string{uid}, unconfirmed)
+	}
+	return err
 }
 
-// handleAssetAbsent handles an Asset that was requested in a batch upsert but
-// did not come back from SOQL — soft-deleted, or no longer qualifying because
-// Product2.Family flipped off Membership. The second case is a live record, so
-// this path must not withdraw authorization.
+// handleAssetAbsent publishes the index delete for an Asset that was requested
+// in a batch upsert but did not come back from SOQL — soft-deleted, or no
+// longer qualifying because Product2.Family flipped off Membership;
+// removeAbsentFromIndex confirms it. The second case is a live record, so this
+// path must not withdraw authorization.
 func (o *CDCConsumer) handleAssetAbsent(ctx context.Context, uid string) error {
-	o.publishAssetDeleteIndex(ctx, uid)
-	return nil
+	return o.publishAssetDeleteIndex(ctx, uid)
 }
 
 // publishAssetDeleteIndex converges the search state shared by both a genuine
-// delete and a record that no longer qualifies for the membership query.
+// delete and a record that no longer qualifies for the membership query, and
+// returns the publish error so the caller can confirm or queue the removal.
 // Authorization cleanup deliberately remains in handleAssetDelete.
-func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
+func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) error {
 	if err := o.cacheInvalidator.InvalidateProjectMembership(ctx, uid); err != nil {
 		slog.WarnContext(ctx, "cdc: project_membership cache invalidation failed on delete",
 			"uid", uid, "error", err)
@@ -1356,7 +1728,7 @@ func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) {
 	}
 
 	stubPM := &model.ProjectMembership{UID: uid}
-	PublishProjectMembershipIndexer(ctx, o.publisher, stubPM, indexerConstants.ActionDeleted)
+	return publishProjectMembershipIndexer(ctx, o.publisher, stubPM, indexerConstants.ActionDeleted)
 }
 
 // ── Project_Role__c (key_contact) ─────────────────────────────────────────────

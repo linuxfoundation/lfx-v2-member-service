@@ -2,8 +2,9 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# grant-lf-teams-auditor-openfga.sh — Grant the configured team subject
-# (the LF staff team only) the `auditor` relation on every
+# grant-lf-teams-auditor-openfga.sh — Grant the configured team subjects
+# (the LF staff team and global-org-auditors; never the withdrawn contractor
+# team) the `auditor` relation on every
 # b2b_org in the exported census. One-off backfill for orgs that existed
 # before the service started asserting these grants on every write. See
 # LFXV2-2937 and LFXV2-3071.
@@ -22,7 +23,11 @@
 #   kubectl --context lfx-v2-prod -n lfx port-forward svc/lfx-platform-openfga 8080:8080
 #   jq installed
 #   ./scripts/export-b2b-org-uids-from-opensearch.sh has been run
-#   export LF_STAFF_TEAM_NAME=…   (staff only; LF_CONTRACTOR_TEAM_NAME is not read)
+#   export LF_STAFF_TEAM_NAME=…
+#   export GLOBAL_ORG_AUDITORS_TEAM_NAME=…
+#     (LF_CONTRACTOR_TEAM_NAME is not read. fga_team_names silently skips an
+#     unset name and errors only when every named variable is empty, so export
+#     both names the deployment carries.)
 #
 # Usage:
 #   ./scripts/grant-lf-teams-auditor-openfga.sh <store-id> [input_dir] [--dry-run]
@@ -77,12 +82,16 @@ fi
 # Read loop rather than mapfile: mapfile is bash 4+, and macOS ships bash 3.2
 # as /bin/bash, which is what an operator running this from a laptop will hit.
 #
-# Staff only: the contractor grant was withdrawn (LFXV2-3071 rollback;
-# lfx-self-serve#2814 deletes the root tuple it rested on), so the backfill must
-# not be able to re-create it from a shell that still exports the variable. The
-# revoke script still reads LF_CONTRACTOR_TEAM_NAME — rollback has to be able to
-# target a team the service no longer emits.
-TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME)
+# Staff and global-org-auditors, matching B2BOrgAuditorTeamNames.
+# fga_team_names silently skips an unset name — it errors only when every named
+# variable is empty — so an operator who exports only one gets a backfill for
+# that team alone; export both names the deployment carries. The contractor
+# grant was withdrawn (LFXV2-3071 rollback; lfx-self-serve#2814 deletes the root
+# tuple it rested on), so the backfill must not be able to re-create it from a
+# shell that still exports the variable. The revoke script still reads
+# LF_CONTRACTOR_TEAM_NAME — rollback has to be able to target a team the service
+# no longer emits.
+TEAM_NAMES=$(fga_team_names LF_STAFF_TEAM_NAME GLOBAL_ORG_AUDITORS_TEAM_NAME)
 TEAMS=()
 while IFS= read -r team_name; do
 	TEAMS+=("$team_name")

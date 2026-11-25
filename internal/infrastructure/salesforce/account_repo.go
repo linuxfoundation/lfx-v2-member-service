@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +24,13 @@ type soqlAccountID struct {
 	ID string `salesforce:"Id" json:"Id"`
 }
 
+// soqlEligibleAccountID is soqlAccountID plus the eligibility inputs, for the
+// single-parent child-list query.
+type soqlEligibleAccountID struct {
+	ID string `salesforce:"Id" json:"Id"`
+	soqlEligibility
+}
+
 // accountsSOQLSelect is the fixed Account projection shared by every list/search
 // query. The organization slug is not a Salesforce field: it is derived from Name
 // by model.Slugify when the record is converted (spec 050, DR-007).
@@ -31,20 +40,17 @@ const accountsSOQLSelect = "Id, Name, Logo_URL__c, Website," +
 	" Parent.Id, Parent.Name, Parent.Logo_URL__c," +
 	" Industry, Sector__c, CrunchBase_URL__c," +
 	" NumberOfEmployees, LF_Membership_Status__c, IsMember__c," +
-	" CreatedDate, LastModifiedDate"
+	" CreatedDate, LastModifiedDate, " + accountEligibilitySOQLFields
 
 // accountsSOQLWhere is the fixed WHERE base for Account search/list queries.
-// Only Accounts that are not deleted and have at least one membership Asset are
-// returned — the SOQL semi-join on Asset ensures we do not expose arbitrary
-// Account records to the API.
+// It returns every non-deleted Account. Eligibility (model.IsB2BOrgEligible) is
+// applied in Go to the decoded records, because the rule needs a semi-join
+// inside OR, which SOQL rejects; callers must drop records whose eligible() is
+// false before exposing them. Callers build on AccountRepo.searchBase, which
+// adds the membership filter when Company Accounts are excluded.
 const accountsSOQLWhere = `
 FROM Account
-WHERE IsDeleted = false
-    AND Id IN (
-        SELECT AccountId FROM Asset
-        WHERE Product2.Family = 'Membership'
-            AND IsDeleted = false
-    )`
+WHERE IsDeleted = false`
 
 // accountsSOQLBase is the SELECT + fixed WHERE base for Account search/list
 // queries. The caller appends optional predicates and an ORDER BY clause before
@@ -53,20 +59,46 @@ const accountsSOQLBase = "\nSELECT\n    " + accountsSOQLSelect + accountsSOQLWhe
 
 // AccountRepo handles Salesforce SOQL queries for Account (B2BOrg) records.
 type AccountRepo struct {
-	client *sf.Salesforce
+	client                 *sf.Salesforce
+	includeCompanyAccounts bool
 }
 
-// NewAccountRepo creates a new AccountRepo backed by the given Salesforce client.
-func NewAccountRepo(client *sf.Salesforce) *AccountRepo {
-	return &AccountRepo{client: client}
+// NewAccountRepo creates a new AccountRepo backed by the given Salesforce
+// client. includeCompanyAccounts selects the eligibility rule
+// (model.IsB2BOrgEligible) for every query and check made through the repo.
+// The API and the CDC consumer must be given the same value: if they differ,
+// one publishes an org that the other removes on its next change event.
+func NewAccountRepo(client *sf.Salesforce, includeCompanyAccounts bool) *AccountRepo {
+	return &AccountRepo{client: client, includeCompanyAccounts: includeCompanyAccounts}
 }
 
-// FetchChildUIDsByParentUID returns the SFIDs of member-eligible Salesforce
-// Accounts whose ParentId matches the SFID derived from parentUID (uid == SFID).
-// Only accounts with at least one membership Asset are returned — matching the
-// same gate used by accountsSOQLBase so the result contains only UIDs that exist
-// in the index. Returns an empty slice (no error) when the parent has no
-// member-eligible children.
+// eligible applies the repo's eligibility rule to a decoded record.
+func (r *AccountRepo) eligible(e soqlEligibility) bool {
+	return e.eligible(r.includeCompanyAccounts)
+}
+
+// accountsMembershipFilter limits a query to Accounts holding a non-deleted
+// Membership Asset. Without Company Accounts this is the whole rule, so it can
+// be applied in SOQL.
+const accountsMembershipFilter = "\n    AND Id IN (SELECT AccountId FROM Asset" +
+	" WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
+
+// searchBase returns accountsSOQLBase, narrowed to members when Company
+// Accounts are excluded. The narrowing matters where a LIMIT or a page-full
+// check runs before the Go eligibility filter: the website/name lookup would
+// otherwise count non-members toward its ambiguity cap.
+func (r *AccountRepo) searchBase() string {
+	if r.includeCompanyAccounts {
+		return accountsSOQLBase
+	}
+	return accountsSOQLBase + accountsMembershipFilter
+}
+
+// FetchChildUIDsByParentUID returns the SFIDs of eligible Salesforce Accounts
+// (model.IsB2BOrgEligible) whose ParentId matches the SFID derived from
+// parentUID (uid == SFID). It applies the same rule as the list queries so the
+// result contains only UIDs that exist in the index. Returns an empty slice
+// (no error) when the parent has no eligible children.
 func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID string) ([]string, error) {
 	parentSFID, err := sfuuid.Normalize18(parentUID)
 	if err != nil {
@@ -74,16 +106,19 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 	}
 	slog.DebugContext(ctx, "fetching child account SFIDs from Salesforce", "parent_sfid", parentSFID)
 
-	query := "SELECT Id FROM Account WHERE ParentId = " + quoteSOQL(parentSFID) +
-		" AND IsDeleted = false" +
-		" AND Id IN (SELECT AccountId FROM Asset WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
-	records, _, err := QueryAllPages[soqlAccountID](ctx, r.client, query, "")
+	query := "SELECT Id, " + accountEligibilitySOQLFields +
+		" FROM Account WHERE ParentId = " + quoteSOQL(parentSFID) +
+		" AND IsDeleted = false"
+	records, _, err := QueryAllPages[soqlEligibleAccountID](ctx, r.client, query, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching children of parent %s: %w", parentSFID, err)
 	}
 
 	uids := make([]string, 0, len(records))
 	for _, rec := range records {
+		if !rec.eligible(r.includeCompanyAccounts) {
+			continue
+		}
 		uid, convErr := sfuuid.Normalize18(rec.ID)
 		if convErr != nil {
 			slog.WarnContext(ctx, "child account SFID could not be normalized, skipping",
@@ -96,15 +131,16 @@ func (r *AccountRepo) FetchChildUIDsByParentUID(ctx context.Context, parentUID s
 }
 
 // FetchAccountBySFID fetches a single Account record from Salesforce by its
-// Salesforce Id. Returns nil, nil when no matching record is found.
+// Salesforce Id. Returns nil, nil when no matching record is found or the
+// Account is not eligible (model.IsB2BOrgEligible).
 func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*model.B2BOrg, error) {
 	slog.DebugContext(ctx, "fetching account by SFID from Salesforce", "sfid", sfid)
-	query := accountsSOQLBase + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
+	query := r.searchBase() + "\n    AND Id = " + quoteSOQL(sfid) + "\nLIMIT 1"
 	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching account by SFID %s: %w", sfid, err)
 	}
-	if len(sfResult.Records) == 0 {
+	if len(sfResult.Records) == 0 || !sfResult.Records[0].eligible(r.includeCompanyAccounts) {
 		return nil, nil
 	}
 	return convertSOQLToB2BOrg(ctx, sfResult.Records[0])
@@ -112,9 +148,11 @@ func (r *AccountRepo) FetchAccountBySFID(ctx context.Context, sfid string) (*mod
 
 // FetchAccountsBySFIDs fetches multiple Account records from Salesforce by
 // their Salesforce Ids in a single batched SOQL query. Records absent from
-// the result set have been soft-deleted or no longer hold a membership Asset
-// (the membership semi-join in accountsSOQLBase excludes them). Returns an
-// empty slice when none are found.
+// the result set have been soft-deleted or are not eligible
+// (model.IsB2BOrgEligible); ineligible records are dropped here, not reported
+// as conversion errors, so callers treat them as absent. Every page of each
+// chunk is read: a short result would read as absence. Returns an empty slice
+// when none are found.
 func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) ([]*model.B2BOrg, []string, error) {
 	if len(sfids) == 0 {
 		return []*model.B2BOrg{}, nil, nil
@@ -131,12 +169,15 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 		}
 		chunk := sfids[start:end]
 
-		query := accountsSOQLBase + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
-		sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
+		query := r.searchBase() + "\n    AND Id IN (" + buildSOQLInClause(chunk) + ")"
+		records, _, err := QueryAllPages[soqlAccount](ctx, r.client, query, "")
 		if err != nil {
 			return nil, nil, fmt.Errorf("batch fetching accounts (chunk %d-%d): %w", start, end, err)
 		}
-		for _, acc := range sfResult.Records {
+		for _, acc := range records {
+			if !acc.eligible(r.includeCompanyAccounts) {
+				continue
+			}
 			org, convErr := convertSOQLToB2BOrg(ctx, acc)
 			if convErr != nil {
 				slog.WarnContext(ctx, "skipping account with invalid SFID in batch",
@@ -150,11 +191,117 @@ func (r *AccountRepo) FetchAccountsBySFIDs(ctx context.Context, sfids []string) 
 	return all, conversionErrorSFIDs, nil
 }
 
+// fetchAccountEligibility returns the eligibility inputs of the non-deleted
+// Account with the given SFID, or nil when there is none.
+func (r *AccountRepo) fetchAccountEligibility(ctx context.Context, sfid string) (*soqlEligibility, error) {
+	query := "SELECT Id, " + accountEligibilitySOQLFields +
+		" FROM Account WHERE Id = " + quoteSOQL(sfid) + " AND IsDeleted = false LIMIT 1"
+	result, err := QueryPage[soqlEligibleAccountID](ctx, r.client, query, "")
+	if err != nil {
+		return nil, fmt.Errorf("fetching eligibility of account %s: %w", sfid, err)
+	}
+	if len(result.Records) == 0 {
+		return nil, nil
+	}
+	return &result.Records[0].soqlEligibility, nil
+}
+
+// FetchB2BOrgEligibility returns uid → eligible for every non-deleted Account
+// among uids, in one chunked query per 200 ids. Ineligible Accounts are kept
+// with false rather than filtered in SOQL, so callers can tell "not an
+// organization" from "deleted or unknown" (absent).
+func (r *AccountRepo) FetchB2BOrgEligibility(ctx context.Context, uids []string) (map[string]bool, error) {
+	sfids := make([]string, 0, len(uids))
+	sfidToUID := make(map[string]string, len(uids))
+	for _, uid := range uids {
+		sfid, err := sfuuid.Normalize18(uid)
+		if err != nil {
+			slog.WarnContext(ctx, "eligibility read: uid could not be normalized, treating as not an organization",
+				"uid", uid, "error", err)
+			continue
+		}
+		sfids = append(sfids, sfid)
+		sfidToUID[sfid] = uid
+	}
+	out := make(map[string]bool, len(sfids))
+	if len(sfids) == 0 {
+		return out, nil
+	}
+	slog.DebugContext(ctx, "fetching account eligibility from Salesforce (batch)", "count", len(sfids))
+
+	const chunkSize = 200
+	for start := 0; start < len(sfids); start += chunkSize {
+		chunk := sfids[start:min(start+chunkSize, len(sfids))]
+		query := "SELECT Id, " + accountEligibilitySOQLFields +
+			" FROM Account WHERE Id IN (" + buildSOQLInClause(chunk) + ")" +
+			" AND IsDeleted = false"
+		records, _, err := QueryAllPages[soqlEligibleAccountID](ctx, r.client, query, "")
+		if err != nil {
+			return nil, fmt.Errorf("fetching eligibility of %d accounts (chunk starting at %d): %w",
+				len(chunk), start, err)
+		}
+		for _, rec := range records {
+			sfid, convErr := sfuuid.Normalize18(rec.ID)
+			if convErr != nil {
+				// Dropping it would read as a deleted Account and remove a live record.
+				return nil, fmt.Errorf("normalizing returned account id %q: %w", rec.ID, convErr)
+			}
+			if uid, ok := sfidToUID[sfid]; ok {
+				out[uid] = rec.eligible(r.includeCompanyAccounts)
+			}
+		}
+	}
+	return out, nil
+}
+
+var _ port.B2BOrgEligibilityReader = (*AccountRepo)(nil)
+
+// FetchDeletedAccountParents returns caller id → parent UID for every Account
+// among sfids that is in the recycle bin and had a parent, in one chunked
+// queryAll per 200 ids. Accounts purged from the recycle bin are not returned.
+func (r *AccountRepo) FetchDeletedAccountParents(ctx context.Context, sfids []string) (map[string]string, error) {
+	normalized, sfidToCaller := normalizeParentUIDs(ctx, sfids)
+	out := make(map[string]string, len(normalized))
+	if len(normalized) == 0 {
+		return out, nil
+	}
+	slog.DebugContext(ctx, "fetching parents of deleted accounts from Salesforce (batch)", "count", len(normalized))
+
+	const chunkSize = 200
+	for start := 0; start < len(normalized); start += chunkSize {
+		chunk := normalized[start:min(start+chunkSize, len(normalized))]
+		query := "SELECT Id, ParentId FROM Account WHERE Id IN (" + buildSOQLInClause(chunk) + ")" +
+			" AND IsDeleted = true AND ParentId != null"
+		records, err := QueryDeletedAndLivePages[soqlParentChild](ctx, r.client, query)
+		if err != nil {
+			return nil, fmt.Errorf("fetching parents of %d deleted accounts (chunk starting at %d): %w",
+				len(chunk), start, err)
+		}
+		for _, rec := range records {
+			sfid, convErr := sfuuid.Normalize18(rec.ID)
+			if convErr != nil {
+				continue
+			}
+			parentUID, convErr := sfuuid.Normalize18(rec.ParentID)
+			if convErr != nil {
+				slog.WarnContext(ctx, "parent SFID of deleted account could not be normalized, skipping",
+					"sfid", rec.ID, "parent_sfid", rec.ParentID, "error", convErr)
+				continue
+			}
+			if caller, ok := sfidToCaller[sfid]; ok {
+				out[caller] = parentUID
+			}
+		}
+	}
+	return out, nil
+}
+
 // soqlParentChild is a minimal projection for the batched child-list query.
 // No aggregate alias — uses the same plain json.Unmarshal path as soqlAccountID.
 type soqlParentChild struct {
 	ParentID string `json:"ParentId"`
 	ID       string `json:"Id"`
+	soqlEligibility
 }
 
 // normalizeParentUIDs converts caller UIDs to 18-char SFIDs and builds a
@@ -177,8 +324,8 @@ func normalizeParentUIDs(ctx context.Context, parentUIDs []string) (sfids []stri
 
 // fetchChildUIDsByParents issues one chunked SOQL query per <=200 parents and
 // returns child UIDs grouped by caller-supplied parent UID. Chunking mirrors
-// FetchAccountsBySFIDs (account_repo.go:117). All normalization and the
-// membership Asset semi-join live here; callers see only domain UIDs.
+// FetchAccountsBySFIDs. All normalization and the eligibility rule
+// (model.IsB2BOrgEligible) live here; callers see only domain UIDs.
 func (r *AccountRepo) fetchChildUIDsByParents(
 	ctx context.Context, parentUIDs []string,
 ) (map[string][]string, error) {
@@ -199,11 +346,9 @@ func (r *AccountRepo) fetchChildUIDsByParents(
 	for start := 0; start < len(sfids); start += chunkSize {
 		chunk := sfids[start:min(start+chunkSize, len(sfids))]
 
-		query := "SELECT ParentId, Id FROM Account" +
+		query := "SELECT ParentId, Id, " + accountEligibilitySOQLFields + " FROM Account" +
 			" WHERE ParentId IN (" + buildSOQLInClause(chunk) + ")" +
-			" AND IsDeleted = false" +
-			" AND Id IN (SELECT AccountId FROM Asset" +
-			" WHERE Product2.Family = 'Membership' AND IsDeleted = false)"
+			" AND IsDeleted = false"
 
 		records, _, err := QueryAllPages[soqlParentChild](ctx, r.client, query, "")
 		if err != nil {
@@ -212,6 +357,9 @@ func (r *AccountRepo) fetchChildUIDsByParents(
 		}
 
 		for _, rec := range records {
+			if !rec.eligible(r.includeCompanyAccounts) {
+				continue
+			}
 			pid, pidErr := sfuuid.Normalize18(rec.ParentID)
 			if pidErr != nil {
 				continue
@@ -239,6 +387,176 @@ func (r *AccountRepo) FetchChildUIDsByParentUIDs(
 	ctx context.Context, parentUIDs []string,
 ) (map[string][]string, error) {
 	return r.fetchChildUIDsByParents(ctx, parentUIDs)
+}
+
+// accountMatchPageSize bounds the exact-equality match tiers' SOQL query
+// (primary_domain, name). A small cap is deliberate: these tiers exist to
+// find a single match, so more than a handful of hits already proves the
+// tier is ambiguous, and SOQL itself applies the equality predicate so no
+// true match can be truncated out of this page.
+const accountMatchPageSize = 5
+
+// accountLikeMatchPageSize bounds the substring (LIKE) match tiers'
+// (domain_alias, website) raw SOQL query, before the verify closure narrows
+// raw hits down to exact-hostname/exact-alias matches. This must stay well
+// above accountMatchPageSize: a LIKE predicate can return many irrelevant
+// substring hits, and if the raw page were capped at the same size as the
+// verified-match count, a second true match could be truncated out of the
+// page before verify ever saw it, masking real ambiguity.
+const accountLikeMatchPageSize = 50
+
+// websiteDomain extracts the lowercase, www-stripped hostname from a website
+// URL (with or without a scheme). Returns "" when website is empty or does
+// not parse to a usable host.
+func websiteDomain(website string) string {
+	website = strings.TrimSpace(website)
+	if website == "" {
+		return ""
+	}
+	if !strings.Contains(website, "://") {
+		website = "https://" + website
+	}
+	u, err := url.Parse(website)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return foldDomain(u.Hostname())
+}
+
+// foldDomain lowercases and strips a leading "www." so domains stored with
+// different case or www-prefixing (e.g. "ACME.COM", "www.acme.com") compare
+// equal to the lower/www-stripped form produced by websiteDomain.
+func foldDomain(s string) string {
+	return strings.TrimPrefix(strings.ToLower(s), "www.")
+}
+
+// FindAccountByNameOrWebsite resolves a single b2b_org-eligible Account by
+// primary domain, domain alias, website, then name, in that priority order. An ambiguous
+// result at any domain tier stops resolution entirely rather than falling
+// through to a lower-priority tier: a less specific matcher (website, then
+// name) could otherwise resolve to a different, incorrect organization than
+// the one the ambiguous, more specific matcher couldn't safely identify.
+// "no match" and "ambiguous match" are deliberately indistinguishable to the
+// caller (both return ok=false, err=nil): this method is read-only
+// resolution, never auto-provisioning, so both cases mean the same thing to
+// a caller — do not treat the id as confirmed.
+func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error) {
+	domain := websiteDomain(website)
+	name = strings.TrimSpace(name)
+
+	if domain != "" {
+		// Account_Domain__c is stored verbatim in Salesforce (no www./case
+		// folding applied on write), so an exact match against the folded
+		// domain alone would miss a record stored as "www.<domain>". Query
+		// both forms; the verify callback's fold still guards against case
+		// variants Salesforce's string equality wouldn't otherwise catch.
+		org, ok, ambiguous, err := r.matchSingleAccount(ctx,
+			"Account_Domain__c IN ("+buildSOQLInClause([]string{domain, "www." + domain})+")",
+			"primary_domain", accountMatchPageSize,
+			func(o *model.B2BOrg) bool { return foldDomain(o.PrimaryDomain) == domain })
+		if err != nil || ok || ambiguous {
+			return org, ok, err
+		}
+
+		// Each matchSingleAccount call below is a single Salesforce HTTP
+		// request bounded only by the client's fixed httpTimeout, not by ctx:
+		// go-salesforce's QueryPage never propagates ctx into the underlying
+		// http.Request, so ctx expiring cannot abort an in-flight call. Check
+		// ctx between tiers so a deadline that has already passed (e.g. the
+		// first tier alone consumed the handler's budget) stops further
+		// tiers from running, rather than letting up to three more
+		// full-timeout requests run after the caller has given up.
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+
+		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
+			"Domain_Alias__c LIKE "+quoteLikeSOQL(domain), "domain_alias", accountLikeMatchPageSize,
+			func(o *model.B2BOrg) bool {
+				return slices.ContainsFunc(o.DomainAliases, func(alias string) bool { return foldDomain(alias) == domain })
+			})
+		if err != nil || ok || ambiguous {
+			return org, ok, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+
+		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
+			"Website LIKE "+quoteLikeSOQL(domain), "website", accountLikeMatchPageSize,
+			func(o *model.B2BOrg) bool { return websiteDomain(o.Website) == domain })
+		if err != nil || ok || ambiguous {
+			return org, ok, err
+		}
+	}
+
+	if name != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		org, ok, _, err := r.matchSingleAccount(ctx, "Name = "+quoteSOQL(name), "name", accountMatchPageSize, nil)
+		return org, ok, err
+	}
+	return nil, false, nil
+}
+
+// matchSingleAccount runs predicate (a pre-quoted/escaped SOQL WHERE
+// fragment) against the non-deleted Account search base, drops Accounts that
+// are not b2b_org-eligible (the eligibility rule cannot be expressed in the
+// WHERE clause), filters hits through verify (nil to skip filtering), and
+// reports whether exactly one
+// match survives. limit bounds the raw SOQL page fetched before verify runs;
+// callers using a substring (LIKE) predicate must pass a limit well above the
+// expected verified-match count, since verify filtering happens after the
+// page is fetched and a true match could otherwise be truncated out of the
+// page before it's ever considered. ambiguous is true when more than one hit
+// survives, or when the raw page is saturated (>= limit) or a non-empty
+// NextPageToken shows Salesforce has more rows beyond this page: SOQL applies
+// no ORDER BY here, so neither case can prove that no further hits (a true
+// match, or a second true match) exist beyond the cutoff. The predicate alone
+// (e.g. a LIKE substring match) cannot be trusted to prove uniqueness in
+// either case, so the caller should stop rather than treat this as a miss or
+// a confirmed unique match.
+func (r *AccountRepo) matchSingleAccount(ctx context.Context, predicate, label string, limit int, verify func(*model.B2BOrg) bool) (*model.B2BOrg, bool, bool, error) {
+	query := r.searchBase() + "\n    AND " + predicate + "\nLIMIT " + strconv.Itoa(limit)
+	sfResult, err := QueryPage[soqlAccount](ctx, r.client, query, "")
+	if err != nil {
+		return nil, false, false, fmt.Errorf("matching accounts by %s: %w", label, err)
+	}
+
+	if len(sfResult.Records) >= limit || sfResult.NextPageToken != "" {
+		slog.WarnContext(ctx, "b2b org name/website lookup skipped: raw match page saturated",
+			"match_type", label, "limit", limit, "records", len(sfResult.Records))
+		return nil, false, true, nil
+	}
+
+	matches := make([]*model.B2BOrg, 0, len(sfResult.Records))
+	for _, acc := range sfResult.Records {
+		if !acc.eligible(r.includeCompanyAccounts) {
+			continue
+		}
+		org, convErr := convertSOQLToB2BOrg(ctx, acc)
+		if convErr != nil {
+			slog.WarnContext(ctx, "skipping account with invalid SFID in name/website match",
+				"match_type", label, "sfid", acc.ID, "error", convErr)
+			continue
+		}
+		if verify != nil && !verify(org) {
+			continue
+		}
+		matches = append(matches, org)
+	}
+
+	if len(matches) == 0 {
+		return nil, false, false, nil
+	}
+	if len(matches) > 1 {
+		slog.WarnContext(ctx, "b2b org name/website lookup skipped: ambiguous match",
+			"match_type", label, "candidates", len(matches))
+		return nil, false, true, nil
+	}
+	return matches[0], true, false, nil
 }
 
 // Ensure AccountRepo satisfies the port at compile time.
@@ -339,11 +657,25 @@ func convertSOQLToB2BOrg(ctx context.Context, acc soqlAccount) (*model.B2BOrg, e
 // IterB2BOrgs iterates over B2B orgs (Accounts) from Salesforce, applying an
 // optional LastModifiedDate filter when since is provided. Calls fn for each
 // page of converted records. Conversion errors are logged and skipped.
+// Ineligible Accounts (model.IsB2BOrgEligible) are skipped silently: the
+// converter yields nil for them rather than an error, which IterPages would
+// log as a warning for every ineligible Account in the scan.
 func (r *AccountRepo) IterB2BOrgs(ctx context.Context, since, until *time.Time, fn func([]*model.B2BOrg) error) error {
-	query := accountsSOQLBase + lastModifiedWindowClause(since, until)
+	query := r.searchBase() + lastModifiedWindowClause(since, until)
 	return IterPages[soqlAccount, *model.B2BOrg](ctx, r.client, query, func(acc soqlAccount) (*model.B2BOrg, error) {
+		if !acc.eligible(r.includeCompanyAccounts) {
+			return nil, nil
+		}
 		return convertSOQLToB2BOrg(ctx, acc)
-	}, fn)
+	}, func(orgs []*model.B2BOrg) error {
+		eligible := orgs[:0]
+		for _, org := range orgs {
+			if org != nil {
+				eligible = append(eligible, org)
+			}
+		}
+		return fn(eligible)
+	})
 }
 
 // normalizeDomain validates and returns the host portion of a bare domain

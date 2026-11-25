@@ -57,7 +57,8 @@ Key-Value cache to minimise round-trips.
 - **NATS RPC endpoints**: Exposes request/reply subjects so other services can
   resolve identifiers without querying Salesforce directly:
   - `lfx.member.project-id-map.lookup` — v2 project UID → Salesforce `Project__c.Id`
-  - `lfx.member.b2b_org_lookup` — validate a `b2b_org` id and return the canonical 18-char Account SFID
+  - `lfx.member.b2b_org_lookup` — validate a `b2b_org` id and return the canonical 18-char Account SFID and logo URL
+  - `lfx.member.b2b_org_lookup_by_website` — resolve a `b2b_org` by name/website when a caller cannot resolve it directly via `b2b_org_lookup` (also returns the logo URL)
 - **Clean Architecture**: Follows hexagonal architecture with clear separation of
   domain, service, and infrastructure layers.
 - **Authorization**: JWT-based authentication with Heimdall middleware integration
@@ -93,6 +94,8 @@ Key-Value cache to minimise round-trips.
 | GET | `/b2b_orgs/{uid}/settings` | Get org access-control settings (writers, auditors) |
 | PUT | `/b2b_orgs/{uid}/settings` | Update org access-control settings (writers, auditors) |
 | GET | `/b2b_orgs/member-tiers/{username}` | Highest active membership tier per org for a user (machine-to-machine) |
+
+With `B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS=true`, writes that add or change data for an org (`PUT /b2b_orgs/{uid}`, the logo upload, the settings update, adding a settings user or changing their role, creating or renaming a workspace, and adding workspace projects) return 404 when the Salesforce Account is deleted or no longer qualifies as a B2B org (`model.IsB2BOrgEligible`). The check is one batched Salesforce read per request. With the setting off, these writes are not checked, so a Company Account without a membership stays editable until the setting is turned on. Removals (deleting a settings user, a workspace, or a workspace project) are always allowed, so access can be withdrawn after an org stops qualifying. `GET /b2b_orgs/{uid}` and the `lfx.member.b2b_org_lookup` NATS lookup still return the raw Account.
 
 ### Admin
 
@@ -178,8 +181,10 @@ sObject cache → Salesforce Account fetch via `GetB2BOrg`.
 **Response — success:**
 
 ```json
-{"id": "<canonical 18-char Account SFID>"}
+{"id": "<canonical 18-char Account SFID>", "logo_url": "<Account.Logo_URL__c>"}
 ```
+
+`logo_url` is omitted when the Account has no logo.
 
 **Response — not found:**
 
@@ -203,6 +208,59 @@ The reply is always valid JSON. Check for the presence of the `"error"` key to
 detect failure. A not-found response means the id does not resolve to a `b2b_org`
 (e.g. CDP UUID, unknown SFID); infrastructure failures return a distinct error
 message.
+
+### B2B Org Lookup By Website
+
+Resolves a `b2b_org` by name/website when a caller cannot resolve it directly
+via `lfx.member.b2b_org_lookup` (e.g. a legacy, non-SFID id for an org that
+exists under a different SFID). Resolution is tiered: primary domain →
+domain alias → website → name, in that priority order. A match at any domain
+tier is verified against the normalized hostname before being accepted, and
+an ambiguous result (more than one candidate) at any domain tier stops
+resolution entirely rather than falling through to a less specific tier.
+
+| Field | Value |
+|-------|-------|
+| **Subject** | `lfx.member.b2b_org_lookup_by_website` |
+| **Transport** | NATS core request/reply |
+| **Queue group** | `lfx-v2-member-service` |
+
+**Request body (JSON):**
+
+```json
+{"name": "<org name>", "website": "<org website or bare domain>"}
+```
+
+**Response — success:**
+
+```json
+{"id": "<canonical 18-char Account SFID>", "logo_url": "<Account.Logo_URL__c>"}
+```
+
+`logo_url` is omitted when the Account has no logo.
+
+**Response — not found, ambiguous, or invalid:**
+
+```json
+{"error": "b2b org not found"}
+```
+
+**Response — bad request:**
+
+```json
+{"error": "name or website is required"}
+```
+
+**Response — lookup failure (infrastructure error):**
+
+```json
+{"error": "b2b org lookup failed"}
+```
+
+The reply is always valid JSON. Check for the presence of the `"error"` key to
+detect failure. A not-found response covers both "no match" and "ambiguous
+match" cases alike, since this RPC is read-only resolution and both mean the
+same thing to a caller: do not treat the id as confirmed.
 
 ### B2B Org UID Resolution
 

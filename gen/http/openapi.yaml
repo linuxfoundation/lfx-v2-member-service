@@ -115,6 +115,10 @@ paths:
                     description: Precondition Failed response.
                     schema:
                         $ref: '#/definitions/MembershipServiceCreateB2bOrgPreconditionFailedResponseBody'
+                "422":
+                    description: Unprocessable Entity response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceCreateB2bOrgUnprocessableEntityResponseBody'
                 "500":
                     description: Internal Server Error response.
                     schema:
@@ -1134,6 +1138,96 @@ paths:
                     description: Service Unavailable response.
                     schema:
                         $ref: '#/definitions/MembershipServiceBulkAddB2bOrgWorkspaceProjectsServiceUnavailableResponseBody'
+            schemes:
+                - http
+            security:
+                - jwt_header_Authorization: []
+    /b2b_orgs/find-or-create:
+        post:
+            tags:
+                - membership-service
+            summary: find-or-create-b2b-org membership-service
+            description: Find the Salesforce Account by website domain or create it as a Company Account, then register it as a B2B organization
+            operationId: membership-service#find-or-create-b2b-org
+            parameters:
+                - name: v
+                  in: query
+                  description: Version of the API
+                  required: false
+                  type: string
+                  enum:
+                    - "1"
+                - name: Find-Or-Create-B2b-OrgRequestBody
+                  in: body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgRequestBody'
+                    required:
+                        - name
+                        - website
+            responses:
+                "200":
+                    description: OK response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgOKResponseBody'
+                    headers:
+                        ETag:
+                            description: ETag header value
+                            type: string
+                        Last-Modified:
+                            description: Last-Modified header value (HTTP date format)
+                            type: string
+                        X-Account-Action:
+                            description: Whether the Account was matched or created
+                            type: string
+                            enum:
+                                - matched
+                                - created
+                "201":
+                    description: Created response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgCreatedResponseBody'
+                    headers:
+                        ETag:
+                            description: ETag header value
+                            type: string
+                        Last-Modified:
+                            description: Last-Modified header value (HTTP date format)
+                            type: string
+                        X-Account-Action:
+                            description: Whether the Account was matched or created
+                            type: string
+                            enum:
+                                - matched
+                                - created
+                "400":
+                    description: Bad Request response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgBadRequestResponseBody'
+                "404":
+                    description: Not Found response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgNotFoundResponseBody'
+                "409":
+                    description: Conflict response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgConflictResponseBody'
+                "422":
+                    description: Unprocessable Entity response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgUnprocessableEntityResponseBody'
+                "500":
+                    description: Internal Server Error response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgInternalServerErrorResponseBody'
+                "501":
+                    description: Not Implemented response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgNotImplementedResponseBody'
+                "503":
+                    description: Service Unavailable response.
+                    schema:
+                        $ref: '#/definitions/MembershipServiceFindOrCreateB2bOrgServiceUnavailableResponseBody'
             schemes:
                 - http
             security:
@@ -3280,6 +3374,49 @@ definitions:
             - temporary
             - timeout
             - fault
+    MembershipServiceCreateB2bOrgUnprocessableEntityResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Account is not eligible as a B2B organization (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
     MembershipServiceCreateB2bOrgWorkspaceBadRequestResponseBody:
         title: 'Mediatype identifier: application/vnd.goa.error; view=default'
         type: object
@@ -4649,6 +4786,335 @@ definitions:
                 description: Is the error a timeout?
                 example: false
         description: Service unavailable (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgBadRequestResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Bad request (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgConflictResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: More than one Account has the website domain; nothing was created (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgCreatedResponseBody:
+        title: MembershipServiceFindOrCreateB2bOrgCreatedResponseBody
+        $ref: '#/definitions/B2bOrgResponse'
+    MembershipServiceFindOrCreateB2bOrgInternalServerErrorResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Internal server error (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgNotFoundResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Resource not found (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgNotImplementedResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Endpoint not implemented (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgOKResponseBody:
+        title: MembershipServiceFindOrCreateB2bOrgOKResponseBody
+        $ref: '#/definitions/B2bOrgResponse'
+    MembershipServiceFindOrCreateB2bOrgRequestBody:
+        title: MembershipServiceFindOrCreateB2bOrgRequestBody
+        type: object
+        properties:
+            name:
+                type: string
+                description: Organization name, used when the Account is created
+                example: Example Corp
+                minLength: 1
+                maxLength: 255
+            website:
+                type: string
+                description: Organization website; its domain (scheme, www. and path stripped) is the match key
+                example: https://example.com
+                minLength: 1
+                maxLength: 255
+        example:
+            name: Example Corp
+            website: https://example.com
+        required:
+            - name
+            - website
+    MembershipServiceFindOrCreateB2bOrgServiceUnavailableResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Find-or-create is disabled or the Apex endpoint is not configured (default view)
+        example:
+            fault: true
+            id: 123abc
+            message: parameter 'p' must be an integer
+            name: bad_request
+            temporary: true
+            timeout: false
+        required:
+            - name
+            - id
+            - message
+            - temporary
+            - timeout
+            - fault
+    MembershipServiceFindOrCreateB2bOrgUnprocessableEntityResponseBody:
+        title: 'Mediatype identifier: application/vnd.goa.error; view=default'
+        type: object
+        properties:
+            fault:
+                type: boolean
+                description: Is the error a server-side fault?
+                example: true
+            id:
+                type: string
+                description: ID is a unique identifier for this particular occurrence of the problem.
+                example: 123abc
+            message:
+                type: string
+                description: Message is a human-readable explanation specific to this occurrence of the problem.
+                example: parameter 'p' must be an integer
+            name:
+                type: string
+                description: Name is the name of this class of errors.
+                example: bad_request
+            temporary:
+                type: boolean
+                description: Is the error temporary?
+                example: true
+            timeout:
+                type: boolean
+                description: Is the error a timeout?
+                example: false
+        description: Account is not eligible as a B2B organization (default view)
         example:
             fault: true
             id: 123abc

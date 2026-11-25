@@ -417,6 +417,22 @@ var B2BOrgCreateBody = dsl.Type("b2b-org-create-body", func() {
 	dsl.Required("sfid")
 })
 
+// B2BOrgFindOrCreateBody is the DSL type for finding or creating a B2B organization by name and website.
+var B2BOrgFindOrCreateBody = dsl.Type("b2b-org-find-or-create-body", func() {
+	dsl.Description("Request body for finding the Salesforce Account by website domain or creating it as a Company Account")
+	dsl.Attribute("name", dsl.String, "Organization name, used when the Account is created", func() {
+		dsl.Example("Example Corp")
+		dsl.MinLength(1)
+		dsl.MaxLength(255)
+	})
+	dsl.Attribute("website", dsl.String, "Organization website; its domain (scheme, www. and path stripped) is the match key", func() {
+		dsl.Example("https://example.com")
+		dsl.MinLength(1)
+		dsl.MaxLength(255)
+	})
+	dsl.Required("name", "website")
+})
+
 // B2BOrgUpdateBody is the DSL type for updating a B2B organization.
 var B2BOrgUpdateBody = dsl.Type("b2b-org-update-body", func() {
 	dsl.Description("Request body for updating mutable fields on a B2B organization")

@@ -314,12 +314,50 @@ func B2BOrgReaderImpl(ctx context.Context) port.B2BOrgReader {
 	case "salesforce":
 		slog.InfoContext(ctx, "initialising Salesforce B2B org reader with sObject cache")
 		sObjectClientInit(ctx) // also calls sfInit internally
-		return salesforce.NewB2BOrgReader(sObjectClient, sfClient)
+		return salesforce.NewB2BOrgReader(sObjectClient, sfClient, B2BOrgIncludeCompanyAccounts(ctx))
 
 	default:
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
 		return nil
 	}
+}
+
+// B2BOrgEligibilityReaderImpl initialises and returns the
+// port.B2BOrgEligibilityReader implementation selected by the
+// REPOSITORY_SOURCE environment variable.
+func B2BOrgEligibilityReaderImpl(ctx context.Context) port.B2BOrgEligibilityReader {
+	repoSource := os.Getenv("REPOSITORY_SOURCE")
+	if repoSource == "" {
+		repoSource = "salesforce"
+	}
+
+	switch repoSource {
+	case "mock":
+		slog.InfoContext(ctx, "initialising mock B2B org eligibility reader")
+		return mock.MockB2BOrgEligibilityReader{}
+
+	case "salesforce":
+		return writeEligibilityReader(B2BOrgIncludeCompanyAccounts(ctx), func() port.B2BOrgEligibilityReader {
+			slog.InfoContext(ctx, "initialising Salesforce B2B org eligibility reader")
+			sfInit(ctx)
+			return salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx))
+		})
+
+	default:
+		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
+		return nil
+	}
+}
+
+// writeEligibilityReader returns a reader only while every Company Account
+// qualifies. With the setting off, a Company Account without a membership is
+// ineligible, and refusing its writes would change staging and prod before
+// the setting is turned on there. A nil reader refuses nothing.
+func writeEligibilityReader(includeCompanyAccounts bool, newReader func() port.B2BOrgEligibilityReader) port.B2BOrgEligibilityReader {
+	if !includeCompanyAccounts {
+		return nil
+	}
+	return newReader()
 }
 
 // B2BOrgWriterImpl initialises and returns the port.B2BOrgWriter implementation
@@ -338,7 +376,7 @@ func B2BOrgWriterImpl(ctx context.Context) port.B2BOrgWriter {
 	case "salesforce":
 		slog.InfoContext(ctx, "initialising Salesforce B2B org writer with sObject cache")
 		sObjectClientInit(ctx)
-		return salesforce.NewB2BOrgWriter(sObjectClient)
+		return salesforce.NewB2BOrgWriter(sObjectClient, salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx)))
 
 	default:
 		log.Fatalf("unsupported REPOSITORY_SOURCE value: %q", repoSource)
@@ -504,6 +542,41 @@ func UserReaderImpl(ctx context.Context) port.UserReader {
 	}
 }
 
+var (
+	includeCompanyAccounts     bool
+	includeCompanyAccountsOnce sync.Once
+)
+
+// B2BOrgIncludeCompanyAccounts reads B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS once and
+// returns whether every Company Account is a b2b_org (model.IsB2BOrgEligible).
+// Unset means false: only Accounts holding a membership qualify, and
+// registration refuses other Company Accounts with 422. A value that does not
+// parse as a boolean stops startup.
+//
+// Turning it on publishes existing Accounts only on their next change or the
+// next b2b_org reindex. Turning it off does no bulk cleanup, but a published
+// non-member leaves the index (grants kept) on its next change or targeted
+// reindex; a full reindex skips it, so removing the rest is a manual step.
+func B2BOrgIncludeCompanyAccounts(ctx context.Context) bool {
+	includeCompanyAccountsOnce.Do(func() {
+		v, err := parseIncludeCompanyAccounts(os.Getenv("B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS"))
+		if err != nil {
+			log.Fatalf("invalid B2B_ORG_INCLUDE_COMPANY_ALL_ACCOUNTS: %v", err)
+		}
+		includeCompanyAccounts = v
+		slog.InfoContext(ctx, "b2b_org eligibility rule", "include_company_accounts", v)
+	})
+	return includeCompanyAccounts
+}
+
+func parseIncludeCompanyAccounts(raw string) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, nil
+	}
+	return strconv.ParseBool(raw)
+}
+
 // GlobalOrgAdminTeamName reads the GLOBAL_ORG_ADMIN_TEAM_NAME environment variable.
 // Returns empty string when not set (allowed in mock/messaging=mock mode; the
 // FGA message simply omits the global_org_admin reference).
@@ -512,7 +585,7 @@ func GlobalOrgAdminTeamName() string {
 }
 
 // B2BOrgAuditorTeamNames reads the LF team names granted blanket auditor access
-// on every b2b_org, from LF_STAFF_TEAM_NAME.
+// on every b2b_org, from LF_STAFF_TEAM_NAME and then GLOBAL_ORG_AUDITORS_TEAM_NAME.
 //
 // No team name is hardcoded here. The authoritative copy lives in
 // charts/lfx-v2-member-service/values.yaml, which both deployments inject
@@ -522,29 +595,28 @@ func GlobalOrgAdminTeamName() string {
 //
 // Names are trimmed and blank or whitespace-only values are dropped, so no path
 // can produce a "team:#member" subject with an empty name — the trap
-// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. The
-// de-duplication below is forward-looking: with one variable it cannot fire,
-// but it stays so that re-adding a team cannot silently break publishing —
-// teamMemberRefs does not de-duplicate, and OpenFGA rejects a repeated tuple
-// within one write request, so two variables naming one team would fail the
-// whole full-sync message on every publish path.
+// GLOBAL_ORG_ADMIN_TEAM_NAME follows the same trim-and-drop semantics. With two
+// variables the de-duplication below is live: the same name in both yields one
+// entry. teamMemberRefs does not de-duplicate, and OpenFGA rejects a repeated
+// tuple within one write request, so two variables naming one team would
+// otherwise fail the whole full-sync message on every publish path.
 //
 // Clearing a variable stops new references being emitted but revokes nothing:
 // fga-sync preserves team subjects on relations not prefixed "global_". This
 // grant uses "auditor", so no service code path can remove it — only
 // scripts/revoke-lf-teams-auditor-openfga.sh.
 //
-// Staff only. LF_CONTRACTOR_TEAM_NAME was read here under LFXV2-3071 and has
-// been withdrawn: that parity rested on lf-contractor holding auditor on the
+// LF_CONTRACTOR_TEAM_NAME is not read. It was read here under LFXV2-3071 and
+// has been withdrawn: that parity rested on lf-contractor holding auditor on the
 // tenant root project, and lfx-self-serve#2814 Release 2 deletes that tuple
 // (dropped, not migrated). Contractors keep explicit per-org grants only
-// (Manish Dixit, LFXV2-3071, 2026-08-10). Re-adding a team is not a one-line
-// change: it touches the values.yaml key, both Deployment templates
-// (LF_*_TEAM_NAME env), the envVars list below, the grant script's
+// (Manish Dixit, LFXV2-3071, 2026-08-10). Adding or re-adding a team is not a
+// one-line change: it touches the values.yaml key, both Deployment templates
+// (*_TEAM_NAME env), the envVars list below, the grant and revoke scripts'
 // fga_team_names arguments, the runbook's kubectl exports, and the CLAUDE.md
 // env tables — and the resulting grant cannot be taken back by reverting it.
 func B2BOrgAuditorTeamNames() []string {
-	envVars := []string{"LF_STAFF_TEAM_NAME"}
+	envVars := []string{"LF_STAFF_TEAM_NAME", "GLOBAL_ORG_AUDITORS_TEAM_NAME"}
 	names := make([]string, 0, len(envVars))
 	seen := make(map[string]struct{}, len(envVars))
 	for _, envVar := range envVars {
@@ -581,7 +653,7 @@ func BackfillIteratorImpl(ctx context.Context) usecaseSvc.BackfillIterator {
 		slog.InfoContext(ctx, "initialising Salesforce backfill iterator")
 		sfInit(ctx)
 		return salesforce.NewBackfillIterator(
-			salesforce.NewAccountRepo(sfClient),
+			salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx)),
 			salesforce.NewMembershipRepo(sfClient),
 			salesforce.NewKeyContactRepo(sfClient),
 		)
@@ -676,17 +748,31 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		usecaseSvc.WithUserReader(UserReaderImpl(ctx)),
 		usecaseSvc.WithRunnerB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
 	}
+	if repoSource == "mock" {
+		opts = append(opts,
+			usecaseSvc.WithB2BOrgEligibilityReader(mock.MockB2BOrgEligibilityReader{}),
+			usecaseSvc.WithChildLinkReader(mock.NewMockB2BOrgChildLinkReader()),
+		)
+	}
 
 	// cdc_repair drain collaborators — only wired in Salesforce mode where the
-	// NATS cdc-repair bucket and a real quota gauge exist. In mock mode the
-	// repair path returns ServiceUnavailable ("not configured").
+	// NATS cdc-repair bucket and a real quota gauge exist, and the repair
+	// queue only with the NATS publisher: a mock publisher delivers nothing, so
+	// draining would clear markers for records it never republished. Otherwise
+	// the repair path returns ServiceUnavailable ("not configured").
 	if repoSource == "salesforce" {
+		if repairQueueEnabled(messagingSource()) {
+			opts = append(opts, usecaseSvc.WithRepairStore(nats.NewCDCRepairStore(nc)))
+		} else {
+			slog.InfoContext(ctx, "cdc_repair drain not wired: MESSAGING_SOURCE is not nats", "messaging_source", messagingSource())
+		}
 		opts = append(opts,
-			usecaseSvc.WithRepairStore(nats.NewCDCRepairStore(nc)),
+			usecaseSvc.WithChildLinkReader(nats.NewAccessCheckRPC(nc.Conn(), natsTimeoutFromEnv())),
 			usecaseSvc.WithQuotaGauge(salesforce.NewAPIUsageGauge(salesforce.NewLimitsRefreshFunc(sfClient))),
 			// Batch readers for targeted (items) reindex of the prod volume drivers.
 			usecaseSvc.WithMembershipBatchReader(salesforce.NewMembershipRepo(sfClient)),
 			usecaseSvc.WithKeyContactBatchReader(salesforce.NewKeyContactRepo(sfClient)),
+			usecaseSvc.WithB2BOrgEligibilityReader(salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx))),
 			// Fresh-fetch sibling reader for the Inactive-revoke check (never
 			// served from the stale membership-group cache).
 			usecaseSvc.WithRunnerKeyContactsByMembershipReader(salesforce.NewKeyContactRepo(sfClient)),
@@ -711,6 +797,12 @@ func BackfillRunnerImpl(ctx context.Context) *usecaseSvc.Runner {
 		ProjectResolverImpl(ctx),
 		opts...,
 	)
+}
+
+// repairQueueEnabled reports whether the cdc_repair drain may be wired for the
+// given MESSAGING_SOURCE.
+func repairQueueEnabled(messaging string) bool {
+	return messaging == "nats"
 }
 
 // adminReindexQuotaThresholdFromEnv parses ADMIN_REINDEX_QUOTA_THRESHOLD (a
@@ -752,6 +844,7 @@ func B2BOrgWriterUseCase(ctx context.Context) usecaseSvc.B2BOrgWriter {
 	return usecaseSvc.NewB2BOrgWriter(
 		usecaseSvc.WithB2BOrgReader(B2BOrgReaderImpl(ctx)),
 		usecaseSvc.WithB2BOrgWriter(B2BOrgWriterImpl(ctx)),
+		usecaseSvc.WithAccountFindOrCreator(AccountFindOrCreatorImpl(ctx)),
 		usecaseSvc.WithB2BOrgPublisher(MemberPublisherImpl(ctx)),
 		usecaseSvc.WithGlobalOrgAdminTeamName(GlobalOrgAdminTeamName()),
 		usecaseSvc.WithB2BOrgAuditorTeams(B2BOrgAuditorTeamNames()),
@@ -936,9 +1029,10 @@ func InviteAcceptedServiceImpl(ctx context.Context) *usecaseSvc.InviteAcceptedSe
 
 // QueueSubscriptions registers all runAPI NATS subscriptions. It initialises
 // NATS, registers inbound RPC handlers (project-id-map when not in mock mode;
-// b2b_org_lookup whenever a B2BOrgReader is wired, including mock mode), and
-// always registers the invite_accepted handler. Drain callbacks are collected in
-// apiSubs; call DrainAPISubscriptions on shutdown.
+// b2b_org_lookup and b2b_org_lookup_by_website whenever a B2BOrgReader is wired,
+// including mock mode), and always registers the invite_accepted handler.
+// Drain callbacks are collected in apiSubs; call DrainAPISubscriptions on
+// shutdown.
 func QueueSubscriptions(ctx context.Context) error {
 	natsInit(ctx)
 
@@ -958,6 +1052,14 @@ func QueueSubscriptions(ctx context.Context) error {
 			return fmt.Errorf("subscribe b2b_org_lookup: %w", err)
 		}
 		apiSubs = append(apiSubs, sub.Drain)
+
+		// b2b_org_lookup_by_website: resolve a b2b_org by name/website when
+		// callers cannot resolve it directly via b2b_org_lookup.
+		websiteSub, err := nats.SubscribeB2BOrgLookupByWebsite(natsClient.Conn(), reader)
+		if err != nil {
+			return fmt.Errorf("subscribe b2b_org_lookup_by_website: %w", err)
+		}
+		apiSubs = append(apiSubs, websiteSub.Drain)
 	}
 
 	// invite_accepted: always registered; mock mode wires a no-op invite sender.
@@ -1034,7 +1136,7 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 	// directly — so the published record always reflects the CDC change.
 	cdcMembershipRepo := salesforce.NewMembershipRepo(sfClient)
 	cdcKeyContactRepo := salesforce.NewKeyContactRepo(sfClient)
-	cdcAccountRepo := salesforce.NewAccountRepo(sfClient)
+	cdcAccountRepo := salesforce.NewAccountRepo(sfClient, B2BOrgIncludeCompanyAccounts(ctx))
 
 	consumer := usecaseSvc.NewCDCConsumer(
 		usecaseSvc.WithCDCSubscriber(pubsubClient),
@@ -1055,6 +1157,9 @@ func CDCConsumerImpl(ctx context.Context) (*usecaseSvc.CDCConsumer, *pubsub.Repl
 		// Durable repair queue — records the records skipped by the quota guard so
 		// they can be repaired via POST /admin/reindex {cdc_repair:true}.
 		usecaseSvc.WithCDCRepairStore(nats.NewCDCRepairStore(natsClient)),
+		// Access-model read of the orgs still listing a changed Account as a
+		// child, so a move with no cached previous record is withdrawn.
+		usecaseSvc.WithCDCChildLinkReader(nats.NewAccessCheckRPC(natsClient.Conn(), natsTimeoutFromEnv())),
 		// Durable grant record — lets a key_contact delete, which carries only the
 		// contact's own SFID after the Salesforce record is gone, address the revoke.
 		usecaseSvc.WithCDCKeyContactGrantIndex(nats.NewKeyContactGrantIndex(natsClient)),

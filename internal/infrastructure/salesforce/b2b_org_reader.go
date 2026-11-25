@@ -23,11 +23,12 @@ type B2BOrgReader struct {
 
 // NewB2BOrgReader creates a B2BOrgReader backed by the given SObjectClient and
 // an optional Salesforce SOQL client (used for child-list queries). sfClient
-// may be nil in tests that only exercise GetB2BOrg.
-func NewB2BOrgReader(client *SObjectClient, sfClient *sf.Salesforce) *B2BOrgReader {
+// may be nil in tests that only exercise GetB2BOrg. includeCompanyAccounts is
+// passed to NewAccountRepo.
+func NewB2BOrgReader(client *SObjectClient, sfClient *sf.Salesforce, includeCompanyAccounts bool) *B2BOrgReader {
 	var repo *AccountRepo
 	if sfClient != nil {
-		repo = NewAccountRepo(sfClient)
+		repo = NewAccountRepo(sfClient, includeCompanyAccounts)
 	}
 	return &B2BOrgReader{client: client, accountRepo: repo}
 }
@@ -62,4 +63,12 @@ func (r *B2BOrgReader) FetchChildUIDsByParentUIDs(ctx context.Context, parentUID
 		return nil, fmt.Errorf("accountRepo not initialised")
 	}
 	return r.accountRepo.FetchChildUIDsByParentUIDs(ctx, parentUIDs)
+}
+
+// FindByNameOrWebsite delegates to AccountRepo for the SOQL name/website match.
+func (r *B2BOrgReader) FindByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error) {
+	if r.accountRepo == nil {
+		return nil, false, fmt.Errorf("accountRepo not initialised")
+	}
+	return r.accountRepo.FindAccountByNameOrWebsite(ctx, name, website)
 }
