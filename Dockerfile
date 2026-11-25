@@ -1,10 +1,9 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 
-# checkov:skip=CKV_DOCKER_7:No free access to Chainguard versioned labels.
 # hadolint global ignore=DL3007
 
-FROM cgr.dev/chainguard/go:latest AS builder
+FROM golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS builder
 
 # Set necessary environment variables needed for our image. Allow building to
 # other architectures via cross-compilation build-arg.

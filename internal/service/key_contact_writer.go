@@ -458,7 +458,7 @@ func (o *keyContactWriterOrchestrator) Update(ctx context.Context, in KeyContact
 			}
 			// Failures are logged by the choke point but not propagated: the SF
 			// update already succeeded, and this path accepts unflushed loss.
-			revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
+			_, _, _ = revokeKeyContactPairIfUnjustified(ctx, o.memberPublisher, lister, keyContactPairRevoke{
 				membershipUID: newKC.MembershipUID,
 				username:      oldUsername,
 				excludeUID:    newKC.UID,

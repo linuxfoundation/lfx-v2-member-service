@@ -3,7 +3,9 @@
 
 module github.com/linuxfoundation/lfx-v2-member-service
 
-go 1.27.4
+go 1.26.0
+
+toolchain go1.26.11
 
 require (
 	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f

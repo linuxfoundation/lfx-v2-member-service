@@ -39,8 +39,5 @@ jobs:
           # All available variables are described in documentation
           # https://megalinter.io/configuration/
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
-          REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
-          # The image defaults to GOTOOLCHAIN=local with Go 1.26. This lets the
-          # Go linters download the go.mod toolchain (Go 1.27).
+          # Go linters can download the go.mod toolchain when needed.
           GOTOOLCHAIN: auto
