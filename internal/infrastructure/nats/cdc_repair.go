@@ -38,11 +38,14 @@ var repairReindexTypes = map[string]struct{}{
 	constants.ReindexTypeProjectMembershipDeleteAccess: {},
 }
 
-// repairMarkerValue is the minimal pending-marker payload. Only skipped_at is
-// stored — the type and SFID live in the key. A later skip for the same target
-// rewrites the same marker with a fresh skipped_at.
+// repairMarkerValue is the minimal pending-marker payload; the type and SFID
+// live in the key. A later skip for the same target rewrites the same marker
+// with a fresh skipped_at and no lookup_attempts. lookup_attempts is written
+// only by RequeuePending; its absence (every marker written before it existed)
+// decodes as 0.
 type repairMarkerValue struct {
-	SkippedAt time.Time `json:"skipped_at"`
+	SkippedAt      time.Time `json:"skipped_at"`
+	LookupAttempts int       `json:"lookup_attempts,omitempty"`
 }
 
 // CDCRepairStore implements port.CDCRepairStore over the cdc-repair NATS KV
@@ -121,7 +124,10 @@ func (s *CDCRepairStore) PutPending(ctx context.Context, reindexType, sfid strin
 
 // ListPending returns up to limit pending markers for reindexType with their KV
 // revisions. It consumes a bounded, type-filtered key stream and stops early —
-// it never enumerates the full bucket. Ordering is not promised.
+// it never enumerates the full bucket. Keys arrive in the order of their latest
+// write: the key lister replays each key's last revision in stream-sequence
+// order, and the bucket keeps one revision per key, so a marker rewritten by
+// RequeuePending is listed after every marker not rewritten since.
 func (s *CDCRepairStore) ListPending(ctx context.Context, reindexType string, limit int) ([]port.RepairMarker, error) {
 	if err := validateReindexType(reindexType); err != nil {
 		return nil, err
@@ -186,13 +192,62 @@ func (s *CDCRepairStore) ListPending(ctx context.Context, reindexType string, li
 				"type", reindexType, "uid", sfid, "error", unmarshalErr)
 		}
 		markers = append(markers, port.RepairMarker{
-			Type:      reindexType,
-			SFID:      sfid,
-			SkippedAt: val.SkippedAt,
-			Revision:  entry.Revision(),
+			Type:           reindexType,
+			SFID:           sfid,
+			SkippedAt:      val.SkippedAt,
+			Revision:       entry.Revision(),
+			LookupAttempts: val.LookupAttempts,
 		})
 	}
 	return markers, nil
+}
+
+// RequeuePending revision-conditionally rewrites marker with lookupAttempts,
+// keeping its skipped_at. The new revision moves it behind every other pending
+// marker of its type (see ListPending).
+//
+// When the revision no longer matches, whatever is stored now survives and
+// Conflict is returned. The one exception is a marker that is gone: a
+// concurrent drain republished the contact with a resolved username and
+// settled the marker, after which this caller's failed lookup published an
+// empty username over that repair. Nothing else would retry it, so the marker
+// is recreated create-only (kv.Create), which loses to any fresh write that
+// lands in between and returns Conflict then.
+func (s *CDCRepairStore) RequeuePending(ctx context.Context, marker port.RepairMarker, lookupAttempts int) error {
+	if err := validateTarget(marker.Type, marker.SFID); err != nil {
+		return err
+	}
+	kv, err := s.kv()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(repairMarkerValue{SkippedAt: marker.SkippedAt, LookupAttempts: lookupAttempts})
+	if err != nil {
+		return errs.NewUnexpected("cdc-repair: failed to marshal marker", err)
+	}
+	key := pendingKey(marker.Type, marker.SFID)
+	_, updErr := kv.Update(ctx, key, data, marker.Revision)
+	if updErr == nil {
+		return nil
+	}
+	if !errors.Is(updErr, jetstream.ErrKeyExists) && !errors.Is(updErr, jetstream.ErrKeyNotFound) {
+		return errs.NewUnexpected(fmt.Sprintf("cdc-repair: failed to requeue marker for %s/%s", marker.Type, marker.SFID), updErr)
+	}
+
+	conflict := errs.NewConflict(fmt.Sprintf("cdc-repair: marker for %s/%s changed since selection", marker.Type, marker.SFID))
+	if _, getErr := kv.Get(ctx, key); getErr == nil {
+		// A newer marker (a fresh write or another drain's requeue) is stored.
+		return conflict
+	} else if !errors.Is(getErr, jetstream.ErrKeyNotFound) {
+		return errs.NewUnexpected(fmt.Sprintf("cdc-repair: failed to read marker for %s/%s", marker.Type, marker.SFID), getErr)
+	}
+	if _, createErr := kv.Create(ctx, key, data); createErr != nil {
+		if errors.Is(createErr, jetstream.ErrKeyExists) {
+			return conflict
+		}
+		return errs.NewUnexpected(fmt.Sprintf("cdc-repair: failed to recreate marker for %s/%s", marker.Type, marker.SFID), createErr)
+	}
+	return nil
 }
 
 // DeletePending revision-conditionally deletes the marker for

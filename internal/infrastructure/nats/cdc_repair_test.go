@@ -4,9 +4,12 @@
 package nats
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/linuxfoundation/lfx-v2-member-service/pkg/constants"
 )
@@ -36,4 +39,32 @@ func TestValidateReindexType_RejectsUnknownType(t *testing.T) {
 
 func TestValidateTarget_RejectsNonCanonicalSFID(t *testing.T) {
 	assert.Error(t, validateTarget(constants.ReindexTypeB2BOrgDeleteAccess, "not-an-sfid"))
+}
+
+// TestRepairMarkerValue_LookupAttempts pins the marker value's backward
+// compatibility: a marker written before lookup_attempts existed decodes as 0
+// attempts, a fresh marker still encodes exactly as before, and a requeued
+// marker round-trips its count.
+func TestRepairMarkerValue_LookupAttempts(t *testing.T) {
+	skippedAt := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name         string
+		stored       string
+		wantAttempts int
+	}{
+		{name: "legacy marker without the field", stored: `{"skipped_at":"2026-10-01T00:00:00Z"}`, wantAttempts: 0},
+		{name: "requeued marker", stored: `{"skipped_at":"2026-10-01T00:00:00Z","lookup_attempts":3}`, wantAttempts: 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var val repairMarkerValue
+			require.NoError(t, json.Unmarshal([]byte(tc.stored), &val))
+			assert.Equal(t, skippedAt, val.SkippedAt)
+			assert.Equal(t, tc.wantAttempts, val.LookupAttempts)
+
+			encoded, err := json.Marshal(val)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.stored, string(encoded), "re-encoding must reproduce the stored form")
+		})
+	}
 }
