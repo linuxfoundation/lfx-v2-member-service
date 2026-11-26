@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,17 +23,17 @@ import (
 )
 
 // seqQueryTransport returns a fixed /limits response for sf.Init, then returns
-// SOQL query responses from a queue (one per /query call, in order). When the
-// queue is exhausted it returns an empty-records response so tests don't have
-// to account for trailing calls.
+// responses from a queue (one per /query or /search call, in order). When the
+// queue is exhausted it returns the empty response for that endpoint so tests
+// don't have to account for trailing calls.
 type seqQueryTransport struct {
 	mu            sync.Mutex
 	responses     []string // JSON response bodies, consumed in order
 	queryStatuses []int    // optional HTTP status codes aligned with responses
 	pos           int
 	queryCalls    int
-	queries       []string // decoded q parameter of each initial /query call
-	paths         []string // URL path of every query call
+	queries       []string // decoded q parameter of each initial /query or /search call
+	paths         []string // URL path of every /query or /search call
 }
 
 func (t *seqQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -41,13 +42,16 @@ func (t *seqQueryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if strings.Contains(req.URL.Path, "/limits") {
 		return fakeResponse(http.StatusOK, `{}`, nil), nil
 	}
-	// All other calls are SOQL /query requests.
+	// All other calls are SOQL /query or SOSL /search requests.
 	t.queryCalls++
 	t.paths = append(t.paths, req.URL.Path)
 	if q := req.URL.Query().Get("q"); q != "" {
 		t.queries = append(t.queries, q)
 	}
 	body := `{"totalSize":0,"done":true,"records":[]}`
+	if strings.HasSuffix(req.URL.Path, "/search") {
+		body = `{"searchRecords":[]}`
+	}
 	status := http.StatusOK
 	if t.pos < len(t.responses) {
 		body = t.responses[t.pos]
@@ -748,15 +752,24 @@ func TestAccountRepo_CompanyAccountsExcluded(t *testing.T) {
 	})
 
 	t.Run("website lookup", func(t *testing.T) {
-		repo := newRepo(t, soqlAccountsResponse(
-			soqlAccountRecord(nonMember, "Acme Corp", "", "acme.com", ""),
-		))
+		repo := newRepo(t,
+			soqlAccountsResponse(soqlAccountRecord(nonMember, "Acme Corp", "", "acme.com", "")),
+			soslSearchResponse(nonMember),
+			soqlAccountsResponse(soqlAccountRecord(nonMember, "Acme Corp", "", "other.com", "acme.com")),
+		)
 		org, ok, err := repo.FindAccountByNameOrWebsite(context.Background(), "Acme Corp", "acme.com")
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.Nil(t, org)
-		require.NotEmpty(t, tr.queries)
+		require.True(t, slices.ContainsFunc(tr.queries, func(q string) bool {
+			return strings.Contains(q, "Id IN ('"+nonMember+"')")
+		}), "the domain_alias Id re-read must run")
 		for _, q := range tr.queries {
+			if strings.HasPrefix(q, "FIND ") {
+				// SOSL cannot express the membership semi-join; the domain_alias
+				// re-read of its Ids is a SOQL query and carries the filter.
+				continue
+			}
 			assert.Contains(t, q, membershipFilter, "the LIMIT and saturation check must count members only")
 		}
 	})

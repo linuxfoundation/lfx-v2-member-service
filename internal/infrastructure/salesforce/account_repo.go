@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	sf "github.com/k-capehart/go-salesforce/v3"
 	"github.com/linuxfoundation/lfx-v2-member-service/internal/domain/model"
@@ -57,7 +58,8 @@ WHERE IsDeleted = false`
 // executing.
 const accountsSOQLBase = "\nSELECT\n    " + accountsSOQLSelect + accountsSOQLWhere
 
-// AccountRepo handles Salesforce SOQL queries for Account (B2BOrg) records.
+// AccountRepo handles Salesforce SOQL queries and SOSL searches for Account
+// (B2BOrg) records.
 type AccountRepo struct {
 	client                 *sf.Salesforce
 	includeCompanyAccounts bool
@@ -396,19 +398,33 @@ func (r *AccountRepo) FetchChildUIDsByParentUIDs(
 // true match can be truncated out of this page.
 const accountMatchPageSize = 5
 
-// accountLikeMatchPageSize bounds the substring (LIKE) match tiers'
-// (domain_alias, website) raw SOQL query, before the verify closure narrows
-// raw hits down to exact-hostname/exact-alias matches. This must stay well
-// above accountMatchPageSize: a LIKE predicate can return many irrelevant
-// substring hits, and if the raw page were capped at the same size as the
+// accountLikeMatchPageSize bounds the website tier's raw LIKE page, before the
+// verify closure narrows raw hits down to exact-hostname matches. This must
+// stay well above accountMatchPageSize: a substring match can return many
+// irrelevant hits, and if the raw page were capped at the same size as the
 // verified-match count, a second true match could be truncated out of the
 // page before verify ever saw it, masking real ambiguity.
 const accountLikeMatchPageSize = 50
+
+// aliasSearchLimit bounds the domain_alias SOSL search and its Id re-read.
+// The search matches the domain in any searchable field of any Account,
+// members or not, and a search at the limit is ambiguous, which also skips
+// the website and name tiers; so it sits well above accountLikeMatchPageSize.
+// 200 Ids keep the re-read's request URI well under Salesforce's 16,384
+// character limit.
+const aliasSearchLimit = 200
 
 // websiteDomain extracts the lowercase, www-stripped hostname from a website
 // URL (with or without a scheme). Returns "" when website is empty or does
 // not parse to a usable host.
 func websiteDomain(website string) string {
+	return foldDomain(websiteHost(website))
+}
+
+// websiteHost extracts the lowercase hostname from a website URL (with or
+// without a scheme), keeping any "www." prefix. Returns "" when website is
+// empty or does not parse to a usable host.
+func websiteHost(website string) string {
 	website = strings.TrimSpace(website)
 	if website == "" {
 		return ""
@@ -417,10 +433,10 @@ func websiteDomain(website string) string {
 		website = "https://" + website
 	}
 	u, err := url.Parse(website)
-	if err != nil || u.Hostname() == "" {
+	if err != nil {
 		return ""
 	}
-	return foldDomain(u.Hostname())
+	return strings.ToLower(u.Hostname())
 }
 
 // foldDomain lowercases and strips a leading "www." so domains stored with
@@ -441,10 +457,12 @@ func foldDomain(s string) string {
 // resolution, never auto-provisioning, so both cases mean the same thing to
 // a caller — do not treat the id as confirmed.
 func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, website string) (*model.B2BOrg, bool, error) {
-	domain := websiteDomain(website)
+	host := websiteHost(website)
+	domain := foldDomain(host)
+	term := domainSearchTerm(host, domain)
 	name = strings.TrimSpace(name)
 
-	if domain != "" {
+	if term != "" {
 		// Account_Domain__c is stored verbatim in Salesforce (no www./case
 		// folding applied on write), so an exact match against the folded
 		// domain alone would miss a record stored as "www.<domain>". Query
@@ -458,23 +476,19 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 			return org, ok, err
 		}
 
-		// Each matchSingleAccount call below is a single Salesforce HTTP
-		// request bounded only by the client's fixed httpTimeout, not by ctx:
-		// go-salesforce's QueryPage never propagates ctx into the underlying
+		// Each Salesforce HTTP request below (one per tier, two for
+		// domain_alias) is bounded only by the client's fixed httpTimeout,
+		// not by ctx: go-salesforce never propagates ctx into the underlying
 		// http.Request, so ctx expiring cannot abort an in-flight call. Check
-		// ctx between tiers so a deadline that has already passed (e.g. the
-		// first tier alone consumed the handler's budget) stops further
-		// tiers from running, rather than letting up to three more
+		// ctx between requests so a deadline that has already passed (e.g.
+		// the first tier alone consumed the handler's budget) stops further
+		// requests from running, rather than letting up to four more
 		// full-timeout requests run after the caller has given up.
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
 
-		org, ok, ambiguous, err = r.matchSingleAccount(ctx,
-			"Domain_Alias__c LIKE "+quoteLikeSOQL(domain), "domain_alias", accountLikeMatchPageSize,
-			func(o *model.B2BOrg) bool {
-				return slices.ContainsFunc(o.DomainAliases, func(alias string) bool { return foldDomain(alias) == domain })
-			})
+		org, ok, ambiguous, err = r.matchAccountByAlias(ctx, term, domain)
 		if err != nil || ok || ambiguous {
 			return org, ok, err
 		}
@@ -499,6 +513,77 @@ func (r *AccountRepo) FindAccountByNameOrWebsite(ctx context.Context, name, webs
 		return org, ok, err
 	}
 	return nil, false, nil
+}
+
+// domainSearchTerm returns the form of a website's domain that the alias
+// search uses, or "" when the website carries no usable domain and the
+// domain tiers must not run. Stored domains always contain a dot
+// (normalizeDomain), so a dot-less folded domain can only match one stored
+// as "www.<domain>" (www.com folds to com), and that form is searched when
+// the website carried it. Any other single label ("n/a", "-") or a value with
+// fewer than two letters or digits (".", "a.") is a placeholder: SOSL rejects
+// it, failing the whole lookup, and the website tier's LIKE would match
+// nearly every Account and block the name tier.
+func domainSearchTerm(host, domain string) string {
+	if domain == "" {
+		return ""
+	}
+	term := domain
+	if !strings.Contains(term, ".") {
+		if host != "www."+domain {
+			return ""
+		}
+		term = host
+	}
+	alnum := 0
+	for _, r := range term {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			alnum++
+		}
+	}
+	if alnum < 2 {
+		return ""
+	}
+	return term
+}
+
+// matchAccountByAlias is the domain_alias tier. Domain_Alias__c is a long
+// text area, which SOQL can select but not filter on, so candidate Ids come
+// from a SOSL search and are re-read through matchSingleAccount, which applies
+// eligibility, the exact-alias verify and the ambiguity rule. The search can
+// also hit Accounts that mention domain in other fields; verify drops those.
+// A search page at the limit is ambiguous for the same reason a saturated
+// SOQL page is: it cannot prove no further true match exists, so it stops the
+// website and name tiers as well. SOSL cannot carry searchBase's membership
+// semi-join, so with Company Accounts excluded non-members count toward that
+// limit; that can only turn a match into "ambiguous", never into a wrong
+// match. Salesforce indexes searches asynchronously, so an alias saved
+// moments ago may not be found yet. term is domainSearchTerm's result; verify
+// compares against the folded domain.
+func (r *AccountRepo) matchAccountByAlias(ctx context.Context, term, domain string) (*model.B2BOrg, bool, bool, error) {
+	ids, err := searchIDs(r.client, "FIND {"+quoteSOSLPhrase(term)+"} IN ALL FIELDS"+
+		" RETURNING Account(Id WHERE IsDeleted = false LIMIT "+strconv.Itoa(aliasSearchLimit)+")")
+	if err != nil {
+		return nil, false, false, fmt.Errorf("matching accounts by domain_alias: %w", err)
+	}
+	if len(ids) >= aliasSearchLimit {
+		slog.WarnContext(ctx, "b2b org name/website lookup skipped: raw match page saturated",
+			"match_type", "domain_alias", "limit", aliasSearchLimit, "records", len(ids))
+		return nil, false, true, nil
+	}
+	if len(ids) == 0 {
+		return nil, false, false, nil
+	}
+	// Same reason as the checks between tiers: neither request can be
+	// cancelled in flight, so a deadline spent on the search must not start
+	// the re-read.
+	if err := ctx.Err(); err != nil {
+		return nil, false, false, err
+	}
+	return r.matchSingleAccount(ctx, "Id IN ("+buildSOQLInClause(ids)+")", "domain_alias", aliasSearchLimit,
+		func(o *model.B2BOrg) bool {
+			return slices.ContainsFunc(o.DomainAliases, func(alias string) bool { return foldDomain(alias) == domain })
+		})
 }
 
 // matchSingleAccount runs predicate (a pre-quoted/escaped SOQL WHERE
