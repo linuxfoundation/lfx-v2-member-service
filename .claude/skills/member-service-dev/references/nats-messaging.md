@@ -102,7 +102,7 @@ Resolves a `b2b_org` by name/website when a caller cannot resolve it directly
 via `lfx.member.b2b_org_lookup` (e.g. a legacy, non-SFID id for an org that
 exists under a different SFID). Implemented in
 `internal/infrastructure/nats/b2b_org_lookup_by_website_handler.go`, backed by
-`AccountRepo.FindAccountByNameOrWebsite` (Salesforce SOQL).
+`AccountRepo.FindAccountByNameOrWebsite` (Salesforce SOQL, plus one SOSL search).
 
 Resolution is tiered: primary domain (`Account_Domain__c`) → domain alias
 (`Domain_Alias__c`) → website (`Website`) → name (`Name`), in that priority
@@ -112,6 +112,15 @@ before being accepted (so a `Website LIKE '%hat.com%'` SOQL hit on
 any domain tier stops resolution entirely rather than falling through to a
 less specific tier, since a less specific matcher could otherwise resolve to
 a different, incorrect organization.
+
+`Domain_Alias__c` is a long text area: SOQL can select it but rejects any
+filter on it (`INVALID_FIELD`). The alias tier therefore finds candidate Ids
+with a SOSL `FIND {"<domain>"} IN ALL FIELDS` search and re-reads them with
+SOQL `Id IN (...)`, where eligibility, the exact-alias check and the ambiguity
+rule apply. A search returning 200 or more Ids is treated as ambiguous and,
+like any ambiguity, stops the website and name steps. Salesforce indexes
+searches asynchronously, so an alias saved moments ago may not be found yet.
+Never add a SOQL `WHERE` predicate on `Domain_Alias__c`.
 
 | Field | Value |
 | --- | --- |

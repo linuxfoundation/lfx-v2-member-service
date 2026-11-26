@@ -20,7 +20,7 @@ import (
 )
 
 // b2bOrgLookupByWebsiteHandlerTimeout bounds downstream FindByNameOrWebsite work
-// (Salesforce SOQL) so a hung dependency cannot pin the subscription callback
+// (Salesforce SOQL and SOSL) so a hung dependency cannot pin the subscription callback
 // indefinitely.
 const b2bOrgLookupByWebsiteHandlerTimeout = 30 * time.Second
 
