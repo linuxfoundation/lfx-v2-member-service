@@ -47,4 +47,10 @@ type CDCEvent struct {
 	// and no change. The consumer saves ReplayID without processing it, which
 	// keeps a quiet channel's cursor inside Salesforce's 72-hour retention.
 	CursorOnly bool
+
+	// MissingAsset is true only when a Project_Role__c CREATE event body
+	// carries Asset__c as null or empty. Such a role has no membership and can
+	// never become a key contact as created, so the consumer skips its
+	// Salesforce fetch. The zero value means "process normally".
+	MissingAsset bool
 }

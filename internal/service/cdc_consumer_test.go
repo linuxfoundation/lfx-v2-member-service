@@ -4,9 +4,11 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -700,6 +702,59 @@ func TestCDCConsumer_Asset_Upsert_SoftTTLEvictionError_IsNonFatal(t *testing.T) 
 }
 
 // ── Project_Role__c (key_contact) tests ──────────────────────────────────────
+
+func TestCDCConsumer_ProjectRole_CreateMissingAsset_SkipsFetchAndLogsReason(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	reader := &countingKeyContactBatchReader{}
+	pub := &subjectCapturingPublisher{}
+	replay := &fakeReplayStore{}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeCreate, RecordIDs: []string{sfid("kc-no-asset")}, ReplayID: []byte("r-na"), MissingAsset: true},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		pub,
+		"",
+		svc.WithCDCKeyContactBatchReader(reader),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", replay))
+
+	assert.Equal(t, 0, reader.calls, "no Salesforce fetch for a role create with no Asset")
+	assert.Empty(t, pub.indexer, "nothing published")
+	assert.Equal(t, []byte("r-na"), replay.saved, "replay cursor still advances")
+	out := logs.String()
+	assert.Contains(t, out, `"msg":"cdc: project_role create skipped"`)
+	assert.Contains(t, out, `"reason":"empty_asset_id"`)
+	assert.Contains(t, out, `"record_count":1`)
+}
+
+func TestCDCConsumer_ProjectRole_CreateWithAsset_StillFetches(t *testing.T) {
+	// The fetch reports the role as a conversion error, which is today's
+	// outcome for an Asset-less role: marked seen, not deleted, not published.
+	reader := &countingKeyContactBatchReader{convErr: []string{sfid("kc-with-asset")}}
+
+	consumer := newTestCDCConsumer(
+		&fakeCDCSubscriber{events: []model.CDCEvent{
+			{Entity: "Project_Role__c", ChangeType: model.CDCChangeCreate, RecordIDs: []string{sfid("kc-with-asset")}, ReplayID: []byte("r-wa")},
+		}},
+		&fakeB2BOrgReader{},
+		&mock.MockCacheInvalidator{},
+		&subjectCapturingPublisher{},
+		"",
+		svc.WithCDCKeyContactBatchReader(reader),
+	)
+
+	require.NoError(t, consumer.Run(context.Background(), "/data/ProjectRoleChangeEvent", &fakeReplayStore{}))
+
+	assert.Equal(t, 1, reader.calls, "default path must still fetch from Salesforce")
+}
 
 func TestCDCConsumer_ProjectRole_Upsert_WithUsername_PublishesIndexerAndFGAMemberPut(t *testing.T) {
 	kc := &model.KeyContact{UID: sfid("kc-uid-1"), MembershipUID: "pm-uid-1", Username: "alice"}
