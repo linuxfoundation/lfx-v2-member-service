@@ -95,11 +95,39 @@ func normalizeRecord(record map[string]interface{}, replayID []byte) (model.CDCE
 	}
 
 	return model.CDCEvent{
-		Entity:     entity,
-		RecordIDs:  recordIDs,
-		ChangeType: model.CDCChangeType(changeType),
-		ReplayID:   replayID,
+		Entity:       entity,
+		RecordIDs:    recordIDs,
+		ChangeType:   model.CDCChangeType(changeType),
+		ReplayID:     replayID,
+		MissingAsset: projectRoleCreateMissingAsset(record, entity, changeType),
 	}, nil
+}
+
+// projectRoleCreateMissingAsset reports whether a Project_Role__c CREATE body
+// carries Asset__c as null or empty. A Pub/Sub CREATE body holds every field,
+// so empty there means the role really has no Asset; on UPDATE unchanged
+// fields are also empty, so UPDATE never matches. Anything uncertain returns
+// false and the event is processed normally.
+func projectRoleCreateMissingAsset(record map[string]interface{}, entity, changeType string) bool {
+	if entity != "Project_Role__c" || changeType != string(model.CDCChangeCreate) {
+		return false
+	}
+	raw, ok := record["Asset__c"]
+	if !ok {
+		return false
+	}
+	v, err := unwrapUnion(raw)
+	if err != nil {
+		return false
+	}
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	default:
+		return false
+	}
 }
 
 // unwrapUnion handles goavro's Avro union encoding. Non-null union values are

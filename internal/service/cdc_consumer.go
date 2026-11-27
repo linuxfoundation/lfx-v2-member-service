@@ -1734,6 +1734,14 @@ func (o *CDCConsumer) publishAssetDeleteIndex(ctx context.Context, uid string) e
 // ── Project_Role__c (key_contact) ─────────────────────────────────────────────
 
 func (o *CDCConsumer) handleProjectRole(ctx context.Context, event model.CDCEvent) error {
+	if event.MissingAsset {
+		slog.InfoContext(ctx, "cdc: project_role create skipped",
+			"reason", "empty_asset_id",
+			"record_ids", event.RecordIDs,
+			"record_count", len(event.RecordIDs))
+		return nil
+	}
+
 	// See handleAccount: upserts run before the error is returned. This entity
 	// publishes no delete_access; the returned error is non-nil only for an
 	// unconfirmed key_contact revoke (errKeyContactRevokeIncomplete).
